@@ -1,0 +1,20 @@
+[project]
+name = "diff-cam"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = "~=3.10.0"
+dependencies = [
+    "autopep8>=2.3.2",
+    "flax>=0.10.7",
+    "gymnasium>=0.29.1",
+    "pufferlib>=3.0.0",
+    "pyyaml>=6.0.3",
+    "rtree>=1.4.1",
+    "scipy>=1.15.3",
+    "taichi>=1.7.4",
+    "tensorboard>=2.20.0",
+    "torch>=2.9.1",
+    "trimesh>=4.11.1",
+    "tyro>=1.0.5",
+]
