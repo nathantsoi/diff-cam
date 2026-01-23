@@ -304,13 +304,15 @@ def main():
                 show_help = not show_help
             elif key == ti.ui.SPACE:
                 paused = not paused
-            elif key == '1':
+            # Number keys (1-4) or Alternatives (Z-V)
+            # Some environments fail to map number keys correctly
+            elif key == '1' or key == 'z' or key == 'Z':
                 show_tool = not show_tool
-            elif key == '2':
+            elif key == '2' or key == 'x' or key == 'X':
                 show_holder = not show_holder
-            elif key == '3':
+            elif key == '3' or key == 'c' or key == 'C':
                 show_stock = not show_stock
-            elif key == '4':
+            elif key == '4' or key == 'v' or key == 'V':
                 show_part = not show_part
         
         for e in window.get_events(ti.ui.RELEASE):
@@ -424,16 +426,16 @@ def main():
         
         # Draw GUI Overlay
         if show_help:
-            with gui.sub_window("Controls", x=0.05, y=0.05, width=0.3, height=0.4):
-                gui.text("H: Toggle Help")
-                gui.text("Space: Pause/Resume")
+            with gui.sub_window("Controls", x=0.05, y=0.05, width=0.3, height=0.45):
+                gui.text(f"H: Toggle Help ({show_help})")
+                gui.text(f"Space: Pause/Resume ({paused})")
                 gui.text("WASD: Pan Camera")
                 gui.text("QE: Tilt Camera (Phi)")
-                gui.text("Mouse Drag: Orbit Camera")
-                gui.text("1: Toggle Tool Visibility")
-                gui.text("2: Toggle Holder Visibility")
-                gui.text("3: Toggle Stock Visibility")
-                gui.text("4: Toggle Part Visibility")
+                gui.text(f"Mouse Drag: Orbit Camera")
+                gui.text(f"1/Z: Toggle Tool ({show_tool})")
+                gui.text(f"2/X: Toggle Holder ({show_holder})")
+                gui.text(f"3/C: Toggle Stock ({show_stock})")
+                gui.text(f"4/V: Toggle Part ({show_part})")
         else:
             with gui.sub_window("Help", x=0.05, y=0.05, width=0.2, height=0.1):
                 gui.text("Press 'h' for controls")
