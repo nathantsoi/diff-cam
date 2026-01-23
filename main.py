@@ -41,6 +41,14 @@ class CNCSimulator:
         self.part_points = ti.Vector.field(3, dtype=ti.f32, shape=self.res**3)
         self.part_count = ti.field(dtype=ti.i32, shape=())
 
+        # Debug Slices
+        self.slice_xy = ti.Vector.field(3, dtype=ti.f32, shape=(self.res, self.res))
+        self.slice_xz = ti.Vector.field(3, dtype=ti.f32, shape=(self.res, self.res))
+        self.slice_yz = ti.Vector.field(3, dtype=ti.f32, shape=(self.res, self.res))
+        
+        # Combined debug view (3 panels side-by-side: XY, XZ, YZ)
+        self.debug_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(self.res * 3, self.res))
+
 
     @ti.kernel
     def initialize_stock_primitive(self):
@@ -216,6 +224,85 @@ class CNCSimulator:
         for i in self.holder_points:
              self.holder_points[i] = self.holder_template[i] + tool_pos + holder_offset
 
+    @ti.kernel
+    def generate_slices(self, tool_pos: ti.types.vector(3, ti.f32), tool_radius: ti.f32):
+        # 1. XY Slice at tool Z
+        z_idx = int(tool_pos.z / self.dx)
+        z_idx = ti.max(0, ti.min(z_idx, self.res - 1))
+        
+        for i, j in ti.ndrange(self.res, self.res):
+            # SDF Color
+            val = self.sdf_stock[i, j, z_idx]
+            color = ti.Vector([0.0, 0.0, 0.0])
+            
+            # Helper for checkerboard pattern to see grid
+            grid_check = ((i // 4) + (j // 4)) % 2
+            
+            if val < 0: # Inside stock
+                color = ti.Vector([0.3, 0.3, 0.9])
+            else: # Outside
+                bg_col = 0.8 if grid_check == 0 else 0.7
+                color = ti.Vector([bg_col, bg_col, bg_col])
+                
+            # Tool Overlay
+            p = ti.Vector([i, j, z_idx]) * self.dx
+            dist_to_center = (ti.Vector([p.x, p.y]) - ti.Vector([tool_pos.x, tool_pos.y])).norm()
+            
+            # Green outline for tool radius
+            if abs(dist_to_center - tool_radius) < self.dx:
+                 color = ti.Vector([0.0, 1.0, 0.0])
+            
+            self.slice_xy[i, j] = color
+
+        # 2. XZ Slice at tool Y
+        y_idx = int(tool_pos.y / self.dx)
+        y_idx = ti.max(0, ti.min(y_idx, self.res - 1))
+        
+        for i, k in ti.ndrange(self.res, self.res):
+             val = self.sdf_stock[i, y_idx, k]
+             color = ti.Vector([0.0, 0.0, 0.0])
+             if val < 0: color = ti.Vector([0.3, 0.3, 0.9])
+             else: color = ti.Vector([0.8, 0.8, 0.8])
+             
+             p = ti.Vector([i, y_idx, k]) * self.dx
+             dist_x = abs(p.x - tool_pos.x)
+             if abs(dist_x - tool_radius) < self.dx:
+                  color = ti.Vector([0.0, 1.0, 0.0])
+             
+             self.slice_xz[i, k] = color
+
+        # 3. YZ Slice at tool X
+        x_idx = int(tool_pos.x / self.dx)
+        x_idx = ti.max(0, ti.min(x_idx, self.res - 1))
+        
+        for j, k in ti.ndrange(self.res, self.res):
+             val = self.sdf_stock[x_idx, j, k]
+             color = ti.Vector([0.0, 0.0, 0.0])
+             if val < 0: color = ti.Vector([0.3, 0.3, 0.9])
+             else: color = ti.Vector([0.8, 0.8, 0.8])
+             
+             p = ti.Vector([x_idx, j, k]) * self.dx
+             dist_y = abs(p.y - tool_pos.y)
+             if abs(dist_y - tool_radius) < self.dx:
+                  color = ti.Vector([0.0, 1.0, 0.0])
+
+             self.slice_yz[j, k] = color
+
+    @ti.kernel
+    def compose_debug_view(self):
+        # Stitch the 3 slices into debug_buffer
+        for i, j in ti.ndrange(self.res, self.res):
+            # Panel 1: XY (Left)
+            self.debug_buffer[i, j] = self.slice_xy[i, j]
+            
+            # Panel 2: XZ (Center)
+            # Map X->X, Z->Y
+            self.debug_buffer[i + self.res, j] = self.slice_xz[i, j]
+            
+            # Panel 3: YZ (Right)
+            # Map Y->X, Z->Y
+            self.debug_buffer[i + 2 * self.res, j] = self.slice_yz[i, j]
+
 # --- Main Execution ---
 
 def main():
@@ -276,12 +363,13 @@ def main():
     rmb_down = False
     
     # GUI State
-    show_help = True
+    show_help = False
     paused = False
     show_tool = True
     show_holder = True
     show_stock = True
     show_part = True
+    show_debug = False
     
     gui = window.get_gui()
 
@@ -295,6 +383,7 @@ def main():
             if key == '@': key = '2'
             if key == '#': key = '3'
             if key == '$': key = '4'
+            if key == '%': key = '5'
             
             if key == ti.ui.RMB:
                 rmb_down = True
@@ -314,6 +403,8 @@ def main():
                 show_stock = not show_stock
             elif key == '4' or key == 'v' or key == 'V':
                 show_part = not show_part
+            elif key == '5' or key == 'b' or key == 'B':
+                show_debug = not show_debug
         
         for e in window.get_events(ti.ui.RELEASE):
             if e.key == ti.ui.RMB:
@@ -393,8 +484,6 @@ def main():
         except Exception as e:
             print(f"Error during mesh gen: {e}")
         
-        # 4. Render Scene
-        scene.set_camera(camera)
         scene.ambient_light((0.5, 0.5, 0.5))
         
         # Draw Stock
@@ -419,11 +508,6 @@ def main():
         
         scene.point_light(pos=(2, 2, 2), color=(1, 1, 1))
         
-        # Draw Coordinate Frame
-        scene.lines(axes_points, width=5.0, per_vertex_color=axes_colors)
-        
-        canvas.scene(scene)
-        
         # Draw GUI Overlay
         if show_help:
             with gui.sub_window("Controls", x=0.05, y=0.05, width=0.3, height=0.45):
@@ -436,9 +520,53 @@ def main():
                 gui.text(f"2/X: Toggle Holder ({show_holder})")
                 gui.text(f"3/C: Toggle Stock ({show_stock})")
                 gui.text(f"4/V: Toggle Part ({show_part})")
+                gui.text(f"5/B: Toggle Debug Slices ({show_debug})")
+
+        if show_debug:
+            sim.generate_slices(ti.Vector(tool_pos), 0.1)
+            sim.compose_debug_view()
+            canvas.set_image(sim.debug_buffer)
+            
+            # Overlay simple text logic to explain view
+            with gui.sub_window("Debug Info", x=0.0, y=0.9, width=1.0, height=0.1):
+                gui.text("Left: Top (XY) | Center: Front (XZ) | Right: Side (YZ)")
+                gui.text("Green: Tool Radius | Blue: Stock Material")
+
         else:
-            with gui.sub_window("Help", x=0.05, y=0.05, width=0.2, height=0.1):
-                gui.text("Press 'h' for controls")
+            # 4. Render Scene
+            scene.set_camera(camera)
+            scene.ambient_light((0.5, 0.5, 0.5))
+            
+            # Draw Stock
+            if show_stock:
+                count = min(sim.render_count[None], sim.render_points.shape[0])
+                if count > 0:
+                    scene.particles(sim.render_points, per_vertex_color=None, radius=0.005, color=(0.2, 0.8, 0.2), index_count=count)
+            
+            # Draw Part (Target)
+            if show_part:
+                count = min(sim.part_count[None], sim.part_points.shape[0])
+                if count > 0:
+                    scene.particles(sim.part_points, radius=0.005, color=(0.5, 0.5, 1.0), index_count=count)
+
+            # Draw Tool
+            if show_tool:
+                scene.particles(sim.tool_points, radius=0.005, color=(1.0, 0.2, 0.2), index_count=sim.tool_count[None])
+
+            # Draw Holder
+            if show_holder:
+                scene.particles(sim.holder_points, radius=0.005, color=(0.2, 0.2, 0.2), index_count=sim.holder_count[None])
+            
+            scene.point_light(pos=(2, 2, 2), color=(1, 1, 1))
+            
+            # Draw Coordinate Frame
+            scene.lines(axes_points, width=5.0, per_vertex_color=axes_colors)
+            
+            canvas.scene(scene)
+
+            if not show_help:
+                with gui.sub_window("Help", x=0.05, y=0.05, width=0.2, height=0.1):
+                    gui.text("Press 'h' for controls")
 
         window.show()
         
