@@ -28,13 +28,13 @@ class CNCSimulator:
         self.render_count = ti.field(dtype=ti.i32, shape=())
 
         # Tool Visualization
-        self.tool_points = ti.Vector.field(3, dtype=ti.f32, shape=4096)
-        self.tool_template = ti.Vector.field(3, dtype=ti.f32, shape=4096)
+        self.tool_points = ti.Vector.field(3, dtype=ti.f32, shape=100000)
+        self.tool_template = ti.Vector.field(3, dtype=ti.f32, shape=100000)
         self.tool_count = ti.field(dtype=ti.i32, shape=())
 
         # Holder Visualization
-        self.holder_points = ti.Vector.field(3, dtype=ti.f32, shape=4096)
-        self.holder_template = ti.Vector.field(3, dtype=ti.f32, shape=4096)
+        self.holder_points = ti.Vector.field(3, dtype=ti.f32, shape=100000)
+        self.holder_template = ti.Vector.field(3, dtype=ti.f32, shape=100000)
         self.holder_count = ti.field(dtype=ti.i32, shape=())
 
         # Part (Target) Visualization
@@ -46,8 +46,11 @@ class CNCSimulator:
         self.slice_xz = ti.Vector.field(3, dtype=ti.f32, shape=(self.res, self.res))
         self.slice_yz = ti.Vector.field(3, dtype=ti.f32, shape=(self.res, self.res))
         
-        # Combined debug view (3 panels side-by-side: XY, XZ, YZ)
-        self.debug_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(self.res * 3, self.res))
+        # Combined debug view using 2x2 grid with padding to match window Aspect Ratio (4:3)
+        # Window: 1024x768. AR = 1.333
+        # Buffer Height: 2 * res = 256.
+        # Buffer Width Target: 256 * 1.333 = 341.33 -> 341
+        self.debug_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(341, 2 * self.res))
 
 
     @ti.kernel
@@ -189,7 +192,7 @@ class CNCSimulator:
              
              if x*x + y*y <= visual_r*visual_r and z <= height:
                  idx = ti.atomic_add(self.tool_count[None], 1)
-                 if idx < 4096:
+                 if idx < 100000:
                      self.tool_template[idx] = ti.Vector([x, y, z])
 
         # Generate Holder Template (Wider cylinder on top)
@@ -206,7 +209,7 @@ class CNCSimulator:
              
              if x*x + y*y <= holder_r*holder_r and z <= holder_h:
                  idx = ti.atomic_add(self.holder_count[None], 1)
-                 if idx < 4096:
+                 if idx < 100000:
                      # Offset slightly up so it sits on top of the tool, but we'll handle placement in update
                      self.holder_template[idx] = ti.Vector([x, y, z])
 
@@ -290,23 +293,34 @@ class CNCSimulator:
 
     @ti.kernel
     def compose_debug_view(self):
-        # Stitch the 3 slices into debug_buffer
+        # Clear buffer (black)
+        for i, j in ti.ndrange(341, 2 * self.res):
+             self.debug_buffer[i, j] = ti.Vector([0.0, 0.0, 0.0])
+
+        # Stitch slices into 2x2 grid
+        # Top-Left: XY
+        # Top-Right: XZ
+        # Bottom-Left: YZ
+        # Botom-Right: Legend area (empty)
+        
         for i, j in ti.ndrange(self.res, self.res):
-            # Panel 1: XY (Left)
-            self.debug_buffer[i, j] = self.slice_xy[i, j]
+            # 1. XY at (0, res) to (res, 2*res) -- Top Left?
+            # Canvas coords: (0,0) is bottom-left usually in Taichi? 
+            # Let's verify. standard graphical convention is usually bottom-left origin.
             
-            # Panel 2: XZ (Center)
-            # Map X->X, Z->Y
-            self.debug_buffer[i + self.res, j] = self.slice_xz[i, j]
+            # Place XY at Top-Left: x=[0, res], y=[res, 2*res]
+            self.debug_buffer[i, j + self.res] = self.slice_xy[i, j]
             
-            # Panel 3: YZ (Right)
-            # Map Y->X, Z->Y
-            self.debug_buffer[i + 2 * self.res, j] = self.slice_yz[i, j]
+            # Place XZ at Top-Right: x=[res, 2*res], y=[res, 2*res]
+            self.debug_buffer[i + self.res, j + self.res] = self.slice_xz[i, j]
+            
+            # Place YZ at Bottom-Left: x=[0, res], y=[0, res]
+            self.debug_buffer[i, j] = self.slice_yz[i, j]
 
 # --- Main Execution ---
 
 def main():
-    sim = CNCSimulator(resolution=64)
+    sim = CNCSimulator(resolution=128)
     sim.initialize_stock_primitive()
     sim.initialize_target_primitive()
 
@@ -528,9 +542,12 @@ def main():
             canvas.set_image(sim.debug_buffer)
             
             # Overlay simple text logic to explain view
-            with gui.sub_window("Debug Info", x=0.0, y=0.9, width=1.0, height=0.1):
-                gui.text("Left: Top (XY) | Center: Front (XZ) | Right: Side (YZ)")
-                gui.text("Green: Tool Radius | Blue: Stock Material")
+            with gui.sub_window("Debug Info", x=0.5, y=0.05, width=0.45, height=0.2):
+                gui.text("TL: XY (Top) | TR: XZ (Front)")
+                gui.text("BL: YZ (Side)")
+                gui.text("Green Layer: Tool Radius")
+                gui.text("Blue: Stock (SDF < 0)")
+                gui.text(f"Res: {sim.res}, AR Corrected")
 
         else:
             # 4. Render Scene
