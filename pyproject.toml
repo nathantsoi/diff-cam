@@ -18,3 +18,8 @@ dependencies = [
     "trimesh>=4.11.1",
     "tyro>=1.0.5",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
