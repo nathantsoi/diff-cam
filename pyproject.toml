@@ -7,6 +7,7 @@ requires-python = "~=3.10.0"
 dependencies = [
     "autopep8>=2.3.2",
     "flax>=0.10.7",
+    "gym>=0.23.0",
     "gymnasium>=0.29.1",
     "pufferlib>=3.0.0",
     "pyyaml>=6.0.3",

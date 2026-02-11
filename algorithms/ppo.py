@@ -13,6 +13,11 @@ import tyro
 from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
+import pufferlib
+import pufferlib.vector
+
+from cam_env.cam_env import CamEnv
+
 
 @dataclass
 class Args:
@@ -158,9 +163,11 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    # env setup
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name) for i in range(args.num_envs)],
+    # env setup -- changed to use PufferLib
+    envs = pufferlib.vector.make(
+        CamEnv,
+        num_envs=args.num_envs,
+        env_kwargs={"resolution": args.resolution, "max_steps": args.max_steps},
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 

@@ -14,3 +14,7 @@ def test_taichi_gpu_support():
         print("Taichi GPU support available")
     except Exception as e:
         pytest.fail(f"Taichi GPU support not available: {e}")
+
+
+
+
