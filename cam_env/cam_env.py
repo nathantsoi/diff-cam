@@ -168,14 +168,12 @@ class CamEnv(gym.Env):
         return obs, info
 
 
-    # TODO: 
     def _holder_hit_stock(self):
-        return False
+        return self.simulator.check_holder_collision() == 1
 
 
-    # TODO: 
     def _tool_cuts_into_target(self):
-        return False
+        return self.simulator.check_tool_intersects_target() == 1
 
 
     def step(self, action):
@@ -415,7 +413,7 @@ class CamEnv(gym.Env):
 
 
 if __name__ == "__main__":
-    env = CamEnv(resolution=64, max_steps=1000, render_mode="human")
+    env = gym.make('CamEnv-v0')
     obs, info = env.reset()
     done = False
 
