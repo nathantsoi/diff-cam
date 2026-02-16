@@ -16,6 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 import pufferlib
 import pufferlib.vector
 import pufferlib.emulation
+import pufferlib.environments
 
 from cam_env.cam_env import CamEnv
 
@@ -40,7 +41,7 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Algorithm specific arguments
-    env_id: str = "CartPole-v1"
+    env_id: str = "CamEnv-v0"
     """the id of the environment"""
     total_timesteps: int = 500000
     """total timesteps of the experiments"""
@@ -90,18 +91,24 @@ class Args:
     """the maximum number of steps per episode"""
 
 
-def make_env(env_id, idx, capture_video, run_name):
-    def thunk():
-        if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array")
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id)
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        return env
+def make_env(env_id, idx, capture_video, run_name, resolution, max_steps):
+    # def thunk():
+    #     if capture_video and idx == 0:
+    #         env = gym.make(env_id, render_mode="rgb_array", resolution=resolution, max_steps=max_steps)
+    #         env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
+    #     else:
+    #         env = gym.make(env_id, resolution=resolution, max_steps=max_steps)
+    #     env = gym.wrappers.RecordEpisodeStatistics(env)
+    #     env = pufferlib.emulation.GymnasiumPufferEnv(env)
+    #     return env
 
+    # return thunk
+
+    def thunk(buf=None, seed=None, **kwargs):
+        return pufferlib.emulation.GymnasiumPufferEnv(
+            env_creator=lambda: gym.make("CamEnv-v0", resolution=64, max_steps=100)
+        )
     return thunk
-
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
@@ -172,7 +179,16 @@ if __name__ == "__main__":
 
     # env setup -- changed to use PufferLib
     envs = pufferlib.vector.make(
-
+        make_env(
+            args.env_id, 
+            0,
+            args.capture_video, 
+            run_name,
+            args.resolution,
+            args.max_steps
+        ),
+        num_envs=args.num_envs,
+        backend=pufferlib.vector.Serial,
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
