@@ -64,6 +64,7 @@ class CamEnv(gym.Env):
         self.show_help = False
 
 
+
     def _initialize_sim(self):
         """ Initializes the CNC simulator if not already initialized (lazy initialization). """
         if self.simulator is None:
