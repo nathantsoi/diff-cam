@@ -15,6 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import pufferlib
 import pufferlib.vector
+import pufferlib.emulation
 
 from cam_env.cam_env import CamEnv
 
@@ -81,6 +82,12 @@ class Args:
     """the mini-batch size (computed in runtime)"""
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
+
+    # additional arguments for CamEnv
+    resolution: int = 64
+    """the resolution of the camera observation"""
+    max_steps: int = 1000
+    """the maximum number of steps per episode"""
 
 
 def make_env(env_id, idx, capture_video, run_name):
@@ -165,9 +172,7 @@ if __name__ == "__main__":
 
     # env setup -- changed to use PufferLib
     envs = pufferlib.vector.make(
-        CamEnv,
-        num_envs=args.num_envs,
-        env_kwargs={"resolution": args.resolution, "max_steps": args.max_steps},
+
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
