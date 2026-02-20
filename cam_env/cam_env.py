@@ -25,6 +25,7 @@ class CamEnv(gym.Env):
         self.render_mode = render_mode
 
         self.simulator = None
+        self.global_step = 0
         self.current_step = 0
 
         self.action_dims = [3, 3, 3]
@@ -32,7 +33,8 @@ class CamEnv(gym.Env):
 
         self.obs_dims = 3 + (resolution ** 3) + (resolution ** 3) # tool position + stock SDF + target SDF
         self.observation_space = spaces.Box(low=-1, high=1, shape=(self.obs_dims,), dtype=np.float32) # Soft bounds for SDF
-
+        
+        self.writer = None
         # --- Rendering State ---
         self.window = None
         self.canvas = None
@@ -127,7 +129,7 @@ class CamEnv(gym.Env):
         return np.concatenate([tool_pos, sdf_stock, sdf_target])
     
 
-    def _calculate_reward(self) -> float:
+    def _calculate_reward(self, tool_cut_stock, tool_cut_target, holder_hit) -> float:
         """ Calculates the reward based on the current state of the stock and target.
 
         Returns:
@@ -135,11 +137,38 @@ class CamEnv(gym.Env):
         """
         sdf_stock = self.simulator.sdf_stock.to_numpy()
         sdf_target = self.simulator.sdf_target.to_numpy()
+        tool_pos = self.simulator.tool_pos[None].to_numpy()
+        res = self.resolution
+        dx = self.simulator.dx
 
-        # Reward is negative L1 distance between stock and target SDFs
-        reward = -np.mean(np.abs(sdf_stock - sdf_target))
+        # Primary reward: How close the stock is to the target (negative L1 distance between SDFs)
+        difference_reward = -np.mean(np.abs(sdf_stock - sdf_target))
+
+        # Encourage cutting into the stock (negative reward if tool cuts into target, positive reward if cuts into stock)
+        cutting_reward = 0.0
+        if tool_cut_stock:
+            cutting_reward = 0.1
+
+        # Encourage tool to be close to the surface of the stock (where SDF is near zero) using a proximity reward
+        ix = int(np.clip(tool_pos[0] * res, 0, res - 1))
+        iy = int(np.clip(tool_pos[1] * res, 0, res - 1))
+        iz = int(np.clip(tool_pos[2] * res, 0, res - 1))
+        sdf_at_tool = float(sdf_stock[ix, iy, iz]) / dx
+        proximity_reward = np.exp(-max(sdf_at_tool, 0.0)) - 1.0
+
+        # Large negative reward for hitting the holder or cutting into the target
+        penalties = 0.0
+        if holder_hit:
+            penalties -= 1.0
+        if tool_cut_target:
+            penalties -= 1.0
+
+        # Calc reward
+        # print(difference_reward, cutting_reward, proximity_reward, penalties)
+        reward = difference_reward + cutting_reward + proximity_reward + penalties
+        # print(reward)
+
         return reward
-
 
     def reset(self, seed: Optional[int] = None):
         """ Resets the environment to an initial state and returns an initial observation.
@@ -187,6 +216,7 @@ class CamEnv(gym.Env):
             truncated (bool): Whether the episode was truncated.
             info (Dict[str, Any]): Additional information about the step.
         """
+        self.global_step += 1
         self.current_step += 1
         
         x = (action // 9) - 1
@@ -195,13 +225,21 @@ class CamEnv(gym.Env):
         self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z)) # Currently does not handle collisons or out-of-bounds
         force = self.simulator.apply_cut()
 
+        tool_cut_stock = force > 0.0
+        holder_hit = self._holder_hit_stock()
+        tool_cut_target = self._tool_cuts_into_target()
+
+
         obs = self._get_obs()
-        reward = self._calculate_reward()
+        reward = self._calculate_reward(tool_cut_stock, tool_cut_target, holder_hit)
+        if self.writer:
+            self.writer.add_scalar("charts/env_reward", reward, self.global_step)
+        print(reward)
 
         truncated = self.current_step >= self.max_steps
-        # terminated condition holder hits stock or cut into target
-        terminated = False
-        info = {"step": self.current_step}
+        #terminated = holder_hit or tool_cut_target
+        terminated = tool_cut_target
+        info = {"step": self.current_step, "action": [x, y, z], "vol": force, "holder_hit": holder_hit, "tool_cut_target": tool_cut_target}
 
         return obs, reward, terminated, truncated, info
 
@@ -414,7 +452,7 @@ class CamEnv(gym.Env):
 
 
 if __name__ == "__main__":
-    env = gym.make('CamEnv-v0')
+    env = CamEnv(resolution=64, max_steps=1000, render_mode="human")
     obs, info = env.reset()
     done = False
 
@@ -425,6 +463,6 @@ if __name__ == "__main__":
 
         env.render()
 
-        print(f"Step: {info['step']}, Action: {action-1}, Reward: {reward}")
+        print(f"Step: {info['step']}, Reward: {reward}, Info: {info}")
 
     env.close()

@@ -89,9 +89,11 @@ class Args:
     """the resolution of the camera observation"""
     max_steps: int = 1000
     """the maximum number of steps per episode"""
+    render_mode: str = "rgb_array"
+    """the render mode for the environment"""
 
 
-def make_env(env_id, idx, capture_video, run_name, resolution, max_steps):
+def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render_mode):
     # def thunk():
     #     if capture_video and idx == 0:
     #         env = gym.make(env_id, render_mode="rgb_array", resolution=resolution, max_steps=max_steps)
@@ -106,7 +108,7 @@ def make_env(env_id, idx, capture_video, run_name, resolution, max_steps):
 
     def thunk(buf=None, seed=None, **kwargs):
         return pufferlib.emulation.GymnasiumPufferEnv(
-            env_creator=lambda: gym.make("CamEnv-v0", resolution=64, max_steps=100)
+            env_creator=lambda: gym.make("CamEnv-v0", resolution=resolution, max_steps=max_steps, render_mode=render_mode),
         )
     return thunk
 
@@ -185,12 +187,19 @@ if __name__ == "__main__":
             args.capture_video, 
             run_name,
             args.resolution,
-            args.max_steps
+            args.max_steps,
+            args.render_mode
         ),
         num_envs=args.num_envs,
         backend=pufferlib.vector.Serial,
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
+    # Inject writer into each env - added this in there
+    for env in envs.envs:
+        base = env
+        while hasattr(base, 'env'):
+            base = base.env
+        base.writer = writer
 
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
@@ -231,6 +240,7 @@ if __name__ == "__main__":
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+            writer.add_scalar("charts/algo_reward", np.mean(reward), global_step)
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
@@ -335,6 +345,7 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         print("SPS:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
 
     envs.close()
     writer.close()
