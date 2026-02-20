@@ -27,12 +27,11 @@ class CamEnv(gym.Env):
         self.simulator = None
         self.current_step = 0
 
-        self.action_space = spaces.MultiDiscrete([3, 3, 3])
-        self.observation_space = spaces.Dict({
-            "tool_position": spaces.Box(low=0.0, high=1.0, shape=(3,), dtype=np.float32),
-            "sdf_stock": spaces.Box(low=-1.0, high=1.0, shape=(resolution, resolution, resolution), dtype=np.float32),
-            "sdf_target": spaces.Box(low=-1.0, high=1.0, shape=(resolution, resolution, resolution), dtype=np.float32),
-        })
+        self.action_dims = [3, 3, 3]
+        self.action_space = spaces.Discrete(np.prod(self.action_dims))
+
+        self.obs_dims = 3 + (resolution ** 3) + (resolution ** 3) # tool position + stock SDF + target SDF
+        self.observation_space = spaces.Box(low=-1, high=1, shape=(self.obs_dims,), dtype=np.float32) # Soft bounds for SDF
 
         # --- Rendering State ---
         self.window = None
@@ -122,11 +121,10 @@ class CamEnv(gym.Env):
             Dict[str, Any]: The current observation including tool position and SDFs.
         """ 
 
-        return {
-            "tool_position": self.simulator.tool_pos[None].to_numpy().astype(np.float32),
-            "sdf_stock": np.clip(self.simulator.sdf_stock.to_numpy(), -1.0, 1.0).astype(np.float32),
-            "sdf_target": np.clip(self.simulator.sdf_target.to_numpy(), -1.0, 1.0).astype(np.float32),
-        }
+        tool_pos = self.simulator.tool_pos[None].to_numpy().astype(np.float32)
+        sdf_stock = np.clip(self.simulator.sdf_stock.to_numpy(), -1.0, 1.0).astype(np.float32).flatten()
+        sdf_target = np.clip(self.simulator.sdf_target.to_numpy(), -1.0, 1.0).astype(np.float32).flatten()
+        return np.concatenate([tool_pos, sdf_stock, sdf_target])
     
 
     def _calculate_reward(self) -> float:
@@ -180,7 +178,7 @@ class CamEnv(gym.Env):
     def step(self, action):
         """ Executes one time step within the environment. 
         Args:
-            action (np.ndarray): An array of shape (3,) with values in {0,1,2} representing tool movement directions.
+            action (np.ndarray): The action to take, discrete decomposed into 3 dimensions (x, y, z) with values in {0, 1, 2} corresponding to movement of -1, 0, +1 units respectively.
             
         Returns:
             obs (Dict[str, Any]): The observation after taking the action.
@@ -191,8 +189,10 @@ class CamEnv(gym.Env):
         """
         self.current_step += 1
         
-        direction = action.astype(np.float32) - 1.0  # Map {0,1,2} to {-1,0,1}
-        self.simulator.move_tool_one_unit(ti.math.vec3(direction[0], direction[1], direction[2])) # Currently does not handle collisons or out-of-bounds
+        x = (action // 9) - 1
+        y = ((action // 3) % 3) - 1
+        z = (action % 3) - 1
+        self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z)) # Currently does not handle collisons or out-of-bounds
         force = self.simulator.apply_cut()
 
         obs = self._get_obs()
