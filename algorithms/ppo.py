@@ -43,13 +43,13 @@ class Args:
     # Algorithm specific arguments
     env_id: str = "CamEnv-v0"
     """the id of the environment"""
-    total_timesteps: int = 500000
+    total_timesteps: int = 1000000
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
     num_envs: int = 4
     """the number of parallel game environments"""
-    num_steps: int = 128
+    num_steps: int = 512
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -85,30 +85,19 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
     # additional arguments for CamEnv
-    resolution: int = 64
+    resolution: int = 8
     """the resolution of the camera observation"""
-    max_steps: int = 1000
+    max_steps: int = 256
     """the maximum number of steps per episode"""
     render_mode: str = "rgb_array"
     """the render mode for the environment"""
 
 
 def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render_mode):
-    # def thunk():
-    #     if capture_video and idx == 0:
-    #         env = gym.make(env_id, render_mode="rgb_array", resolution=resolution, max_steps=max_steps)
-    #         env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-    #     else:
-    #         env = gym.make(env_id, resolution=resolution, max_steps=max_steps)
-    #     env = gym.wrappers.RecordEpisodeStatistics(env)
-    #     env = pufferlib.emulation.GymnasiumPufferEnv(env)
-    #     return env
-
-    # return thunk
-
     def thunk(buf=None, seed=None, **kwargs):
         return pufferlib.emulation.GymnasiumPufferEnv(
             env_creator=lambda: gym.make("CamEnv-v0", resolution=resolution, max_steps=max_steps, render_mode=render_mode),
+            buf=buf,
         )
     return thunk
 
@@ -333,6 +322,13 @@ if __name__ == "__main__":
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+        
+        # Saving checkpoint models
+        if iteration % 25 == 0:
+            torch.save({
+                "agent": agent.state_dict(),
+                "args": vars(args),
+            }, f"runs/{run_name}/checkpoint_{iteration}.pt")
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
@@ -343,7 +339,7 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
+        print(f"SPS {iteration}:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
 

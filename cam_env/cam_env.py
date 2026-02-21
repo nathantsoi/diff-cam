@@ -3,6 +3,7 @@ from gymnasium import spaces
 import numpy as np
 from typing import Optional, Tuple, Dict, Any
 import taichi as ti
+import time
 
 from simulator.simulator import CNCSimulator
 
@@ -232,9 +233,9 @@ class CamEnv(gym.Env):
 
         obs = self._get_obs()
         reward = self._calculate_reward(tool_cut_stock, tool_cut_target, holder_hit)
-        if self.writer:
-            self.writer.add_scalar("charts/env_reward", reward, self.global_step)
-        print(reward)
+        #if self.writer:
+        #    self.writer.add_scalar("charts/env_reward", reward, self.global_step)
+        #print(reward)
 
         truncated = self.current_step >= self.max_steps
         #terminated = holder_hit or tool_cut_target
@@ -452,16 +453,19 @@ class CamEnv(gym.Env):
 
 
 if __name__ == "__main__":
-    env = CamEnv(resolution=64, max_steps=1000, render_mode="human")
+    # Test the environment with random actions
+    env = CamEnv(resolution=8, max_steps=512, render_mode="human")
     obs, info = env.reset()
     done = False
 
     while not done:
         action = env.action_space.sample()
         obs, reward, terminated, truncated, info = env.step(action)
+        print(type(reward))
         done = terminated or truncated
 
         env.render()
+        time.sleep(0.3)
 
         print(f"Step: {info['step']}, Reward: {reward}, Info: {info}")
 
