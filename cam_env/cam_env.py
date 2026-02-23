@@ -130,20 +130,28 @@ class CamEnv(gym.Env):
         return np.concatenate([tool_pos, sdf_stock, sdf_target])
     
 
-    def _calculate_reward(self, sdf_stock_before, sdf_stock_after, sdf_target) -> float:
+    def _calculate_reward(self, sdf_stock_before, sdf_stock_after, sdf_target, tool_pos) -> float:
         """ Calculates the reward based on the current state of the stock and target.
 
         Returns:
             float: The calculated reward.
         """
+        res = self.resolution
+        ix = int(np.clip(tool_pos[0] * res, 0, res - 1))
+        iy = int(np.clip(tool_pos[1] * res, 0, res - 1))
+        iz = int(np.clip(tool_pos[2] * res, 0, res - 1))
+
         delta = sdf_stock_after - sdf_stock_before
         weighted = delta * sdf_target
-        reward = float(np.sum(weighted))
+        cutting = float(np.sum(weighted))
 
-        # Small time penalty to discourage idling
-        reward -= 0.01
+        sdf_stock_at_tool = float(sdf_stock_after[ix, iy, iz])
+        proximity = -max(sdf_stock_at_tool, 0.0)
+
+        reward = 1.0 * cutting + 0.1 * proximity - 0.01
 
         return reward
+
 
     def reset(self, seed: Optional[int] = None):
         """ Resets the environment to an initial state and returns an initial observation.
@@ -198,11 +206,13 @@ class CamEnv(gym.Env):
         y = ((action // 3) % 3) - 1
         z = (action % 3) - 1
 
+
         sdf_target = self.simulator.sdf_target.to_numpy()
         sdf_stock_before = self.simulator.sdf_stock.to_numpy()
-        self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z)) # Currently does not handle collisons or out-of-bounds
+        self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z))
         vol_removed = self.simulator.apply_cut()
         
+        tool_pos_after = self.simulator.tool_pos[None].to_numpy()
         sdf_stock_after = self.simulator.sdf_stock.to_numpy()
         tool_cut_stock = vol_removed > 0.0
         holder_hit = self._holder_hit_stock()
@@ -210,7 +220,7 @@ class CamEnv(gym.Env):
 
 
         obs = self._get_obs()
-        reward = self._calculate_reward(sdf_stock_before, sdf_stock_after, sdf_target)
+        reward = self._calculate_reward(sdf_stock_before, sdf_stock_after, sdf_target, tool_pos_after)
         #if self.writer:
         #    self.writer.add_scalar("charts/env_reward", reward, self.global_step)
         # print(f"Step {self.current_step}: action = [{x}, {y}, {z}], reward = {reward}")
