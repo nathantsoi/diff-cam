@@ -130,44 +130,18 @@ class CamEnv(gym.Env):
         return np.concatenate([tool_pos, sdf_stock, sdf_target])
     
 
-    def _calculate_reward(self, tool_cut_stock, tool_cut_target, holder_hit) -> float:
+    def _calculate_reward(self, sdf_stock_before, sdf_stock_after, sdf_target) -> float:
         """ Calculates the reward based on the current state of the stock and target.
 
         Returns:
             float: The calculated reward.
         """
-        sdf_stock = self.simulator.sdf_stock.to_numpy()
-        sdf_target = self.simulator.sdf_target.to_numpy()
-        tool_pos = self.simulator.tool_pos[None].to_numpy()
-        res = self.resolution
-        dx = self.simulator.dx
+        delta = sdf_stock_after - sdf_stock_before
+        weighted = delta * sdf_target
+        reward = float(np.sum(weighted))
 
-        # Primary reward: How close the stock is to the target (negative L1 distance between SDFs)
-        difference_reward = -np.mean(np.abs(sdf_stock - sdf_target))
-
-        # Encourage cutting into the stock (negative reward if tool cuts into target, positive reward if cuts into stock)
-        cutting_reward = 0.0
-        if tool_cut_stock:
-            cutting_reward = 0.1
-
-        # Encourage tool to be close to the surface of the stock (where SDF is near zero) using a proximity reward
-        ix = int(np.clip(tool_pos[0] * res, 0, res - 1))
-        iy = int(np.clip(tool_pos[1] * res, 0, res - 1))
-        iz = int(np.clip(tool_pos[2] * res, 0, res - 1))
-        sdf_at_tool = float(sdf_stock[ix, iy, iz]) / dx
-        proximity_reward = np.exp(-max(sdf_at_tool, 0.0)) - 1.0
-
-        # Large negative reward for hitting the holder or cutting into the target
-        penalties = 0.0
-        if holder_hit:
-            penalties -= 1.0
-        if tool_cut_target:
-            penalties -= 1.0
-
-        # Calc reward
-        # print(difference_reward, cutting_reward, proximity_reward, penalties)
-        reward = difference_reward + cutting_reward + proximity_reward + penalties
-        # print(reward)
+        # Small time penalty to discourage idling
+        reward -= 0.01
 
         return reward
 
@@ -219,28 +193,32 @@ class CamEnv(gym.Env):
         """
         self.global_step += 1
         self.current_step += 1
-        
+
         x = (action // 9) - 1
         y = ((action // 3) % 3) - 1
         z = (action % 3) - 1
-        self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z)) # Currently does not handle collisons or out-of-bounds
-        force = self.simulator.apply_cut()
 
-        tool_cut_stock = force > 0.0
+        sdf_target = self.simulator.sdf_target.to_numpy()
+        sdf_stock_before = self.simulator.sdf_stock.to_numpy()
+        self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z)) # Currently does not handle collisons or out-of-bounds
+        vol_removed = self.simulator.apply_cut()
+        
+        sdf_stock_after = self.simulator.sdf_stock.to_numpy()
+        tool_cut_stock = vol_removed > 0.0
         holder_hit = self._holder_hit_stock()
         tool_cut_target = self._tool_cuts_into_target()
 
 
         obs = self._get_obs()
-        reward = self._calculate_reward(tool_cut_stock, tool_cut_target, holder_hit)
+        reward = self._calculate_reward(sdf_stock_before, sdf_stock_after, sdf_target)
         #if self.writer:
         #    self.writer.add_scalar("charts/env_reward", reward, self.global_step)
-        #print(reward)
+        # print(f"Step {self.current_step}: action = [{x}, {y}, {z}], reward = {reward}")
 
         truncated = self.current_step >= self.max_steps
         #terminated = holder_hit or tool_cut_target
         terminated = tool_cut_target
-        info = {"step": self.current_step, "action": [x, y, z], "vol": force, "holder_hit": holder_hit, "tool_cut_target": tool_cut_target}
+        info = {"step": self.current_step, "action": [x, y, z], "vol": vol_removed, "tool_cut_target": tool_cut_target}
 
         return obs, reward, terminated, truncated, info
 

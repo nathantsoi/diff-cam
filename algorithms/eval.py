@@ -50,9 +50,13 @@ def eval(checkpoint_path):
         done = terminated or truncated
 
         env.render()
-        time.sleep(.3)
+        time.sleep(.2)
 
-        print(f"Step: {info['step']}, Action: {action.item()}, Reward: {reward:.4f}, Value: {value.item():.4f}")
+        action = action.item()
+        x = (action // 9) - 1
+        y = ((action // 3) % 3) - 1
+        z = (action % 3) - 1
+        print(f"Step: {info['step']}, Action: {[x, y, z]}, Reward: {reward:.4f}, Value: {value.item():.4f}")
 
     print(f"\nEpisode finished. Total reward: {total_reward:.4f}")
     env.close()
