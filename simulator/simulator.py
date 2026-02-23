@@ -196,17 +196,20 @@ class CNCSimulator:
     @ti.kernel
     def move_tool_one_unit(self, dir: ti.types.vector(3, ti.f32)):
         """Moves the tool one unit in the direction of a unit vector"""
-        valid = True
+        valid_dir = True
         for i in ti.static(range(3)):
             if not (dir[i] == -1.0 or dir[i] == 0.0 or dir[i] == 1.0):
-                valid = False
+                valid_dir = False
 
-        if not valid:
+        if not valid_dir:
             print(
                 "Error: Direction must be a unit step vector with components in {-1, 0, 1}"
             )
 
-        self.tool_pos[None] += dir * self.dx
+        new_pos = self.tool_pos[None]
+        for i in ti.static(range(3)):
+            new_pos[i] = ti.max(0.0, ti.min(1.0 - self.dx, new_pos[i] + dir[i] * self.dx))
+        self.tool_pos[None] = new_pos
 
     @ti.kernel
     def check_holder_collision(self) -> ti.i32:

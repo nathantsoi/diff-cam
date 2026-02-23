@@ -234,7 +234,7 @@ if __name__ == "__main__":
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
 
-            if args.render_mode == "human" and global_step % (args.num_envs * 5) == 0:
+            if args.render_mode == "human":
                 envs.envs[0].render()
 
             if "final_info" in infos:
