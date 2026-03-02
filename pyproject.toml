@@ -20,6 +20,12 @@ dependencies = [
     "tyro>=1.0.5",
 ]
 
+[tool.setuptools.packages.find]
+include = ["cam_env*", "simulator*", "algorithms*"]
+
+[tool.uv]
+extra-index-url = ["https://download.pytorch.org/whl/cu128"]
+
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
