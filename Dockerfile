@@ -12,4 +12,5 @@ RUN apt-get update && apt-get install -y \
 COPY . /app
 WORKDIR /app
 
+RUN pip install pufferlib>=3.0.0 --no-build-isolation
 RUN pip install . --extra-index-url https://download.pytorch.org/whl/cu128
