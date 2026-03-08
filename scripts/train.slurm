@@ -42,11 +42,11 @@ echo "Python : $(python --version)"
 echo "CWD    : $(pwd)"
 echo ""
 
-python algorithms/ppo.py \
+python -u algorithms/ppo.py \
     --cuda \
-    --total-timesteps 500000 \
-    --num-envs 4 \
-    --num-steps 128
+    --total-timesteps 2000000 \
+    --num-envs 3 \
+    --num-steps 256
 
 echo ""
 echo "=== Training complete ==="
