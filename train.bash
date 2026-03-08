@@ -15,7 +15,7 @@ singularity exec --nv \
     --bind $SCRATCH/diff-cam/simulator:/opt/conda/lib/python3.11/site-packages/simulator \
     --bind $SCRATCH/diff-cam/cam_env:/opt/conda/lib/python3.11/site-packages/cam_env \
     --bind $SCRATCH/diff-cam/algorithms:/app/algorithms \
-    $WORK/diff-cam.sif \
+    $SCRATCH/diff-cam.sif \
     python3 /app/algorithms/ppo.py \
     --total_timesteps 10000000 \
     --num_envs 1 \
