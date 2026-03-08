@@ -208,6 +208,10 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
+    # Manual episode tracking (PufferLib doesn't use final_info)
+    ep_returns = np.zeros(args.num_envs, dtype=np.float64)
+    ep_lengths = np.zeros(args.num_envs, dtype=np.int64)
+
     for iteration in range(1, args.num_iterations + 1):
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -237,12 +241,17 @@ if __name__ == "__main__":
             if args.render_mode == "human":
                 envs.envs[0].render()
 
-            if "final_info" in infos:
-                for info in infos["final_info"]:
-                    if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
-                        writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
-                        writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
+            # Track episode returns manually
+            ep_returns += np.array(reward, dtype=np.float64).flatten()
+            ep_lengths += 1
+            done_mask = np.logical_or(terminations, truncations).flatten()
+            for i in range(args.num_envs):
+                if done_mask[i]:
+                    print(f"global_step={global_step}, env={i}, episodic_return={ep_returns[i]:.4f}, episodic_length={ep_lengths[i]}")
+                    writer.add_scalar("charts/episodic_return", ep_returns[i], global_step)
+                    writer.add_scalar("charts/episodic_length", ep_lengths[i], global_step)
+                    ep_returns[i] = 0.0
+                    ep_lengths[i] = 0
 
         # bootstrap value if not done
         with torch.no_grad():
