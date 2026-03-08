@@ -15,22 +15,14 @@ class CNCSimulator:
         self.res = resolution
         self.dx = 1.0 / self.res
 
-        # --- 1. Sparse Data Structure ---
-        # We use a sparse grid to store the Signed Distance Field (SDF).
-        # This saves memory by only allocating blocks where the surface exists.
-        self.sdf_stock = ti.field(dtype=ti.f32)
-        self.sdf_target = ti.field(dtype=ti.f32)
+        # Define the SDF fields for stock and target geometry
+        self.sdf_stock = ti.field(dtype=ti.f32, shape=(self.res, self.res, self.res))
+        self.sdf_target = ti.field(dtype=ti.f32, shape=(self.res, self.res, self.res))
 
         # Define the tool
         self.tool_pos = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.tool_radius = ti.field(dtype=ti.f32, shape=())
         self.tool_height = ti.field(dtype=ti.f32, shape=())
-
-        # Define the sparse layout (Pointer -> Dense)
-        self.block_size = 8
-        self.sdf_layout = ti.root.pointer(ti.ijk, self.res // self.block_size)
-        self.sdf_layout.dense(ti.ijk, self.block_size).place(self.sdf_stock)
-        self.sdf_layout.dense(ti.ijk, self.block_size).place(self.sdf_target)
 
         # Visualization fields (for GGUI)
 
