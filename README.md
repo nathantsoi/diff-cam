@@ -79,16 +79,15 @@ Run this script once to install `uv` (if missing) and configure cache directorie
 
 Choose **one** of the following methods to install dependencies.
 
-### Option A: Compute Node (Recommended)
+### Option A: Compute Node + Uv
 
-This method uses `uv` for faster, stricter dependency resolution. It requires a compute node because compiling on login nodes is discouraged/restricted.
+Uses uv sync which requires a dev node
 
 1. **Request an interactive Dev Node (A100):**
 ```bash
 idev -p gpu-a100-dev -N 1 -n 1 -t 01:00:00
 
 ```
-
 
 *Wait until the command finishes and your prompt changes (indicating you are on a compute node).*
 2. **Run the installer:**
@@ -98,9 +97,7 @@ cd $SCRATCH/diff-cam
 
 # Run the script
 ./scripts/01_install_compute.sh
-
 ```
-
 
 ### Option B: Login Node Only via Pip 
 
