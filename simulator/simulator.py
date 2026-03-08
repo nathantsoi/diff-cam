@@ -1,18 +1,21 @@
 import taichi as ti
 
-# Initialize Taichi on GPU with debug mode enabled for better error messages
-# Otherwise, initialize Taichi on CPU
 
-print("Initializing Taichi in simulator.py")
-if ti._lib.core.with_cuda():
-    ti.init(arch=ti.gpu, debug=True)
-else:
-    ti.init(arch=ti.cpu, debug=True)
 
 
 @ti.data_oriented
 class CNCSimulator:
-    def __init__(self, resolution=128):
+    _ti_initialized = False
+
+    def __init__(self, resolution=128, debug=False):
+        # Initialize Taichi (only on first instantiation)
+        if not CNCSimulator._ti_initialized:
+            if ti._lib.core.with_cuda():
+                ti.init(arch=ti.gpu, debug=debug)
+            else:
+                ti.init(arch=ti.cpu, debug=debug)
+            CNCSimulator._ti_initialized = True
+
         self.res = resolution
         self.dx = 1.0 / self.res
 
@@ -65,6 +68,11 @@ class CNCSimulator:
         # Buffer Height: 2 * res = 256.
         # Buffer Width Target: 256 * 1.333 = 341.33 -> 341
         self.debug_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(341, 2 * self.res))
+
+        # Raymarching buffer for high-quality alternative render
+        self.raymarch_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(1024, 768))
+        self.removed_vol_field = ti.field(dtype=ti.f32, shape=())
+
 
     # Initialization Kernels
     @ti.kernel
@@ -138,22 +146,24 @@ class CNCSimulator:
         return ti.max(d_h, d_z)
 
     # Other kernel utilities
-    @ti.kernel
-    def apply_cut(self) -> ti.f32:
+    def apply_cut(self) -> float:
         """
         Boolean Subtraction: Stock = max(Stock, -Tool)
         Returns the approximate volume removed (useful for force calculation)
         """
+        self.removed_vol_field[None] = 0.0
+        self._apply_cut_kernel()
+        return float(self.removed_vol_field[None])
+
+    @ti.kernel
+    def _apply_cut_kernel(self):
         tool_pos = self.tool_pos[None]
         tool_radius = self.tool_radius[None]
         tool_height = self.tool_height[None]
 
-        removed_vol = 0.0
-
         # Optimization: Only iterate over the bounding box of the tool
         # Convert tool position and radius to index space
 
-        # Calculate bounds in integer coordinates
         # Calculate bounds in integer coordinates
         # X and Y are bounded by tool radius
         min_x = int(ti.floor((tool_pos.x - tool_radius) / self.dx - 4.0))
@@ -188,10 +198,9 @@ class CNCSimulator:
 
             if new_dist != stock_dist:
                 # If values changed, we removed material
-                removed_vol += 1.0  # simplistic volume proxy
+                ti.atomic_add(self.removed_vol_field[None], 1.0)  # simplistic volume proxy
                 self.sdf_stock[i, j, k] = new_dist
 
-        return removed_vol
 
     @ti.kernel
     def move_tool_one_unit(self, dir: ti.types.vector(3, ti.f32)):
@@ -465,6 +474,152 @@ class CNCSimulator:
 
             # Place YZ at Bottom-Left: x=[0, res], y=[0, res]
             self.debug_buffer[i, j] = self.slice_yz[i, j]
+
+
+    @ti.func
+    def sample_sdf(self, field: ti.template(), p: ti.template()) -> ti.f32:
+        p_grid = p * self.res
+        x = p_grid.x
+        y = p_grid.y
+        z = p_grid.z
+        
+        x0 = int(ti.floor(x))
+        y0 = int(ti.floor(y))
+        z0 = int(ti.floor(z))
+        
+        x1 = x0 + 1
+        y1 = y0 + 1
+        z1 = z0 + 1
+        
+        tx = x - x0
+        ty = y - y0
+        tz = z - z0
+        
+        x0 = ti.max(0, ti.min(self.res - 1, x0))
+        y0 = ti.max(0, ti.min(self.res - 1, y0))
+        z0 = ti.max(0, ti.min(self.res - 1, z0))
+        x1 = ti.max(0, ti.min(self.res - 1, x1))
+        y1 = ti.max(0, ti.min(self.res - 1, y1))
+        z1 = ti.max(0, ti.min(self.res - 1, z1))
+        
+        c000 = field[x0, y0, z0]
+        c100 = field[x1, y0, z0]
+        c010 = field[x0, y1, z0]
+        c110 = field[x1, y1, z0]
+        c001 = field[x0, y0, z1]
+        c101 = field[x1, y0, z1]
+        c011 = field[x0, y1, z1]
+        c111 = field[x1, y1, z1]
+        
+        c00 = c000 * (1 - tx) + c100 * tx
+        c10 = c010 * (1 - tx) + c110 * tx
+        c01 = c001 * (1 - tx) + c101 * tx
+        c11 = c011 * (1 - tx) + c111 * tx
+        
+        c0 = c00 * (1 - ty) + c10 * ty
+        c1 = c01 * (1 - ty) + c11 * ty
+        
+        c = c0 * (1 - tz) + c1 * tz
+        return c
+
+    @ti.func
+    def normal_sdf(self, field: ti.template(), p: ti.template()) -> ti.math.vec3:
+        eps = self.dx * 1.5
+        dx = ti.Vector([eps, 0.0, 0.0])
+        dy = ti.Vector([0.0, eps, 0.0])
+        dz = ti.Vector([0.0, 0.0, eps])
+        
+        nx = self.sample_sdf(field, p + dx) - self.sample_sdf(field, p - dx)
+        ny = self.sample_sdf(field, p + dy) - self.sample_sdf(field, p - dy)
+        nz = self.sample_sdf(field, p + dz) - self.sample_sdf(field, p - dz)
+        
+        return ti.math.normalize(ti.Vector([nx, ny, nz]))
+
+    @ti.kernel
+    def render_raymarch(self, cam_pos: ti.types.vector(3, ti.f32), cam_up: ti.types.vector(3, ti.f32), cam_dir: ti.types.vector(3, ti.f32), show_stock: ti.i32, show_part: ti.i32, show_tool: ti.i32):
+        cam_right = cam_dir.cross(cam_up).normalized()
+        cam_up_actual = cam_right.cross(cam_dir).normalized()
+        
+        fov_scale = ti.tan(3.14159 / 4.0)
+        width = self.raymarch_buffer.shape[0]
+        height = self.raymarch_buffer.shape[1]
+        aspect_ratio = float(width) / float(height)
+        
+        for i, j in self.raymarch_buffer:
+            u = (2.0 * (i + 0.5) / float(width) - 1.0) * aspect_ratio * fov_scale
+            v = (2.0 * (j + 0.5) / float(height) - 1.0) * fov_scale
+            
+            ray_dir = (cam_dir + cam_right * u + cam_up_actual * v).normalized()
+            
+            t = 0.0
+            max_t = 10.0
+            max_steps = 150
+            
+            color = ti.Vector([0.1, 0.1, 0.1])
+            
+            for step in range(max_steps):
+                p = cam_pos + ray_dir * t
+                d_stock = 1e6
+                d_target = 1e6
+                d_tool = 1e6
+                
+                if p.x >= 0.0 and p.x <= 1.0 and p.y >= 0.0 and p.y <= 1.0 and p.z >= 0.0 and p.z <= 1.0:
+                    if show_stock == 1:
+                        d_stock = self.sample_sdf(self.sdf_stock, p)
+                    if show_part == 1:
+                        d_target = self.sample_sdf(self.sdf_target, p)
+                else:
+                    d_box = p - ti.Vector([0.5, 0.5, 0.5])
+                    d_aabb = ti.max(ti.abs(d_box.x), ti.max(ti.abs(d_box.y), ti.abs(d_box.z))) - 0.5
+                    if show_stock == 1:
+                        d_stock = ti.max(d_aabb, 2e-3)
+                    if show_part == 1:
+                        d_target = ti.max(d_aabb, 2e-3)
+                
+                if show_tool == 1:
+                    d_tool = ti.min(self.tool_sdf(p), self.holder_sdf(p))
+                
+                d = ti.min(d_stock, ti.min(d_target, d_tool))
+                
+                if d < 1e-3:
+                    norm = ti.Vector([0.0, 0.0, 1.0])
+                    mat_color = ti.Vector([0.8, 0.8, 0.8])
+                    
+                    if d == d_tool:
+                        mat_color = ti.Vector([1.0, 0.2, 0.2]) if self.tool_sdf(p) < self.holder_sdf(p) else ti.Vector([0.2, 0.2, 0.2])
+                        eps = 1e-3
+                        dx = ti.Vector([eps, 0.0, 0.0]); dy = ti.Vector([0.0, eps, 0.0]); dz = ti.Vector([0.0, 0.0, eps])
+                        if self.tool_sdf(p) < self.holder_sdf(p):
+                            nx = self.tool_sdf(p + dx) - self.tool_sdf(p - dx)
+                            ny = self.tool_sdf(p + dy) - self.tool_sdf(p - dy)
+                            nz = self.tool_sdf(p + dz) - self.tool_sdf(p - dz)
+                            norm = ti.math.normalize(ti.Vector([nx, ny, nz]))
+                        else:
+                            nx = self.holder_sdf(p + dx) - self.holder_sdf(p - dx)
+                            ny = self.holder_sdf(p + dy) - self.holder_sdf(p - dy)
+                            nz = self.holder_sdf(p + dz) - self.holder_sdf(p - dz)
+                            norm = ti.math.normalize(ti.Vector([nx, ny, nz]))
+                    elif d == d_stock:
+                        mat_color = ti.Vector([0.2, 0.8, 0.2])
+                        norm = self.normal_sdf(self.sdf_stock, p)
+                        grid_p = p * float(self.res)
+                        cx = int(grid_p.x) % 2; cy = int(grid_p.y) % 2; cz = int(grid_p.z) % 2
+                        if (cx + cy + cz) % 2 == 0: mat_color = mat_color * 0.8
+                    elif d == d_target:
+                        mat_color = ti.Vector([0.5, 0.5, 1.0])
+                        norm = self.normal_sdf(self.sdf_target, p)
+                    
+                    light_dir = ti.Vector([1.0, 1.0, 1.0]).normalized()
+                    diffuse = ti.max(0.0, norm.dot(light_dir))
+                    ambient = 0.2
+                    color = mat_color * (diffuse * 0.8 + ambient)
+                    break
+                    
+                t += d
+                if t > max_t:
+                    break
+                    
+            self.raymarch_buffer[i, j] = color
 
 
 def main():

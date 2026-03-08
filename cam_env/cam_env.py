@@ -10,13 +10,14 @@ from simulator.simulator import CNCSimulator
 class CamEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
-    def __init__(self, resolution=128, max_steps=100, render_mode: Optional[str] = None):
+    def __init__(self, resolution=128, max_steps=100, render_mode: Optional[str] = None, debug: bool = False):
         """ Initializes the CAM environment.
 
         Args:
             resolution (int): The resolution of the simulation grid.
             max_steps (int): The maximum number of steps per episode.
             render_mode (Optional[str]): The mode for rendering the environment.
+            debug (bool): If True, enables Taichi debug mode (slower but better errors).
         """
         super().__init__()
 
@@ -24,10 +25,15 @@ class CamEnv(gym.Env):
         self.resolution = resolution
         self.max_steps = max_steps
         self.render_mode = render_mode
+        self.debug = debug
 
         self.simulator = None
         self.global_step = 0
         self.current_step = 0
+
+        # --- Cached SDF data (avoid redundant GPU→CPU transfers) ---
+        self._cached_sdf_target = None   # static per episode
+        self._cached_sdf_stock = None    # updated after each cut
 
         self.action_dims = [3, 3, 3]
         self.action_space = spaces.Discrete(np.prod(self.action_dims))
@@ -56,7 +62,7 @@ class CamEnv(gym.Env):
 
         # Mouse state
         self.last_mouse_pos = None
-        self.rmb_down = False
+        self.lmb_down = False
 
         # Toggle flags
         self.show_tool = True
@@ -64,6 +70,7 @@ class CamEnv(gym.Env):
         self.show_stock = True
         self.show_part = True
         self.show_debug = False
+        self.show_raymarch = False
         self.show_help = False
 
 
@@ -71,7 +78,7 @@ class CamEnv(gym.Env):
     def _initialize_sim(self):
         """ Initializes the CNC simulator if not already initialized (lazy initialization). """
         if self.simulator is None:
-            self.simulator = CNCSimulator(resolution=self.resolution)
+            self.simulator = CNCSimulator(resolution=self.resolution, debug=self.debug)
 
 
     def _initialize_render(self):
@@ -133,11 +140,14 @@ class CamEnv(gym.Env):
         grad_stock: normalized ∇φ_stock at the tool — points toward the stock surface.
         grad_diff:  normalized ∇(φ_stock - φ_target) at the tool — points toward
                     regions where stock still differs from the target (i.e. where to cut).
+
+        Uses cached SDF arrays to avoid redundant GPU→CPU transfers.
         """
         tool_pos = self.simulator.tool_pos[None].to_numpy().astype(np.float32)
 
-        sdf_stock_3d = np.clip(self.simulator.sdf_stock.to_numpy(), -1.0, 1.0).astype(np.float32)
-        sdf_target_3d = np.clip(self.simulator.sdf_target.to_numpy(), -1.0, 1.0).astype(np.float32)
+        # Use cached values (updated in reset/step) instead of transferring again
+        sdf_stock_3d = np.clip(self._cached_sdf_stock, -1.0, 1.0).astype(np.float32)
+        sdf_target_3d = np.clip(self._cached_sdf_target, -1.0, 1.0).astype(np.float32)
 
         # --- Finite-difference gradient at the tool position ---
         res = self.resolution
@@ -196,18 +206,17 @@ class CamEnv(gym.Env):
         return reward
 
 
-    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
+    def reset(self, seed: Optional[int] = None):
         """ Resets the environment to an initial state and returns an initial observation.
-
+        
         Args:
             seed (Optional[int]): An optional seed for random number generation.
-            options (Optional[Dict[str, Any]]): Additional options for resetting the environment.
 
         Returns:
             obs (Dict[str, Any]): The initial observation of the environment.
             info (Dict[str, Any]): Additional information about the reset.
         """
-        super().reset(seed=seed, options=options)
+        super().reset(seed=seed)
 
         self._initialize_sim()
         self.simulator.initialize_stock_primitive()
@@ -216,6 +225,10 @@ class CamEnv(gym.Env):
         self.simulator.init_tool_template()
 
         self.current_step = 0
+
+        # Cache SDF arrays once per episode (target is static, stock is initial state)
+        self._cached_sdf_target = self.simulator.sdf_target.to_numpy()
+        self._cached_sdf_stock = self.simulator.sdf_stock.to_numpy()
 
         obs = self._get_obs()
         info = {"step": 0}
@@ -251,20 +264,21 @@ class CamEnv(gym.Env):
         z = (action % 3) - 1
 
 
-        sdf_target = self.simulator.sdf_target.to_numpy()
-        sdf_stock_before = self.simulator.sdf_stock.to_numpy()
+        sdf_stock_before = self._cached_sdf_stock  # use cached value from previous step
         self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z))
         vol_removed = self.simulator.apply_cut()
         
+        # Single GPU→CPU transfer per step for sdf_stock (the only thing that changes)
+        self._cached_sdf_stock = self.simulator.sdf_stock.to_numpy()
+        sdf_stock_after = self._cached_sdf_stock
         tool_pos_after = self.simulator.tool_pos[None].to_numpy()
-        sdf_stock_after = self.simulator.sdf_stock.to_numpy()
         tool_cut_stock = vol_removed > 0.0
         holder_hit = self._holder_hit_stock()
         tool_cut_target = self._tool_cuts_into_target()
 
 
         obs = self._get_obs()
-        reward = self._calculate_reward(sdf_stock_before, sdf_stock_after, sdf_target, tool_pos_after)
+        reward = self._calculate_reward(sdf_stock_before, sdf_stock_after, self._cached_sdf_target, tool_pos_after)
         #if self.writer:
         #    self.writer.add_scalar("charts/env_reward", reward, self.global_step)
         # print(f"Step {self.current_step}: action = [{x}, {y}, {z}], reward = {reward}")
@@ -278,7 +292,7 @@ class CamEnv(gym.Env):
 
 
     def _handle_input(self):
-        """ Handles keyboard and mouse input for camera control and toggles. """
+        """ Handles keyboard and mouse input for orbit camera control and toggles. """
         # Event handling (key presses)
         for e in self.window.get_events(ti.ui.PRESS):
             key = e.key
@@ -289,8 +303,8 @@ class CamEnv(gym.Env):
             if key == '$': key = '4'
             if key == '%': key = '5'
 
-            if key == ti.ui.RMB:
-                self.rmb_down = True
+            if key == ti.ui.LMB:
+                self.lmb_down = True
             elif key == ti.ui.ESCAPE:
                 self.window.running = False
             elif key == 'h' or key == 'H':
@@ -305,14 +319,16 @@ class CamEnv(gym.Env):
                 self.show_part = not self.show_part
             elif key == '5' or key == 'b' or key == 'B':
                 self.show_debug = not self.show_debug
+            elif key == 'm' or key == 'M':
+                self.show_raymarch = not self.show_raymarch
 
         for e in self.window.get_events(ti.ui.RELEASE):
-            if e.key == ti.ui.RMB:
-                self.rmb_down = False
+            if e.key == ti.ui.LMB:
+                self.lmb_down = False
 
-        # Mouse drag for orbit
+        # LMB drag for orbit
         curr_mouse_pos = self.window.get_cursor_pos()
-        if self.rmb_down:
+        if self.lmb_down:
             dx = curr_mouse_pos[0] - self.last_mouse_pos[0]
             dy = curr_mouse_pos[1] - self.last_mouse_pos[1]
             self.cam_theta -= dx * 5.0
@@ -320,27 +336,12 @@ class CamEnv(gym.Env):
             self.cam_phi = max(0.01, min(3.14, self.cam_phi))
         self.last_mouse_pos = curr_mouse_pos
 
-        # WASD pan
-        pan_speed = 0.02
-        if self.window.is_pressed('w'):
-            self.cam_center.x += np.cos(self.cam_theta) * pan_speed
-            self.cam_center.y += np.sin(self.cam_theta) * pan_speed
-        if self.window.is_pressed('s'):
-            self.cam_center.x -= np.cos(self.cam_theta) * pan_speed
-            self.cam_center.y -= np.sin(self.cam_theta) * pan_speed
-        if self.window.is_pressed('a'):
-            self.cam_center.x += np.cos(self.cam_theta - 1.57) * pan_speed
-            self.cam_center.y += np.sin(self.cam_theta - 1.57) * pan_speed
-        if self.window.is_pressed('d'):
-            self.cam_center.x += np.cos(self.cam_theta + 1.57) * pan_speed
-            self.cam_center.y += np.sin(self.cam_theta + 1.57) * pan_speed
-
-        # Q/E tilt
-        if self.window.is_pressed('q'):
-            self.cam_phi -= 0.02
-        if self.window.is_pressed('e'):
-            self.cam_phi += 0.02
-        self.cam_phi = max(0.01, min(3.14, self.cam_phi))
+        # Zoom in/out with R/F keys
+        zoom_speed = 0.05
+        if self.window.is_pressed('r'):
+            self.cam_r = max(0.5, self.cam_r - zoom_speed)
+        if self.window.is_pressed('f'):
+            self.cam_r = min(10.0, self.cam_r + zoom_speed)
 
 
     def _update_camera(self):
@@ -384,17 +385,31 @@ class CamEnv(gym.Env):
         if self.show_help:
             with self.gui.sub_window("Controls", x=0.05, y=0.05, width=0.3, height=0.45):
                 self.gui.text(f"H: Toggle Help")
-                self.gui.text("WASD: Pan Camera")
-                self.gui.text("QE: Tilt Camera")
-                self.gui.text("RMB Drag: Orbit Camera")
+                self.gui.text("LMB Drag: Orbit Camera")
+                self.gui.text("R/F: Zoom In/Out")
                 self.gui.text(f"1/Z: Toggle Tool ({self.show_tool})")
                 self.gui.text(f"2/X: Toggle Holder ({self.show_holder})")
                 self.gui.text(f"3/C: Toggle Stock ({self.show_stock})")
                 self.gui.text(f"4/V: Toggle Part ({self.show_part})")
                 self.gui.text(f"5/B: Toggle Debug ({self.show_debug})")
+                self.gui.text(f"M: Toggle Raymarch ({self.show_raymarch})")
                 self.gui.text(f"Step: {self.current_step}/{self.max_steps}")
 
-        if self.show_debug:
+        if self.show_raymarch:
+            cam_x = self.cam_r * np.sin(self.cam_phi) * np.cos(self.cam_theta)
+            cam_y = self.cam_r * np.sin(self.cam_phi) * np.sin(self.cam_theta)
+            cam_z = self.cam_r * np.cos(self.cam_phi)
+            cam_pos_vec = ti.Vector([self.cam_center.x + cam_x, self.cam_center.y + cam_y, self.cam_center.z + cam_z])
+            cam_dir_vec = ti.Vector([-cam_x, -cam_y, -cam_z]).normalized()
+            cam_up_vec = ti.Vector([0.0, 0.0, 1.0])
+            self.simulator.render_raymarch(cam_pos_vec, cam_up_vec, cam_dir_vec, int(self.show_stock), int(self.show_part), int(self.show_tool))
+            self.canvas.set_image(self.simulator.raymarch_buffer)
+            
+            with self.gui.sub_window("Raymarch Info", x=0.5, y=0.05, width=0.45, height=0.2):
+                self.gui.text("Raymarching View")
+                self.gui.text("High-quality SDF rendering")
+
+        elif self.show_debug:
             # 2D slice debug view
             self.simulator.generate_slices()
             self.simulator.compose_debug_view()

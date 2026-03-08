@@ -2,6 +2,7 @@ import gymnasium as gym
 import torch
 import argparse
 import time
+import numpy as np
 
 from ppo import Agent
 import pufferlib
@@ -37,6 +38,21 @@ def eval(checkpoint_path):
     env = gym.make("CamEnv-v0", resolution=resolution, max_steps=max_steps, render_mode="human")
     obs, info = env.reset()
 
+    # Get initial stock/target volumes for comparison
+    sim = env.unwrapped.simulator
+    initial_stock = float(np.sum(sim.sdf_stock.to_numpy() < 0))
+    target_vol = float(np.sum(sim.sdf_target.to_numpy() < 0))
+
+    print(f"\n{'='*60}")
+    print(f"Evaluating checkpoint: {checkpoint_path}")
+    print(f"Resolution: {resolution}, Max steps: {max_steps}")
+    print(f"Initial stock voxels: {initial_stock:.0f}")
+    print(f"Target voxels:        {target_vol:.0f}")
+    print(f"Voxels to remove:     {initial_stock - target_vol:.0f}")
+    print(f"{'='*60}")
+    print(f"{'Step':>5} {'Action':>12} {'Reward':>8} {'Value':>8} {'Stock':>8} {'Overlap%':>9} {'Removed%':>9}")
+    print(f"{'-'*5} {'-'*12} {'-'*8} {'-'*8} {'-'*8} {'-'*9} {'-'*9}")
+
     total_reward = 0
     done = False
 
@@ -50,15 +66,32 @@ def eval(checkpoint_path):
         done = terminated or truncated
 
         env.render()
-        time.sleep(.2)
+        time.sleep(.15)
 
-        action = action.item()
-        x = (action // 9) - 1
-        y = ((action // 3) % 3) - 1
-        z = (action % 3) - 1
-        print(f"Step: {info['step']}, Action: {[x, y, z]}, Reward: {reward:.4f}, Value: {value.item():.4f}")
+        # Compute progress metrics
+        sdf_stock = sim.sdf_stock.to_numpy()
+        sdf_target = sim.sdf_target.to_numpy()
+        current_stock = float(np.sum(sdf_stock < 0))
+        # Overlap: voxels that are in stock AND in target (good — should keep these)
+        overlap = float(np.sum((sdf_stock < 0) & (sdf_target < 0)))
+        overlap_pct = 100.0 * overlap / max(target_vol, 1)
+        # How much excess stock has been removed
+        excess_initial = initial_stock - target_vol
+        excess_now = current_stock - overlap
+        removed_pct = 100.0 * (1.0 - excess_now / max(excess_initial, 1))
 
-    print(f"\nEpisode finished. Total reward: {total_reward:.4f}")
+        a = action.item()
+        x = (a // 9) - 1
+        y = ((a // 3) % 3) - 1
+        z = (a % 3) - 1
+        print(f"{info['step']:>5} {str([x,y,z]):>12} {reward:>8.4f} {value.item():>8.4f} {current_stock:>8.0f} {overlap_pct:>8.1f}% {removed_pct:>8.1f}%")
+
+    print(f"\n{'='*60}")
+    print(f"Episode finished in {info['step']} steps")
+    print(f"Total reward:        {total_reward:.4f}")
+    print(f"Target preserved:    {overlap_pct:.1f}% (want 100%)")
+    print(f"Excess removed:      {removed_pct:.1f}% (want 100%)")
+    print(f"{'='*60}\n")
     env.close()
 
 

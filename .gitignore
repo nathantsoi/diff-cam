@@ -1,2 +1,7 @@
 __pycache__/*
-imgui.ini
+imgui.in
+runs/*
+cam_env/__pycache__/*
+algorithms/__pycache__/*
+simulator/__pycache__/*
+tests/__pycache__/*
