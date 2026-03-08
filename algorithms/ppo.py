@@ -327,7 +327,7 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
         
         # Saving checkpoint models
-        if iteration % 25 == 0:
+        if iteration % 100 == 0:
             torch.save({
                 "agent": agent.state_dict(),
                 "args": vars(args),

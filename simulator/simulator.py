@@ -9,7 +9,6 @@ if ti._lib.core.with_cuda():
 else:
     ti.init(arch=ti.cpu, debug=True)
 
-
 @ti.data_oriented
 class CNCSimulator:
     def __init__(self, resolution=128):
