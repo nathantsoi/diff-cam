@@ -32,8 +32,9 @@ class CamEnv(gym.Env):
         self.action_dims = [3, 3, 3]
         self.action_space = spaces.Discrete(np.prod(self.action_dims))
 
-        self.obs_dims = 3 + (resolution ** 3) + (resolution ** 3) # tool position + stock SDF + target SDF
-        self.observation_space = spaces.Box(low=-1, high=1, shape=(self.obs_dims,), dtype=np.float32) # Soft bounds for SDF
+        # tool position (3) + grad_stock (3) + grad_diff (3) + stock SDF + target SDF
+        self.obs_dims = 9 + (resolution ** 3) + (resolution ** 3)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_dims,), dtype=np.float32)
         
         self.writer = None
         # --- Rendering State ---
@@ -117,17 +118,59 @@ class CamEnv(gym.Env):
         self.last_mouse_pos = self.window.get_cursor_pos()
 
 
-    def _get_obs(self) -> Dict[str, Any]:
-        """ Retrieves the current state of the tool, stock, and target from the simulator.
+    @staticmethod
+    def _normalize(v: np.ndarray) -> np.ndarray:
+        """ Normalizes a vector to unit length; returns zero vector if norm is near zero. """
+        norm = np.linalg.norm(v)
+        return v / norm if norm > 1e-8 else v
 
-        Returns:
-            Dict[str, Any]: The current observation including tool position and SDFs.
-        """ 
+    def _get_obs(self) -> np.ndarray:
+        """ Retrieves the current observation: tool position, SDF gradients, and SDF grids.
 
+        The observation vector is:
+            [tool_pos (3), grad_stock (3), grad_diff (3), sdf_stock (res³), sdf_target (res³)]
+
+        grad_stock: normalized ∇φ_stock at the tool — points toward the stock surface.
+        grad_diff:  normalized ∇(φ_stock - φ_target) at the tool — points toward
+                    regions where stock still differs from the target (i.e. where to cut).
+        """
         tool_pos = self.simulator.tool_pos[None].to_numpy().astype(np.float32)
-        sdf_stock = np.clip(self.simulator.sdf_stock.to_numpy(), -1.0, 1.0).astype(np.float32).flatten()
-        sdf_target = np.clip(self.simulator.sdf_target.to_numpy(), -1.0, 1.0).astype(np.float32).flatten()
-        return np.concatenate([tool_pos, sdf_stock, sdf_target])
+
+        sdf_stock_3d = np.clip(self.simulator.sdf_stock.to_numpy(), -1.0, 1.0).astype(np.float32)
+        sdf_target_3d = np.clip(self.simulator.sdf_target.to_numpy(), -1.0, 1.0).astype(np.float32)
+
+        # --- Finite-difference gradient at the tool position ---
+        res = self.resolution
+        dx = 1.0 / res
+        ix = int(np.clip(tool_pos[0] * res, 1, res - 2))
+        iy = int(np.clip(tool_pos[1] * res, 1, res - 2))
+        iz = int(np.clip(tool_pos[2] * res, 1, res - 2))
+
+        # ∇φ_stock — direction toward the nearest stock surface
+        grad_stock = np.array([
+            sdf_stock_3d[ix+1, iy, iz] - sdf_stock_3d[ix-1, iy, iz],
+            sdf_stock_3d[ix, iy+1, iz] - sdf_stock_3d[ix, iy-1, iz],
+            sdf_stock_3d[ix, iy, iz+1] - sdf_stock_3d[ix, iy, iz-1],
+        ], dtype=np.float32) / (2.0 * dx)
+
+        # ∇(φ_stock - φ_target) — direction toward excess material
+        diff_3d = sdf_stock_3d - sdf_target_3d
+        grad_diff = np.array([
+            diff_3d[ix+1, iy, iz] - diff_3d[ix-1, iy, iz],
+            diff_3d[ix, iy+1, iz] - diff_3d[ix, iy-1, iz],
+            diff_3d[ix, iy, iz+1] - diff_3d[ix, iy, iz-1],
+        ], dtype=np.float32) / (2.0 * dx)
+
+        grad_stock = self._normalize(grad_stock)
+        grad_diff = self._normalize(grad_diff)
+
+        return np.concatenate([
+            tool_pos,
+            grad_stock,
+            grad_diff,
+            sdf_stock_3d.flatten(),
+            sdf_target_3d.flatten(),
+        ])
     
 
     def _calculate_reward(self, sdf_stock_before, sdf_stock_after, sdf_target, tool_pos) -> float:
@@ -153,17 +196,18 @@ class CamEnv(gym.Env):
         return reward
 
 
-    def reset(self, seed: Optional[int] = None):
+    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
         """ Resets the environment to an initial state and returns an initial observation.
-        
+
         Args:
             seed (Optional[int]): An optional seed for random number generation.
+            options (Optional[Dict[str, Any]]): Additional options for resetting the environment.
 
         Returns:
             obs (Dict[str, Any]): The initial observation of the environment.
             info (Dict[str, Any]): Additional information about the reset.
         """
-        super().reset(seed=seed)
+        super().reset(seed=seed, options=options)
 
         self._initialize_sim()
         self.simulator.initialize_stock_primitive()
