@@ -20,8 +20,8 @@
 #SBATCH -n 1                    # Total MPI tasks (1 for single-process training)
 #SBATCH -t 02:00:00             # Wall-clock time (hh:mm:ss)
 #SBATCH --mail-type=all         # Email at begin/end/fail
-##SBATCH --mail-user=you@utexas.edu   # ← uncomment and set your email
-##SBATCH -A myproject            # ← uncomment and set your allocation
+#SBATCH --mail-user=aditya.angajala@utexas.edu   # ← uncomment and set your email
+#SBATCH -A IRI25030            # ← uncomment and set your allocation
 
 # ── Modules ──────────────────────────────────────────
 module load gcc/13.2.0 cuda/12.8
