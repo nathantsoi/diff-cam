@@ -183,27 +183,33 @@ class CamEnv(gym.Env):
         ])
     
 
-    def _calculate_reward(self, sdf_stock_before, sdf_stock_after, sdf_target, tool_pos) -> float:
-        """ Calculates the reward based on the current state of the stock and target.
+    @staticmethod
+    def _compute_excess(sdf_stock: np.ndarray, sdf_target: np.ndarray) -> float:
+        """ Computes total excess material volume (stock beyond target surface).
+
+        Excess exists where the stock is still solid (sdf_stock < 0) but
+        the target is empty (sdf_target > 0).  We measure this as the sum
+        of max(sdf_target - sdf_stock, 0), which is positive wherever stock
+        extends past the target.
+        """
+        return float(np.sum(np.maximum(sdf_target - sdf_stock, 0.0)))
+
+    def _calculate_reward(self, excess_before: float, excess_after: float, completed: bool) -> float:
+        """ Progress-based reward with time penalty and completion bonus.
+
+        Args:
+            excess_before: Excess volume before the cut.
+            excess_after:  Excess volume after the cut.
+            completed:     Whether the stock now matches the target.
 
         Returns:
             float: The calculated reward.
         """
-        res = self.resolution
-        ix = int(np.clip(tool_pos[0] * res, 0, res - 1))
-        iy = int(np.clip(tool_pos[1] * res, 0, res - 1))
-        iz = int(np.clip(tool_pos[2] * res, 0, res - 1))
+        progress = excess_before - excess_after   # positive = good cutting
+        time_penalty = -0.01
+        completion_bonus = 10.0 if completed else 0.0
 
-        delta = sdf_stock_after - sdf_stock_before
-        weighted = delta * sdf_target
-        cutting = float(np.sum(weighted))
-
-        sdf_stock_at_tool = float(sdf_stock_after[ix, iy, iz])
-        proximity = -max(sdf_stock_at_tool, 0.0)
-
-        reward = 1.0 * cutting + 0.1 * proximity - 0.01
-
-        return reward
+        return progress + time_penalty + completion_bonus
 
 
     def reset(self, seed: Optional[int] = None):
@@ -245,10 +251,10 @@ class CamEnv(gym.Env):
 
 
     def step(self, action):
-        """ Executes one time step within the environment. 
+        """ Executes one time step within the environment.
         Args:
             action (np.ndarray): The action to take, discrete decomposed into 3 dimensions (x, y, z) with values in {0, 1, 2} corresponding to movement of -1, 0, +1 units respectively.
-            
+
         Returns:
             obs (Dict[str, Any]): The observation after taking the action.
             reward (float): The reward obtained from taking the action.
@@ -263,30 +269,34 @@ class CamEnv(gym.Env):
         y = ((action // 3) % 3) - 1
         z = (action % 3) - 1
 
+        # Excess volume BEFORE the cut
+        excess_before = self._compute_excess(self._cached_sdf_stock, self._cached_sdf_target)
 
-        sdf_stock_before = self._cached_sdf_stock  # use cached value from previous step
         self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z))
         vol_removed = self.simulator.apply_cut()
-        
+
         # Single GPU→CPU transfer per step for sdf_stock (the only thing that changes)
         self._cached_sdf_stock = self.simulator.sdf_stock.to_numpy()
-        sdf_stock_after = self._cached_sdf_stock
-        tool_pos_after = self.simulator.tool_pos[None].to_numpy()
-        tool_cut_stock = vol_removed > 0.0
-        holder_hit = self._holder_hit_stock()
-        tool_cut_target = self._tool_cuts_into_target()
 
+        # Excess volume AFTER the cut
+        excess_after = self._compute_excess(self._cached_sdf_stock, self._cached_sdf_target)
+
+        # Completion: no excess material remains
+        completion_threshold = 1e-3
+        completed = excess_after < completion_threshold
 
         obs = self._get_obs()
-        reward = self._calculate_reward(sdf_stock_before, sdf_stock_after, self._cached_sdf_target, tool_pos_after)
-        #if self.writer:
-        #    self.writer.add_scalar("charts/env_reward", reward, self.global_step)
-        # print(f"Step {self.current_step}: action = [{x}, {y}, {z}], reward = {reward}")
+        reward = self._calculate_reward(excess_before, excess_after, completed)
 
         truncated = self.current_step >= self.max_steps
-        #terminated = holder_hit or tool_cut_target
-        terminated = tool_cut_target
-        info = {"step": self.current_step, "action": [x, y, z], "vol": vol_removed, "tool_cut_target": tool_cut_target}
+        terminated = completed  # only terminate on perfect completion
+        info = {
+            "step": self.current_step,
+            "action": [x, y, z],
+            "vol": vol_removed,
+            "excess": excess_after,
+            "completed": completed,
+        }
 
         return obs, reward, terminated, truncated, info
 
