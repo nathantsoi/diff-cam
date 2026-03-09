@@ -15,7 +15,7 @@
 #SBATCH -J diffcam-ppo         # Job name
 #SBATCH -o diffcam-ppo.o%j     # stdout  (%j = jobid)
 #SBATCH -e diffcam-ppo.e%j     # stderr
-#SBATCH -p gpu-a100             # Queue — A100 GPU nodes
+#SBATCH -p gpu-a100-small             # Queue — A100 GPU nodes
 #SBATCH -N 1                    # Total nodes
 #SBATCH -n 1                    # Total MPI tasks (1 for single-process training)
 #SBATCH -t 02:00:00             # Wall-clock time (hh:mm:ss)
