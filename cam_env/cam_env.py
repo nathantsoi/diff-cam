@@ -31,6 +31,10 @@ class CamEnv(gym.Env):
         self.global_step = 0
         self.current_step = 0
 
+        # Proximity shaping annealing: linearly decay from initial to 0
+        self.proximity_coef_initial = 0.1
+        self.proximity_anneal_steps = 500_000
+
         # --- Cached SDF data (avoid redundant GPU→CPU transfers) ---
         self._cached_sdf_target = None   # static per episode
         self._cached_sdf_stock = None    # updated after each cut
@@ -196,22 +200,27 @@ class CamEnv(gym.Env):
         """
         return float(np.sum(np.maximum(np.minimum(-sdf_stock, sdf_target), 0.0)))
 
-    def _calculate_reward(self, excess_before: float, excess_after: float, completed: bool) -> float:
-        """ Progress-based reward with time penalty and completion bonus.
+    def _calculate_reward(
+        self,
+        excess_before: float,
+        excess_after: float,
+        completed: bool,
+        proximity_bonus: float,
+    ) -> float:
+        """ Progress-based reward with time penalty, completion bonus,
+        and annealed proximity shaping.
 
         Args:
-            excess_before: Excess volume before the cut.
-            excess_after:  Excess volume after the cut.
-            completed:     Whether the stock now matches the target.
-
-        Returns:
-            float: The calculated reward.
+            excess_before:   Excess volume before the cut.
+            excess_after:    Excess volume after the cut.
+            completed:       Whether the stock now matches the target.
+            proximity_bonus: Dot-product shaping reward (already scaled by annealed coef).
         """
         progress = excess_before - excess_after   # positive = good cutting
         time_penalty = -0.01
         completion_bonus = 10.0 if completed else 0.0
 
-        return progress + time_penalty + completion_bonus
+        return progress + time_penalty + completion_bonus + proximity_bonus
 
 
     def reset(self, seed: Optional[int] = None):
@@ -274,8 +283,19 @@ class CamEnv(gym.Env):
         # Excess volume BEFORE the cut
         excess_before = self._compute_excess(self._cached_sdf_stock, self._cached_sdf_target)
 
+        # Tentative move: save position, move, check if tool overlaps target
+        old_pos = self.simulator.tool_pos[None]
         self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z))
-        vol_removed = self.simulator.apply_cut()
+
+        if self._tool_cuts_into_target():
+            # Move would place tool inside target — undo it (no-op action)
+            self.simulator.tool_pos[None] = old_pos
+            vol_removed = 0.0
+            move_blocked = True
+        else:
+            # Move is legal — apply the cut
+            vol_removed = self.simulator.apply_cut()
+            move_blocked = False
 
         # Single GPU→CPU transfer per step for sdf_stock (the only thing that changes)
         self._cached_sdf_stock = self.simulator.sdf_stock.to_numpy()
@@ -283,12 +303,27 @@ class CamEnv(gym.Env):
         # Excess volume AFTER the cut
         excess_after = self._compute_excess(self._cached_sdf_stock, self._cached_sdf_target)
 
+        # Proximity shaping: reward moving toward excess material
+        # Uses grad_diff (gradient of stock-target difference) computed in _get_obs
+        obs = self._get_obs()
+        grad_diff = obs[6:9]  # normalized gradient toward excess material
+        move_dir = np.array([x, y, z], dtype=np.float32)
+        move_norm = np.linalg.norm(move_dir)
+        if move_norm > 1e-8:
+            move_dir = move_dir / move_norm
+
+        # Anneal proximity coefficient linearly to zero
+        anneal_frac = max(0.0, 1.0 - self.global_step / self.proximity_anneal_steps)
+        proximity_coef = self.proximity_coef_initial * anneal_frac
+        proximity_bonus = proximity_coef * float(np.dot(move_dir, grad_diff))
+
         # Completion: no excess material remains
         completion_threshold = 1e-3
         completed = excess_after < completion_threshold
 
-        obs = self._get_obs()
-        reward = self._calculate_reward(excess_before, excess_after, completed)
+        reward = self._calculate_reward(
+            excess_before, excess_after, completed, proximity_bonus
+        )
 
         truncated = self.current_step >= self.max_steps
         terminated = completed  # only terminate on perfect completion
@@ -298,6 +333,8 @@ class CamEnv(gym.Env):
             "vol": vol_removed,
             "excess": excess_after,
             "completed": completed,
+            "move_blocked": move_blocked,
+            "proximity_coef": proximity_coef,
         }
 
         return obs, reward, terminated, truncated, info
