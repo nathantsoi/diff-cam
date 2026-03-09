@@ -264,28 +264,47 @@ class CNCSimulator:
 
     @ti.kernel
     def check_tool_intersects_target(self) -> ti.i32:
-        """ Returns 1 if tool intersects target geometry, 0 otherwise. """
+        """ Returns 1 if tool intersects target geometry, 0 otherwise.
+
+        Uses sub-grid sampling (half-dx steps) with trilinear interpolation
+        of the target SDF for robust detection even at low resolution.
+        """
         tool_pos = self.tool_pos[None]
         tool_radius = self.tool_radius[None]
         tool_height = self.tool_height[None]
-        
+
         cuts_target = 0
-        
-        # Bounding box of tool
-        min_x = ti.max(0, int(ti.floor((tool_pos.x - tool_radius) / self.dx) - 1))
-        max_x = ti.min(self.res, int(ti.ceil((tool_pos.x + tool_radius) / self.dx) + 1))
-        min_y = ti.max(0, int(ti.floor((tool_pos.y - tool_radius) / self.dx) - 1))
-        max_y = ti.min(self.res, int(ti.ceil((tool_pos.y + tool_radius) / self.dx) + 1))
-        min_z = ti.max(0, int(ti.floor(tool_pos.z / self.dx) - 1))
-        max_z = ti.min(self.res, int(ti.ceil((tool_pos.z + tool_height) / self.dx) + 1))
-        
-        for i, j, k in ti.ndrange((min_x, max_x), (min_y, max_y), (min_z, max_z)):
-            p = ti.Vector([i, j, k]) * self.dx
-            
-            # If point is inside tool AND inside or on target → bad cut
-            if self.tool_sdf(p) < 0 and self.sdf_target[i, j, k] <= 0:
-                cuts_target = 1
-        
+
+        # Sample at half-dx spacing for sub-grid accuracy
+        step = self.dx * 0.5
+
+        # Number of samples in each dimension (covers tool bounding box + 1dx pad)
+        n_x = int(ti.ceil((2.0 * tool_radius + 2.0 * self.dx) / step)) + 1
+        n_y = int(ti.ceil((2.0 * tool_radius + 2.0 * self.dx) / step)) + 1
+        n_z = int(ti.ceil((tool_height + 2.0 * self.dx) / step)) + 1
+
+        origin_x = tool_pos.x - tool_radius - self.dx
+        origin_y = tool_pos.y - tool_radius - self.dx
+        origin_z = tool_pos.z - self.dx
+
+        for i, j, k in ti.ndrange(n_x, n_y, n_z):
+            p = ti.Vector([
+                origin_x + i * step,
+                origin_y + j * step,
+                origin_z + k * step,
+            ])
+
+            # Stay within the simulation domain
+            if (p.x >= 0.0 and p.x <= 1.0
+                    and p.y >= 0.0 and p.y <= 1.0
+                    and p.z >= 0.0 and p.z <= 1.0):
+                # tool_sdf <= 0  : point is on or inside tool (includes bottom face)
+                # target_sdf <= 0: point is on or inside target (interpolated)
+                if self.tool_sdf(p) <= 0:
+                    target_val = self.sample_sdf(self.sdf_target, p)
+                    if target_val <= 0:
+                        cuts_target = 1
+
         return cuts_target
 
     # Visualization Kernels

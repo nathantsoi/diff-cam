@@ -167,8 +167,10 @@ class CamEnv(gym.Env):
             sdf_stock_3d[ix, iy, iz+1] - sdf_stock_3d[ix, iy, iz-1],
         ], dtype=np.float32) / (2.0 * dx)
 
-        # ∇(φ_stock - φ_target) — direction toward excess material
-        diff_3d = sdf_stock_3d - sdf_target_3d
+        # ∇(φ_target - φ_stock) — direction toward excess material
+        # Excess exists where target is air (φ_target > 0) and stock is solid (φ_stock < 0),
+        # so (φ_target - φ_stock) is large and positive there; its gradient points toward it.
+        diff_3d = sdf_target_3d - sdf_stock_3d
         grad_diff = np.array([
             diff_3d[ix+1, iy, iz] - diff_3d[ix-1, iy, iz],
             diff_3d[ix, iy+1, iz] - diff_3d[ix, iy-1, iz],
@@ -283,13 +285,15 @@ class CamEnv(gym.Env):
         # Excess volume BEFORE the cut
         excess_before = self._compute_excess(self._cached_sdf_stock, self._cached_sdf_target)
 
-        # Tentative move: save position, move, check if tool overlaps target
-        old_pos = self.simulator.tool_pos[None]
+        # Tentative move: save position as Python floats (NOT a Taichi proxy that
+        # might be invalidated by the kernel below), move, check if tool overlaps target.
+        _tp = self.simulator.tool_pos[None]
+        old_pos = (float(_tp[0]), float(_tp[1]), float(_tp[2]))
         self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z))
 
         if self._tool_cuts_into_target():
             # Move would place tool inside target — undo it (no-op action)
-            self.simulator.tool_pos[None] = old_pos
+            self.simulator.tool_pos[None] = ti.math.vec3(*old_pos)
             vol_removed = 0.0
             move_blocked = True
         else:
