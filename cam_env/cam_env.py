@@ -185,14 +185,16 @@ class CamEnv(gym.Env):
 
     @staticmethod
     def _compute_excess(sdf_stock: np.ndarray, sdf_target: np.ndarray) -> float:
-        """ Computes total excess material volume (stock beyond target surface).
+        """ Computes total excess material volume (stock that extends beyond target).
 
-        Excess exists where the stock is still solid (sdf_stock < 0) but
-        the target is empty (sdf_target > 0).  We measure this as the sum
-        of max(sdf_target - sdf_stock, 0), which is positive wherever stock
-        extends past the target.
+        Excess exists where two conditions are met simultaneously:
+          1. Stock is solid:  sdf_stock < 0  (i.e. -sdf_stock > 0)
+          2. Target is air:   sdf_target > 0
+
+        Using min(-sdf_stock, sdf_target) gives a continuous measure that is
+        positive ONLY when both conditions hold, and zero otherwise.
         """
-        return float(np.sum(np.maximum(sdf_target - sdf_stock, 0.0)))
+        return float(np.sum(np.maximum(np.minimum(-sdf_stock, sdf_target), 0.0)))
 
     def _calculate_reward(self, excess_before: float, excess_after: float, completed: bool) -> float:
         """ Progress-based reward with time penalty and completion bonus.

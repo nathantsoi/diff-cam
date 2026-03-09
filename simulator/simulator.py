@@ -196,11 +196,12 @@ class CNCSimulator:
             # In SDF math: max(A, -B)
             new_dist = ti.max(stock_dist, -tool_dist)
 
-            # Safety mask: never cut past the target surface.
-            # This clamps the stock SDF so it can never exceed the target SDF,
-            # making it physically impossible to remove target material.
+            # Safety mask: prevent cutting inside the target.
+            # Where the target is solid (target_dist < 0), the stock must remain
+            # at least as solid — clamp new_dist so it can't exceed target_dist.
             target_dist = self.sdf_target[i, j, k]
-            new_dist = ti.max(new_dist, target_dist)
+            if target_dist < 0.0:
+                new_dist = ti.min(new_dist, target_dist)
 
             if new_dist != stock_dist:
                 # If values changed, we removed material
