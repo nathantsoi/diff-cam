@@ -46,7 +46,9 @@ python -u algorithms/ppo.py \
     --cuda \
     --total-timesteps 2000000 \
     --num-envs 3 \
-    --num-steps 512
+    --num-steps 1024 \
+    --max-steps 512 \
+    --gamma 1.0
 
 echo ""
 echo "=== Training complete ==="

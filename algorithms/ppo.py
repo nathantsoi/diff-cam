@@ -87,7 +87,7 @@ class Args:
     # additional arguments for CamEnv
     resolution: int = 8
     """the resolution of the camera observation"""
-    max_steps: int = 256
+    max_steps: int = 512
     """the maximum number of steps per episode"""
     render_mode: str = "rgb_array"
     """the render mode for the environment"""
@@ -110,30 +110,56 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 128)),
-            nn.Tanh(),
-            layer_init(nn.Linear(128, 1), std=1.0),
+        # Infer resolution from observation shape:
+        # obs = [tool_pos(3) + grad_stock(3) + grad_diff(3)] + sdf_stock(res³) + sdf_target(res³)
+        obs_size = np.array(envs.single_observation_space.shape).prod()
+        self.state_dim = 9  # tool_pos + grad_stock + grad_diff
+        sdf_total = obs_size - self.state_dim
+        self.res = round((sdf_total // 2) ** (1.0 / 3.0))
+
+        # 3D CNN encoder for stacked SDF grids (2 channels: stock + target)
+        self.sdf_encoder = nn.Sequential(
+            nn.Conv3d(2, 16, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv3d(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool3d(2),   # always outputs (32, 2, 2, 2) = 256
+            nn.Flatten(),              # -> 256
         )
-        self.actor = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 128)),
-            nn.Tanh(),
-            layer_init(nn.Linear(128, envs.single_action_space.n), std=0.01),
+        sdf_feat_dim = 32 * 2 * 2 * 2  # 256
+
+        # Shared trunk: combine SDF features with tool state
+        self.shared = nn.Sequential(
+            layer_init(nn.Linear(sdf_feat_dim + self.state_dim, 128)),
+            nn.ReLU(),
+            layer_init(nn.Linear(128, 128)),
+            nn.ReLU(),
         )
+
+        self.actor_head = layer_init(nn.Linear(128, envs.single_action_space.n), std=0.01)
+        self.critic_head = layer_init(nn.Linear(128, 1), std=1.0)
+
+    def _encode(self, x):
+        """Split flat obs into tool state + 3D SDF grids, run through encoder."""
+        tool_state = x[:, :self.state_dim]
+        sdf_data = x[:, self.state_dim:]
+        half = sdf_data.shape[1] // 2
+        stock = sdf_data[:, :half].reshape(-1, 1, self.res, self.res, self.res)
+        target = sdf_data[:, half:].reshape(-1, 1, self.res, self.res, self.res)
+        sdf_grids = torch.cat([stock, target], dim=1)  # (B, 2, R, R, R)
+        sdf_features = self.sdf_encoder(sdf_grids)
+        return self.shared(torch.cat([sdf_features, tool_state], dim=1))
 
     def get_value(self, x):
-        return self.critic(x)
+        return self.critic_head(self._encode(x))
 
     def get_action_and_value(self, x, action=None):
-        logits = self.actor(x)
+        features = self._encode(x)
+        logits = self.actor_head(features)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+        return action, probs.log_prob(action), probs.entropy(), self.critic_head(features)
 
 
 if __name__ == "__main__":
