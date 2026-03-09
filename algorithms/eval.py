@@ -4,12 +4,60 @@ import argparse
 import time
 import numpy as np
 
-from ppo import Agent
+from ppo import Agent, layer_init
 import pufferlib
 import pufferlib.vector
 import pufferlib.emulation
 
 from cam_env.cam_env import CamEnv
+
+
+class LegacyAgent(torch.nn.Module):
+    """Original flat MLP agent for loading old checkpoints."""
+    def __init__(self, envs):
+        super().__init__()
+        obs_size = np.array(envs.single_observation_space.shape).prod()
+        self.critic = torch.nn.Sequential(
+            layer_init(torch.nn.Linear(obs_size, 256)),
+            torch.nn.Tanh(),
+            layer_init(torch.nn.Linear(256, 128)),
+            torch.nn.Tanh(),
+            layer_init(torch.nn.Linear(128, 1), std=1.0),
+        )
+        self.actor = torch.nn.Sequential(
+            layer_init(torch.nn.Linear(obs_size, 256)),
+            torch.nn.Tanh(),
+            layer_init(torch.nn.Linear(256, 128)),
+            torch.nn.Tanh(),
+            layer_init(torch.nn.Linear(128, envs.single_action_space.n), std=0.01),
+        )
+
+    def get_value(self, x):
+        return self.critic(x)
+
+    def get_action_and_value(self, x, action=None):
+        from torch.distributions.categorical import Categorical
+        logits = self.actor(x)
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+
+
+def _make_agent(checkpoint, dummy_envs):
+    """Auto-detect architecture from checkpoint keys and create the right agent."""
+    state_dict = checkpoint["agent"]
+    if "critic.0.weight" in state_dict:
+        # Old flat MLP checkpoint
+        print("Detected legacy MLP checkpoint — using LegacyAgent")
+        agent = LegacyAgent(dummy_envs)
+    else:
+        # New 3D CNN checkpoint
+        print("Detected 3D CNN checkpoint — using Agent")
+        agent = Agent(dummy_envs)
+    agent.load_state_dict(state_dict)
+    agent.eval()
+    return agent
 
 
 def eval(checkpoint_path):
@@ -29,9 +77,7 @@ def eval(checkpoint_path):
         backend=pufferlib.vector.Serial,
     )
 
-    agent = Agent(dummy_envs)
-    agent.load_state_dict(checkpoint["agent"])
-    agent.eval()
+    agent = _make_agent(checkpoint, dummy_envs)
     dummy_envs.close()
 
     # Real env with rendering
