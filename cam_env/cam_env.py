@@ -6,6 +6,10 @@ import taichi as ti
 import time
 
 from simulator.simulator import CNCSimulator
+from cam_env.physics_config import (
+    TIME_PENALTY, COMPLETION_BONUS, COMPLETION_THRESHOLD,
+    PROXIMITY_COEF_INITIAL, PROXIMITY_ANNEAL_STEPS, PROXIMITY_CLIP,
+)
 
 class CamEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
@@ -32,12 +36,11 @@ class CamEnv(gym.Env):
         self.current_step = 0
 
         # Proximity shaping annealing: linearly decay from initial to 0
-        self.proximity_coef_initial = 0.1
-        self.proximity_anneal_steps = 500_000
+        self.proximity_coef_initial = PROXIMITY_COEF_INITIAL
+        self.proximity_anneal_steps = PROXIMITY_ANNEAL_STEPS
 
-        # --- Cached SDF data (avoid redundant GPU→CPU transfers) ---
-        self._cached_sdf_target = None   # static per episode
-        self._cached_sdf_stock = None    # updated after each cut
+        # --- Cached excess for reward progress (set in reset/step) ---
+        self._prev_excess = 0.0
 
         self.action_dims = [3, 3, 3]
         self.action_space = spaces.Discrete(np.prod(self.action_dims))
@@ -136,71 +139,17 @@ class CamEnv(gym.Env):
         return v / norm if norm > 1e-8 else v
 
     def _get_obs(self) -> np.ndarray:
-        """ Retrieves the current observation: tool position, SDF gradients, and SDF grids.
+        """Build observation + compute excess entirely on the GPU.
 
-        The observation vector is:
-            [tool_pos (3), grad_stock (3), grad_diff (3), sdf_stock (res³), sdf_target (res³)]
+        Uses the fused simulator.build_obs() kernel which computes gradients,
+        clips SDF values, and accumulates excess in a single kernel launch.
+        Only transfers the final flat obs vector (no full SDF grid transfer).
 
-        grad_stock: normalized ∇φ_stock at the tool — points toward the stock surface.
-        grad_diff:  normalized ∇(φ_stock - φ_target) at the tool — points toward
-                    regions where stock still differs from the target (i.e. where to cut).
-
-        Uses cached SDF arrays to avoid redundant GPU→CPU transfers.
+        After this call, self.simulator.excess_field[None] holds the current
+        excess volume as a side-effect.
         """
-        tool_pos = self.simulator.tool_pos[None].to_numpy().astype(np.float32)
-
-        # Use cached values (updated in reset/step) instead of transferring again
-        sdf_stock_3d = np.clip(self._cached_sdf_stock, -1.0, 1.0).astype(np.float32)
-        sdf_target_3d = np.clip(self._cached_sdf_target, -1.0, 1.0).astype(np.float32)
-
-        # --- Finite-difference gradient at the tool position ---
-        res = self.resolution
-        dx = 1.0 / res
-        ix = int(np.clip(tool_pos[0] * res, 1, res - 2))
-        iy = int(np.clip(tool_pos[1] * res, 1, res - 2))
-        iz = int(np.clip(tool_pos[2] * res, 1, res - 2))
-
-        # ∇φ_stock — direction toward the nearest stock surface
-        grad_stock = np.array([
-            sdf_stock_3d[ix+1, iy, iz] - sdf_stock_3d[ix-1, iy, iz],
-            sdf_stock_3d[ix, iy+1, iz] - sdf_stock_3d[ix, iy-1, iz],
-            sdf_stock_3d[ix, iy, iz+1] - sdf_stock_3d[ix, iy, iz-1],
-        ], dtype=np.float32) / (2.0 * dx)
-
-        # ∇(φ_target - φ_stock) — direction toward excess material
-        # Excess exists where target is air (φ_target > 0) and stock is solid (φ_stock < 0),
-        # so (φ_target - φ_stock) is large and positive there; its gradient points toward it.
-        diff_3d = sdf_target_3d - sdf_stock_3d
-        grad_diff = np.array([
-            diff_3d[ix+1, iy, iz] - diff_3d[ix-1, iy, iz],
-            diff_3d[ix, iy+1, iz] - diff_3d[ix, iy-1, iz],
-            diff_3d[ix, iy, iz+1] - diff_3d[ix, iy, iz-1],
-        ], dtype=np.float32) / (2.0 * dx)
-
-        grad_stock = self._normalize(grad_stock)
-        grad_diff = self._normalize(grad_diff)
-
-        return np.concatenate([
-            tool_pos,
-            grad_stock,
-            grad_diff,
-            sdf_stock_3d.flatten(),
-            sdf_target_3d.flatten(),
-        ])
-    
-
-    @staticmethod
-    def _compute_excess(sdf_stock: np.ndarray, sdf_target: np.ndarray) -> float:
-        """ Computes total excess material volume (stock that extends beyond target).
-
-        Excess exists where two conditions are met simultaneously:
-          1. Stock is solid:  sdf_stock < 0  (i.e. -sdf_stock > 0)
-          2. Target is air:   sdf_target > 0
-
-        Using min(-sdf_stock, sdf_target) gives a continuous measure that is
-        positive ONLY when both conditions hold, and zero otherwise.
-        """
-        return float(np.sum(np.maximum(np.minimum(-sdf_stock, sdf_target), 0.0)))
+        self.simulator.build_obs()
+        return self.simulator.obs_buffer.to_numpy()
 
     def _calculate_reward(
         self,
@@ -219,8 +168,9 @@ class CamEnv(gym.Env):
             proximity_bonus: Dot-product shaping reward (already scaled by annealed coef).
         """
         progress = excess_before - excess_after   # positive = good cutting
-        time_penalty = -0.01
-        completion_bonus = 10.0 if completed else 0.0
+        time_penalty = TIME_PENALTY
+        completion_bonus = COMPLETION_BONUS if completed else 0.0
+        proximity_bonus = np.clip(proximity_bonus, -PROXIMITY_CLIP, PROXIMITY_CLIP)
 
         return progress + time_penalty + completion_bonus + proximity_bonus
 
@@ -245,11 +195,9 @@ class CamEnv(gym.Env):
 
         self.current_step = 0
 
-        # Cache SDF arrays once per episode (target is static, stock is initial state)
-        self._cached_sdf_target = self.simulator.sdf_target.to_numpy()
-        self._cached_sdf_stock = self.simulator.sdf_stock.to_numpy()
-
+        # Build initial obs on GPU (also computes initial excess)
         obs = self._get_obs()
+        self._prev_excess = float(self.simulator.excess_field[None])
         info = {"step": 0}
         
         return obs, info
@@ -282,8 +230,8 @@ class CamEnv(gym.Env):
         y = ((action // 3) % 3) - 1
         z = (action % 3) - 1
 
-        # Excess volume BEFORE the cut
-        excess_before = self._compute_excess(self._cached_sdf_stock, self._cached_sdf_target)
+        # Excess BEFORE = cached from the previous step's build_obs (free)
+        excess_before = self._prev_excess
 
         # Tentative move: save position as Python floats (NOT a Taichi proxy that
         # might be invalidated by the kernel below), move, check if tool overlaps target.
@@ -301,16 +249,14 @@ class CamEnv(gym.Env):
             vol_removed = self.simulator.apply_cut()
             move_blocked = False
 
-        # Single GPU→CPU transfer per step for sdf_stock (the only thing that changes)
-        self._cached_sdf_stock = self.simulator.sdf_stock.to_numpy()
-
-        # Excess volume AFTER the cut
-        excess_after = self._compute_excess(self._cached_sdf_stock, self._cached_sdf_target)
+        # Fused: build obs + compute excess_after in ONE kernel + ONE transfer
+        # (no sdf_stock.to_numpy(), no numpy clip/gradient/concat)
+        obs = self._get_obs()
+        excess_after = float(self.simulator.excess_field[None])
+        self._prev_excess = excess_after  # cache for next step
 
         # Proximity shaping: reward moving toward excess material
-        # Uses grad_diff (gradient of stock-target difference) computed in _get_obs
-        obs = self._get_obs()
-        grad_diff = obs[6:9]  # normalized gradient toward excess material
+        grad_diff = obs[6:9]  # gradient toward excess material
         move_dir = np.array([x, y, z], dtype=np.float32)
         move_norm = np.linalg.norm(move_dir)
         if move_norm > 1e-8:
@@ -322,7 +268,7 @@ class CamEnv(gym.Env):
         proximity_bonus = proximity_coef * float(np.dot(move_dir, grad_diff))
 
         # Completion: no excess material remains
-        completion_threshold = 1e-3
+        completion_threshold = COMPLETION_THRESHOLD
         completed = excess_after < completion_threshold
 
         reward = self._calculate_reward(

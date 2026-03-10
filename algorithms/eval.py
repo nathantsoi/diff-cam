@@ -4,7 +4,7 @@ import argparse
 import time
 import numpy as np
 
-from ppo import Agent, layer_init
+from algorithms.ppo import Agent, layer_init
 import pufferlib
 import pufferlib.vector
 import pufferlib.emulation
@@ -44,9 +44,8 @@ class LegacyAgent(torch.nn.Module):
         return action, probs.log_prob(action), probs.entropy(), self.critic(x)
 
 
-def _make_agent(checkpoint, dummy_envs):
+def _make_agent(state_dict, dummy_envs):
     """Auto-detect architecture from checkpoint keys and create the right agent."""
-    state_dict = checkpoint["agent"]
     if "critic.0.weight" in state_dict:
         # Old flat MLP checkpoint
         print("Detected legacy MLP checkpoint — using LegacyAgent")
@@ -60,12 +59,52 @@ def _make_agent(checkpoint, dummy_envs):
     return agent
 
 
-def eval(checkpoint_path):
+def eval(checkpoint_path, fallback_resolution=None, fallback_max_steps=None):
     # Load checkpoint once
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-    saved_args = checkpoint["args"]
-    resolution = saved_args["resolution"]
-    max_steps = saved_args["max_steps"]
+    checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+    resolution = None
+    max_steps = None
+
+    if isinstance(checkpoint, dict) and "args" in checkpoint:
+        # Our custom checkpoint format
+        saved_args = checkpoint["args"]
+        resolution = saved_args.get("resolution")
+        max_steps = saved_args.get("max_steps")
+        state_dict = checkpoint.get("agent", checkpoint)
+    else:
+        # Native pufferlib checkpoint (or other raw state dict)
+        state_dict = checkpoint.get("agent", checkpoint) if isinstance(checkpoint, dict) else checkpoint
+
+    # Check for parameters injected as buffers
+    if resolution is None and "env_resolution" in state_dict:
+        resolution = state_dict["env_resolution"].item()
+    if max_steps is None and "env_max_steps" in state_dict:
+        max_steps = state_dict["env_max_steps"].item()
+
+    if resolution is None or max_steps is None:
+        if fallback_resolution is not None and fallback_max_steps is not None:
+             print("Warning: Checkpoint missing internal parameters, using provided CLI fallbacks.")
+             resolution = fallback_resolution
+             max_steps = fallback_max_steps
+        else:
+             raise ValueError(
+                "Checkpoint does not contain 'args' dictionary or injected buffer parameters.\n"
+                "This checkpoint appears to be missing its environment parameters (resolution, max_steps).\n"
+                "Evaluation now strictly requires checkpoints saved with these parameters OR for you to pass "
+                "--resolution and --max-steps explicitly via the CLI."
+             )
+
+    # Strip "agent." prefix if present (from PuffeRLWrapperPolicy) and remove injected buffers
+    stripped = {}
+    for k, v in state_dict.items():
+        if k in ["env_resolution", "env_max_steps"]:
+            continue
+        new_key = k.replace("agent.", "", 1) if k.startswith("agent.") else k
+        stripped[new_key] = v
+    state_dict = stripped
+
+    print(f"Using resolution={resolution}, max_steps={max_steps}")
 
     # Dummy vectorized env to get shapes for Agent init
     dummy_envs = pufferlib.vector.make(
@@ -77,7 +116,7 @@ def eval(checkpoint_path):
         backend=pufferlib.vector.Serial,
     )
 
-    agent = _make_agent(checkpoint, dummy_envs)
+    agent = _make_agent(state_dict, dummy_envs)
     dummy_envs.close()
 
     # Real env with rendering
@@ -144,6 +183,10 @@ def eval(checkpoint_path):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint", type=str, required=True)
+    parser.add_argument("--resolution", type=int, default=None,
+                        help="Fallback resolution for older checkpoints missing internal parameters.")
+    parser.add_argument("--max-steps", type=int, default=None,
+                        help="Fallback max_steps for older checkpoints missing internal parameters.")
     args = parser.parse_args()
 
-    eval(args.checkpoint)
+    eval(args.checkpoint, fallback_resolution=args.resolution, fallback_max_steps=args.max_steps)
