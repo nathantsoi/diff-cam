@@ -1,5 +1,11 @@
 import taichi as ti
 
+from cam_env.physics_config import (
+    STOCK_HALF_SIZE,
+    TARGET_RADIUS,
+    TOOL_START_POS, TOOL_RADIUS, TOOL_HEIGHT,
+)
+
 
 
 
@@ -72,38 +78,120 @@ class CNCSimulator:
         # Raymarching buffer for high-quality alternative render
         self.raymarch_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(1024, 768))
         self.removed_vol_field = ti.field(dtype=ti.f32, shape=())
+        self.excess_field = ti.field(dtype=ti.f32, shape=())
 
+        # Observation buffer: [tool_pos(3), grad_stock(3), grad_diff(3), sdf_stock(res³), sdf_target(res³)]
+        self.obs_size = 9 + 2 * resolution ** 3
+        self.obs_buffer = ti.field(dtype=ti.f32, shape=(self.obs_size,))
+
+    # ── Excess volume (GPU-only) ────────────────────────────────────
+    def get_excess(self) -> float:
+        """Compute total excess material volume entirely on the GPU.
+        Returns a Python float — no array transfer involved."""
+        self.excess_field[None] = 0.0
+        self._compute_excess_kernel()
+        return float(self.excess_field[None])
+
+    @ti.kernel
+    def _compute_excess_kernel(self):
+        """sum(max(min(-sdf_stock, sdf_target), 0)) over the full grid."""
+        for i, j, k in ti.ndrange(self.res, self.res, self.res):
+            stock = self.sdf_stock[i, j, k]
+            target = self.sdf_target[i, j, k]
+            val = ti.max(ti.min(-stock, target), 0.0)
+            if val > 0.0:
+                ti.atomic_add(self.excess_field[None], val)
+
+    # ── Fused observation builder (GPU-only) ────────────────────────
+    def build_obs(self):
+        """Build the full observation vector AND compute excess volume in one
+        kernel launch.  After this call:
+          - obs_buffer contains the flat observation (transfer with .to_numpy())
+          - excess_field[None] holds the current excess volume (scalar read)
+        """
+        self.excess_field[None] = 0.0
+        self._build_obs_kernel()
+
+    @ti.kernel
+    def _build_obs_kernel(self):
+        # ── Serial: tool position + gradients at tool cell ──────────
+        tp = self.tool_pos[None]
+        self.obs_buffer[0] = tp.x
+        self.obs_buffer[1] = tp.y
+        self.obs_buffer[2] = tp.z
+
+        res = self.res
+        ix = ti.max(1, ti.min(res - 2, int(tp.x * res)))
+        iy = ti.max(1, ti.min(res - 2, int(tp.y * res)))
+        iz = ti.max(1, ti.min(res - 2, int(tp.z * res)))
+
+        inv_2dx = float(res) * 0.5  # 1 / (2 * dx)
+
+        # ∇φ_stock (normalized)
+        gs_x = (self.sdf_stock[ix+1, iy, iz] - self.sdf_stock[ix-1, iy, iz]) * inv_2dx
+        gs_y = (self.sdf_stock[ix, iy+1, iz] - self.sdf_stock[ix, iy-1, iz]) * inv_2dx
+        gs_z = (self.sdf_stock[ix, iy, iz+1] - self.sdf_stock[ix, iy, iz-1]) * inv_2dx
+        gs = ti.Vector([gs_x, gs_y, gs_z])
+        gs_norm = gs.norm()
+        if gs_norm > 1e-8:
+            gs = gs / gs_norm
+        self.obs_buffer[3] = gs.x
+        self.obs_buffer[4] = gs.y
+        self.obs_buffer[5] = gs.z
+
+        # ∇(φ_target − φ_stock) — direction toward excess material
+        gd_x = ((self.sdf_target[ix+1, iy, iz] - self.sdf_stock[ix+1, iy, iz])
+               - (self.sdf_target[ix-1, iy, iz] - self.sdf_stock[ix-1, iy, iz])) * inv_2dx
+        gd_y = ((self.sdf_target[ix, iy+1, iz] - self.sdf_stock[ix, iy+1, iz])
+               - (self.sdf_target[ix, iy-1, iz] - self.sdf_stock[ix, iy-1, iz])) * inv_2dx
+        gd_z = ((self.sdf_target[ix, iy, iz+1] - self.sdf_stock[ix, iy, iz+1])
+               - (self.sdf_target[ix, iy, iz-1] - self.sdf_stock[ix, iy, iz-1])) * inv_2dx
+        self.obs_buffer[6] = gd_x
+        self.obs_buffer[7] = gd_y
+        self.obs_buffer[8] = gd_z
+
+        # ── Parallel: clipped SDF copy + excess accumulation ───────
+        for i, j, k in ti.ndrange(res, res, res):
+            idx = i * res * res + j * res + k
+            stock_val = self.sdf_stock[i, j, k]
+            target_val = self.sdf_target[i, j, k]
+
+            # Clipped SDF values → obs_buffer
+            self.obs_buffer[9 + idx] = ti.max(-1.0, ti.min(1.0, stock_val))
+            self.obs_buffer[9 + res * res * res + idx] = ti.max(-1.0, ti.min(1.0, target_val))
+
+            # Excess accumulation (free — already visiting every voxel)
+            excess_val = ti.max(ti.min(-stock_val, target_val), 0.0)
+            if excess_val > 0.0:
+                ti.atomic_add(self.excess_field[None], excess_val)
 
     # Initialization Kernels
     @ti.kernel
     def initialize_stock_primitive(self):
         """Initializes stock as a solid block (SDF < 0 inside)"""
+        hs = float(STOCK_HALF_SIZE)
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
-            # Simple box SDF: max(|x|-s, |y|-s, |z|-s)
-            # Centered at 0.5, size 0.8
             p = ti.Vector([i, j, k]) * self.dx
             center = ti.Vector([0.5, 0.5, 0.5])
-            d = ti.abs(p - center) - 0.4
+            d = ti.abs(p - center) - hs
             dist = ti.max(d.x, ti.max(d.y, d.z))
-
             self.sdf_stock[i, j, k] = dist
-            # In a real app, you would load self.sdf_target here from an STL
 
     @ti.kernel
     def initialize_target_primitive(self):
-        """Initializes target as a smaller sphere/box for visualization"""
+        """Initializes target as a sphere"""
+        radius = float(TARGET_RADIUS)
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
             p = ti.Vector([i, j, k]) * self.dx
             center = ti.Vector([0.5, 0.5, 0.5])
-            # Sphere target
-            d = (p - center).norm() - 0.25
+            d = (p - center).norm() - radius
             self.sdf_target[i, j, k] = d
 
     def initialize_tool_primitive(self):
         """Initializes the tool position, tool radius, and tool height"""
-        self.tool_pos[None] = ti.Vector([0.0, 0.5, 0.5])
-        self.tool_radius[None] = 0.1
-        self.tool_height[None] = 0.3
+        self.tool_pos[None] = ti.Vector([float(TOOL_START_POS[0]), float(TOOL_START_POS[1]), float(TOOL_START_POS[2])])
+        self.tool_radius[None] = float(TOOL_RADIUS)
+        self.tool_height[None] = float(TOOL_HEIGHT)
 
     # Methods to generate tool and holder sdfs
     @ti.func
