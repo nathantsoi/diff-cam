@@ -21,17 +21,16 @@ uv sync
 See [docs/design.md](docs/design.md) for design details.
 
 ## PPO Training
-
-TODO:
-
-- Create cam_env for the simulator (currently in `main.py`)
-- Register the cam_env with gymnasium
-- Load the env with pufferlib's vectorized loader inside of `ppo.py`
-- Train with:
-
+To run locally, run the command:
 ```bash
-./algorithms/ppo.py
+uv run ./algorithms/ppo.py
 ```
+
+To run on lonestar6, ensure that the diff-cam repo and the singularity exist in the $SCRATCH directory. To train, use the command from the diff-cam repo. Ensure that your allocation and training hyperparameters are correct - these are currently hard-coded. 
+```bash
+./train.bash
+```
+
 
 ## AMD GPU Support
 
