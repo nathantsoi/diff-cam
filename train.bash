@@ -5,7 +5,7 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -p gpu-a100-small
-#SBATCH -t 04:00:00
+#SBATCH -t 24:00:00
 #SBATCH -A IRI25030
 
 module load tacc-apptainer
