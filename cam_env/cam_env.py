@@ -137,20 +137,51 @@ class CamEnv(gym.Env):
             float: The calculated reward.
         """
         res = self.resolution
+        k = 10
+
         ix = int(np.clip(tool_pos[0] * res, 0, res - 1))
         iy = int(np.clip(tool_pos[1] * res, 0, res - 1))
         iz = int(np.clip(tool_pos[2] * res, 0, res - 1))
 
-        delta = sdf_stock_after - sdf_stock_before
-        weighted = delta * sdf_target
-        cutting = float(np.sum(weighted))
+        # --- 1. Cutting Reward ---
 
-        sdf_stock_at_tool = float(sdf_stock_after[ix, iy, iz])
-        proximity = -max(sdf_stock_at_tool, 0.0)
+        inside_stock_before = 1.0 / (1.0 + np.exp(k * sdf_stock_before))
+        inside_stock_after = 1.0 / (1.0 + np.exp(k * sdf_stock_after))
 
-        reward = 1.0 * cutting + 0.1 * proximity - 0.01
+        inside_target = 1.0 / (1.0 + np.exp(k * sdf_target))
+        outside_target = 1.0 / (1.0 + np.exp(-k * sdf_target))
+
+        material_removed = inside_stock_before - inside_stock_after 
+        good_cuts = float(np.sum(material_removed * outside_target))
+        bad_cuts = float(np.sum(material_removed * inside_target))
+
+        # --- 2. Boundary Proximity Bonus ---
+        target_at_tool = float(sdf_target[ix, iy, iz])
+        stock_at_tool = float(sdf_stock_after[ix, iy, iz])
+        
+        near_target_surface = np.exp(-8.0 * target_at_tool ** 2)
+        stock_presence = 1.0 / (1.0 + np.exp(k * (stock_at_tool - 0.05))) 
+    
+        # --- 3. Progress Reward ---
+        excess_before = float(np.sum(inside_stock_before * outside_target))
+        excess_after = float(np.sum(inside_stock_after * outside_target))
+        progress = excess_before - excess_after
+        
+        if self.initial_mismatch is not None and self.initial_mismatch > 0:
+            progress_reward = 1.0 * (progress / self.initial_mismatch) * res
+        else:
+            progress_reward = 0.0
 
         return reward
+
+        # --- 4. Idle Penalty ---
+        total_removed = float(np.sum(np.clip(material_removed, 0, None)))
+        idle_penalty = -0.05 + 0.04 * (1.0 / (1.0 + np.exp(-k * (total_removed - 0.5))))
+
+        # Reward calculation
+        reward = cut_reward + boundary_bonus + progress_reward + idle_penalty
+        return reward
+
 
 
     def reset(self, seed: Optional[int] = None):
