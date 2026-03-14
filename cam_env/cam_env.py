@@ -258,7 +258,7 @@ class CamEnv(gym.Env):
 
         truncated = self.current_step >= self.max_steps
         #terminated = holder_hit or tool_cut_target
-        terminated = tool_cut_target
+        terminated = False
         info = {"step": self.current_step, "action": [x, y, z], "vol": vol_removed, "tool_cut_target": tool_cut_target}
 
         return obs, reward, terminated, truncated, info
