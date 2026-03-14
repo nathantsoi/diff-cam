@@ -264,6 +264,8 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
+    num_checkpoints = 4
+    checkpoint_interval = max(1, args.num_iterations // num_checkpoints)
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -450,7 +452,7 @@ if __name__ == "__main__":
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
         
         # Saving checkpoint models
-        if iteration % 100 == 0:
+        if iteration % checkpoint_interval == 0:
             torch.save({
                 "agent": agent.state_dict(),
                 "args": vars(args),
@@ -468,6 +470,11 @@ if __name__ == "__main__":
         print(f"SPS {iteration}:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
+    # Final checkpoint after training is complete
+    torch.save({
+        "agent": agent.state_dict(),
+        "args": vars(args),
+    }, f"runs/{run_name}/checkpoint_final.pt")
 
     envs.close()
     writer.close()
