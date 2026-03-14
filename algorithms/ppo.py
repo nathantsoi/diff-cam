@@ -101,39 +101,162 @@ def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render
         )
     return thunk
 
+
+# class Agent(nn.Module):
+#     def __init__(self, envs):
+#         super().__init__()
+#         self.critic = nn.Sequential(
+#             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
+#             nn.Tanh(),
+#             layer_init(nn.Linear(256, 128)),
+#             nn.Tanh(),
+#             layer_init(nn.Linear(128, 1), std=1.0),
+#         )
+#         self.actor = nn.Sequential(
+#             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
+#             nn.Tanh(),
+#             layer_init(nn.Linear(256, 128)),
+#             nn.Tanh(),
+#             layer_init(nn.Linear(128, envs.single_action_space.n), std=0.01),
+#         )
+
+#     def get_value(self, x):
+#         return self.critic(x)
+
+#     def get_action_and_value(self, x, action=None):
+#         logits = self.actor(x)
+#         probs = Categorical(logits=logits)
+#         if action is None:
+#             action = probs.sample()
+#         return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+
+
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+def conv_init(layer, std=np.sqrt(2), bias_const=0.0):
+    """Same orthogonal init applied to conv layers for consistency."""
+    torch.nn.init.orthogonal_(layer.weight, std)
+    if layer.bias is not None:
+        torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+class Block(nn.Module):
+    """Convolutional block: Conv3d → BatchNorm3d → ReLU"""
+    def __init__(self, in_channels, out_channels, stride, kernel_size, padding):
+        super().__init__()
+        self.conv = conv_init(nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding))
+        self.batchnorm = nn.BatchNorm3d(out_channels)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.batchnorm(x)
+        x = self.activation(x)
+        return x
+
+class SDF3DEncoder(nn.Module):
+    """Encodes a 3D SDF observation into a feature vector."""
+    def __init__(self, resolution):
+        super().__init__()
+
+        # Define the convolutional layers based on the resolution
+        self.resolution = resolution
+        layers = []
+        current_resolution = resolution
+        in_channels = 2
+
+        # Add blocks until the resolution is reduced to 4x4x4 or smaller
+        while current_resolution > 4:
+            if in_channels == 2:
+                out_channels = 32
+            else:                
+                out_channels = min(in_channels * 2, 256)
+            
+            block = Block(in_channels, out_channels, stride=2, kernel_size=4, padding=1)
+            layers.append(block)
+
+            in_channels = out_channels
+            current_resolution = (current_resolution - 4 + 2 * 1) // 2 + 1
+
+        # Define encoder as a sequential of the blocks
+        self.encoder = nn.Sequential(*layers)
+
+        # Compute the feature dimension after the conv layers
+        with torch.no_grad():
+            dummy = torch.zeros(1, 2, resolution, resolution, resolution)
+            self.feature_dim = int(np.prod(self.encoder(dummy).shape[1:]))
+
+        # Define the fully connected layer to get the final feature vector
+        self.fc = nn.Sequential(
+            layer_init(nn.Linear(self.feature_dim, 512)),
+            nn.ReLU(),
+        )
+
+    def forward(self, x):
+        """x: (batch, 2, res, res, res) → (batch, 512)"""
+        x = self.encoder(x)
+        x = x.reshape(x.shape[0], -1)
+        return self.fc(x)
 
 class Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 128)),
-            nn.Tanh(),
-            layer_init(nn.Linear(128, 1), std=1.0),
-        )
-        self.actor = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-            nn.Tanh(),
-            layer_init(nn.Linear(256, 128)),
-            nn.Tanh(),
-            layer_init(nn.Linear(128, envs.single_action_space.n), std=0.01),
+
+        # Compute resolution and number of voxels from env observation space
+        obs_dim = int(np.prod(envs.single_observation_space.shape))
+        self.resolution = round((( obs_dim - 3) / 2) ** (1/3))
+        n_voxels = self.resolution ** 3
+        n_actions = envs.single_action_space.n
+
+        # Define encoder for the SDF observation
+        self.encoder = SDF3DEncoder(self.resolution)
+
+        # Define fusion layer to combine encoded stock and target features with tool position
+        self.fusion = nn.Sequential(
+            layer_init(nn.Linear(512 + 3, 256)),
+            nn.ReLU(),
         )
 
+        # Define separate heads for actor and critic
+        self.actor_head = layer_init(nn.Linear(256, n_actions), std=0.01)
+        self.critic_head = layer_init(nn.Linear(256, 1), std=1.0)
+
+    def _reshape_obs_for_encoding(self, flat_obs):
+        """Reshape flat observation into (batch, 2, res, res, res) for encoding."""
+        # Define batch size and number of voxels for reshaping
+        batch_size = flat_obs.shape[0]
+        n_voxels = self.resolution ** 3
+
+        # Break down the flat observation into tool position and SDFs, then reshape SDFs for encoding
+        tool_pos = flat_obs[:, :3]
+        stock_sdf = flat_obs[:, 3:3 + n_voxels].reshape(batch_size, 1, self.resolution, self.resolution, self.resolution)
+        target_sdf = flat_obs[:, 3 + n_voxels:3 + 2 * n_voxels].reshape(batch_size, 1, self.resolution, self.resolution, self.resolution)
+        
+        sdf_obs = torch.cat([stock_sdf, target_sdf], dim=1)  # (batch, 2, res, res, res)
+
+        return sdf_obs, tool_pos
+    
+    def _forward_features(self, x):
+        """Encode the SDF observation and fuse with tool position."""
+        sdf_obs, tool_pos = self._reshape_obs_for_encoding(x)
+        encoded_features = self.encoder(sdf_obs)
+        fused_features = self.fusion(torch.cat([encoded_features, tool_pos], dim=1))
+        return fused_features
+    
     def get_value(self, x):
-        return self.critic(x)
-
+        features = self._forward_features(x)
+        return self.critic_head(features)
+    
     def get_action_and_value(self, x, action=None):
-        logits = self.actor(x)
+        features = self._forward_features(x)
+        logits = self.actor_head(features)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+        return action, probs.log_prob(action), probs.entropy(), self.critic_head(features)
 
 
 if __name__ == "__main__":
