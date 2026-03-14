@@ -28,7 +28,7 @@ uv run ./algorithms/ppo.py
 
 To run on lonestar6, ensure that the diff-cam repo and the singularity exist in the $SCRATCH directory. To train, use the command from the diff-cam repo. Ensure that your allocation and training hyperparameters are correct - these are currently hard-coded. 
 ```bash
-./train.bash
+sbatch train.bash
 ```
 
 
