@@ -24,13 +24,18 @@ class PufferBatchedCamEnv(pufferlib.PufferEnv):
         self,
         num_envs: int,
         resolution: int = 8,
+        step_size: float = 0.05,
         max_steps: int = 1000,
+        total_timesteps: int = 1000000,
         buf=None,
         seed=None,
+        **kwargs
     ):
         self.num_envs = num_envs
         self.resolution = resolution
+        self.step_size = step_size
         self.max_steps = max_steps
+        self.total_timesteps = total_timesteps
 
         # Action space: 3x3x3 discrete movements
         self.single_action_space = spaces.Discrete(27)
@@ -51,7 +56,7 @@ class PufferBatchedCamEnv(pufferlib.PufferEnv):
         super().__init__(buf=buf)
 
         # --- Internal State ---
-        self.sim = BatchedCNCSimulator(num_envs=num_envs, resolution=resolution)
+        self.sim = BatchedCNCSimulator(num_envs=num_envs, resolution=resolution, step_size=step_size)
 
         # Global track of progress for shaping coefficients
         self.global_step = 0
