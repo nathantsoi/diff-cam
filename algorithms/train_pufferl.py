@@ -1,6 +1,18 @@
 import argparse
+import logging
 import os
+import sys
 from pathlib import Path
+
+# Setup standard logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger("train_pufferl")
 
 import torch
 import torch.nn as nn
@@ -36,13 +48,36 @@ def train(
     exp_name="diff-cam-batched",
     num_envs=4,
     resolution=8,
+    step_size=0.05,
     max_steps=1024,
     total_timesteps=1_000_000,
     learning_rate=2.5e-4,
     device="cuda",
 ):
+    save_dir = Path("experiments") / exp_name
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    # Add a file handler to log outputs to the experiment directory
+    fh = logging.FileHandler(save_dir / "training.log")
+    fh.setLevel(logging.INFO)
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s"))
+    logger.addHandler(fh)
+
+    logger.info(f"Starting training run: {exp_name}")
+    logger.info(f"Training parameters: num_envs={num_envs}, resolution={resolution}, "
+                f"step_size={step_size}, max_steps={max_steps}, "
+                f"total_timesteps={total_timesteps}, learning_rate={learning_rate}, device={device}")
+
     # Set up PufferLib vectorized environment
-    env_creator = lambda **kwargs: PufferBatchedCamEnv(num_envs=num_envs, resolution=resolution, max_steps=max_steps, **kwargs)
+    logger.info("Initializing PufferBatchedCamEnv...")
+    env_creator = lambda **kwargs: PufferBatchedCamEnv(
+        num_envs=num_envs,
+        resolution=resolution,
+        step_size=step_size,
+        max_steps=max_steps,
+        total_timesteps=total_timesteps,
+        **kwargs
+    )
     vec_env = pufferlib.vector.make(
         env_creator,
         num_envs=1, # The creator already returns an env with `num_envs` batched inside!
@@ -50,6 +85,7 @@ def train(
     )
 
     # Initialize the neural network agent
+    logger.info("Initializing neural network agent...")
     base_agent = Agent(vec_env).to(device)
     policy = PuffeRLWrapperPolicy(base_agent, resolution=resolution, max_steps=max_steps).to(device)
 
@@ -68,7 +104,7 @@ def train(
         "precision": "float32",
         "total_timesteps": total_timesteps,
         "learning_rate": learning_rate,
-        "gamma": 0.99,
+        "gamma": 1.0,
         "gae_lambda": 0.95,
         "update_epochs": 4,
         "clip_coef": 0.2,
@@ -95,20 +131,21 @@ def train(
         "use_rnn": False,
     }
 
-    print(f"\nStarting batched training with {num_envs} environments on a single GPU...\n")
+    logger.info(f"Starting batched training with {num_envs} environments on a single GPU (Device: {device})")
+    logger.info(f"PuffeRL Training Config: {train_cfg}")
 
     trainer = pufferl.PuffeRL(train_cfg, vec_env, policy)
 
-    save_dir = Path("experiments") / exp_name
-    save_dir.mkdir(parents=True, exist_ok=True)
-
+    logger.info("Starting training loop...")
     while trainer.epoch < trainer.total_epochs:
         trainer.evaluate()
         trainer.train()
         
         if trainer.epoch % 5 == 0:
+            logger.info(f"Epoch {trainer.epoch}/{trainer.total_epochs} completed.")
             trainer.print_dashboard()
             ckpt_path = save_dir / f"model_{trainer.epoch}.pt"
+            logger.info(f"Saving checkpoint to {ckpt_path}")
             torch.save({
                 "agent": base_agent.state_dict(),
                 "args": {
@@ -117,6 +154,7 @@ def train(
                 }
             }, ckpt_path)
 
+    logger.info("Training complete.")
     trainer.print_dashboard()
     trainer.close()
 
@@ -124,15 +162,18 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--num-envs", type=int, default=64)
     parser.add_argument("--resolution", type=int, default=8)
+    parser.add_argument("--step-size", type=float, default=0.05)
     parser.add_argument("--max-steps", type=int, default=1024)
     parser.add_argument("--total-timesteps", type=int, default=1_000_000)
     parser.add_argument("--learning-rate", type=float, default=2.5e-4)
     parser.add_argument("--device", type=str, default="cuda")
 
     args = parser.parse_args()
+    logger.info(f"Parsed CLI arguments: {args}")
     
     train(num_envs=args.num_envs, 
     resolution=args.resolution, 
+    step_size=args.step_size,
     max_steps=args.max_steps, 
     total_timesteps=args.total_timesteps, 
     learning_rate=args.learning_rate, 

@@ -11,7 +11,7 @@ from cam_env.physics_config import (
 class BatchedCNCSimulator:
     _ti_initialized = False
 
-    def __init__(self, num_envs: int, resolution: int = 8, debug: bool = False):
+    def __init__(self, num_envs: int, resolution: int = 8, step_size: float = 0.05, debug: bool = False):
         if not BatchedCNCSimulator._ti_initialized:
             if ti._lib.core.with_cuda():
                 ti.init(arch=ti.gpu, debug=debug)
@@ -22,6 +22,7 @@ class BatchedCNCSimulator:
         self.num_envs = num_envs
         self.res = resolution
         self.dx = 1.0 / self.res
+        self.step_size = step_size
 
         # --- Vectorized Fields ---
         # The target geometry is identical across all environments, so it is just 3D.
@@ -121,6 +122,32 @@ class BatchedCNCSimulator:
         c1 = c01*(1-ty) + c11*ty
         return c0*(1-tz) + c1*tz
 
+    @ti.func
+    def _sample_stock_sdf(self, env_id: ti.i32, p: ti.template()) -> ti.f32:
+        """Trilinear interpolation of the stock SDF at an arbitrary point."""
+        res = self.res
+        gx = p.x * res - 0.5
+        gy = p.y * res - 0.5
+        gz = p.z * res - 0.5
+
+        x0 = int(ti.floor(gx));  x1 = x0 + 1
+        y0 = int(ti.floor(gy));  y1 = y0 + 1
+        z0 = int(ti.floor(gz));  z1 = z0 + 1
+
+        tx = gx - x0;  ty = gy - y0;  tz = gz - z0
+
+        x0 = ti.max(0, ti.min(res - 1, x0));  x1 = ti.max(0, ti.min(res - 1, x1))
+        y0 = ti.max(0, ti.min(res - 1, y0));  y1 = ti.max(0, ti.min(res - 1, y1))
+        z0 = ti.max(0, ti.min(res - 1, z0));  z1 = ti.max(0, ti.min(res - 1, z1))
+
+        c00 = self.sdf_stock[env_id,x0,y0,z0]*(1-tx) + self.sdf_stock[env_id,x1,y0,z0]*tx
+        c10 = self.sdf_stock[env_id,x0,y1,z0]*(1-tx) + self.sdf_stock[env_id,x1,y1,z0]*tx
+        c01 = self.sdf_stock[env_id,x0,y0,z1]*(1-tx) + self.sdf_stock[env_id,x1,y0,z1]*tx
+        c11 = self.sdf_stock[env_id,x0,y1,z1]*(1-tx) + self.sdf_stock[env_id,x1,y1,z1]*tx
+        c0 = c00*(1-ty) + c10*ty
+        c1 = c01*(1-ty) + c11*ty
+        return c0*(1-tz) + c1*tz
+
     @ti.kernel
     def reset_envs(self, reset_mask: ti.types.ndarray(dtype=ti.i32, ndim=1)):
         """Resets specific environments to initial states."""
@@ -173,15 +200,14 @@ class BatchedCNCSimulator:
         """
         tr = self.tool_radius[None]
         th = self.tool_height[None]
-        limit = 1.0 - self.dx
-        res = self.res
+        limit = 1.0
 
         for env_id in range(self.num_envs):
             # 1. Tentatively move tool
             old_pos = self.tool_pos[env_id]
-            dx_m = float(actions[env_id, 0]) * self.dx
-            dy_m = float(actions[env_id, 1]) * self.dx
-            dz_m = float(actions[env_id, 2]) * self.dx
+            dx_m = float(actions[env_id, 0]) * self.step_size
+            dy_m = float(actions[env_id, 1]) * self.step_size
+            dz_m = float(actions[env_id, 2]) * self.step_size
 
             new_pos = ti.Vector([
                 ti.max(0.0, ti.min(limit, old_pos.x + dx_m)),
@@ -190,31 +216,32 @@ class BatchedCNCSimulator:
             ])
             self.tool_pos[env_id] = new_pos
 
-            # 2. Pre-simulate the cut on the grid and check for target damage
-            ix = ti.max(0, ti.min(res - 1, int(new_pos.x * res)))
-            iy = ti.max(0, ti.min(res - 1, int(new_pos.y * res)))
-            iz = ti.max(0, ti.min(res - 1, int(new_pos.z * res)))
+            # 2. Pre-simulate the cut using fine sub-grid sampling for target damage
+            step = ti.min(self.step_size * 0.5, 0.025)
+            margin = 0.02
+            
+            origin_x = new_pos.x - tr - margin
+            origin_y = new_pos.y - tr - margin
+            origin_z = new_pos.z - margin
 
-            rx = int(ti.ceil(tr / self.dx))
-            rz = int(ti.ceil(th / self.dx))
-            margin = 2
+            nx = int(ti.ceil((2.0 * tr + 2.0 * margin) / step)) + 1
+            ny = int(ti.ceil((2.0 * tr + 2.0 * margin) / step)) + 1
+            nz = int(ti.ceil((th + 2.0 * margin) / step)) + 1
 
             intersects = 0
-            for i in range(ix - rx - margin, ix + rx + margin + 1):
-                for j in range(iy - rx - margin, iy + rx + margin + 1):
-                    for k in range(iz - rz - margin, iz + rz + margin + 1 + rz):
-                        if 0 <= i < res and 0 <= j < res and 0 <= k < res:
-                            target_dist = self.sdf_target[i, j, k]
-                            if target_dist < 0.0:
-                                voxel_pos = ti.Vector([
-                                    (i + 0.5) * self.dx,
-                                    (j + 0.5) * self.dx,
-                                    (k + 0.5) * self.dx])
-                                tool_dist = self._tool_sdf(voxel_pos, new_pos, th, tr)
-                                stock_dist = self.sdf_stock[env_id, i, j, k]
-                                would_be = ti.max(stock_dist, -tool_dist)
-                                if would_be > target_dist:
-                                    intersects = 1
+            for ix in range(nx):
+                for iy in range(ny):
+                    for iz in range(nz):
+                        p = ti.Vector([origin_x + ix*step, origin_y + iy*step, origin_z + iz*step])
+                        if 0 <= p.x <= 1.0 and 0 <= p.y <= 1.0 and 0 <= p.z <= 1.0:
+                            tool_dist = self._tool_sdf(p, new_pos, th, tr)
+                            if tool_dist <= 0.0:  # point is inside the tool
+                                target_dist = self._sample_target_sdf(p)
+                                if target_dist < 0.0:
+                                    stock_dist = self._sample_stock_sdf(env_id, p)
+                                    would_be = ti.max(stock_dist, -tool_dist)
+                                    if would_be > target_dist:
+                                        intersects = 1
 
             if intersects == 1:
                 self.move_blocked[env_id] = 1
@@ -265,7 +292,6 @@ class BatchedCNCSimulator:
     def _batched_build_obs(self):
         """Computes gradients, SDF grids, and total excess volume across all environments."""
         res = self.res
-        inv_2dx = float(res) * 0.5
 
         # 1. Setup per-environment tool position and gradients (Serial over grid, parallel over envs)
         for env_id in range(self.num_envs):
@@ -274,14 +300,15 @@ class BatchedCNCSimulator:
             self.obs_buffer[env_id, 1] = tp.y
             self.obs_buffer[env_id, 2] = tp.z
 
-            ix = ti.max(1, ti.min(res - 2, int(tp.x * res)))
-            iy = ti.max(1, ti.min(res - 2, int(tp.y * res)))
-            iz = ti.max(1, ti.min(res - 2, int(tp.z * res)))
+            eps = 1e-3
+            dx_vec = ti.Vector([eps, 0.0, 0.0])
+            dy_vec = ti.Vector([0.0, eps, 0.0])
+            dz_vec = ti.Vector([0.0, 0.0, eps])
 
             # ∇φ_stock
-            gs_x = (self.sdf_stock[env_id, ix+1, iy, iz] - self.sdf_stock[env_id, ix-1, iy, iz]) * inv_2dx
-            gs_y = (self.sdf_stock[env_id, ix, iy+1, iz] - self.sdf_stock[env_id, ix, iy-1, iz]) * inv_2dx
-            gs_z = (self.sdf_stock[env_id, ix, iy, iz+1] - self.sdf_stock[env_id, ix, iy, iz-1]) * inv_2dx
+            gs_x = (self._sample_stock_sdf(env_id, tp + dx_vec) - self._sample_stock_sdf(env_id, tp - dx_vec)) / (2.0 * eps)
+            gs_y = (self._sample_stock_sdf(env_id, tp + dy_vec) - self._sample_stock_sdf(env_id, tp - dy_vec)) / (2.0 * eps)
+            gs_z = (self._sample_stock_sdf(env_id, tp + dz_vec) - self._sample_stock_sdf(env_id, tp - dz_vec)) / (2.0 * eps)
             gs = ti.Vector([gs_x, gs_y, gs_z])
             gs_norm = gs.norm()
             if gs_norm > 1e-8:
@@ -291,12 +318,12 @@ class BatchedCNCSimulator:
             self.obs_buffer[env_id, 5] = gs.z
 
             # ∇(φ_target − φ_stock)
-            gd_x = ((self.sdf_target[ix+1, iy, iz] - self.sdf_stock[env_id, ix+1, iy, iz])
-                   - (self.sdf_target[ix-1, iy, iz] - self.sdf_stock[env_id, ix-1, iy, iz])) * inv_2dx
-            gd_y = ((self.sdf_target[ix, iy+1, iz] - self.sdf_stock[env_id, ix, iy+1, iz])
-                   - (self.sdf_target[ix, iy-1, iz] - self.sdf_stock[env_id, ix, iy-1, iz])) * inv_2dx
-            gd_z = ((self.sdf_target[ix, iy, iz+1] - self.sdf_stock[env_id, ix, iy, iz+1])
-                   - (self.sdf_target[ix, iy, iz-1] - self.sdf_stock[env_id, ix, iy, iz-1])) * inv_2dx
+            gd_x = ((self._sample_target_sdf(tp + dx_vec) - self._sample_stock_sdf(env_id, tp + dx_vec))
+                   - (self._sample_target_sdf(tp - dx_vec) - self._sample_stock_sdf(env_id, tp - dx_vec))) / (2.0 * eps)
+            gd_y = ((self._sample_target_sdf(tp + dy_vec) - self._sample_stock_sdf(env_id, tp + dy_vec))
+                   - (self._sample_target_sdf(tp - dy_vec) - self._sample_stock_sdf(env_id, tp - dy_vec))) / (2.0 * eps)
+            gd_z = ((self._sample_target_sdf(tp + dz_vec) - self._sample_stock_sdf(env_id, tp + dz_vec))
+                   - (self._sample_target_sdf(tp - dz_vec) - self._sample_stock_sdf(env_id, tp - dz_vec))) / (2.0 * eps)
             self.obs_buffer[env_id, 6] = gd_x
             self.obs_buffer[env_id, 7] = gd_y
             self.obs_buffer[env_id, 8] = gd_z
