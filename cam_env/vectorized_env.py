@@ -9,6 +9,7 @@ from simulator.batched_simulator import BatchedCNCSimulator
 from cam_env.physics_config import (
     TIME_PENALTY, COMPLETION_BONUS, COMPLETION_THRESHOLD,
     PROXIMITY_COEF_INITIAL, PROXIMITY_ANNEAL_STEPS, PROXIMITY_CLIP,
+    BLOCKED_PENALTY,
 )
 
 
@@ -162,6 +163,9 @@ class PufferBatchedCamEnv(pufferlib.PufferEnv):
             prox_bonus = np.clip(prox_bonus, -PROXIMITY_CLIP, PROXIMITY_CLIP)
 
             reward = progress + TIME_PENALTY + completion_bonus + prox_bonus
+            
+            if move_blocked[env_id]:
+                reward += BLOCKED_PENALTY
             
             truncated = self._step_counts[env_id] >= self.max_steps
             terminated = completed
