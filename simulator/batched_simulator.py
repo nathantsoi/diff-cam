@@ -216,32 +216,32 @@ class BatchedCNCSimulator:
             ])
             self.tool_pos[env_id] = new_pos
 
-            # 2. Pre-simulate the cut using fine sub-grid sampling for target damage
-            step = ti.min(self.step_size * 0.5, 0.025)
-            margin = 0.02
-            
-            origin_x = new_pos.x - tr - margin
-            origin_y = new_pos.y - tr - margin
-            origin_z = new_pos.z - margin
+            # 2. Pre-simulate the cut on the grid and check for target damage
+            res = self.res
+            ix = ti.max(0, ti.min(res - 1, int(new_pos.x * res)))
+            iy = ti.max(0, ti.min(res - 1, int(new_pos.y * res)))
+            iz = ti.max(0, ti.min(res - 1, int(new_pos.z * res)))
 
-            nx = int(ti.ceil((2.0 * tr + 2.0 * margin) / step)) + 1
-            ny = int(ti.ceil((2.0 * tr + 2.0 * margin) / step)) + 1
-            nz = int(ti.ceil((th + 2.0 * margin) / step)) + 1
+            rx = int(ti.ceil(tr / self.dx))
+            rz = int(ti.ceil(th / self.dx))
+            margin = 2
 
             intersects = 0
-            for ix in range(nx):
-                for iy in range(ny):
-                    for iz in range(nz):
-                        p = ti.Vector([origin_x + ix*step, origin_y + iy*step, origin_z + iz*step])
-                        if 0 <= p.x <= 1.0 and 0 <= p.y <= 1.0 and 0 <= p.z <= 1.0:
-                            tool_dist = self._tool_sdf(p, new_pos, th, tr)
-                            if tool_dist <= 0.0:  # point is inside the tool
-                                target_dist = self._sample_target_sdf(p)
-                                if target_dist < 0.0:
-                                    stock_dist = self._sample_stock_sdf(env_id, p)
-                                    would_be = ti.max(stock_dist, -tool_dist)
-                                    if would_be > target_dist:
-                                        intersects = 1
+            for i in range(ix - rx - margin, ix + rx + margin + 1):
+                for j in range(iy - rx - margin, iy + rx + margin + 1):
+                    for k in range(iz - rz - margin, iz + rz + margin + 1 + rz):
+                        if 0 <= i < res and 0 <= j < res and 0 <= k < res:
+                            target_dist = self.sdf_target[i, j, k]
+                            if target_dist < 0.0:
+                                voxel_pos = ti.Vector([
+                                    (i + 0.5) * self.dx,
+                                    (j + 0.5) * self.dx,
+                                    (k + 0.5) * self.dx])
+                                tool_dist = self._tool_sdf(voxel_pos, new_pos, th, tr)
+                                stock_dist = self.sdf_stock[env_id, i, j, k]
+                                would_be = ti.max(stock_dist, -tool_dist)
+                                if would_be > stock_dist:
+                                    intersects = 1
 
             if intersects == 1:
                 self.move_blocked[env_id] = 1
