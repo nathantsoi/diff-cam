@@ -161,7 +161,10 @@ class CamEnv(gym.Env):
         
         near_target_surface = np.exp(-8.0 * target_at_tool ** 2)
         stock_presence = 1.0 / (1.0 + np.exp(k * (stock_at_tool - 0.05))) 
-        boundary_bonus = near_target_surface * stock_presence
+        
+        material_was_cut = float(np.sum(np.clip(material_removed, 0, None)))
+        cutting_mask = 1.0 / (1.0 + np.exp(-k * (material_was_cut - 0.1)))
+        boundary_bonus = 0.3 * near_target_surface * stock_presence * cutting_mask
     
         # --- 3. Global Progress Reward ---
         excess_before = float(np.sum(inside_stock_before * outside_target))
@@ -170,10 +173,10 @@ class CamEnv(gym.Env):
 
         # --- 4. Idle Penalty ---
         total_removed = float(np.sum(np.clip(material_removed, 0, None)))
-        idle_penalty = -0.05 + 0.04 * (1.0 / (1.0 + np.exp(-k * (total_removed - 0.5))))
+        idle_penalty = -0.2 + 0.18 * (1.0 / (1.0 + np.exp(-k * (total_removed - 0.1))))
 
         # Reward calculation
-        reward = 2.0 * good_cuts - 10.0 * bad_cuts + 0.5 * boundary_bonus + progress_reward + idle_penalty
+        reward = 5.0 * good_cuts - 10.0 * bad_cuts + 0.5 * boundary_bonus + progress_reward + idle_penalty
         return reward
 
 
