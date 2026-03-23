@@ -8,13 +8,13 @@ import time
 from simulator.simulator import CNCSimulator
 from cam_env.physics_config import (
     TIME_PENALTY, COMPLETION_BONUS, COMPLETION_THRESHOLD,
-    PROXIMITY_COEF_INITIAL, PROXIMITY_ANNEAL_STEPS, PROXIMITY_CLIP,
+    PROXIMITY_COEF_INITIAL, PROXIMITY_ANNEAL_FRACTION, PROXIMITY_CLIP,
 )
 
 class CamEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
-    def __init__(self, resolution=128, max_steps=100, render_mode: Optional[str] = None, debug: bool = False):
+    def __init__(self, resolution=128, max_steps=100, render_mode: Optional[str] = None, debug: bool = False, total_timesteps: int = 1_000_000):
         """ Initializes the CAM environment.
 
         Args:
@@ -37,7 +37,7 @@ class CamEnv(gym.Env):
 
         # Proximity shaping annealing: linearly decay from initial to 0
         self.proximity_coef_initial = PROXIMITY_COEF_INITIAL
-        self.proximity_anneal_steps = PROXIMITY_ANNEAL_STEPS
+        self.proximity_anneal_steps = int(total_timesteps * PROXIMITY_ANNEAL_FRACTION)
 
         # --- Cached excess for reward progress (set in reset/step) ---
         self._prev_excess = 0.0

@@ -8,7 +8,7 @@ import pufferlib
 from simulator.batched_simulator import BatchedCNCSimulator
 from cam_env.physics_config import (
     TIME_PENALTY, COMPLETION_BONUS, COMPLETION_THRESHOLD,
-    PROXIMITY_COEF_INITIAL, PROXIMITY_ANNEAL_STEPS, PROXIMITY_CLIP,
+    PROXIMITY_COEF_INITIAL, PROXIMITY_ANNEAL_FRACTION, PROXIMITY_CLIP,
     BLOCKED_PENALTY,
 )
 
@@ -61,6 +61,8 @@ class PufferBatchedCamEnv(pufferlib.PufferEnv):
 
         # Global track of progress for shaping coefficients
         self.global_step = 0
+        # Anneal proximity over the first PROXIMITY_ANNEAL_FRACTION of training
+        self.proximity_anneal_steps = int(total_timesteps * PROXIMITY_ANNEAL_FRACTION)
 
         # Python-side state per environment
         self._step_counts = np.zeros(num_envs, dtype=np.int32)
@@ -135,7 +137,7 @@ class PufferBatchedCamEnv(pufferlib.PufferEnv):
         target_violations = self.sim.target_violation.to_numpy()
 
         # Anneal proximity coefficient linearly to zero
-        anneal_frac = max(0.0, 1.0 - self.global_step / PROXIMITY_ANNEAL_STEPS)
+        anneal_frac = max(0.0, 1.0 - self.global_step / self.proximity_anneal_steps)
         proximity_coef = PROXIMITY_COEF_INITIAL * anneal_frac
         self.global_step += self.num_envs
         
@@ -193,7 +195,7 @@ class PufferBatchedCamEnv(pufferlib.PufferEnv):
                 "reward_completion_bonus": float(completion_bonus),
                 "reward_prox_bonus": float(prox_bonus),
                 "reward_blocked_penalty": float(BLOCKED_PENALTY if move_blocked[env_id] else 0.0),
-                "reward_total": float(reward),
+                 "reward_total": float(reward),
             })
             
             # Auto-reset logic
