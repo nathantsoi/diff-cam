@@ -240,12 +240,13 @@ class BatchedCNCSimulator:
                                 tool_dist = self._tool_sdf(voxel_pos, new_pos, th, tr)
                                 stock_dist = self.sdf_stock[env_id, i, j, k]
                                 would_be = ti.max(stock_dist, -tool_dist)
-                                if would_be > stock_dist:
+                                # Block if cut pushes stock boundary past the target
+                                if would_be > target_dist + 1e-5:
                                     intersects = 1
 
             if intersects == 1:
                 self.move_blocked[env_id] = 1
-                self.tool_pos[env_id] = old_pos
+                self.tool_pos[env_id] =  old_pos
                 
     @ti.kernel
     def _batched_apply_cut(self):
@@ -283,7 +284,6 @@ class BatchedCNCSimulator:
                                     self.sdf_stock[env_id, i, j, k] = new_dist
 
                                     # Diagnostic: detect if cut damaged the target
-                                    # Should be zero if collision check works correctly.
                                     target_dist = self.sdf_target[i, j, k]
                                     if target_dist < 0.0 and new_dist > target_dist:
                                         ti.atomic_add(self.target_violation[env_id], new_dist - target_dist)
