@@ -41,6 +41,9 @@ class CamEnv(gym.Env):
 
         # --- Cached excess for reward progress (set in reset/step) ---
         self._prev_excess = 0.0
+        self.last_grad_diff = np.zeros(3, dtype=np.float32)
+        self.last_move_dir = np.zeros(3, dtype=np.float32)
+        self.last_info = {}
 
         self.action_dims = [3, 3, 3]
         self.action_space = spaces.Discrete(np.prod(self.action_dims))
@@ -127,10 +130,42 @@ class CamEnv(gym.Env):
         self.axes_colors[4] = [0, 0, 1]
         self.axes_colors[5] = [0, 0, 1]
 
+        # Reward vectors
+        self.grad_points = ti.Vector.field(3, dtype=ti.f32, shape=2)
+        self.grad_colors = ti.Vector.field(3, dtype=ti.f32, shape=2)
+        self.move_points = ti.Vector.field(3, dtype=ti.f32, shape=2)
+        self.move_colors = ti.Vector.field(3, dtype=ti.f32, shape=2)
+
         # Camera state
         self.cam_center = ti.Vector([0.5, 0.5, 0.5])
         self.last_mouse_pos = self.window.get_cursor_pos()
 
+
+    def _project_to_screen(self, point_3d, cam_pos, cam_dir, cam_up):
+        """Project a 3D world point to 2D pixel coords matching the raymarch camera."""
+        cam_right = np.cross(cam_dir, cam_up)
+        cam_right = cam_right / np.linalg.norm(cam_right)
+        cam_up_actual = np.cross(cam_right, cam_dir)
+        cam_up_actual = cam_up_actual / np.linalg.norm(cam_up_actual)
+
+        fov_scale = np.tan(np.pi / 4.0)
+        width, height = 1024, 768
+        aspect_ratio = width / height
+
+        d = point_3d - cam_pos
+        z = np.dot(d, cam_dir)
+        if z <= 0:
+            return None  # Behind camera
+
+        x = np.dot(d, cam_right)
+        y = np.dot(d, cam_up_actual)
+
+        u = x / (z * aspect_ratio * fov_scale)
+        v = y / (z * fov_scale)
+
+        px = int((u + 1.0) * 0.5 * width)
+        py = int((v + 1.0) * 0.5 * height)
+        return (px, py)
 
     @staticmethod
     def _normalize(v: np.ndarray) -> np.ndarray:
@@ -261,6 +296,9 @@ class CamEnv(gym.Env):
         move_norm = np.linalg.norm(move_dir)
         if move_norm > 1e-8:
             move_dir = move_dir / move_norm
+            
+        self.last_grad_diff = grad_diff
+        self.last_move_dir = move_dir
 
         # Anneal proximity coefficient linearly to zero
         anneal_frac = max(0.0, 1.0 - self.global_step / self.proximity_anneal_steps)
@@ -270,6 +308,9 @@ class CamEnv(gym.Env):
         # Completion: no excess material remains
         completion_threshold = COMPLETION_THRESHOLD
         completed = excess_after < completion_threshold
+
+        progress = excess_before - excess_after
+        completion_bonus = COMPLETION_BONUS if completed else 0.0
 
         reward = self._calculate_reward(
             excess_before, excess_after, completed, proximity_bonus
@@ -285,7 +326,13 @@ class CamEnv(gym.Env):
             "completed": completed,
             "move_blocked": move_blocked,
             "proximity_coef": proximity_coef,
+            "reward_progress": float(progress),
+            "reward_time_penalty": float(TIME_PENALTY),
+            "reward_completion_bonus": float(completion_bonus),
+            "reward_prox_bonus": float(proximity_bonus),
+            "reward_total": float(reward),
         }
+        self.last_info = info
 
         return obs, reward, terminated, truncated, info
 
@@ -402,11 +449,39 @@ class CamEnv(gym.Env):
             cam_dir_vec = ti.Vector([-cam_x, -cam_y, -cam_z]).normalized()
             cam_up_vec = ti.Vector([0.0, 0.0, 1.0])
             self.simulator.render_raymarch(cam_pos_vec, cam_up_vec, cam_dir_vec, int(self.show_stock), int(self.show_part), int(self.show_tool))
+
+            # Draw reward vectors on the raymarch buffer
+            cam_pos_np = np.array([self.cam_center.x + cam_x, self.cam_center.y + cam_y, self.cam_center.z + cam_z])
+            cam_dir_np = np.array([-cam_x, -cam_y, -cam_z])
+            cam_dir_np = cam_dir_np / np.linalg.norm(cam_dir_np)
+            cam_up_np = np.array([0.0, 0.0, 1.0])
+
+            tp = self.simulator.tool_pos[None]
+            tool_pos_np = np.array([float(tp[0]), float(tp[1]), float(tp[2])])
+            grad_end = tool_pos_np + self.last_grad_diff * 0.15
+            move_end = tool_pos_np + self.last_move_dir * 0.15
+
+            for p0, p1, color in [
+                (tool_pos_np, grad_end, (1.0, 1.0, 0.0)),  # gradient = yellow
+                (tool_pos_np, move_end, (0.0, 1.0, 1.0)),  # movement = cyan
+            ]:
+                px0 = self._project_to_screen(p0, cam_pos_np, cam_dir_np, cam_up_np)
+                px1 = self._project_to_screen(p1, cam_pos_np, cam_dir_np, cam_up_np)
+                if px0 is not None and px1 is not None:
+                    self.simulator.draw_line_2d(px0[0], px0[1], px1[0], px1[1],
+                                               color[0], color[1], color[2], 3)
+
             self.canvas.set_image(self.simulator.raymarch_buffer)
             
-            with self.gui.sub_window("Raymarch Info", x=0.5, y=0.05, width=0.45, height=0.2):
+            with self.gui.sub_window("Raymarch Info", x=0.5, y=0.05, width=0.45, height=0.3):
                 self.gui.text("Raymarching View")
-                self.gui.text("High-quality SDF rendering")
+                self.gui.text("Yellow = Gradient Dir | Cyan = Move Dir")
+                self.gui.text(f"Total: {self.last_info.get('reward_total', 0.0):.4f}")
+                self.gui.text(f"Progress: {self.last_info.get('reward_progress', 0.0):.4f}")
+                self.gui.text(f"Prox Bonus: {self.last_info.get('reward_prox_bonus', 0.0):.4f}")
+                self.gui.text(f"Time Penalty: {self.last_info.get('reward_time_penalty', 0.0):.4f}")
+                self.gui.text(f"Completion: {self.last_info.get('reward_completion_bonus', 0.0):.4f}")
+                self.gui.text(f"Coef: {self.last_info.get('proximity_coef', 0.0):.4f}")
 
         elif self.show_debug:
             # 2D slice debug view
@@ -454,6 +529,23 @@ class CamEnv(gym.Env):
                     color=(1.0, 0.2, 0.2),
                     index_count=self.simulator.tool_count[None]
                 )
+                
+                # Draw Vectors
+                tool_pos_py = self.simulator.tool_pos[None]
+                # Gradient Vector (Yellow)
+                self.grad_points[0] = tool_pos_py
+                self.grad_points[1] = tool_pos_py + ti.Vector(self.last_grad_diff.tolist()) * 0.15
+                self.grad_colors[0] = [1, 1, 0]
+                self.grad_colors[1] = [1, 1, 0]
+                
+                # Movement Vector (Cyan)
+                self.move_points[0] = tool_pos_py
+                self.move_points[1] = tool_pos_py + ti.Vector(self.last_move_dir.tolist()) * 0.15
+                self.move_colors[0] = [0, 1, 1]
+                self.move_colors[1] = [0, 1, 1]
+                
+                self.scene.lines(self.grad_points, width=4.0, per_vertex_color=self.grad_colors)
+                self.scene.lines(self.move_points, width=4.0, per_vertex_color=self.move_colors)
 
             # Draw Holder
             if self.show_holder:
@@ -474,6 +566,14 @@ class CamEnv(gym.Env):
             if not self.show_help:
                 with self.gui.sub_window("Help", x=0.05, y=0.05, width=0.2, height=0.1):
                     self.gui.text("Press 'h' for controls")
+                    
+                with self.gui.sub_window("Rewards", x=0.05, y=0.15, width=0.3, height=0.25):
+                    self.gui.text(f"Total: {self.last_info.get('reward_total', 0.0):.4f}")
+                    self.gui.text(f"Progress: {self.last_info.get('reward_progress', 0.0):.4f}")
+                    self.gui.text(f"Prox Bonus: {self.last_info.get('reward_prox_bonus', 0.0):.4f}")
+                    self.gui.text(f"Time Penalty: {self.last_info.get('reward_time_penalty', 0.0):.4f}")
+                    self.gui.text(f"Completion: {self.last_info.get('reward_completion_bonus', 0.0):.4f}")
+                    self.gui.text(f"Coef: {self.last_info.get('proximity_coef', 0.0):.4f}")
 
         self.window.show()
 

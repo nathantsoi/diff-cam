@@ -735,6 +735,36 @@ class CNCSimulator:
                     
             self.raymarch_buffer[i, j] = color
 
+    @ti.kernel
+    def draw_line_2d(self, x0: ti.i32, y0: ti.i32, x1: ti.i32, y1: ti.i32,
+                     r: ti.f32, g: ti.f32, b: ti.f32, thickness: ti.i32):
+        """Draw a thick colored line on the raymarch_buffer between two 2D pixel coords."""
+        color = ti.Vector([r, g, b])
+        width = self.raymarch_buffer.shape[0]
+        height = self.raymarch_buffer.shape[1]
+
+        min_x = ti.max(0, ti.min(x0, x1) - thickness)
+        max_x = ti.min(width - 1, ti.max(x0, x1) + thickness)
+        min_y = ti.max(0, ti.min(y0, y1) - thickness)
+        max_y = ti.min(height - 1, ti.max(y0, y1) + thickness)
+
+        dx = float(x1 - x0)
+        dy = float(y1 - y0)
+        length_sq = dx * dx + dy * dy
+
+        for i, j in ti.ndrange((min_x, max_x + 1), (min_y, max_y + 1)):
+            dist = 1e6
+            if length_sq < 1e-6:
+                dist = ti.sqrt(float((i - x0) * (i - x0) + (j - y0) * (j - y0)))
+            else:
+                t = ((i - x0) * dx + (j - y0) * dy) / length_sq
+                t = ti.max(0.0, ti.min(1.0, t))
+                px = float(x0) + t * dx
+                py = float(y0) + t * dy
+                dist = ti.sqrt((float(i) - px) * (float(i) - px) + (float(j) - py) * (float(j) - py))
+            if dist < float(thickness):
+                self.raymarch_buffer[i, j] = color
+
 
 def main():
     sim = CNCSimulator(resolution=128)

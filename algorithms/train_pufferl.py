@@ -3,6 +3,15 @@ import logging
 import os
 import sys
 from pathlib import Path
+import torch
+import torch.nn as nn
+
+import pufferlib
+import pufferlib.vector
+from pufferlib import pufferl
+
+from cam_env.vectorized_env import PufferBatchedCamEnv
+from algorithms.ppo import Agent
 
 # Setup standard logging
 logging.basicConfig(
@@ -14,16 +23,51 @@ logging.basicConfig(
 )
 logger = logging.getLogger("train_pufferl")
 
-import torch
-import torch.nn as nn
 
-import pufferlib
-import pufferlib.vector
-from pufferlib import pufferl
 
-from cam_env.vectorized_env import PufferBatchedCamEnv
-from algorithms.ppo import Agent
 
+def _format_training_info(trainer):
+    """Best-effort extraction of trainer metrics for logging."""
+    candidate_attrs = [
+        "stats",
+        "dashboard",
+        "metrics",
+        "train_stats",
+        "eval_stats",
+        "performance",
+    ]
+
+    def _as_float(value):
+        if isinstance(value, torch.Tensor):
+            if value.numel() == 1:
+                return float(value.detach().cpu().item())
+            return None
+        if isinstance(value, (int, float)):
+            return float(value)
+        return None
+
+    def _collect(prefix, obj, out):
+        if not isinstance(obj, dict):
+            return
+        for key, value in obj.items():
+            flat_key = f"{prefix}.{key}" if prefix else str(key)
+            if isinstance(value, dict):
+                _collect(flat_key, value, out)
+                continue
+            parsed = _as_float(value)
+            if parsed is not None:
+                out[flat_key] = parsed
+
+    metrics = {}
+    for attr in candidate_attrs:
+        obj = getattr(trainer, attr, None)
+        _collect(attr, obj, metrics)
+
+    if not metrics:
+        return "no trainer metrics available"
+
+    ordered = sorted(metrics.items())
+    return ", ".join(f"{k}={v:.6g}" for k, v in ordered)
 
 class PuffeRLWrapperPolicy(nn.Module):
     """Wraps the existing PPO Agent to comply with PuffeRL's interface."""
@@ -104,7 +148,7 @@ def train(
         "precision": "float32",
         "total_timesteps": total_timesteps,
         "learning_rate": learning_rate,
-        "gamma": 1.0,
+        "gamma": 0.95,
         "gae_lambda": 0.95,
         "update_epochs": 4,
         "clip_coef": 0.2,
@@ -140,6 +184,12 @@ def train(
     while trainer.epoch < trainer.total_epochs:
         trainer.evaluate()
         trainer.train()
+        logger.info(
+            "Epoch %s/%s metrics: %s",
+            trainer.epoch,
+            trainer.total_epochs,
+            _format_training_info(trainer),
+        )
         
         if trainer.epoch % 5 == 0:
             logger.info(f"Epoch {trainer.epoch}/{trainer.total_epochs} completed.")
@@ -170,11 +220,13 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     logger.info(f"Parsed CLI arguments: {args}")
-    
-    train(num_envs=args.num_envs, 
-    resolution=args.resolution, 
-    step_size=args.step_size,
-    max_steps=args.max_steps, 
-    total_timesteps=args.total_timesteps, 
-    learning_rate=args.learning_rate, 
-    device=args.device)
+
+    train(
+        num_envs=args.num_envs,
+        resolution=args.resolution,
+        step_size=args.step_size,
+        max_steps=args.max_steps,
+        total_timesteps=args.total_timesteps,
+        learning_rate=args.learning_rate,
+        device=args.device,
+    )

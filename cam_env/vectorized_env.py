@@ -188,6 +188,12 @@ class PufferBatchedCamEnv(pufferlib.PufferEnv):
                 "move_blocked": bool(move_blocked[env_id]),
                 "proximity_coef": proximity_coef,
                 "target_violation": violation,
+                "reward_progress": float(progress),
+                "reward_time_penalty": float(TIME_PENALTY),
+                "reward_completion_bonus": float(completion_bonus),
+                "reward_prox_bonus": float(prox_bonus),
+                "reward_blocked_penalty": float(BLOCKED_PENALTY if move_blocked[env_id] else 0.0),
+                "reward_total": float(reward),
             })
             
             # Auto-reset logic
@@ -200,11 +206,15 @@ class PufferBatchedCamEnv(pufferlib.PufferEnv):
         reset_mask = np.logical_or(self.terminals, self.truncations).astype(np.int32)
         if np.any(reset_mask):
             self.sim.reset_envs(reset_mask)
-            # Re-run build_obs just for the reset envs to update observation buffer and excess
+            # Re-run build_obs to update observation buffer and excess for reset envs
             self.sim.excess_field.fill(0.0)
             self.sim._batched_build_obs()
             self._sync_observations()
-            self._prev_excess[:] = self.sim.excess_field.to_numpy()
+            # Only update prev_excess for envs that actually reset —
+            # mid-episode envs already have the correct value from line 204.
+            new_excess = self.sim.excess_field.to_numpy()
+            reset_bool = reset_mask.astype(bool)
+            self._prev_excess[reset_bool] = new_excess[reset_bool]
 
         return self.observations, self.rewards, self.terminals, self.truncations, infos
 
