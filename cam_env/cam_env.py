@@ -35,6 +35,8 @@ class CamEnv(gym.Env):
         self.obs_dims = 3 + (resolution ** 3) + (resolution ** 3) # tool position + stock SDF + target SDF
         self.observation_space = spaces.Box(low=-1, high=1, shape=(self.obs_dims,), dtype=np.float32) # Soft bounds for SDF
         
+        self.state_buffer = []
+
         self.writer = None
         # --- Rendering State ---
         self.window = None
@@ -64,7 +66,6 @@ class CamEnv(gym.Env):
         self.show_part = True
         self.show_debug = False
         self.show_help = False
-
 
 
     def _initialize_sim(self):
@@ -175,8 +176,20 @@ class CamEnv(gym.Env):
         total_removed = float(np.sum(np.clip(material_removed, 0, None)))
         idle_penalty = -0.2 + 0.18 * (1.0 / (1.0 + np.exp(-k * (total_removed - 0.1))))
 
+
+        # --- 5. Holder Collision Penalty ---
+        tool_radius = self.simulator.tool_radius[None]
+        tool_height = self.simulator.tool_height[None]
+
+        holder_z = tool_pos[2] + tool_height
+        holder_z_idx = int(np.clip(holder_z * res, 0, res - 1))
+        stock_at_holder = float(sdf_stock_after[ix, iy, holder_z_idx])
+        holder_inside_stock = 1.0 / (1.0 + np.exp(k * stock_at_holder))
+
+        holder_penalty = -5.0 * holder_inside_stock
+
         # Reward calculation
-        reward = 5.0 * good_cuts - 10.0 * bad_cuts + 0.5 * boundary_bonus + progress_reward + idle_penalty
+        reward = 5.0 * good_cuts - 10.0 * bad_cuts + 0.5 * boundary_bonus + progress_reward + idle_penalty + holder_penalty
         return reward
 
 
@@ -194,9 +207,50 @@ class CamEnv(gym.Env):
         super().reset(seed=seed)
 
         self._initialize_sim()
-        self.simulator.initialize_stock_primitive()
-        self.simulator.initialize_target_primitive()
-        self.simulator.initialize_tool_primitive()
+
+        # Small probability of loading a previously saved state
+        if len(self.state_buffer) > 0 and self.np_random.random() < 0.3:
+            saved = self.state_buffer[self.np_random.integers(len(self.state_buffer))]
+            self.simulator.sdf_stock.from_numpy(saved["sdf_stock"])
+            self.simulator.sdf_target.from_numpy(saved["sdf_target"])
+            x = float(saved["tool_pos"][0])
+            y = float(saved["tool_pos"][1])
+            z = float(saved["tool_pos"][2])
+            radius = float(saved["tool_radius"])
+            height = float(saved["tool_height"])
+            self.simulator.initialize_tool_primitive([x, y, z], radius, height)
+        # Initialize new random state
+        else:
+            # Initialize tool
+            x = float(self.np_random.uniform(0.1, 0.9))
+            y = float(self.np_random.uniform(0.1, 0.9))
+            z = 0.9
+
+            radius = float(self.np_random.uniform(0.05, 0.15))
+            height = float(self.np_random.uniform(0.2, 0.4))
+            self.simulator.initialize_tool_primitive([x, y, z], radius, height)
+
+            # Initialize stock
+            self.simulator.initialize_stock_primitive()
+        
+            # Initialize target with random shape and size
+            shape = self.np_random.choice(["sphere", "cube", "cylinder", "pyramid"])
+            if shape == "sphere":
+                r = float(self.np_random.uniform(0.15, 0.3))
+                self.simulator.initialize_target_sphere_primitive(r)
+            elif shape == "cube":
+                s = float(self.np_random.uniform(0.15, 0.3))
+                self.simulator.initialize_target_cube(s)
+            elif shape == "cylinder":
+                r = float(self.np_random.uniform(0.1, 0.25))
+                h = float(self.np_random.uniform(0.15, 0.3))
+                self.simulator.initialize_target_cylinder(r, h)
+            elif shape == "pyramid":
+                b = float(self.np_random.uniform(0.15, 0.3))
+                h = float(self.np_random.uniform(0.2, 0.4))
+                self.simulator.initialize_target_pyramid(b, h)
+
+        # Initialize tool visualization (must be after tool primitive init)
         self.simulator.init_tool_template()
 
         self.current_step = 0
@@ -234,14 +288,18 @@ class CamEnv(gym.Env):
         y = ((action // 3) % 3) - 1
         z = (action % 3) - 1
 
-
+        # State before cut
         sdf_target = self.simulator.sdf_target.to_numpy()
         sdf_stock_before = self.simulator.sdf_stock.to_numpy()
+
+        # Cutting action
         self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z))
         vol_removed = self.simulator.apply_cut()
-        
+
+        # State after cut
         tool_pos_after = self.simulator.tool_pos[None].to_numpy()
         sdf_stock_after = self.simulator.sdf_stock.to_numpy()
+
         tool_cut_stock = vol_removed > 0.0
         holder_hit = self._holder_hit_stock()
         tool_cut_target = self._tool_cuts_into_target()
@@ -249,12 +307,22 @@ class CamEnv(gym.Env):
 
         obs = self._get_obs()
         reward = self._calculate_reward(sdf_stock_before, sdf_stock_after, sdf_target, tool_pos_after)
+        if vol_removed > 0 and self.np_random.random() < 0.1:
+            self.state_buffer.append({
+                "sdf_stock": sdf_stock_after.copy(),
+                "sdf_target": sdf_target.copy(),
+                "tool_pos": tool_pos_after.copy(),
+                "tool_radius": float(self.simulator.tool_radius[None]),
+                "tool_height": float(self.simulator.tool_height[None]),
+            })
+            if len(self.state_buffer) > 500:
+                self.state_buffer.pop(0)
+
         #if self.writer:
         #    self.writer.add_scalar("charts/env_reward", reward, self.global_step)
         # print(f"Step {self.current_step}: action = [{x}, {y}, {z}], reward = {reward}")
 
         truncated = self.current_step >= self.max_steps
-        #terminated = holder_hit or tool_cut_target
         terminated = False
         info = {"step": self.current_step, "action": [x, y, z], "vol": vol_removed, "tool_cut_target": tool_cut_target}
 

@@ -51,7 +51,14 @@ This repository includes automated scripts to handle environment setup on TACC (
 
 ## 1. First-Time Setup
 
-1. Navigate to Scratch and clone the repo:
+1. ssh into TACC:
+```bash
+ssh -m hmac-sha2-512 neilvakharia45@ls6.tacc.utexas.edu
+```
+Password is your TACC password and Passcode is your TACC Token from Duo.
+
+
+2. Navigate to Scratch and clone the repo:
 ```bash
 cd $SCRATCH
 git clone https://github.com/nathantsoi/diff-cam.git
@@ -59,13 +66,13 @@ cd diff-cam
 ```
 
 
-2. Make the setup scripts executable:
+3. Make the setup scripts executable:
 ```bash
 chmod +x scripts/*.sh
 ```
 
 
-3. **Initialize the Machine:**
+4. **Initialize the Machine:**
 Run this script once to install `uv` (if missing) and configure cache directories to use `$SCRATCH` instead of `$HOME`.
 ```bash
 ./scripts/00_init_machine.sh
