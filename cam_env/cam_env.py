@@ -174,7 +174,7 @@ class CamEnv(gym.Env):
 
         # --- 4. Idle Penalty ---
         total_removed = float(np.sum(np.clip(material_removed, 0, None)))
-        idle_penalty = -0.2 + 0.18 * (1.0 / (1.0 + np.exp(-k * (total_removed - 0.1))))
+        idle_penalty = -0.2 + 0.2 * (1.0 / (1.0 + np.exp(-k * (total_removed - 0.1))))
 
 
         # --- 5. Holder Collision Penalty ---
@@ -186,10 +186,10 @@ class CamEnv(gym.Env):
         stock_at_holder = float(sdf_stock_after[ix, iy, holder_z_idx])
         holder_inside_stock = 1.0 / (1.0 + np.exp(k * stock_at_holder))
 
-        holder_penalty = -5.0 * holder_inside_stock
+        holder_penalty = -1.0 * holder_inside_stock
 
         # Reward calculation
-        reward = 5.0 * good_cuts - 10.0 * bad_cuts + 0.5 * boundary_bonus + progress_reward + idle_penalty + holder_penalty
+        reward = 10.0 * good_cuts - 10.0 * bad_cuts + 0.5 * boundary_bonus + progress_reward + idle_penalty + holder_penalty
         return reward
 
 
