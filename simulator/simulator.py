@@ -9,6 +9,7 @@ from cam_env.physics_config import (
 
 
 
+
 @ti.data_oriented
 class CNCSimulator:
     _ti_initialized = False
@@ -75,6 +76,7 @@ class CNCSimulator:
         # Buffer Width Target: 256 * 1.333 = 341.33 -> 341
         self.debug_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(341, 2 * self.res))
 
+<<<<<<< HEAD
         # Raymarching buffer for high-quality alternative render
         self.raymarch_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(1024, 768))
         self.removed_vol_field = ti.field(dtype=ti.f32, shape=())
@@ -170,17 +172,31 @@ class CNCSimulator:
     def initialize_stock_primitive(self):
         """Initializes stock as a solid block (SDF < 0 inside)"""
         hs = float(STOCK_HALF_SIZE)
+=======
+    # Initialization Kernels
+    @ti.kernel
+    def initialize_stock_primitive(self):
+        """Initializes stock as a solid block (SDF < 0 inside)"""
+>>>>>>> b523c58 (Notional collision logic added to simulator)
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
             p = ti.Vector([i, j, k]) * self.dx
             center = ti.Vector([0.5, 0.5, 0.5])
             d = ti.abs(p - center) - hs
             dist = ti.max(d.x, ti.max(d.y, d.z))
+<<<<<<< HEAD
+=======
+
+>>>>>>> b523c58 (Notional collision logic added to simulator)
             self.sdf_stock[i, j, k] = dist
 
     @ti.kernel
     def initialize_target_primitive(self):
+<<<<<<< HEAD
         """Initializes target as a sphere"""
         radius = float(TARGET_RADIUS)
+=======
+        """Initializes target as a smaller sphere/box for visualization"""
+>>>>>>> b523c58 (Notional collision logic added to simulator)
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
             p = ti.Vector([i, j, k]) * self.dx
             center = ti.Vector([0.5, 0.5, 0.5])
@@ -189,9 +205,15 @@ class CNCSimulator:
 
     def initialize_tool_primitive(self):
         """Initializes the tool position, tool radius, and tool height"""
+<<<<<<< HEAD
         self.tool_pos[None] = ti.Vector([float(TOOL_START_POS[0]), float(TOOL_START_POS[1]), float(TOOL_START_POS[2])])
         self.tool_radius[None] = float(TOOL_RADIUS)
         self.tool_height[None] = float(TOOL_HEIGHT)
+=======
+        self.tool_pos[None] = ti.Vector([0.0, 0.5, 0.5])
+        self.tool_radius[None] = 0.1
+        self.tool_height[None] = 0.3
+>>>>>>> b523c58 (Notional collision logic added to simulator)
 
     # Methods to generate tool and holder sdfs
     @ti.func
@@ -215,10 +237,39 @@ class CNCSimulator:
     @ti.func
     def holder_sdf(self, p):
         """Analytic SDF for the holder cylinder (based on tool position)"""
+<<<<<<< HEAD
+=======
         tool_pos = self.tool_pos[None]
         tool_radius = self.tool_radius[None]
         tool_height = self.tool_height[None]
 
+        holder_radius = tool_radius * 2.0
+        holder_height = tool_height * 0.5
+        holder_z_start = tool_pos.z + tool_height
+
+        # Horizontal distance from holder axis
+        d_h = ti.Vector([p.x - tool_pos.x, p.y - tool_pos.y]).norm() - holder_radius
+
+        # Vertical distance (finite height cylinder)
+        d_z_bottom = holder_z_start - p.z
+        d_z_top = p.z - (holder_z_start + holder_height)
+        d_z = ti.max(d_z_bottom, d_z_top)
+
+        return ti.max(d_h, d_z)
+
+    # Other kernel utilities
+    @ti.kernel
+    def apply_cut(self) -> ti.f32:
+        """
+        Boolean Subtraction: Stock = max(Stock, -Tool)
+        Returns the approximate volume removed (useful for force calculation)
+        """
+>>>>>>> b523c58 (Notional collision logic added to simulator)
+        tool_pos = self.tool_pos[None]
+        tool_radius = self.tool_radius[None]
+        tool_height = self.tool_height[None]
+
+<<<<<<< HEAD
         holder_radius = tool_radius * 2.0
         holder_height = tool_height * 0.5
         holder_z_start = tool_pos.z + tool_height
@@ -248,10 +299,17 @@ class CNCSimulator:
         tool_pos = self.tool_pos[None]
         tool_radius = self.tool_radius[None]
         tool_height = self.tool_height[None]
+=======
+        removed_vol = 0.0
+>>>>>>> b523c58 (Notional collision logic added to simulator)
 
         # Optimization: Only iterate over the bounding box of the tool
         # Convert tool position and radius to index space
 
+<<<<<<< HEAD
+=======
+        # Calculate bounds in integer coordinates
+>>>>>>> b523c58 (Notional collision logic added to simulator)
         # Calculate bounds in integer coordinates
         # X and Y are bounded by tool radius
         min_x = int(ti.floor((tool_pos.x - tool_radius) / self.dx - 4.0))
@@ -284,6 +342,7 @@ class CNCSimulator:
             # In SDF math: max(A, -B)
             new_dist = ti.max(stock_dist, -tool_dist)
 
+<<<<<<< HEAD
             # Safety mask: prevent cutting inside the target.
             # Where the target is solid (target_dist < 0), the stock must remain
             # at least as solid — clamp new_dist so it can't exceed target_dist.
@@ -296,15 +355,28 @@ class CNCSimulator:
                 ti.atomic_add(self.removed_vol_field[None], 1.0)  # simplistic volume proxy
                 self.sdf_stock[i, j, k] = new_dist
 
+=======
+            if new_dist != stock_dist:
+                # If values changed, we removed material
+                removed_vol += 1.0  # simplistic volume proxy
+                self.sdf_stock[i, j, k] = new_dist
+
+        return removed_vol
+>>>>>>> b523c58 (Notional collision logic added to simulator)
 
     @ti.kernel
     def move_tool_one_unit(self, dir: ti.types.vector(3, ti.f32)):
         """Moves the tool one unit in the direction of a unit vector"""
+<<<<<<< HEAD
         valid_dir = True
+=======
+        valid = True
+>>>>>>> b523c58 (Notional collision logic added to simulator)
         for i in ti.static(range(3)):
             if not (dir[i] == -1.0 or dir[i] == 0.0 or dir[i] == 1.0):
                 valid_dir = False
 
+<<<<<<< HEAD
         if not valid_dir:
             print(
                 "Error: Direction must be a unit step vector with components in {-1, 0, 1}"
@@ -315,6 +387,15 @@ class CNCSimulator:
             new_pos[i] = ti.max(0.0, ti.min(1.0 - self.dx, new_pos[i] + dir[i] * self.dx))
         self.tool_pos[None] = new_pos
 
+=======
+        if not valid:
+            print(
+                "Error: Direction must be a unit step vector with components in {-1, 0, 1}"
+            )
+
+        self.tool_pos[None] += dir * self.dx
+
+>>>>>>> b523c58 (Notional collision logic added to simulator)
     @ti.kernel
     def check_holder_collision(self) -> ti.i32:
         """Returns 1 if holder intersects stock, 0 otherwise."""
@@ -352,6 +433,7 @@ class CNCSimulator:
 
     @ti.kernel
     def check_tool_intersects_target(self) -> ti.i32:
+<<<<<<< HEAD
         """ Returns 1 if tool intersects target geometry, 0 otherwise.
 
         Uses sub-grid sampling (half-dx steps) with trilinear interpolation
@@ -393,6 +475,30 @@ class CNCSimulator:
                     if target_val <= 0:
                         cuts_target = 1
 
+=======
+        """ Returns 1 if tool intersects target geometry, 0 otherwise. """
+        tool_pos = self.tool_pos[None]
+        tool_radius = self.tool_radius[None]
+        tool_height = self.tool_height[None]
+        
+        cuts_target = 0
+        
+        # Bounding box of tool
+        min_x = ti.max(0, int(ti.floor((tool_pos.x - tool_radius) / self.dx) - 1))
+        max_x = ti.min(self.res, int(ti.ceil((tool_pos.x + tool_radius) / self.dx) + 1))
+        min_y = ti.max(0, int(ti.floor((tool_pos.y - tool_radius) / self.dx) - 1))
+        max_y = ti.min(self.res, int(ti.ceil((tool_pos.y + tool_radius) / self.dx) + 1))
+        min_z = ti.max(0, int(ti.floor(tool_pos.z / self.dx) - 1))
+        max_z = ti.min(self.res, int(ti.ceil((tool_pos.z + tool_height) / self.dx) + 1))
+        
+        for i, j, k in ti.ndrange((min_x, max_x), (min_y, max_y), (min_z, max_z)):
+            p = ti.Vector([i, j, k]) * self.dx
+            
+            # If point is inside tool AND inside or on target → bad cut
+            if self.tool_sdf(p) < 0 and self.sdf_target[i, j, k] <= 0:
+                cuts_target = 1
+        
+>>>>>>> b523c58 (Notional collision logic added to simulator)
         return cuts_target
 
     # Visualization Kernels
@@ -590,6 +696,7 @@ class CNCSimulator:
             self.debug_buffer[i, j] = self.slice_yz[i, j]
 
 
+<<<<<<< HEAD
     @ti.func
     def sample_sdf(self, field: ti.template(), p: ti.template()) -> ti.f32:
         p_grid = p * self.res
@@ -766,6 +873,8 @@ class CNCSimulator:
                 self.raymarch_buffer[i, j] = color
 
 
+=======
+>>>>>>> b523c58 (Notional collision logic added to simulator)
 def main():
     sim = CNCSimulator(resolution=128)
     print("Simulator initialized!")

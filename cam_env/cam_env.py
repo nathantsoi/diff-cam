@@ -599,8 +599,12 @@ class CamEnv(gym.Env):
 
 
 if __name__ == "__main__":
+<<<<<<< HEAD
     # Test the environment with random actions
     env = CamEnv(resolution=8, max_steps=512, render_mode="human")
+=======
+    env = gym.make('CamEnv-v0')
+>>>>>>> b523c58 (Notional collision logic added to simulator)
     obs, info = env.reset()
     done = False
 

@@ -16,7 +16,10 @@ from torch.utils.tensorboard import SummaryWriter
 import pufferlib
 import pufferlib.vector
 import pufferlib.emulation
+<<<<<<< HEAD
 import pufferlib.environments
+=======
+>>>>>>> b523c58 (Notional collision logic added to simulator)
 
 from cam_env.cam_env import CamEnv
 
@@ -85,12 +88,20 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
     # additional arguments for CamEnv
+<<<<<<< HEAD
     resolution: int = 8
     """the resolution of the camera observation"""
     max_steps: int = 512
     """the maximum number of steps per episode"""
     render_mode: str = "rgb_array"
     """the render mode for the environment"""
+=======
+    resolution: int = 64
+    """the resolution of the camera observation"""
+    max_steps: int = 1000
+    """the maximum number of steps per episode"""
+
+>>>>>>> b523c58 (Notional collision logic added to simulator)
 
 
 def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render_mode):
@@ -196,6 +207,7 @@ if __name__ == "__main__":
 
     # env setup -- changed to use PufferLib
     envs = pufferlib.vector.make(
+<<<<<<< HEAD
         make_env(
             args.env_id, 
             0,
@@ -207,6 +219,9 @@ if __name__ == "__main__":
         ),
         num_envs=args.num_envs,
         backend=pufferlib.vector.Serial,
+=======
+
+>>>>>>> b523c58 (Notional collision logic added to simulator)
     )
     assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
     # Inject writer into each env - added this in there
