@@ -1,12 +1,5 @@
 import taichi as ti
 
-from cam_env.physics_config import (
-    STOCK_HALF_SIZE,
-    TARGET_RADIUS,
-    TOOL_START_POS, TOOL_RADIUS, TOOL_HEIGHT,
-)
-
-
 
 @ti.data_oriented
 class CNCSimulator:
@@ -72,26 +65,10 @@ class CNCSimulator:
         self.excess_field = ti.field(dtype=ti.f32, shape=())
 
         # Observation buffer: [tool_pos(3), grad_stock(3), grad_diff(3), sdf_stock(res³), sdf_target(res³)]
-        self.obs_size = 9 + 2 * resolution ** 3
+        self.obs_size = 9 + 2 * resolution**3
         self.obs_buffer = ti.field(dtype=ti.f32, shape=(self.obs_size,))
 
-    # ── Excess volume (GPU-only) ────────────────────────────────────
-    def get_excess(self) -> float:
-        """Compute total excess material volume entirely on the GPU.
-        Returns a Python float — no array transfer involved."""
-        self.excess_field[None] = 0.0
-        self._compute_excess_kernel()
-        return float(self.excess_field[None])
 
-    @ti.kernel
-    def _compute_excess_kernel(self):
-        """sum(max(min(-sdf_stock, sdf_target), 0)) over the full grid."""
-        for i, j, k in ti.ndrange(self.res, self.res, self.res):
-            stock = self.sdf_stock[i, j, k]
-            target = self.sdf_target[i, j, k]
-            val = ti.max(ti.min(-stock, target), 0.0)
-            if val > 0.0:
-                ti.atomic_add(self.excess_field[None], val)
 
     # ── Fused observation builder (GPU-only) ────────────────────────
     def build_obs(self):
@@ -119,9 +96,15 @@ class CNCSimulator:
         inv_2dx = float(res) * 0.5  # 1 / (2 * dx)
 
         # ∇φ_stock (normalized)
-        gs_x = (self.sdf_stock[ix+1, iy, iz] - self.sdf_stock[ix-1, iy, iz]) * inv_2dx
-        gs_y = (self.sdf_stock[ix, iy+1, iz] - self.sdf_stock[ix, iy-1, iz]) * inv_2dx
-        gs_z = (self.sdf_stock[ix, iy, iz+1] - self.sdf_stock[ix, iy, iz-1]) * inv_2dx
+        gs_x = (
+            self.sdf_stock[ix + 1, iy, iz] - self.sdf_stock[ix - 1, iy, iz]
+        ) * inv_2dx
+        gs_y = (
+            self.sdf_stock[ix, iy + 1, iz] - self.sdf_stock[ix, iy - 1, iz]
+        ) * inv_2dx
+        gs_z = (
+            self.sdf_stock[ix, iy, iz + 1] - self.sdf_stock[ix, iy, iz - 1]
+        ) * inv_2dx
         gs = ti.Vector([gs_x, gs_y, gs_z])
         gs_norm = gs.norm()
         if gs_norm > 1e-8:
@@ -131,12 +114,18 @@ class CNCSimulator:
         self.obs_buffer[5] = gs.z
 
         # ∇(φ_target − φ_stock) — direction toward excess material
-        gd_x = ((self.sdf_target[ix+1, iy, iz] - self.sdf_stock[ix+1, iy, iz])
-               - (self.sdf_target[ix-1, iy, iz] - self.sdf_stock[ix-1, iy, iz])) * inv_2dx
-        gd_y = ((self.sdf_target[ix, iy+1, iz] - self.sdf_stock[ix, iy+1, iz])
-               - (self.sdf_target[ix, iy-1, iz] - self.sdf_stock[ix, iy-1, iz])) * inv_2dx
-        gd_z = ((self.sdf_target[ix, iy, iz+1] - self.sdf_stock[ix, iy, iz+1])
-               - (self.sdf_target[ix, iy, iz-1] - self.sdf_stock[ix, iy, iz-1])) * inv_2dx
+        gd_x = (
+            (self.sdf_target[ix + 1, iy, iz] - self.sdf_stock[ix + 1, iy, iz])
+            - (self.sdf_target[ix - 1, iy, iz] - self.sdf_stock[ix - 1, iy, iz])
+        ) * inv_2dx
+        gd_y = (
+            (self.sdf_target[ix, iy + 1, iz] - self.sdf_stock[ix, iy + 1, iz])
+            - (self.sdf_target[ix, iy - 1, iz] - self.sdf_stock[ix, iy - 1, iz])
+        ) * inv_2dx
+        gd_z = (
+            (self.sdf_target[ix, iy, iz + 1] - self.sdf_stock[ix, iy, iz + 1])
+            - (self.sdf_target[ix, iy, iz - 1] - self.sdf_stock[ix, iy, iz - 1])
+        ) * inv_2dx
         self.obs_buffer[6] = gd_x
         self.obs_buffer[7] = gd_y
         self.obs_buffer[8] = gd_z
@@ -149,7 +138,9 @@ class CNCSimulator:
 
             # Clipped SDF values → obs_buffer
             self.obs_buffer[9 + idx] = ti.max(-1.0, ti.min(1.0, stock_val))
-            self.obs_buffer[9 + res * res * res + idx] = ti.max(-1.0, ti.min(1.0, target_val))
+            self.obs_buffer[9 + res * res * res + idx] = ti.max(
+                -1.0, ti.min(1.0, target_val)
+            )
 
             # Excess accumulation (free — already visiting every voxel)
             excess_val = ti.max(ti.min(-stock_val, target_val), 0.0)
@@ -157,10 +148,12 @@ class CNCSimulator:
                 ti.atomic_add(self.excess_field[None], excess_val)
 
     # Initialization Kernels
+
+    # Stock
     @ti.kernel
-    def initialize_stock_primitive(self):
+    def initialize_stock_primitive(self, half_size: ti.f32):
         """Initializes stock as a solid block (SDF < 0 inside)"""
-        hs = float(STOCK_HALF_SIZE)
+        hs = float(half_size)
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
             p = ti.Vector([i, j, k]) * self.dx
             center = ti.Vector([0.5, 0.5, 0.5])
@@ -168,7 +161,7 @@ class CNCSimulator:
             dist = ti.max(d.x, ti.max(d.y, d.z))
             self.sdf_stock[i, j, k] = dist
 
-
+    # Target
     @ti.kernel
     def initialize_target_sphere_primitive(self, radius: ti.f32):
         """Initializes target as a smaller sphere/box for visualization"""
@@ -193,7 +186,6 @@ class CNCSimulator:
             dist = ti.max(d.x, ti.max(d.y, d.z))
             self.sdf_target[i, j, k] = dist
 
-
     @ti.kernel
     def initialize_target_cylinder(self, radius: ti.f32, half_height: ti.f32):
         """
@@ -209,18 +201,17 @@ class CNCSimulator:
             d_vert = ti.abs(p.z - cz) - half_height
             self.sdf_target[i, j, k] = ti.max(d_horiz, d_vert)
 
-
     @ti.kernel
     def initialize_target_pyramid(self, half_base: ti.f32, height: ti.f32):
         """
         Initializes target as a square pyramid.
         Base is centered at (cx, cy, base_z) with half-width half_base.
         Apex is at (cx, cy, base_z + height).
- 
+
         The pyramid is the intersection of:
         - A bottom plane (z >= base_z)
         - Four sloping planes that taper from the base to the apex
- 
+
         Each sloping plane says: at height z, the allowed half-width is
         half_base * (1 - (z - base_z) / height). The SDF at each point
         is the max of all plane distances.
@@ -229,29 +220,30 @@ class CNCSimulator:
 
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
             p = ti.Vector([i, j, k]) * self.dx
- 
+
             # How far up the pyramid are we (0 at base, 1 at apex)
             t = (p.z - base_z) / height
- 
+
             # Below the base
             d_bottom = base_z - p.z
- 
+
             # Above the apex
             d_top = p.z - (base_z + height)
- 
+
             # At height z, the allowed half-width shrinks linearly
             # from half_base at the bottom to 0 at the apex
             allowed = half_base * (1.0 - t)
- 
+
             # Box SDF in XY at current height
             dx = ti.abs(p.x - cx) - allowed
             dy = ti.abs(p.y - cy) - allowed
             d_sides = ti.max(dx, dy)
- 
+
             # Final SDF: max of all constraints
             dist = ti.max(d_bottom, ti.max(d_top, d_sides))
             self.sdf_target[i, j, k] = dist
 
+    # Tool
     def initialize_tool_primitive(self, pos, radius=0.1, height=0.3):
         """Initializes the tool position, tool radius, and tool height"""
 
@@ -359,9 +351,10 @@ class CNCSimulator:
 
             if new_dist != stock_dist:
                 # If values changed, we removed material
-                ti.atomic_add(self.removed_vol_field[None], 1.0)  # simplistic volume proxy
+                ti.atomic_add(
+                    self.removed_vol_field[None], 1.0
+                )  # simplistic volume proxy
                 self.sdf_stock[i, j, k] = new_dist
-
 
     @ti.kernel
     def move_tool_one_unit(self, dir: ti.types.vector(3, ti.f32)):
@@ -378,7 +371,9 @@ class CNCSimulator:
 
         new_pos = self.tool_pos[None]
         for i in ti.static(range(3)):
-            new_pos[i] = ti.max(0.0, ti.min(1.0 - self.dx, new_pos[i] + dir[i] * self.dx))
+            new_pos[i] = ti.max(
+                0.0, ti.min(1.0 - self.dx, new_pos[i] + dir[i] * self.dx)
+            )
         self.tool_pos[None] = new_pos
 
     @ti.kernel
@@ -418,7 +413,7 @@ class CNCSimulator:
 
     @ti.kernel
     def check_tool_intersects_target(self) -> ti.i32:
-        """ Returns 1 if tool intersects target geometry, 0 otherwise.
+        """Returns 1 if tool intersects target geometry, 0 otherwise.
 
         Uses sub-grid sampling (half-dx steps) with trilinear interpolation
         of the target SDF for robust detection even at low resolution.
@@ -442,16 +437,23 @@ class CNCSimulator:
         origin_z = tool_pos.z - self.dx
 
         for i, j, k in ti.ndrange(n_x, n_y, n_z):
-            p = ti.Vector([
-                origin_x + i * step,
-                origin_y + j * step,
-                origin_z + k * step,
-            ])
+            p = ti.Vector(
+                [
+                    origin_x + i * step,
+                    origin_y + j * step,
+                    origin_z + k * step,
+                ]
+            )
 
             # Stay within the simulation domain
-            if (p.x >= 0.0 and p.x <= 1.0
-                    and p.y >= 0.0 and p.y <= 1.0
-                    and p.z >= 0.0 and p.z <= 1.0):
+            if (
+                p.x >= 0.0
+                and p.x <= 1.0
+                and p.y >= 0.0
+                and p.y <= 1.0
+                and p.z >= 0.0
+                and p.z <= 1.0
+            ):
                 # tool_sdf <= 0  : point is on or inside tool (includes bottom face)
                 # target_sdf <= 0: point is on or inside target (interpolated)
                 if self.tool_sdf(p) <= 0:
@@ -460,6 +462,17 @@ class CNCSimulator:
                         cuts_target = 1
 
         return cuts_target
+
+
+    @ti.kernel
+    def _compute_excess_kernel(self):
+        """sum(max(min(-sdf_stock, sdf_target), 0)) over the full grid."""
+        for i, j, k in ti.ndrange(self.res, self.res, self.res):
+            stock = self.sdf_stock[i, j, k]
+            target = self.sdf_target[i, j, k]
+            val = ti.max(ti.min(-stock, target), 0.0)
+            if val > 0.0:
+                ti.atomic_add(self.excess_field[None], val)
 
     # Visualization Kernels
     @ti.kernel
@@ -655,33 +668,32 @@ class CNCSimulator:
             # Place YZ at Bottom-Left: x=[0, res], y=[0, res]
             self.debug_buffer[i, j] = self.slice_yz[i, j]
 
-
     @ti.func
     def sample_sdf(self, field: ti.template(), p: ti.template()) -> ti.f32:
         p_grid = p * self.res
         x = p_grid.x
         y = p_grid.y
         z = p_grid.z
-        
+
         x0 = int(ti.floor(x))
         y0 = int(ti.floor(y))
         z0 = int(ti.floor(z))
-        
+
         x1 = x0 + 1
         y1 = y0 + 1
         z1 = z0 + 1
-        
+
         tx = x - x0
         ty = y - y0
         tz = z - z0
-        
+
         x0 = ti.max(0, ti.min(self.res - 1, x0))
         y0 = ti.max(0, ti.min(self.res - 1, y0))
         z0 = ti.max(0, ti.min(self.res - 1, z0))
         x1 = ti.max(0, ti.min(self.res - 1, x1))
         y1 = ti.max(0, ti.min(self.res - 1, y1))
         z1 = ti.max(0, ti.min(self.res - 1, z1))
-        
+
         c000 = field[x0, y0, z0]
         c100 = field[x1, y0, z0]
         c010 = field[x0, y1, z0]
@@ -690,15 +702,15 @@ class CNCSimulator:
         c101 = field[x1, y0, z1]
         c011 = field[x0, y1, z1]
         c111 = field[x1, y1, z1]
-        
+
         c00 = c000 * (1 - tx) + c100 * tx
         c10 = c010 * (1 - tx) + c110 * tx
         c01 = c001 * (1 - tx) + c101 * tx
         c11 = c011 * (1 - tx) + c111 * tx
-        
+
         c0 = c00 * (1 - ty) + c10 * ty
         c1 = c01 * (1 - ty) + c11 * ty
-        
+
         c = c0 * (1 - tz) + c1 * tz
         return c
 
@@ -708,67 +720,93 @@ class CNCSimulator:
         dx = ti.Vector([eps, 0.0, 0.0])
         dy = ti.Vector([0.0, eps, 0.0])
         dz = ti.Vector([0.0, 0.0, eps])
-        
+
         nx = self.sample_sdf(field, p + dx) - self.sample_sdf(field, p - dx)
         ny = self.sample_sdf(field, p + dy) - self.sample_sdf(field, p - dy)
         nz = self.sample_sdf(field, p + dz) - self.sample_sdf(field, p - dz)
-        
+
         return ti.math.normalize(ti.Vector([nx, ny, nz]))
 
     @ti.kernel
-    def render_raymarch(self, cam_pos: ti.types.vector(3, ti.f32), cam_up: ti.types.vector(3, ti.f32), cam_dir: ti.types.vector(3, ti.f32), show_stock: ti.i32, show_part: ti.i32, show_tool: ti.i32):
+    def render_raymarch(
+        self,
+        cam_pos: ti.types.vector(3, ti.f32),
+        cam_up: ti.types.vector(3, ti.f32),
+        cam_dir: ti.types.vector(3, ti.f32),
+        show_stock: ti.i32,
+        show_part: ti.i32,
+        show_tool: ti.i32,
+    ):
         cam_right = cam_dir.cross(cam_up).normalized()
         cam_up_actual = cam_right.cross(cam_dir).normalized()
-        
+
         fov_scale = ti.tan(3.14159 / 4.0)
         width = self.raymarch_buffer.shape[0]
         height = self.raymarch_buffer.shape[1]
         aspect_ratio = float(width) / float(height)
-        
+
         for i, j in self.raymarch_buffer:
             u = (2.0 * (i + 0.5) / float(width) - 1.0) * aspect_ratio * fov_scale
             v = (2.0 * (j + 0.5) / float(height) - 1.0) * fov_scale
-            
+
             ray_dir = (cam_dir + cam_right * u + cam_up_actual * v).normalized()
-            
+
             t = 0.0
             max_t = 10.0
             max_steps = 150
-            
+
             color = ti.Vector([0.1, 0.1, 0.1])
-            
+
             for step in range(max_steps):
                 p = cam_pos + ray_dir * t
                 d_stock = 1e6
                 d_target = 1e6
                 d_tool = 1e6
-                
-                if p.x >= 0.0 and p.x <= 1.0 and p.y >= 0.0 and p.y <= 1.0 and p.z >= 0.0 and p.z <= 1.0:
+
+                if (
+                    p.x >= 0.0
+                    and p.x <= 1.0
+                    and p.y >= 0.0
+                    and p.y <= 1.0
+                    and p.z >= 0.0
+                    and p.z <= 1.0
+                ):
                     if show_stock == 1:
                         d_stock = self.sample_sdf(self.sdf_stock, p)
                     if show_part == 1:
                         d_target = self.sample_sdf(self.sdf_target, p)
                 else:
                     d_box = p - ti.Vector([0.5, 0.5, 0.5])
-                    d_aabb = ti.max(ti.abs(d_box.x), ti.max(ti.abs(d_box.y), ti.abs(d_box.z))) - 0.5
+                    d_aabb = (
+                        ti.max(
+                            ti.abs(d_box.x), ti.max(ti.abs(d_box.y), ti.abs(d_box.z))
+                        )
+                        - 0.5
+                    )
                     if show_stock == 1:
                         d_stock = ti.max(d_aabb, 2e-3)
                     if show_part == 1:
                         d_target = ti.max(d_aabb, 2e-3)
-                
+
                 if show_tool == 1:
                     d_tool = ti.min(self.tool_sdf(p), self.holder_sdf(p))
-                
+
                 d = ti.min(d_stock, ti.min(d_target, d_tool))
-                
+
                 if d < 1e-3:
                     norm = ti.Vector([0.0, 0.0, 1.0])
                     mat_color = ti.Vector([0.8, 0.8, 0.8])
-                    
+
                     if d == d_tool:
-                        mat_color = ti.Vector([1.0, 0.2, 0.2]) if self.tool_sdf(p) < self.holder_sdf(p) else ti.Vector([0.2, 0.2, 0.2])
+                        mat_color = (
+                            ti.Vector([1.0, 0.2, 0.2])
+                            if self.tool_sdf(p) < self.holder_sdf(p)
+                            else ti.Vector([0.2, 0.2, 0.2])
+                        )
                         eps = 1e-3
-                        dx = ti.Vector([eps, 0.0, 0.0]); dy = ti.Vector([0.0, eps, 0.0]); dz = ti.Vector([0.0, 0.0, eps])
+                        dx = ti.Vector([eps, 0.0, 0.0])
+                        dy = ti.Vector([0.0, eps, 0.0])
+                        dz = ti.Vector([0.0, 0.0, eps])
                         if self.tool_sdf(p) < self.holder_sdf(p):
                             nx = self.tool_sdf(p + dx) - self.tool_sdf(p - dx)
                             ny = self.tool_sdf(p + dy) - self.tool_sdf(p - dy)
@@ -783,22 +821,25 @@ class CNCSimulator:
                         mat_color = ti.Vector([0.2, 0.8, 0.2])
                         norm = self.normal_sdf(self.sdf_stock, p)
                         grid_p = p * float(self.res)
-                        cx = int(grid_p.x) % 2; cy = int(grid_p.y) % 2; cz = int(grid_p.z) % 2
-                        if (cx + cy + cz) % 2 == 0: mat_color = mat_color * 0.8
+                        cx = int(grid_p.x) % 2
+                        cy = int(grid_p.y) % 2
+                        cz = int(grid_p.z) % 2
+                        if (cx + cy + cz) % 2 == 0:
+                            mat_color = mat_color * 0.8
                     elif d == d_target:
                         mat_color = ti.Vector([0.5, 0.5, 1.0])
                         norm = self.normal_sdf(self.sdf_target, p)
-                    
+
                     light_dir = ti.Vector([1.0, 1.0, 1.0]).normalized()
                     diffuse = ti.max(0.0, norm.dot(light_dir))
                     ambient = 0.2
                     color = mat_color * (diffuse * 0.8 + ambient)
                     break
-                    
+
                 t += d
                 if t > max_t:
                     break
-                    
+
             self.raymarch_buffer[i, j] = color
 
 

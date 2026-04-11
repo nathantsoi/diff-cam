@@ -102,39 +102,11 @@ def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render
     return thunk
 
 
-# class Agent(nn.Module):
-#     def __init__(self, envs):
-#         super().__init__()
-#         self.critic = nn.Sequential(
-#             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-#             nn.Tanh(),
-#             layer_init(nn.Linear(256, 128)),
-#             nn.Tanh(),
-#             layer_init(nn.Linear(128, 1), std=1.0),
-#         )
-#         self.actor = nn.Sequential(
-#             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
-#             nn.Tanh(),
-#             layer_init(nn.Linear(256, 128)),
-#             nn.Tanh(),
-#             layer_init(nn.Linear(128, envs.single_action_space.n), std=0.01),
-#         )
-
-#     def get_value(self, x):
-#         return self.critic(x)
-
-#     def get_action_and_value(self, x, action=None):
-#         logits = self.actor(x)
-#         probs = Categorical(logits=logits)
-#         if action is None:
-#             action = probs.sample()
-#         return action, probs.log_prob(action), probs.entropy(), self.critic(x)
-
-
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
+
 
 def conv_init(layer, std=np.sqrt(2), bias_const=0.0):
     """Same orthogonal init applied to conv layers for consistency."""
@@ -142,6 +114,7 @@ def conv_init(layer, std=np.sqrt(2), bias_const=0.0):
     if layer.bias is not None:
         torch.nn.init.constant_(layer.bias, bias_const)
     return layer
+
 
 class Block(nn.Module):
     """Convolutional block: Conv3d → BatchNorm3d → ReLU"""
@@ -156,6 +129,7 @@ class Block(nn.Module):
         x = self.batchnorm(x)
         x = self.activation(x)
         return x
+
 
 class SDF3DEncoder(nn.Module):
     """Encodes a 3D SDF observation into a feature vector."""
@@ -200,6 +174,68 @@ class SDF3DEncoder(nn.Module):
         x = self.encoder(x)
         x = x.reshape(x.shape[0], -1)
         return self.fc(x)
+
+
+class MLP_Agent(nn.Module):
+    def __init__(self, envs):
+        super().__init__()
+        self.critic = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
+            nn.Tanh(),
+            layer_init(nn.Linear(256, 128)),
+            nn.Tanh(),
+            layer_init(nn.Linear(128, 1), std=1.0),
+        )
+        self.actor = nn.Sequential(
+            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
+            nn.Tanh(),
+            layer_init(nn.Linear(256, 128)),
+            nn.Tanh(),
+            layer_init(nn.Linear(128, envs.single_action_space.n), std=0.01),
+        )
+
+    def get_value(self, x):
+        return self.critic(x)
+
+    def get_action_and_value(self, x, action=None):
+        logits = self.actor(x)
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+
+
+class LegacyAgent(nn.Module):
+    """Original flat MLP agent for loading old checkpoints."""
+    def __init__(self, envs):
+        super().__init__()
+        obs_size = np.array(envs.single_observation_space.shape).prod()
+        self.critic = torch.nn.Sequential(
+            layer_init(torch.nn.Linear(obs_size, 256)),
+            torch.nn.Tanh(),
+            layer_init(torch.nn.Linear(256, 128)),
+            torch.nn.Tanh(),
+            layer_init(torch.nn.Linear(128, 1), std=1.0),
+        )
+        self.actor = torch.nn.Sequential(
+            layer_init(torch.nn.Linear(obs_size, 256)),
+            torch.nn.Tanh(),
+            layer_init(torch.nn.Linear(256, 128)),
+            torch.nn.Tanh(),
+            layer_init(torch.nn.Linear(128, envs.single_action_space.n), std=0.01),
+        )
+
+    def get_value(self, x):
+        return self.critic(x)
+
+    def get_action_and_value(self, x, action=None):
+        from torch.distributions.categorical import Categorical
+        logits = self.actor(x)
+        probs = Categorical(logits=logits)
+        if action is None:
+            action = probs.sample()
+        return action, probs.log_prob(action), probs.entropy(), self.critic(x)
+
 
 class AdityaAgent(nn.Module):
     def __init__(self, envs):
@@ -254,6 +290,7 @@ class AdityaAgent(nn.Module):
         if action is None:
             action = probs.sample()
         return action, probs.log_prob(action), probs.entropy(), self.critic_head(features)
+
 
 class Agent(nn.Module):
     def __init__(self, envs):
