@@ -8,7 +8,6 @@ from cam_env.physics_config import (
 
 
 
-
 @ti.data_oriented
 class CNCSimulator:
     _ti_initialized = False
@@ -25,22 +24,14 @@ class CNCSimulator:
         self.res = resolution
         self.dx = 1.0 / self.res
 
-        # --- 1. Sparse Data Structure ---
-        # We use a sparse grid to store the Signed Distance Field (SDF).
-        # This saves memory by only allocating blocks where the surface exists.
-        self.sdf_stock = ti.field(dtype=ti.f32)
-        self.sdf_target = ti.field(dtype=ti.f32)
+        # Define the SDF fields for stock and target geometry
+        self.sdf_stock = ti.field(dtype=ti.f32, shape=(self.res, self.res, self.res))
+        self.sdf_target = ti.field(dtype=ti.f32, shape=(self.res, self.res, self.res))
 
         # Define the tool
         self.tool_pos = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.tool_radius = ti.field(dtype=ti.f32, shape=())
         self.tool_height = ti.field(dtype=ti.f32, shape=())
-
-        # Define the sparse layout (Pointer -> Dense)
-        self.block_size = 8
-        self.sdf_layout = ti.root.pointer(ti.ijk, self.res // self.block_size)
-        self.sdf_layout.dense(ti.ijk, self.block_size).place(self.sdf_stock)
-        self.sdf_layout.dense(ti.ijk, self.block_size).place(self.sdf_target)
 
         # Visualization fields (for GGUI)
 
@@ -177,21 +168,96 @@ class CNCSimulator:
             dist = ti.max(d.x, ti.max(d.y, d.z))
             self.sdf_stock[i, j, k] = dist
 
+
     @ti.kernel
-    def initialize_target_primitive(self):
-        """Initializes target as a sphere"""
-        radius = float(TARGET_RADIUS)
+    def initialize_target_sphere_primitive(self, radius: ti.f32):
+        """Initializes target as a smaller sphere/box for visualization"""
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
             p = ti.Vector([i, j, k]) * self.dx
             center = ti.Vector([0.5, 0.5, 0.5])
+            # Sphere target
             d = (p - center).norm() - radius
             self.sdf_target[i, j, k] = d
 
-    def initialize_tool_primitive(self):
+    @ti.kernel
+    def initialize_target_cube(self, half_size: ti.f32):
+        """
+        Initializes target as a cube.
+        SDF for a box: max(|x - cx| - s, |y - cy| - s, |z - cz| - s)
+        Same formula your stock uses, just with variable center and size.
+        """
+        for i, j, k in ti.ndrange(self.res, self.res, self.res):
+            p = ti.Vector([i, j, k]) * self.dx
+            center = ti.Vector([0.5, 0.5, 0.5])
+            d = ti.abs(p - center) - half_size
+            dist = ti.max(d.x, ti.max(d.y, d.z))
+            self.sdf_target[i, j, k] = dist
+
+
+    @ti.kernel
+    def initialize_target_cylinder(self, radius: ti.f32, half_height: ti.f32):
+        """
+        Initializes target as a cylinder aligned with the Z axis.
+        The cylinder is centered at (cx, cy, cz) with given radius and half_height.
+        SDF = max(horizontal_dist - radius, |z - cz| - half_height)
+        """
+        for i, j, k in ti.ndrange(self.res, self.res, self.res):
+            cx, cy, cz = 0.5, 0.5, 0.5
+
+            p = ti.Vector([i, j, k]) * self.dx
+            d_horiz = ti.Vector([p.x - cx, p.y - cy]).norm() - radius
+            d_vert = ti.abs(p.z - cz) - half_height
+            self.sdf_target[i, j, k] = ti.max(d_horiz, d_vert)
+
+
+    @ti.kernel
+    def initialize_target_pyramid(self, half_base: ti.f32, height: ti.f32):
+        """
+        Initializes target as a square pyramid.
+        Base is centered at (cx, cy, base_z) with half-width half_base.
+        Apex is at (cx, cy, base_z + height).
+ 
+        The pyramid is the intersection of:
+        - A bottom plane (z >= base_z)
+        - Four sloping planes that taper from the base to the apex
+ 
+        Each sloping plane says: at height z, the allowed half-width is
+        half_base * (1 - (z - base_z) / height). The SDF at each point
+        is the max of all plane distances.
+        """
+        cx, cy, base_z = 0.5, 0.5, 0.2
+
+        for i, j, k in ti.ndrange(self.res, self.res, self.res):
+            p = ti.Vector([i, j, k]) * self.dx
+ 
+            # How far up the pyramid are we (0 at base, 1 at apex)
+            t = (p.z - base_z) / height
+ 
+            # Below the base
+            d_bottom = base_z - p.z
+ 
+            # Above the apex
+            d_top = p.z - (base_z + height)
+ 
+            # At height z, the allowed half-width shrinks linearly
+            # from half_base at the bottom to 0 at the apex
+            allowed = half_base * (1.0 - t)
+ 
+            # Box SDF in XY at current height
+            dx = ti.abs(p.x - cx) - allowed
+            dy = ti.abs(p.y - cy) - allowed
+            d_sides = ti.max(dx, dy)
+ 
+            # Final SDF: max of all constraints
+            dist = ti.max(d_bottom, ti.max(d_top, d_sides))
+            self.sdf_target[i, j, k] = dist
+
+    def initialize_tool_primitive(self, pos, radius=0.1, height=0.3):
         """Initializes the tool position, tool radius, and tool height"""
-        self.tool_pos[None] = ti.Vector([float(TOOL_START_POS[0]), float(TOOL_START_POS[1]), float(TOOL_START_POS[2])])
-        self.tool_radius[None] = float(TOOL_RADIUS)
-        self.tool_height[None] = float(TOOL_HEIGHT)
+
+        self.tool_pos[None] = ti.Vector(pos)
+        self.tool_radius[None] = radius
+        self.tool_height[None] = height
 
     # Methods to generate tool and holder sdfs
     @ti.func
@@ -485,7 +551,7 @@ class CNCSimulator:
         # Holder sits at tool_pos.z + tool_height (0.3)
         # We need to know tool height here or assume it's checked elsewhere.
         # For this simple viz, let's assume a fix offset or pass it in.
-        holder_offset = ti.Vector([0.0, 0.0, 0.3])  # Hardcoded 0.3 tool height for now
+        holder_offset = ti.Vector([0.0, 0.0, self.tool_height[None]])
         for i in self.holder_points:
             self.holder_points[i] = self.holder_template[i] + tool_pos + holder_offset
 

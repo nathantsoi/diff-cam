@@ -1,5 +1,6 @@
 __pycache__/*
 imgui.in
+imgui.ini
 runs/*
 cam_env/__pycache__/*
 algorithms/__pycache__/*

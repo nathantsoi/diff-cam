@@ -21,17 +21,16 @@ uv sync
 See [docs/design.md](docs/design.md) for design details.
 
 ## PPO Training
-
-TODO:
-
-- Create cam_env for the simulator (currently in `main.py`)
-- Register the cam_env with gymnasium
-- Load the env with pufferlib's vectorized loader inside of `ppo.py`
-- Train with:
-
+To run locally, run the command:
 ```bash
-./algorithms/ppo.py
+uv run ./algorithms/ppo.py
 ```
+
+To run on lonestar6, ensure that the diff-cam repo and the singularity exist in the $SCRATCH directory. To train, use the command from the diff-cam repo. Ensure that your allocation and training hyperparameters are correct - these are currently hard-coded. 
+```bash
+sbatch train_hpc.bash
+```
+
 
 ## AMD GPU Support
 
@@ -52,7 +51,14 @@ This repository includes automated scripts to handle environment setup on TACC (
 
 ## 1. First-Time Setup
 
-1. Navigate to Scratch and clone the repo:
+1. ssh into TACC:
+```bash
+ssh -m hmac-sha2-512 neilvakharia45@ls6.tacc.utexas.edu
+```
+Password is your TACC password and Passcode is your TACC Token from Duo.
+
+
+2. Navigate to Scratch and clone the repo:
 ```bash
 cd $SCRATCH
 git clone https://github.com/nathantsoi/diff-cam.git
@@ -60,13 +66,13 @@ cd diff-cam
 ```
 
 
-2. Make the setup scripts executable:
+3. Make the setup scripts executable:
 ```bash
 chmod +x scripts/*.sh
 ```
 
 
-3. **Initialize the Machine:**
+4. **Initialize the Machine:**
 Run this script once to install `uv` (if missing) and configure cache directories to use `$SCRATCH` instead of `$HOME`.
 ```bash
 ./scripts/00_init_machine.sh

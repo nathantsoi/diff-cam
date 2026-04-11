@@ -49,6 +49,8 @@ class CamEnv(gym.Env):
         self.obs_dims = 9 + (resolution ** 3) + (resolution ** 3)
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_dims,), dtype=np.float32)
         
+        self.state_buffer = []
+
         self.writer = None
         # --- Rendering State ---
         self.window = None
@@ -79,7 +81,6 @@ class CamEnv(gym.Env):
         self.show_debug = False
         self.show_raymarch = False
         self.show_help = False
-
 
 
     def _initialize_sim(self):
@@ -151,13 +152,8 @@ class CamEnv(gym.Env):
         self.simulator.build_obs()
         return self.simulator.obs_buffer.to_numpy()
 
-    def _calculate_reward(
-        self,
-        excess_before: float,
-        excess_after: float,
-        completed: bool,
-        proximity_bonus: float,
-    ) -> float:
+
+    def _calculate_reward(self, excess_before: float, excess_after: float, completed: bool, proximity_bonus: float,) -> float:
         """ Progress-based reward with time penalty, completion bonus,
         and annealed proximity shaping.
 
@@ -175,6 +171,76 @@ class CamEnv(gym.Env):
         return progress + time_penalty + completion_bonus + proximity_bonus
 
 
+    def _get_obs(self) -> Dict[str, Any]:
+        """ Retrieves the current state of the tool, stock, and target from the simulator.
+
+        Returns:
+            Dict[str, Any]: The current observation including tool position and SDFs.
+        """ 
+
+        tool_pos = self.simulator.tool_pos[None].to_numpy().astype(np.float32)
+        sdf_stock = np.clip(self.simulator.sdf_stock.to_numpy(), -1.0, 1.0).astype(np.float32).flatten()
+        sdf_target = np.clip(self.simulator.sdf_target.to_numpy(), -1.0, 1.0).astype(np.float32).flatten()
+        return np.concatenate([tool_pos, sdf_stock, sdf_target])
+
+
+    def _calculate_reward(self, sdf_stock_before, sdf_stock_after, sdf_target, tool_pos):
+        res = self.resolution
+        k = 10
+
+        ix = int(np.clip(tool_pos[0] * res, 0, res - 1))
+        iy = int(np.clip(tool_pos[1] * res, 0, res - 1))
+        iz = int(np.clip(tool_pos[2] * res, 0, res - 1))
+
+        # --- 1. Cutting Reward ---
+
+        inside_stock_before = 1.0 / (1.0 + np.exp(k * sdf_stock_before))
+        inside_stock_after = 1.0 / (1.0 + np.exp(k * sdf_stock_after))
+
+        inside_target = 1.0 / (1.0 + np.exp(k * sdf_target))
+        outside_target = 1.0 / (1.0 + np.exp(-k * sdf_target))
+
+        material_removed = inside_stock_before - inside_stock_after 
+        good_cuts = float(np.sum(material_removed * outside_target))
+        bad_cuts = float(np.sum(material_removed * inside_target))
+
+        # --- 2. Boundary Proximity Bonus ---
+        target_at_tool = float(sdf_target[ix, iy, iz])
+        stock_at_tool = float(sdf_stock_after[ix, iy, iz])
+        
+        near_target_surface = np.exp(-8.0 * target_at_tool ** 2)
+        stock_presence = 1.0 / (1.0 + np.exp(k * (stock_at_tool - 0.05))) 
+        
+        material_was_cut = float(np.sum(np.clip(material_removed, 0, None)))
+        cutting_mask = 1.0 / (1.0 + np.exp(-k * (material_was_cut - 0.1)))
+        boundary_bonus = 0.3 * near_target_surface * stock_presence * cutting_mask
+    
+        # --- 3. Global Progress Reward ---
+        excess_before = float(np.sum(inside_stock_before * outside_target))
+        excess_after = float(np.sum(inside_stock_after * outside_target))
+        progress_reward = excess_before - excess_after
+
+        # --- 4. Idle Penalty ---
+        total_removed = float(np.sum(np.clip(material_removed, 0, None)))
+        idle_penalty = -0.2 + 0.2 * (1.0 / (1.0 + np.exp(-k * (total_removed - 0.1))))
+
+
+        # --- 5. Holder Collision Penalty ---
+        tool_radius = self.simulator.tool_radius[None]
+        tool_height = self.simulator.tool_height[None]
+
+        holder_z = tool_pos[2] + tool_height
+        holder_z_idx = int(np.clip(holder_z * res, 0, res - 1))
+        stock_at_holder = float(sdf_stock_after[ix, iy, holder_z_idx])
+        holder_inside_stock = 1.0 / (1.0 + np.exp(k * stock_at_holder))
+
+        holder_penalty = -1.0 * holder_inside_stock
+
+        # Reward calculation
+        reward = 10.0 * good_cuts - 10.0 * bad_cuts + 0.5 * boundary_bonus + progress_reward + idle_penalty + holder_penalty
+        return reward
+
+
     def reset(self, seed: Optional[int] = None):
         """ Resets the environment to an initial state and returns an initial observation.
         
@@ -188,9 +254,50 @@ class CamEnv(gym.Env):
         super().reset(seed=seed)
 
         self._initialize_sim()
-        self.simulator.initialize_stock_primitive()
-        self.simulator.initialize_target_primitive()
-        self.simulator.initialize_tool_primitive()
+
+        # Small probability of loading a previously saved state
+        if len(self.state_buffer) > 0 and self.np_random.random() < 0.3:
+            saved = self.state_buffer[self.np_random.integers(len(self.state_buffer))]
+            self.simulator.sdf_stock.from_numpy(saved["sdf_stock"])
+            self.simulator.sdf_target.from_numpy(saved["sdf_target"])
+            x = float(saved["tool_pos"][0])
+            y = float(saved["tool_pos"][1])
+            z = float(saved["tool_pos"][2])
+            radius = float(saved["tool_radius"])
+            height = float(saved["tool_height"])
+            self.simulator.initialize_tool_primitive([x, y, z], radius, height)
+        # Initialize new random state
+        else:
+            # Initialize tool
+            x = float(self.np_random.uniform(0.1, 0.9))
+            y = float(self.np_random.uniform(0.1, 0.9))
+            z = 0.9
+
+            radius = float(self.np_random.uniform(0.05, 0.15))
+            height = float(self.np_random.uniform(0.2, 0.4))
+            self.simulator.initialize_tool_primitive([x, y, z], radius, height)
+
+            # Initialize stock
+            self.simulator.initialize_stock_primitive()
+        
+            # Initialize target with random shape and size
+            shape = self.np_random.choice(["sphere", "cube", "cylinder", "pyramid"])
+            if shape == "sphere":
+                r = float(self.np_random.uniform(0.15, 0.3))
+                self.simulator.initialize_target_sphere_primitive(r)
+            elif shape == "cube":
+                s = float(self.np_random.uniform(0.15, 0.3))
+                self.simulator.initialize_target_cube(s)
+            elif shape == "cylinder":
+                r = float(self.np_random.uniform(0.1, 0.25))
+                h = float(self.np_random.uniform(0.15, 0.3))
+                self.simulator.initialize_target_cylinder(r, h)
+            elif shape == "pyramid":
+                b = float(self.np_random.uniform(0.15, 0.3))
+                h = float(self.np_random.uniform(0.2, 0.4))
+                self.simulator.initialize_target_pyramid(b, h)
+
+        # Initialize tool visualization (must be after tool primitive init)
         self.simulator.init_tool_template()
 
         self.current_step = 0
@@ -211,7 +318,7 @@ class CamEnv(gym.Env):
         return self.simulator.check_tool_intersects_target() == 1
 
 
-    def step(self, action):
+    def adidtya_step(self, action):
         """ Executes one time step within the environment.
         Args:
             action (np.ndarray): The action to take, discrete decomposed into 3 dimensions (x, y, z) with values in {0, 1, 2} corresponding to movement of -1, 0, +1 units respectively.
@@ -261,6 +368,9 @@ class CamEnv(gym.Env):
         move_norm = np.linalg.norm(move_dir)
         if move_norm > 1e-8:
             move_dir = move_dir / move_norm
+            
+        self.last_grad_diff = grad_diff
+        self.last_move_dir = move_dir
 
         # Anneal proximity coefficient linearly to zero
         anneal_frac = max(0.0, 1.0 - self.global_step / self.proximity_anneal_steps)
@@ -270,6 +380,9 @@ class CamEnv(gym.Env):
         # Completion: no excess material remains
         completion_threshold = COMPLETION_THRESHOLD
         completed = excess_after < completion_threshold
+
+        progress = excess_before - excess_after
+        completion_bonus = COMPLETION_BONUS if completed else 0.0
 
         reward = self._calculate_reward(
             excess_before, excess_after, completed, proximity_bonus
@@ -285,7 +398,84 @@ class CamEnv(gym.Env):
             "completed": completed,
             "move_blocked": move_blocked,
             "proximity_coef": proximity_coef,
+            "reward_progress": float(progress),
+            "reward_time_penalty": float(TIME_PENALTY),
+            "reward_completion_bonus": float(completion_bonus),
+            "reward_prox_bonus": float(proximity_bonus),
+            "reward_total": float(reward),
         }
+        self.last_info = info
+
+        return obs, reward, terminated, truncated, info
+
+
+    def step(self, action):
+        """ Executes one time step within the environment.
+        Args:
+            action (np.ndarray): The action to take, discrete decomposed into 3 dimensions (x, y, z) with values in {0, 1, 2} corresponding to movement of -1, 0, +1 units respectively.
+
+        Returns:
+            obs (Dict[str, Any]): The observation after taking the action.
+            reward (float): The reward obtained from taking the action.
+            terminated (bool): Whether the episode has ended.
+            truncated (bool): Whether the episode was truncated.
+            info (Dict[str, Any]): Additional information about the step.
+        """
+        self.global_step += 1
+        self.current_step += 1
+
+        x = (action // 9) - 1
+        y = ((action // 3) % 3) - 1
+        z = (action % 3) - 1
+
+        # State before cut
+        sdf_target = self.simulator.sdf_target.to_numpy()
+        sdf_stock_before = self.simulator.sdf_stock.to_numpy()
+
+        # Cutting action
+        self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z))
+        vol_removed = self.simulator.apply_cut()
+
+        # State after cut
+        tool_pos_after = self.simulator.tool_pos[None].to_numpy()
+        sdf_stock_after = self.simulator.sdf_stock.to_numpy()
+
+        tool_cut_stock = vol_removed > 0.0
+        holder_hit = self._holder_hit_stock()
+        tool_cut_target = self._tool_cuts_into_target()
+
+        if self._tool_cuts_into_target():
+            # Move would place tool inside target — undo it (no-op action)
+            self.simulator.tool_pos[None] = ti.math.vec3(*old_pos)
+            vol_removed = 0.0
+            move_blocked = True
+        else:
+            # Move is legal — apply the cut
+            vol_removed = self.simulator.apply_cut()
+            move_blocked = False
+
+        # Fused: build obs + compute excess_after in ONE kernel + ONE transfer
+        # (no sdf_stock.to_numpy(), no numpy clip/gradient/concat)
+        obs = self._get_obs()
+        reward = self._calculate_reward(sdf_stock_before, sdf_stock_after, sdf_target, tool_pos_after)
+        if vol_removed > 0 and self.np_random.random() < 0.1:
+            self.state_buffer.append({
+                "sdf_stock": sdf_stock_after.copy(),
+                "sdf_target": sdf_target.copy(),
+                "tool_pos": tool_pos_after.copy(),
+                "tool_radius": float(self.simulator.tool_radius[None]),
+                "tool_height": float(self.simulator.tool_height[None]),
+            })
+            if len(self.state_buffer) > 500:
+                self.state_buffer.pop(0)
+
+        #if self.writer:
+        #    self.writer.add_scalar("charts/env_reward", reward, self.global_step)
+        # print(f"Step {self.current_step}: action = [{x}, {y}, {z}], reward = {reward}")
+
+        truncated = self.current_step >= self.max_steps
+        terminated = False
+        info = {"step": self.current_step, "action": [x, y, z], "vol": vol_removed, "tool_cut_target": tool_cut_target}
 
         return obs, reward, terminated, truncated, info
 
