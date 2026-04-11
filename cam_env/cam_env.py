@@ -83,6 +83,7 @@ class CamEnv(gym.Env):
         self.show_help = False
 
 
+
     def _initialize_sim(self):
         """ Initializes the CNC simulator if not already initialized (lazy initialization). """
         if self.simulator is None:
@@ -127,6 +128,12 @@ class CamEnv(gym.Env):
         self.axes_points[5] = [0, 0, 1]
         self.axes_colors[4] = [0, 0, 1]
         self.axes_colors[5] = [0, 0, 1]
+
+        # Reward vectors
+        self.grad_points = ti.Vector.field(3, dtype=ti.f32, shape=2)
+        self.grad_colors = ti.Vector.field(3, dtype=ti.f32, shape=2)
+        self.move_points = ti.Vector.field(3, dtype=ti.f32, shape=2)
+        self.move_colors = ti.Vector.field(3, dtype=ti.f32, shape=2)
 
         # Camera state
         self.cam_center = ti.Vector([0.5, 0.5, 0.5])
@@ -174,9 +181,9 @@ class CamEnv(gym.Env):
     def _get_obs(self) -> Dict[str, Any]:
         """ Retrieves the current state of the tool, stock, and target from the simulator.
 
-        Returns:
-            Dict[str, Any]: The current observation including tool position and SDFs.
-        """ 
+        fov_scale = np.tan(np.pi / 4.0)
+        width, height = 1024, 768
+        aspect_ratio = width / height
 
         tool_pos = self.simulator.tool_pos[None].to_numpy().astype(np.float32)
         sdf_stock = np.clip(self.simulator.sdf_stock.to_numpy(), -1.0, 1.0).astype(np.float32).flatten()
@@ -644,6 +651,23 @@ class CamEnv(gym.Env):
                     color=(1.0, 0.2, 0.2),
                     index_count=self.simulator.tool_count[None]
                 )
+                
+                # Draw Vectors
+                tool_pos_py = self.simulator.tool_pos[None]
+                # Gradient Vector (Yellow)
+                self.grad_points[0] = tool_pos_py
+                self.grad_points[1] = tool_pos_py + ti.Vector(self.last_grad_diff.tolist()) * 0.15
+                self.grad_colors[0] = [1, 1, 0]
+                self.grad_colors[1] = [1, 1, 0]
+                
+                # Movement Vector (Cyan)
+                self.move_points[0] = tool_pos_py
+                self.move_points[1] = tool_pos_py + ti.Vector(self.last_move_dir.tolist()) * 0.15
+                self.move_colors[0] = [0, 1, 1]
+                self.move_colors[1] = [0, 1, 1]
+                
+                self.scene.lines(self.grad_points, width=4.0, per_vertex_color=self.grad_colors)
+                self.scene.lines(self.move_points, width=4.0, per_vertex_color=self.move_colors)
 
             # Draw Holder
             if self.show_holder:
@@ -664,6 +688,14 @@ class CamEnv(gym.Env):
             if not self.show_help:
                 with self.gui.sub_window("Help", x=0.05, y=0.05, width=0.2, height=0.1):
                     self.gui.text("Press 'h' for controls")
+                    
+                with self.gui.sub_window("Rewards", x=0.05, y=0.15, width=0.3, height=0.25):
+                    self.gui.text(f"Total: {self.last_info.get('reward_total', 0.0):.4f}")
+                    self.gui.text(f"Progress: {self.last_info.get('reward_progress', 0.0):.4f}")
+                    self.gui.text(f"Prox Bonus: {self.last_info.get('reward_prox_bonus', 0.0):.4f}")
+                    self.gui.text(f"Time Penalty: {self.last_info.get('reward_time_penalty', 0.0):.4f}")
+                    self.gui.text(f"Completion: {self.last_info.get('reward_completion_bonus', 0.0):.4f}")
+                    self.gui.text(f"Coef: {self.last_info.get('proximity_coef', 0.0):.4f}")
 
         self.window.show()
 
