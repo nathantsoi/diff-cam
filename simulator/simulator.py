@@ -66,10 +66,6 @@ class CNCSimulator:
         self.removed_vol_field = ti.field(dtype=ti.f32, shape=())
         self.excess_field = ti.field(dtype=ti.f32, shape=())
 
-        # Observation buffer: [tool_pos(3), grad_stock(3), grad_diff(3), sdf_stock(res³), sdf_target(res³)]
-        self.obs_size = 9 + 2 * resolution**3
-        self.obs_buffer = ti.field(dtype=ti.f32, shape=(self.obs_size,))
-
     # Initialization Kernels
 
     @ti.kernel

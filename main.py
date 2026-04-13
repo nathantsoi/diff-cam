@@ -16,9 +16,9 @@ else:
 
 def main():
     sim = CNCSimulator(resolution=128)
-    sim.initialize_stock_primitive()
-    sim.initialize_target_primitive()
-    sim.initialize_tool_primitive()
+    sim.initialize_stock(0.4)
+    sim.initialize_target_sphere(0.25)
+    sim.initialize_tool([0.0, 0.5, 0.5], 0.1, 0.3)
 
     # Initialize a path for testing
     path = StairStepPath(step_length=10, num_steps=5)

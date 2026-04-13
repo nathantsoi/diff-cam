@@ -248,7 +248,7 @@ class CamEnv(gym.Env):
             z = float(saved["tool_pos"][2])
             radius = float(saved["tool_radius"])
             height = float(saved["tool_height"])
-            self.simulator.initialize_tool_primitive([x, y, z], radius, height)
+            self.simulator.initialize_tool([x, y, z], radius, height)
         # Initialize new random state
         else:
             # Initialize tool
@@ -258,16 +258,16 @@ class CamEnv(gym.Env):
 
             radius = float(self.np_random.uniform(0.05, 0.15))
             height = float(self.np_random.uniform(0.2, 0.4))
-            self.simulator.initialize_tool_primitive([x, y, z], radius, height)
+            self.simulator.initialize_tool([x, y, z], radius, height)
 
             # Initialize stock
-            self.simulator.initialize_stock_primitive(half_size=0.4)
+            self.simulator.initialize_stock(half_size=0.4)
         
             # Initialize target with random shape and size
             shape = self.np_random.choice(["sphere", "cube", "cylinder", "pyramid"])
             if shape == "sphere":
                 r = float(self.np_random.uniform(0.15, 0.3))
-                self.simulator.initialize_target_sphere_primitive(r)
+                self.simulator.initialize_target_sphere(r)
             elif shape == "cube":
                 s = float(self.np_random.uniform(0.15, 0.3))
                 self.simulator.initialize_target_cube(s)
