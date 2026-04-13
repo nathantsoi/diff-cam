@@ -90,6 +90,13 @@ class CamEnv(gym.Env):
         self.last_info = {}
 
 
+    @staticmethod
+    def _normalize(v: np.ndarray) -> np.ndarray:
+        """ Normalizes a vector to unit length; returns zero vector if norm is near zero. """
+        norm = np.linalg.norm(v)
+        return v / norm if norm > 1e-8 else v
+
+
     def _initialize_sim(self):
         """ Initializes the CNC simulator if not already initialized (lazy initialization). """
         if self.simulator is None:
@@ -146,137 +153,7 @@ class CamEnv(gym.Env):
         self.last_mouse_pos = self.window.get_cursor_pos()
 
 
-    @staticmethod
-    def _normalize(v: np.ndarray) -> np.ndarray:
-        """ Normalizes a vector to unit length; returns zero vector if norm is near zero. """
-        norm = np.linalg.norm(v)
-        return v / norm if norm > 1e-8 else v
-
-# Need to figure out what to do with these 3
-    def _aditya_get_obs(self) -> np.ndarray:
-        """Build observation + compute excess entirely on the GPU.
-
-        Uses the fused simulator.build_obs() kernel which computes gradients,
-        clips SDF values, and accumulates excess in a single kernel launch.
-        Only transfers the final flat obs vector (no full SDF grid transfer).
-
-        After this call, self.simulator.excess_field[None] holds the current
-        excess volume as a side-effect.
-        """
-        self.simulator.build_obs()
-        return self.simulator.obs_buffer.to_numpy()
-
-
-    def _aditya_calculate_reward(self, excess_before: float, excess_after: float, completed: bool, proximity_bonus: float,) -> float:
-        """ Progress-based reward with time penalty, completion bonus,
-        and annealed proximity shaping.
-
-        Args:
-            excess_before:   Excess volume before the cut.
-            excess_after:    Excess volume after the cut.
-            completed:       Whether the stock now matches the target.
-            proximity_bonus: Dot-product shaping reward (already scaled by annealed coef).
-        """
-        progress = excess_before - excess_after   # positive = good cutting
-        time_penalty = TIME_PENALTY
-        completion_bonus = COMPLETION_BONUS if completed else 0.0
-        proximity_bonus = np.clip(proximity_bonus, -PROXIMITY_CLIP, PROXIMITY_CLIP)
-
-        return progress + time_penalty + completion_bonus + proximity_bonus
-
-
-    def _aditya_step(self, action):
-        """ Executes one time step within the environment.
-        Args:
-            action (np.ndarray): The action to take, discrete decomposed into 3 dimensions (x, y, z) with values in {0, 1, 2} corresponding to movement of -1, 0, +1 units respectively.
-
-        Returns:
-            obs (Dict[str, Any]): The observation after taking the action.
-            reward (float): The reward obtained from taking the action.
-            terminated (bool): Whether the episode has ended.
-            truncated (bool): Whether the episode was truncated.
-            info (Dict[str, Any]): Additional information about the step.
-        """
-        self.global_step += 1
-        self.current_step += 1
-
-        x = (action // 9) - 1
-        y = ((action // 3) % 3) - 1
-        z = (action % 3) - 1
-
-        # Excess BEFORE = cached from the previous step's build_obs (free)
-        excess_before = self._prev_excess
-
-        # Tentative move: save position as Python floats (NOT a Taichi proxy that
-        # might be invalidated by the kernel below), move, check if tool overlaps target.
-        _tp = self.simulator.tool_pos[None]
-        old_pos = (float(_tp[0]), float(_tp[1]), float(_tp[2]))
-        self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z))
-
-        if self._tool_cuts_into_target():
-            # Move would place tool inside target — undo it (no-op action)
-            self.simulator.tool_pos[None] = ti.math.vec3(*old_pos)
-            vol_removed = 0.0
-            move_blocked = True
-        else:
-            # Move is legal — apply the cut
-            vol_removed = self.simulator.apply_cut()
-            move_blocked = False
-
-        # Fused: build obs + compute excess_after in ONE kernel + ONE transfer
-        # (no sdf_stock.to_numpy(), no numpy clip/gradient/concat)
-        obs = self._get_obs()
-        excess_after = float(self.simulator.excess_field[None])
-        self._prev_excess = excess_after  # cache for next step
-
-        # Proximity shaping: reward moving toward excess material
-        grad_diff = obs[6:9]  # gradient toward excess material
-        move_dir = np.array([x, y, z], dtype=np.float32)
-        move_norm = np.linalg.norm(move_dir)
-        if move_norm > 1e-8:
-            move_dir = move_dir / move_norm
-            
-        self.last_grad_diff = grad_diff
-        self.last_move_dir = move_dir
-
-        # Anneal proximity coefficient linearly to zero
-        anneal_frac = max(0.0, 1.0 - self.global_step / self.proximity_anneal_steps)
-        proximity_coef = self.proximity_coef_initial * anneal_frac
-        proximity_bonus = proximity_coef * float(np.dot(move_dir, grad_diff))
-
-        # Completion: no excess material remains
-        completion_threshold = COMPLETION_THRESHOLD
-        completed = excess_after < completion_threshold
-
-        progress = excess_before - excess_after
-        completion_bonus = COMPLETION_BONUS if completed else 0.0
-
-        reward = self._calculate_reward(
-            excess_before, excess_after, completed, proximity_bonus
-        )
-
-        truncated = self.current_step >= self.max_steps
-        terminated = completed  # only terminate on perfect completion
-        info = {
-            "step": self.current_step,
-            "action": [x, y, z],
-            "vol": vol_removed,
-            "excess": excess_after,
-            "completed": completed,
-            "move_blocked": move_blocked,
-            "proximity_coef": proximity_coef,
-            "reward_progress": float(progress),
-            "reward_time_penalty": float(TIME_PENALTY),
-            "reward_completion_bonus": float(completion_bonus),
-            "reward_prox_bonus": float(proximity_bonus),
-            "reward_total": float(reward),
-        }
-        self.last_info = info
-
-        return obs, reward, terminated, truncated, info
-
-
-# More methods
+    # More methods
     def _get_obs(self) -> Dict[str, Any]:
         """ Retrieves the current state of the tool, stock, and target from the simulator."""
 
@@ -484,7 +361,7 @@ class CamEnv(gym.Env):
         return obs, reward, terminated, truncated, info
 
 
-# Rendering Methods
+    # Rendering Methods
     def _handle_input(self):
         """ Handles keyboard and mouse input for orbit camera control and toggles. """
         # Event handling (key presses)
@@ -711,7 +588,7 @@ class CamEnv(gym.Env):
             self._render_rgb_array()
 
 
-# Close
+    # Close
     def close(self):
         """ Cleans up the environment resources. """
         if self.window is not None:

@@ -204,3 +204,35 @@ class PufferBatchedCamEnv(pufferlib.PufferEnv):
     
     def render(self):
         return None
+
+
+    def _aditya_get_obs(self) -> np.ndarray:
+        """Build observation + compute excess entirely on the GPU.
+
+        Uses the fused simulator.build_obs() kernel which computes gradients,
+        clips SDF values, and accumulates excess in a single kernel launch.
+        Only transfers the final flat obs vector (no full SDF grid transfer).
+
+        After this call, self.simulator.excess_field[None] holds the current
+        excess volume as a side-effect.
+        """
+        self.simulator.build_obs()
+        return self.simulator.obs_buffer.to_numpy()
+
+
+    def _aditya_calculate_reward(self, excess_before: float, excess_after: float, completed: bool, proximity_bonus: float,) -> float:
+        """ Progress-based reward with time penalty, completion bonus,
+        and annealed proximity shaping.
+
+        Args:
+            excess_before:   Excess volume before the cut.
+            excess_after:    Excess volume after the cut.
+            completed:       Whether the stock now matches the target.
+            proximity_bonus: Dot-product shaping reward (already scaled by annealed coef).
+        """
+        progress = excess_before - excess_after   # positive = good cutting
+        time_penalty = TIME_PENALTY
+        completion_bonus = COMPLETION_BONUS if completed else 0.0
+        proximity_bonus = np.clip(proximity_bonus, -PROXIMITY_CLIP, PROXIMITY_CLIP)
+
+        return progress + time_penalty + completion_bonus + proximity_bonus
