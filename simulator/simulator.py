@@ -1,5 +1,7 @@
 import taichi as ti
 
+from simulator.simulator_utils import *
+
 
 @ti.data_oriented
 class CNCSimulator:
@@ -68,192 +70,60 @@ class CNCSimulator:
         self.obs_size = 9 + 2 * resolution**3
         self.obs_buffer = ti.field(dtype=ti.f32, shape=(self.obs_size,))
 
-
-
-    # ── Fused observation builder (GPU-only) ────────────────────────
-    def build_obs(self):
-        """Build the full observation vector AND compute excess volume in one
-        kernel launch.  After this call:
-          - obs_buffer contains the flat observation (transfer with .to_numpy())
-          - excess_field[None] holds the current excess volume (scalar read)
-        """
-        self.excess_field[None] = 0.0
-        self._build_obs_kernel()
-
-    @ti.kernel
-    def _build_obs_kernel(self):
-        # ── Serial: tool position + gradients at tool cell ──────────
-        tp = self.tool_pos[None]
-        self.obs_buffer[0] = tp.x
-        self.obs_buffer[1] = tp.y
-        self.obs_buffer[2] = tp.z
-
-        res = self.res
-        ix = ti.max(1, ti.min(res - 2, int(tp.x * res)))
-        iy = ti.max(1, ti.min(res - 2, int(tp.y * res)))
-        iz = ti.max(1, ti.min(res - 2, int(tp.z * res)))
-
-        inv_2dx = float(res) * 0.5  # 1 / (2 * dx)
-
-        # ∇φ_stock (normalized)
-        gs_x = (
-            self.sdf_stock[ix + 1, iy, iz] - self.sdf_stock[ix - 1, iy, iz]
-        ) * inv_2dx
-        gs_y = (
-            self.sdf_stock[ix, iy + 1, iz] - self.sdf_stock[ix, iy - 1, iz]
-        ) * inv_2dx
-        gs_z = (
-            self.sdf_stock[ix, iy, iz + 1] - self.sdf_stock[ix, iy, iz - 1]
-        ) * inv_2dx
-        gs = ti.Vector([gs_x, gs_y, gs_z])
-        gs_norm = gs.norm()
-        if gs_norm > 1e-8:
-            gs = gs / gs_norm
-        self.obs_buffer[3] = gs.x
-        self.obs_buffer[4] = gs.y
-        self.obs_buffer[5] = gs.z
-
-        # ∇(φ_target − φ_stock) — direction toward excess material
-        gd_x = (
-            (self.sdf_target[ix + 1, iy, iz] - self.sdf_stock[ix + 1, iy, iz])
-            - (self.sdf_target[ix - 1, iy, iz] - self.sdf_stock[ix - 1, iy, iz])
-        ) * inv_2dx
-        gd_y = (
-            (self.sdf_target[ix, iy + 1, iz] - self.sdf_stock[ix, iy + 1, iz])
-            - (self.sdf_target[ix, iy - 1, iz] - self.sdf_stock[ix, iy - 1, iz])
-        ) * inv_2dx
-        gd_z = (
-            (self.sdf_target[ix, iy, iz + 1] - self.sdf_stock[ix, iy, iz + 1])
-            - (self.sdf_target[ix, iy, iz - 1] - self.sdf_stock[ix, iy, iz - 1])
-        ) * inv_2dx
-        self.obs_buffer[6] = gd_x
-        self.obs_buffer[7] = gd_y
-        self.obs_buffer[8] = gd_z
-
-        # ── Parallel: clipped SDF copy + excess accumulation ───────
-        for i, j, k in ti.ndrange(res, res, res):
-            idx = i * res * res + j * res + k
-            stock_val = self.sdf_stock[i, j, k]
-            target_val = self.sdf_target[i, j, k]
-
-            # Clipped SDF values → obs_buffer
-            self.obs_buffer[9 + idx] = ti.max(-1.0, ti.min(1.0, stock_val))
-            self.obs_buffer[9 + res * res * res + idx] = ti.max(
-                -1.0, ti.min(1.0, target_val)
-            )
-
-            # Excess accumulation (free — already visiting every voxel)
-            excess_val = ti.max(ti.min(-stock_val, target_val), 0.0)
-            if excess_val > 0.0:
-                ti.atomic_add(self.excess_field[None], excess_val)
-
     # Initialization Kernels
 
-    # Stock
     @ti.kernel
-    def initialize_stock_primitive(self, half_size: ti.f32):
-        """Initializes stock as a solid block (SDF < 0 inside)"""
-        hs = float(half_size)
+    def initialize_target_sphere(self, radius: ti.f32):
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
             p = ti.Vector([i, j, k]) * self.dx
             center = ti.Vector([0.5, 0.5, 0.5])
-            d = ti.abs(p - center) - hs
-            dist = ti.max(d.x, ti.max(d.y, d.z))
-            self.sdf_stock[i, j, k] = dist
-
-    # Target
-    @ti.kernel
-    def initialize_target_sphere_primitive(self, radius: ti.f32):
-        """Initializes target as a smaller sphere/box for visualization"""
-        for i, j, k in ti.ndrange(self.res, self.res, self.res):
-            p = ti.Vector([i, j, k]) * self.dx
-            center = ti.Vector([0.5, 0.5, 0.5])
-            # Sphere target
-            d = (p - center).norm() - radius
-            self.sdf_target[i, j, k] = d
+            self.sdf_target[i, j, k] = sphere_sdf(p, center, radius)
 
     @ti.kernel
     def initialize_target_cube(self, half_size: ti.f32):
-        """
-        Initializes target as a cube.
-        SDF for a box: max(|x - cx| - s, |y - cy| - s, |z - cz| - s)
-        Same formula your stock uses, just with variable center and size.
-        """
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
             p = ti.Vector([i, j, k]) * self.dx
             center = ti.Vector([0.5, 0.5, 0.5])
-            d = ti.abs(p - center) - half_size
-            dist = ti.max(d.x, ti.max(d.y, d.z))
-            self.sdf_target[i, j, k] = dist
-
-    @ti.kernel
-    def initialize_target_cylinder(self, radius: ti.f32, half_height: ti.f32):
-        """
-        Initializes target as a cylinder aligned with the Z axis.
-        The cylinder is centered at (cx, cy, cz) with given radius and half_height.
-        SDF = max(horizontal_dist - radius, |z - cz| - half_height)
-        """
-        for i, j, k in ti.ndrange(self.res, self.res, self.res):
-            cx, cy, cz = 0.5, 0.5, 0.5
-
-            p = ti.Vector([i, j, k]) * self.dx
-            d_horiz = ti.Vector([p.x - cx, p.y - cy]).norm() - radius
-            d_vert = ti.abs(p.z - cz) - half_height
-            self.sdf_target[i, j, k] = ti.max(d_horiz, d_vert)
+            self.sdf_target[i, j, k] = box_sdf(p, center, half_size)
 
     @ti.kernel
     def initialize_target_pyramid(self, half_base: ti.f32, height: ti.f32):
-        """
-        Initializes target as a square pyramid.
-        Base is centered at (cx, cy, base_z) with half-width half_base.
-        Apex is at (cx, cy, base_z + height).
-
-        The pyramid is the intersection of:
-        - A bottom plane (z >= base_z)
-        - Four sloping planes that taper from the base to the apex
-
-        Each sloping plane says: at height z, the allowed half-width is
-        half_base * (1 - (z - base_z) / height). The SDF at each point
-        is the max of all plane distances.
-        """
-        cx, cy, base_z = 0.5, 0.5, 0.2
-
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
             p = ti.Vector([i, j, k]) * self.dx
+            center = ti.Vector([0.5, 0.5])
+            base_z = 0.5 - height * 0.5
+            self.sdf_target[i, j, k] = pyramid_sdf(
+                p, center.x, center.y, base_z, half_base, height
+            )
 
-            # How far up the pyramid are we (0 at base, 1 at apex)
-            t = (p.z - base_z) / height
+    @ti.kernel
+    def initialize_target_cylinder(self, radius: ti.f32, height: ti.f32):
+        for i, j, k in ti.ndrange(self.res, self.res, self.res):
+            p = ti.Vector([i, j, k]) * self.dx
+            center = ti.Vector([0.5, 0.5])
+            cz = 0.5 - height * 0.5
+            self.sdf_target[i, j, k] = cylinder_sdf(
+                p, center.x, center.y, cz, radius, height * 0.5
+            )
 
-            # Below the base
-            d_bottom = base_z - p.z
+    @ti.kernel
+    def initialize_stock(self, half_size: ti.f32):
+        for i, j, k in ti.ndrange(self.res, self.res, self.res):
+            p = ti.Vector([i, j, k]) * self.dx
+            center = ti.Vector([0.5, 0.5, 0.5])
+            self.sdf_stock[i, j, k] = box_sdf(p, center, half_size)
 
-            # Above the apex
-            d_top = p.z - (base_z + height)
 
-            # At height z, the allowed half-width shrinks linearly
-            # from half_base at the bottom to 0 at the apex
-            allowed = half_base * (1.0 - t)
-
-            # Box SDF in XY at current height
-            dx = ti.abs(p.x - cx) - allowed
-            dy = ti.abs(p.y - cy) - allowed
-            d_sides = ti.max(dx, dy)
-
-            # Final SDF: max of all constraints
-            dist = ti.max(d_bottom, ti.max(d_top, d_sides))
-            self.sdf_target[i, j, k] = dist
-
-    # Tool
-    def initialize_tool_primitive(self, pos, radius=0.1, height=0.3):
-        """Initializes the tool position, tool radius, and tool height"""
-
+    def initialize_tool(self, pos, radius, height):
         self.tool_pos[None] = ti.Vector(pos)
         self.tool_radius[None] = radius
         self.tool_height[None] = height
 
-    # Methods to generate tool and holder sdfs
+
+
+    # Other kernels and functions (cutting, collision, observation)
     @ti.func
-    def tool_sdf(self, p):
+    def dist_from_tool(self, p):
         """Analytic SDF for a cylindrical cutter (aligned with Z-axis)"""
         tool_pos = self.tool_pos[None]
         tool_radius = self.tool_radius[None]
@@ -271,7 +141,7 @@ class CNCSimulator:
         return ti.max(d_h, d_z)
 
     @ti.func
-    def holder_sdf(self, p):
+    def dist_from_holder(self, p):
         """Analytic SDF for the holder cylinder (based on tool position)"""
         tool_pos = self.tool_pos[None]
         tool_radius = self.tool_radius[None]
@@ -291,7 +161,7 @@ class CNCSimulator:
 
         return ti.max(d_h, d_z)
 
-    # Other kernel utilities
+
     def apply_cut(self) -> float:
         """
         Boolean Subtraction: Stock = max(Stock, -Tool)
@@ -334,7 +204,7 @@ class CNCSimulator:
         for i, j, k in ti.ndrange((min_x, max_x), (min_y, max_y), (min_z, max_z)):
             p = ti.Vector([i, j, k]) * self.dx
 
-            tool_dist = self.tool_sdf(p)
+            tool_dist = self.dist_from_tool(p)
             stock_dist = self.sdf_stock[i, j, k]
 
             # The Cut Logic:
@@ -406,7 +276,7 @@ class CNCSimulator:
             p = ti.Vector([i, j, k]) * self.dx
 
             # If point is inside holder AND inside stock → collision
-            if self.holder_sdf(p) < 0 and self.sdf_stock[i, j, k] < 0:
+            if self.dist_from_holder(p) < 0 and self.sdf_stock[i, j, k] < 0:
                 collision = 1
 
         return collision
@@ -454,15 +324,21 @@ class CNCSimulator:
                 and p.z >= 0.0
                 and p.z <= 1.0
             ):
-                # tool_sdf <= 0  : point is on or inside tool (includes bottom face)
+                # dist_from_tool <= 0  : point is on or inside tool (includes bottom face)
                 # target_sdf <= 0: point is on or inside target (interpolated)
-                if self.tool_sdf(p) <= 0:
-                    target_val = self.sample_sdf(self.sdf_target, p)
+                if self.dist_from_tool(p) <= 0:
+                    target_val = self.interpolate_sdf(self.sdf_target, p)
                     if target_val <= 0:
                         cuts_target = 1
 
         return cuts_target
 
+
+    def compute_excess(self) -> float:
+        """Computes the excess volume: sum(max(min(-sdf_stock, sdf_target), 0)) over the full grid."""
+        self.excess_field[None] = 0.0
+        self._compute_excess_kernel()
+        return float(self.excess_field[None])
 
     @ti.kernel
     def _compute_excess_kernel(self):
@@ -473,6 +349,86 @@ class CNCSimulator:
             val = ti.max(ti.min(-stock, target), 0.0)
             if val > 0.0:
                 ti.atomic_add(self.excess_field[None], val)
+
+    @ti.func
+    def interpolate_sdf(self, field: ti.template(), p: ti.template()) -> ti.f32:
+        """
+        This function performs trilinear interpolation of the SDF field at a continuous position p.
+        
+        Args:
+            field: A 3D Taichi field representing the SDF values.
+            p: A 3D vector representing the continuous position in the simulation domain (normalized [0,1]).
+        
+        Returns:
+            The interpolated SDF value at position p.
+        """
+        p_grid = p * self.res
+        x = p_grid.x
+        y = p_grid.y
+        z = p_grid.z
+
+        x0 = int(ti.floor(x))
+        y0 = int(ti.floor(y))
+        z0 = int(ti.floor(z))
+
+        x1 = x0 + 1
+        y1 = y0 + 1
+        z1 = z0 + 1
+
+        tx = x - x0
+        ty = y - y0
+        tz = z - z0
+
+        x0 = ti.max(0, ti.min(self.res - 1, x0))
+        y0 = ti.max(0, ti.min(self.res - 1, y0))
+        z0 = ti.max(0, ti.min(self.res - 1, z0))
+        x1 = ti.max(0, ti.min(self.res - 1, x1))
+        y1 = ti.max(0, ti.min(self.res - 1, y1))
+        z1 = ti.max(0, ti.min(self.res - 1, z1))
+
+        c000 = field[x0, y0, z0]
+        c100 = field[x1, y0, z0]
+        c010 = field[x0, y1, z0]
+        c110 = field[x1, y1, z0]
+        c001 = field[x0, y0, z1]
+        c101 = field[x1, y0, z1]
+        c011 = field[x0, y1, z1]
+        c111 = field[x1, y1, z1]
+
+        c00 = c000 * (1 - tx) + c100 * tx
+        c10 = c010 * (1 - tx) + c110 * tx
+        c01 = c001 * (1 - tx) + c101 * tx
+        c11 = c011 * (1 - tx) + c111 * tx
+
+        c0 = c00 * (1 - ty) + c10 * ty
+        c1 = c01 * (1 - ty) + c11 * ty
+
+        c = c0 * (1 - tz) + c1 * tz
+        return c
+
+    @ti.func
+    def compute_surface_normal(self, field: ti.template(), p: ti.template()) -> ti.math.vec3:
+        """
+        This function computes the surface normal at a continuous position p by using central differences on the interpolated SDF field.
+        
+        Args:
+            field: A 3D Taichi field representing the SDF values.
+            p: A 3D vector representing the continuous position in the simulation domain (normalized [0,1]).
+        
+        Returns:
+            A normalized 3D vector representing the surface normal at position p.
+        """
+        eps = self.dx * 1.5
+        dx = ti.Vector([eps, 0.0, 0.0])
+        dy = ti.Vector([0.0, eps, 0.0])
+        dz = ti.Vector([0.0, 0.0, eps])
+
+        nx = self.interpolate_sdf(field, p + dx) - self.interpolate_sdf(field, p - dx)
+        ny = self.interpolate_sdf(field, p + dy) - self.interpolate_sdf(field, p - dy)
+        nz = self.interpolate_sdf(field, p + dz) - self.interpolate_sdf(field, p - dz)
+
+        return ti.math.normalize(ti.Vector([nx, ny, nz]))
+
 
     # Visualization Kernels
     @ti.kernel
@@ -668,65 +624,6 @@ class CNCSimulator:
             # Place YZ at Bottom-Left: x=[0, res], y=[0, res]
             self.debug_buffer[i, j] = self.slice_yz[i, j]
 
-    @ti.func
-    def sample_sdf(self, field: ti.template(), p: ti.template()) -> ti.f32:
-        p_grid = p * self.res
-        x = p_grid.x
-        y = p_grid.y
-        z = p_grid.z
-
-        x0 = int(ti.floor(x))
-        y0 = int(ti.floor(y))
-        z0 = int(ti.floor(z))
-
-        x1 = x0 + 1
-        y1 = y0 + 1
-        z1 = z0 + 1
-
-        tx = x - x0
-        ty = y - y0
-        tz = z - z0
-
-        x0 = ti.max(0, ti.min(self.res - 1, x0))
-        y0 = ti.max(0, ti.min(self.res - 1, y0))
-        z0 = ti.max(0, ti.min(self.res - 1, z0))
-        x1 = ti.max(0, ti.min(self.res - 1, x1))
-        y1 = ti.max(0, ti.min(self.res - 1, y1))
-        z1 = ti.max(0, ti.min(self.res - 1, z1))
-
-        c000 = field[x0, y0, z0]
-        c100 = field[x1, y0, z0]
-        c010 = field[x0, y1, z0]
-        c110 = field[x1, y1, z0]
-        c001 = field[x0, y0, z1]
-        c101 = field[x1, y0, z1]
-        c011 = field[x0, y1, z1]
-        c111 = field[x1, y1, z1]
-
-        c00 = c000 * (1 - tx) + c100 * tx
-        c10 = c010 * (1 - tx) + c110 * tx
-        c01 = c001 * (1 - tx) + c101 * tx
-        c11 = c011 * (1 - tx) + c111 * tx
-
-        c0 = c00 * (1 - ty) + c10 * ty
-        c1 = c01 * (1 - ty) + c11 * ty
-
-        c = c0 * (1 - tz) + c1 * tz
-        return c
-
-    @ti.func
-    def normal_sdf(self, field: ti.template(), p: ti.template()) -> ti.math.vec3:
-        eps = self.dx * 1.5
-        dx = ti.Vector([eps, 0.0, 0.0])
-        dy = ti.Vector([0.0, eps, 0.0])
-        dz = ti.Vector([0.0, 0.0, eps])
-
-        nx = self.sample_sdf(field, p + dx) - self.sample_sdf(field, p - dx)
-        ny = self.sample_sdf(field, p + dy) - self.sample_sdf(field, p - dy)
-        nz = self.sample_sdf(field, p + dz) - self.sample_sdf(field, p - dz)
-
-        return ti.math.normalize(ti.Vector([nx, ny, nz]))
-
     @ti.kernel
     def render_raymarch(
         self,
@@ -772,9 +669,9 @@ class CNCSimulator:
                     and p.z <= 1.0
                 ):
                     if show_stock == 1:
-                        d_stock = self.sample_sdf(self.sdf_stock, p)
+                        d_stock = self.interpolate_sdf(self.sdf_stock, p)
                     if show_part == 1:
-                        d_target = self.sample_sdf(self.sdf_target, p)
+                        d_target = self.interpolate_sdf(self.sdf_target, p)
                 else:
                     d_box = p - ti.Vector([0.5, 0.5, 0.5])
                     d_aabb = (
@@ -789,7 +686,7 @@ class CNCSimulator:
                         d_target = ti.max(d_aabb, 2e-3)
 
                 if show_tool == 1:
-                    d_tool = ti.min(self.tool_sdf(p), self.holder_sdf(p))
+                    d_tool = ti.min(self.dist_from_tool(p), self.dist_from_holder(p))
 
                 d = ti.min(d_stock, ti.min(d_target, d_tool))
 
@@ -800,22 +697,34 @@ class CNCSimulator:
                     if d == d_tool:
                         mat_color = (
                             ti.Vector([1.0, 0.2, 0.2])
-                            if self.tool_sdf(p) < self.holder_sdf(p)
+                            if self.dist_from_tool(p) < self.dist_from_holder(p)
                             else ti.Vector([0.2, 0.2, 0.2])
                         )
                         eps = 1e-3
                         dx = ti.Vector([eps, 0.0, 0.0])
                         dy = ti.Vector([0.0, eps, 0.0])
                         dz = ti.Vector([0.0, 0.0, eps])
-                        if self.tool_sdf(p) < self.holder_sdf(p):
-                            nx = self.tool_sdf(p + dx) - self.tool_sdf(p - dx)
-                            ny = self.tool_sdf(p + dy) - self.tool_sdf(p - dy)
-                            nz = self.tool_sdf(p + dz) - self.tool_sdf(p - dz)
+                        if self.dist_from_tool(p) < self.dist_from_holder(p):
+                            nx = self.dist_from_tool(p + dx) - self.dist_from_tool(
+                                p - dx
+                            )
+                            ny = self.dist_from_tool(p + dy) - self.dist_from_tool(
+                                p - dy
+                            )
+                            nz = self.dist_from_tool(p + dz) - self.dist_from_tool(
+                                p - dz
+                            )
                             norm = ti.math.normalize(ti.Vector([nx, ny, nz]))
                         else:
-                            nx = self.holder_sdf(p + dx) - self.holder_sdf(p - dx)
-                            ny = self.holder_sdf(p + dy) - self.holder_sdf(p - dy)
-                            nz = self.holder_sdf(p + dz) - self.holder_sdf(p - dz)
+                            nx = self.dist_from_holder(p + dx) - self.dist_from_holder(
+                                p - dx
+                            )
+                            ny = self.dist_from_holder(p + dy) - self.dist_from_holder(
+                                p - dy
+                            )
+                            nz = self.dist_from_holder(p + dz) - self.dist_from_holder(
+                                p - dz
+                            )
                             norm = ti.math.normalize(ti.Vector([nx, ny, nz]))
                     elif d == d_stock:
                         mat_color = ti.Vector([0.2, 0.8, 0.2])
