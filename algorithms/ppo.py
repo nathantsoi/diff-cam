@@ -492,15 +492,20 @@ if __name__ == "__main__":
             print(infos)
             # Log reward components from info
             reward_keys = [
-                "vol",
+                "step", 
+                "action", 
+                "vol", 
                 "reward",
-                "good_cuts",
-                "bad_cuts",
-                "boundary_bonus",
+                "good_cuts", 
+                "bad_cuts", 
+                "boundary_bonus", 
                 "progress_reward",
-                "idle_penalty",
+                "idle_penalty", 
                 "holder_penalty",
-                "tool_cut_target",
+                "grad_x", 
+                "grad_y", 
+                "grad_z", 
+                "grad_magnitude"
             ]
             for key in reward_keys:
                 if key in infos:
