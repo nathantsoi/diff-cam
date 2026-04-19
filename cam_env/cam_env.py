@@ -292,7 +292,7 @@ class CamEnv(gym.Env):
         # --- Gradients (optional, expensive: 7 tape runs) ---
         # Must be called while sdf_stock_before still holds the pre-cut snapshot.
         # snapshot_stock() was called above, and we haven't overwritten it.
-        reward_info = self.simulator.compute_reward_and_gradients()
+        reward_info = self.simulator.compute_reward_and_gradients() # reward from simulator's autodiff, not the separate calculation in _calculate_reward
         grad = reward_info["grad"]
         reward = reward_info["reward"]
         good_cuts = reward_info["good_cuts"]
@@ -308,19 +308,12 @@ class CamEnv(gym.Env):
 
         obs = self._get_obs()
 
-        # --- Reward (unified formulation; matches simulator's autodiff target) ---
+        # --- Reward from simulator - repeat ---
         # reward_components = self._calculate_reward(
         #     sdf_stock_before_np, sdf_stock_after_np, sdf_target_np, tool_pos_after
         # )
         # reward = reward_components["reward"]
         
-
-        # # --- Update render vectors (gradient direction vs. chosen move) ---
-        # if grad is not None:
-        #     self.last_grad_diff = self._normalize(grad).astype(np.float32)
-        # self.last_move_dir = self._normalize(
-        #     np.array([x, y, z], dtype=np.float32)
-        # ).astype(np.float32)
 
         # --- State buffer for resumable resets ---
         if vol_removed > 0 and self.np_random.random() < 0.1:
@@ -343,6 +336,7 @@ class CamEnv(gym.Env):
             "vol": float(vol_removed),
             "reward": float(reward),
             "completed": terminated,
+
             # Reward component breakdown
             "good_cuts":       good_cuts,
             "bad_cuts":        bad_cuts,
@@ -351,6 +345,7 @@ class CamEnv(gym.Env):
             "idle":            idle,
             "holder":          holder,
 
+            # Gradients
             "grad_x": float(grad[0]),
             "grad_y": float(grad[1]),
             "grad_z": float(grad[2]),
@@ -540,8 +535,14 @@ if __name__ == "__main__":
         done = terminated or truncated
         env.render()
         time.sleep(0.3)
-        print(f"Step {info['step']:3d} | R={reward:+.4f} | vol={info['vol']:.1f} | "
-              f"good={info['good_cuts']:+.4f} bad={info['bad_cuts']:+.4f} "
+        print(f"Step {info['step']:3d} | "
+              f"R={reward:+.4f} | "
+              f"good={info['good_cuts']:+.4f} | "
+              f"bad={info['bad_cuts']:+.4f} | "
               f"holder={info['holder']:+.4f} | "
+              f"progress={info['progress']:+.4f} | "
+              f"boundary={info['boundary']:+.4f} | "
+              f"idle={info['idle']:+.4f} | "
+              f"grad=({info.get('grad_x', 0.0):+.4f}, {info.get('grad_y', 0.0):+.4f}, {info.get('grad_z', 0.0):+.4f}) | "
               f"|∇R|={info.get('grad_magnitude', 0.0):.4f}")
     env.close()

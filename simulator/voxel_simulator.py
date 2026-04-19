@@ -355,7 +355,7 @@ class CNCSimulator:
         return ti.math.normalize(ti.Vector([nx, ny, nz]))
 
     # ========================================================================
-    # UNIFIED REWARD
+    # REWARDS AND GRADIENT
     # ========================================================================
     #
     # Reward formulation (single source of truth):
