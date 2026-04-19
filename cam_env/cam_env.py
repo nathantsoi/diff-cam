@@ -7,15 +7,26 @@ import time
 
 from simulator.simulator import CNCSimulator
 from cam_env.physics_config import (
-    TIME_PENALTY, COMPLETION_BONUS, COMPLETION_THRESHOLD,
-    PROXIMITY_COEF_INITIAL, PROXIMITY_ANNEAL_STEPS, PROXIMITY_CLIP,
+    TIME_PENALTY,
+    COMPLETION_BONUS,
+    COMPLETION_THRESHOLD,
+    PROXIMITY_COEF_INITIAL,
+    PROXIMITY_ANNEAL_STEPS,
+    PROXIMITY_CLIP,
 )
+
 
 class CamEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
-    def __init__(self, resolution=128, max_steps=100, render_mode: Optional[str] = None, debug: bool = False):
-        """ Initializes the CAM environment.
+    def __init__(
+        self,
+        resolution=128,
+        max_steps=100,
+        render_mode: Optional[str] = None,
+        debug: bool = False,
+    ):
+        """Initializes the CAM environment.
 
         Args:
             resolution (int): The resolution of the simulation grid.
@@ -25,8 +36,9 @@ class CamEnv(gym.Env):
         """
         super().__init__()
 
-         # --- Simulator State ---
+        # --- Simulator State ---
         self.resolution = resolution
+        self.dx = 1.0 / resolution
         self.max_steps = max_steps
         self.render_mode = render_mode
         self.debug = debug
@@ -39,12 +51,16 @@ class CamEnv(gym.Env):
         self.action_space = spaces.Discrete(np.prod(self.action_dims))
 
         # self.obs_dims = 9 + (resolution ** 3) + (resolution ** 3) # tool position (3) + grad_stock (3) + grad_diff (3) + stock SDF + target SDF
-        self.obs_dims = 3 + (resolution ** 3) + (resolution ** 3) # tool position + stock SDF + target SDF
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(self.obs_dims,), dtype=np.float32)
-        
+        self.obs_dims = (
+            3 + (resolution**3) + (resolution**3)
+        )  # tool position + stock SDF + target SDF
+        self.observation_space = spaces.Box(
+            low=-np.inf, high=np.inf, shape=(self.obs_dims,), dtype=np.float32
+        )
+
         self.state_buffer = []
 
-        self.writer = None
+        # self.writer = None
 
         # --- Rendering State ---
         self.window = None
@@ -84,27 +100,24 @@ class CamEnv(gym.Env):
 
         # --- Cached excess for reward progress (set in reset/step) ---
         self._prev_excess = 0.0
-        
+
         self.last_grad_diff = np.zeros(3, dtype=np.float32)
         self.last_move_dir = np.zeros(3, dtype=np.float32)
         self.last_info = {}
 
-
     @staticmethod
     def _normalize(v: np.ndarray) -> np.ndarray:
-        """ Normalizes a vector to unit length; returns zero vector if norm is near zero. """
+        """Normalizes a vector to unit length; returns zero vector if norm is near zero."""
         norm = np.linalg.norm(v)
         return v / norm if norm > 1e-8 else v
 
-
     def _initialize_sim(self):
-        """ Initializes the CNC simulator if not already initialized (lazy initialization). """
+        """Initializes the CNC simulator if not already initialized (lazy initialization)."""
         if self.simulator is None:
             self.simulator = CNCSimulator(resolution=self.resolution, debug=self.debug)
 
-
     def _initialize_render(self):
-        """ Initializes GGUI rendering components (lazy initialization). """
+        """Initializes GGUI rendering components (lazy initialization)."""
         if self.window is not None:
             return
 
@@ -152,22 +165,30 @@ class CamEnv(gym.Env):
         self.cam_center = ti.Vector([0.5, 0.5, 0.5])
         self.last_mouse_pos = self.window.get_cursor_pos()
 
-
     # More methods
-    def _get_obs(self) -> Dict[str, Any]:
-        """ Retrieves the current state of the tool, stock, and target from the simulator."""
+    def _get_obs(self) -> np.ndarray:
+        """Retrieves the current state of the tool, stock, and target from the simulator."""
 
         fov_scale = np.tan(np.pi / 4.0)
         width, height = 1024, 768
         aspect_ratio = width / height
 
         tool_pos = self.simulator.tool_pos[None].to_numpy().astype(np.float32)
-        sdf_stock = np.clip(self.simulator.sdf_stock.to_numpy(), -1.0, 1.0).astype(np.float32).flatten()
-        sdf_target = np.clip(self.simulator.sdf_target.to_numpy(), -1.0, 1.0).astype(np.float32).flatten()
+        sdf_stock = (
+            np.clip(self.simulator.sdf_stock.to_numpy(), -1.0, 1.0)
+            .astype(np.float32)
+            .flatten()
+        )
+        sdf_target = (
+            np.clip(self.simulator.sdf_target.to_numpy(), -1.0, 1.0)
+            .astype(np.float32)
+            .flatten()
+        )
         return np.concatenate([tool_pos, sdf_stock, sdf_target])
 
-
-    def _calculate_reward(self, sdf_stock_before, sdf_stock_after, sdf_target, tool_pos):
+    def _calculate_reward(
+        self, sdf_stock_before, sdf_stock_after, sdf_target, tool_pos
+    ):
         res = self.resolution
         k = 10
 
@@ -183,21 +204,21 @@ class CamEnv(gym.Env):
         inside_target = 1.0 / (1.0 + np.exp(k * sdf_target))
         outside_target = 1.0 / (1.0 + np.exp(-k * sdf_target))
 
-        material_removed = inside_stock_before - inside_stock_after 
+        material_removed = inside_stock_before - inside_stock_after
         good_cuts = float(np.sum(material_removed * outside_target))
         bad_cuts = float(np.sum(material_removed * inside_target))
 
         # --- 2. Boundary Proximity Bonus ---
         target_at_tool = float(sdf_target[ix, iy, iz])
         stock_at_tool = float(sdf_stock_after[ix, iy, iz])
-        
-        near_target_surface = np.exp(-8.0 * target_at_tool ** 2)
-        stock_presence = 1.0 / (1.0 + np.exp(k * (stock_at_tool - 0.05))) 
-        
+
+        near_target_surface = np.exp(-8.0 * target_at_tool**2)
+        stock_presence = 1.0 / (1.0 + np.exp(k * (stock_at_tool - 0.05)))
+
         material_was_cut = float(np.sum(np.clip(material_removed, 0, None)))
         cutting_mask = 1.0 / (1.0 + np.exp(-k * (material_was_cut - 0.1)))
         boundary_bonus = 0.3 * near_target_surface * stock_presence * cutting_mask
-    
+
         # --- 3. Global Progress Reward ---
         excess_before = float(np.sum(inside_stock_before * outside_target))
         excess_after = float(np.sum(inside_stock_after * outside_target))
@@ -206,7 +227,6 @@ class CamEnv(gym.Env):
         # --- 4. Idle Penalty ---
         total_removed = float(np.sum(np.clip(material_removed, 0, None)))
         idle_penalty = -0.2 + 0.2 * (1.0 / (1.0 + np.exp(-k * (total_removed - 0.1))))
-
 
         # --- 5. Holder Collision Penalty ---
         tool_radius = self.simulator.tool_radius[None]
@@ -220,13 +240,27 @@ class CamEnv(gym.Env):
         holder_penalty = -1.0 * holder_inside_stock
 
         # Reward calculation
-        reward = 10.0 * good_cuts - 10.0 * bad_cuts + 0.5 * boundary_bonus + progress_reward + idle_penalty + holder_penalty
-        return reward
-
+        reward = (
+            10.0 * good_cuts
+            - 10.0 * bad_cuts
+            + 0.5 * boundary_bonus
+            + progress_reward
+            + idle_penalty
+            + holder_penalty
+        )
+        return (
+            reward,
+            good_cuts,
+            bad_cuts,
+            boundary_bonus,
+            progress_reward,
+            idle_penalty,
+            holder_penalty,
+        )
 
     def reset(self, seed: Optional[int] = None):
-        """ Resets the environment to an initial state and returns an initial observation.
-        
+        """Resets the environment to an initial state and returns an initial observation.
+
         Args:
             seed (Optional[int]): An optional seed for random number generation.
 
@@ -251,33 +285,35 @@ class CamEnv(gym.Env):
             self.simulator.initialize_tool([x, y, z], radius, height)
         # Initialize new random state
         else:
-            # Initialize tool
-            x = float(self.np_random.uniform(0.1, 0.9))
-            y = float(self.np_random.uniform(0.1, 0.9))
-            z = 0.9
+            # Initialize tool -- use voxel space
+            x = round(float(self.np_random.uniform(0.1, 0.9))/self.dx) * self.dx
+            y = round(float(self.np_random.uniform(0.1, 0.9))/self.dx) * self.dx
+            z = round(0.9 / self.dx) * self.dx
+            print(f"Initializing tool at: {[x, y, z]} (voxel space)")
 
-            radius = float(self.np_random.uniform(0.05, 0.15))
-            height = float(self.np_random.uniform(0.2, 0.4))
+            radius = round(float(self.np_random.uniform(0.05, 0.15))/self.dx) * self.dx
+            height = round(float(self.np_random.uniform(0.2, 0.4))/self.dx) * self.dx
             self.simulator.initialize_tool([x, y, z], radius, height)
+            print(f"Tool radius: {radius:.8f}, height: {height:.8f} (voxel space)")
 
             # Initialize stock
-            self.simulator.initialize_stock(half_size=0.4)
-        
+            self.simulator.initialize_stock(half_size=(round(0.4 / self.dx) * self.dx))
+
             # Initialize target with random shape and size
             shape = self.np_random.choice(["sphere", "cube", "cylinder", "pyramid"])
             if shape == "sphere":
-                r = float(self.np_random.uniform(0.15, 0.3))
+                r = round(float(self.np_random.uniform(0.15, 0.3))/self.dx) * self.dx
                 self.simulator.initialize_target_sphere(r)
             elif shape == "cube":
-                s = float(self.np_random.uniform(0.15, 0.3))
+                s = round(float(self.np_random.uniform(0.15, 0.3))/self.dx) * self.dx
                 self.simulator.initialize_target_cube(s)
             elif shape == "cylinder":
-                r = float(self.np_random.uniform(0.1, 0.25))
-                h = float(self.np_random.uniform(0.15, 0.3))
+                r = round(float(self.np_random.uniform(0.1, 0.25))/self.dx) * self.dx
+                h = round(float(self.np_random.uniform(0.15, 0.3))/self.dx) * self.dx
                 self.simulator.initialize_target_cylinder(r, h)
             elif shape == "pyramid":
-                b = float(self.np_random.uniform(0.15, 0.3))
-                h = float(self.np_random.uniform(0.2, 0.4))
+                b = round(float(self.np_random.uniform(0.15, 0.3))/self.dx) * self.dx
+                h = round(float(self.np_random.uniform(0.2, 0.4))/self.dx) * self.dx
                 self.simulator.initialize_target_pyramid(b, h)
 
         # Initialize tool visualization (must be after tool primitive init)
@@ -289,23 +325,20 @@ class CamEnv(gym.Env):
         obs = self._get_obs()
         self._prev_excess = float(self.simulator.excess_field[None])
         info = {"step": 0}
-        
-        return obs, info
 
+        return obs, info
 
     def _holder_hit_stock(self):
         return self.simulator.check_holder_collision() == 1
 
-
     def _tool_cuts_into_target(self):
         return self.simulator.check_tool_intersects_target() == 1
 
-
     def step(self, action):
-        """ Executes one time step within the environment. 
+        """Executes one time step within the environment.
         Args:
             action (np.ndarray): The action to take, discrete decomposed into 3 dimensions (x, y, z) with values in {0, 1, 2} corresponding to movement of -1, 0, +1 units respectively.
-            
+
         Returns:
             obs (Dict[str, Any]): The observation after taking the action.
             reward (float): The reward obtained from taking the action.
@@ -332,65 +365,86 @@ class CamEnv(gym.Env):
         tool_pos_after = self.simulator.tool_pos[None].to_numpy()
         sdf_stock_after = self.simulator.sdf_stock.to_numpy()
 
-        tool_cut_stock = vol_removed > 0.0
-        holder_hit = self._holder_hit_stock()
-        tool_cut_target = self._tool_cuts_into_target()
-
-
         obs = self._get_obs()
-        reward = self._calculate_reward(sdf_stock_before, sdf_stock_after, sdf_target, tool_pos_after)
+        (
+            reward,
+            good_cuts,
+            bad_cuts,
+            boundary_bonus,
+            progress_reward,
+            idle_penalty,
+            holder_penalty,
+        ) = self._calculate_reward(
+            sdf_stock_before, sdf_stock_after, sdf_target, tool_pos_after
+        )
+
         if vol_removed > 0 and self.np_random.random() < 0.1:
-            self.state_buffer.append({
-                "sdf_stock": sdf_stock_after.copy(),
-                "sdf_target": sdf_target.copy(),
-                "tool_pos": tool_pos_after.copy(),
-                "tool_radius": float(self.simulator.tool_radius[None]),
-                "tool_height": float(self.simulator.tool_height[None]),
-            })
+            self.state_buffer.append(
+                {
+                    "sdf_stock": sdf_stock_after.copy(),
+                    "sdf_target": sdf_target.copy(),
+                    "tool_pos": tool_pos_after.copy(),
+                    "tool_radius": float(self.simulator.tool_radius[None]),
+                    "tool_height": float(self.simulator.tool_height[None]),
+                }
+            )
             if len(self.state_buffer) > 500:
                 self.state_buffer.pop(0)
 
-        #if self.writer:
-        #    self.writer.add_scalar("charts/env_reward", reward, self.global_step)
-        # print(f"Step {self.current_step}: action = [{x}, {y}, {z}], reward = {reward}")
-
         truncated = self.current_step >= self.max_steps
         terminated = False
-        info = {"step": self.current_step, "action": [x, y, z], "vol": vol_removed, "tool_cut_target": tool_cut_target}
+        info = {
+            "step": self.current_step,
+            "action": [x, y, z],
+            "vol": vol_removed,
+            "reward": reward,
+            "good_cuts": good_cuts,
+            "bad_cuts": bad_cuts,
+            "boundary_bonus": boundary_bonus,
+            "progress_reward": progress_reward,
+            "idle_penalty": idle_penalty,
+            "holder_penalty": holder_penalty,
+        }
+
+        self.last_info = info
 
         return obs, reward, terminated, truncated, info
 
-
     # Rendering Methods
     def _handle_input(self):
-        """ Handles keyboard and mouse input for orbit camera control and toggles. """
+        """Handles keyboard and mouse input for orbit camera control and toggles."""
         # Event handling (key presses)
         for e in self.window.get_events(ti.ui.PRESS):
             key = e.key
             # Handle shifted keys
-            if key == '!': key = '1'
-            if key == '@': key = '2'
-            if key == '#': key = '3'
-            if key == '$': key = '4'
-            if key == '%': key = '5'
+            if key == "!":
+                key = "1"
+            if key == "@":
+                key = "2"
+            if key == "#":
+                key = "3"
+            if key == "$":
+                key = "4"
+            if key == "%":
+                key = "5"
 
             if key == ti.ui.LMB:
                 self.lmb_down = True
             elif key == ti.ui.ESCAPE:
                 self.window.running = False
-            elif key == 'h' or key == 'H':
+            elif key == "h" or key == "H":
                 self.show_help = not self.show_help
-            elif key == '1' or key == 'z' or key == 'Z':
+            elif key == "1" or key == "z" or key == "Z":
                 self.show_tool = not self.show_tool
-            elif key == '2' or key == 'x' or key == 'X':
+            elif key == "2" or key == "x" or key == "X":
                 self.show_holder = not self.show_holder
-            elif key == '3' or key == 'c' or key == 'C':
+            elif key == "3" or key == "c" or key == "C":
                 self.show_stock = not self.show_stock
-            elif key == '4' or key == 'v' or key == 'V':
+            elif key == "4" or key == "v" or key == "V":
                 self.show_part = not self.show_part
-            elif key == '5' or key == 'b' or key == 'B':
+            elif key == "5" or key == "b" or key == "B":
                 self.show_debug = not self.show_debug
-            elif key == 'm' or key == 'M':
+            elif key == "m" or key == "M":
                 self.show_raymarch = not self.show_raymarch
 
         for e in self.window.get_events(ti.ui.RELEASE):
@@ -409,14 +463,13 @@ class CamEnv(gym.Env):
 
         # Zoom in/out with R/F keys
         zoom_speed = 0.05
-        if self.window.is_pressed('r'):
+        if self.window.is_pressed("r"):
             self.cam_r = max(0.5, self.cam_r - zoom_speed)
-        if self.window.is_pressed('f'):
+        if self.window.is_pressed("f"):
             self.cam_r = min(10.0, self.cam_r + zoom_speed)
 
-
     def _update_camera(self):
-        """ Updates camera position based on orbit state. """
+        """Updates camera position based on orbit state."""
         cam_x = self.cam_r * np.sin(self.cam_phi) * np.cos(self.cam_theta)
         cam_y = self.cam_r * np.sin(self.cam_phi) * np.sin(self.cam_theta)
         cam_z = self.cam_r * np.cos(self.cam_phi)
@@ -424,14 +477,13 @@ class CamEnv(gym.Env):
         self.camera.position(
             self.cam_center.x + cam_x,
             self.cam_center.y + cam_y,
-            self.cam_center.z + cam_z
+            self.cam_center.z + cam_z,
         )
         self.camera.lookat(self.cam_center.x, self.cam_center.y, self.cam_center.z)
         self.camera.up(0, 0, 1)
 
-
     def _render_human(self):
-        """ Interactive rendering with GGUI window. """
+        """Interactive rendering with GGUI window."""
         self._initialize_render()
 
         if not self.window.running:
@@ -454,7 +506,9 @@ class CamEnv(gym.Env):
 
         # Draw GUI overlay
         if self.show_help:
-            with self.gui.sub_window("Controls", x=0.05, y=0.05, width=0.3, height=0.45):
+            with self.gui.sub_window(
+                "Controls", x=0.05, y=0.05, width=0.3, height=0.45
+            ):
                 self.gui.text(f"H: Toggle Help")
                 self.gui.text("LMB Drag: Orbit Camera")
                 self.gui.text("R/F: Zoom In/Out")
@@ -470,13 +524,28 @@ class CamEnv(gym.Env):
             cam_x = self.cam_r * np.sin(self.cam_phi) * np.cos(self.cam_theta)
             cam_y = self.cam_r * np.sin(self.cam_phi) * np.sin(self.cam_theta)
             cam_z = self.cam_r * np.cos(self.cam_phi)
-            cam_pos_vec = ti.Vector([self.cam_center.x + cam_x, self.cam_center.y + cam_y, self.cam_center.z + cam_z])
+            cam_pos_vec = ti.Vector(
+                [
+                    self.cam_center.x + cam_x,
+                    self.cam_center.y + cam_y,
+                    self.cam_center.z + cam_z,
+                ]
+            )
             cam_dir_vec = ti.Vector([-cam_x, -cam_y, -cam_z]).normalized()
             cam_up_vec = ti.Vector([0.0, 0.0, 1.0])
-            self.simulator.render_raymarch(cam_pos_vec, cam_up_vec, cam_dir_vec, int(self.show_stock), int(self.show_part), int(self.show_tool))
+            self.simulator.render_raymarch(
+                cam_pos_vec,
+                cam_up_vec,
+                cam_dir_vec,
+                int(self.show_stock),
+                int(self.show_part),
+                int(self.show_tool),
+            )
             self.canvas.set_image(self.simulator.raymarch_buffer)
-            
-            with self.gui.sub_window("Raymarch Info", x=0.5, y=0.05, width=0.45, height=0.2):
+
+            with self.gui.sub_window(
+                "Raymarch Info", x=0.5, y=0.05, width=0.45, height=0.2
+            ):
                 self.gui.text("Raymarching View")
                 self.gui.text("High-quality SDF rendering")
 
@@ -486,7 +555,9 @@ class CamEnv(gym.Env):
             self.simulator.compose_debug_view()
             self.canvas.set_image(self.simulator.debug_buffer)
 
-            with self.gui.sub_window("Debug Info", x=0.5, y=0.05, width=0.45, height=0.2):
+            with self.gui.sub_window(
+                "Debug Info", x=0.5, y=0.05, width=0.45, height=0.2
+            ):
                 self.gui.text("TL: XY (Top) | TR: XZ (Front)")
                 self.gui.text("BL: YZ (Side)")
                 self.gui.text("Green: Tool Radius")
@@ -498,24 +569,30 @@ class CamEnv(gym.Env):
 
             # Draw Stock
             if self.show_stock:
-                count = min(self.simulator.stock_count[None], self.simulator.stock_points.shape[0])
+                count = min(
+                    self.simulator.stock_count[None],
+                    self.simulator.stock_points.shape[0],
+                )
                 if count > 0:
                     self.scene.particles(
                         self.simulator.stock_points,
                         radius=0.005,
                         color=(0.2, 0.8, 0.2),
-                        index_count=count
+                        index_count=count,
                     )
 
             # Draw Target
             if self.show_part:
-                count = min(self.simulator.target_count[None], self.simulator.target_points.shape[0])
+                count = min(
+                    self.simulator.target_count[None],
+                    self.simulator.target_points.shape[0],
+                )
                 if count > 0:
                     self.scene.particles(
                         self.simulator.target_points,
                         radius=0.005,
                         color=(0.5, 0.5, 1.0),
-                        index_count=count
+                        index_count=count,
                     )
 
             # Draw Tool
@@ -524,25 +601,33 @@ class CamEnv(gym.Env):
                     self.simulator.tool_points,
                     radius=0.005,
                     color=(1.0, 0.2, 0.2),
-                    index_count=self.simulator.tool_count[None]
+                    index_count=self.simulator.tool_count[None],
                 )
-                
+
                 # Draw Vectors
                 tool_pos_py = self.simulator.tool_pos[None]
                 # Gradient Vector (Yellow)
                 self.grad_points[0] = tool_pos_py
-                self.grad_points[1] = tool_pos_py + ti.Vector(self.last_grad_diff.tolist()) * 0.15
+                self.grad_points[1] = (
+                    tool_pos_py + ti.Vector(self.last_grad_diff.tolist()) * 0.15
+                )
                 self.grad_colors[0] = [1, 1, 0]
                 self.grad_colors[1] = [1, 1, 0]
-                
+
                 # Movement Vector (Cyan)
                 self.move_points[0] = tool_pos_py
-                self.move_points[1] = tool_pos_py + ti.Vector(self.last_move_dir.tolist()) * 0.15
+                self.move_points[1] = (
+                    tool_pos_py + ti.Vector(self.last_move_dir.tolist()) * 0.15
+                )
                 self.move_colors[0] = [0, 1, 1]
                 self.move_colors[1] = [0, 1, 1]
-                
-                self.scene.lines(self.grad_points, width=4.0, per_vertex_color=self.grad_colors)
-                self.scene.lines(self.move_points, width=4.0, per_vertex_color=self.move_colors)
+
+                self.scene.lines(
+                    self.grad_points, width=4.0, per_vertex_color=self.grad_colors
+                )
+                self.scene.lines(
+                    self.move_points, width=4.0, per_vertex_color=self.move_colors
+                )
 
             # Draw Holder
             if self.show_holder:
@@ -550,47 +635,49 @@ class CamEnv(gym.Env):
                     self.simulator.holder_points,
                     radius=0.005,
                     color=(0.2, 0.2, 0.2),
-                    index_count=self.simulator.holder_count[None]
+                    index_count=self.simulator.holder_count[None],
                 )
 
             self.scene.point_light(pos=(2, 2, 2), color=(1, 1, 1))
 
             # Draw coordinate axes
-            self.scene.lines(self.axes_points, width=5.0, per_vertex_color=self.axes_colors)
+            self.scene.lines(
+                self.axes_points, width=5.0, per_vertex_color=self.axes_colors
+            )
 
             self.canvas.scene(self.scene)
 
             if not self.show_help:
                 with self.gui.sub_window("Help", x=0.05, y=0.05, width=0.2, height=0.1):
                     self.gui.text("Press 'h' for controls")
-                    
-                with self.gui.sub_window("Rewards", x=0.05, y=0.15, width=0.3, height=0.25):
-                    self.gui.text(f"Total: {self.last_info.get('reward_total', 0.0):.4f}")
-                    self.gui.text(f"Progress: {self.last_info.get('reward_progress', 0.0):.4f}")
-                    self.gui.text(f"Prox Bonus: {self.last_info.get('reward_prox_bonus', 0.0):.4f}")
-                    self.gui.text(f"Time Penalty: {self.last_info.get('reward_time_penalty', 0.0):.4f}")
-                    self.gui.text(f"Completion: {self.last_info.get('reward_completion_bonus', 0.0):.4f}")
-                    self.gui.text(f"Coef: {self.last_info.get('proximity_coef', 0.0):.4f}")
+
+                with self.gui.sub_window(
+                    "Rewards", x=0.05, y=0.15, width=0.3, height=0.25
+                ):
+                    self.gui.text(f"Total Reward:       {self.last_info.get('reward', 0.0):.4f}")
+                    self.gui.text(f"Progress Reward:    {self.last_info.get('progress_reward', 0.0):.4f}")
+                    self.gui.text(f"Prox Bonus:  {self.last_info.get('boundary_bonus', 0.0):.4f}")
+                    self.gui.text(f"Good Cuts:   {self.last_info.get('good_cuts', 0.0):.4f}")
+                    self.gui.text(f"Bad Cuts:    {self.last_info.get('bad_cuts', 0.0):.4f}")
+                    self.gui.text(f"Idle:        {self.last_info.get('idle_penalty', 0.0):.4f}")
+                    self.gui.text(f"Holder:      {self.last_info.get('holder_penalty', 0.0):.4f}")
 
         self.window.show()
-
 
     def _render_rgb_array(self):
         raise NotImplementedError()
 
-
     def render(self):
-        """ Renders the environment. """
+        """Renders the environment."""
 
         if self.render_mode == "human":
             self._render_human()
         elif self.render_mode == "rgb_array":
             self._render_rgb_array()
 
-
     # Close
     def close(self):
-        """ Cleans up the environment resources. """
+        """Cleans up the environment resources."""
         if self.window is not None:
             self.window.running = False
             self.window = None
@@ -598,7 +685,7 @@ class CamEnv(gym.Env):
 
 if __name__ == "__main__":
     # Test the environment with random actions
-    env = CamEnv(resolution=8, max_steps=512, render_mode="human")
+    env = CamEnv(resolution=32, max_steps=512, render_mode="human")
     obs, info = env.reset()
     done = False
 
@@ -611,6 +698,8 @@ if __name__ == "__main__":
         env.render()
         time.sleep(0.3)
 
-        print(f"Step: {info['step']}, Reward: {reward}, Info: {info}")
+        print(
+            f"Tool Pos: {obs[:3]}, Reward: {reward:.4f}, Step: {info['step']}, Vol Removed: {info['vol']:.4f}, Cut Target: {info['tool_cut_target']}  "
+        )
 
     env.close()

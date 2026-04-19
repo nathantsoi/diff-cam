@@ -116,7 +116,6 @@ class CNCSimulator:
         self.tool_height[None] = height
 
 
-
     # Other kernels and functions (cutting, collision, observation)
     @ti.func
     def dist_from_tool(self, p):
@@ -230,10 +229,6 @@ class CNCSimulator:
             if not (dir[i] == -1.0 or dir[i] == 0.0 or dir[i] == 1.0):
                 valid_dir = False
 
-        if not valid_dir:
-            print(
-                "Error: Direction must be a unit step vector with components in {-1, 0, 1}"
-            )
 
         new_pos = self.tool_pos[None]
         for i in ti.static(range(3)):
@@ -257,16 +252,14 @@ class CNCSimulator:
         collision = 0
 
         # Bounding box of holder
-        min_x = ti.max(0, int(ti.floor((tool_pos.x - holder_radius) / self.dx) - 1))
-        max_x = ti.min(
-            self.res, int(ti.ceil((tool_pos.x + holder_radius) / self.dx) + 1)
-        )
-        min_y = ti.max(0, int(ti.floor((tool_pos.y - holder_radius) / self.dx) - 1))
-        max_y = ti.min(
-            self.res, int(ti.ceil((tool_pos.y + holder_radius) / self.dx) + 1)
-        )
-        min_z = ti.max(0, int(ti.floor(holder_z_start / self.dx) - 1))
-        max_z = ti.min(self.res, int(ti.ceil(holder_z_end / self.dx) + 1))
+        min_x = ti.max(0, ti.cast(ti.floor((tool_pos.x - holder_radius) / self.dx) - 1, ti.i32))
+        max_x = ti.min(self.res, ti.cast(ti.ceil((tool_pos.x + holder_radius) / self.dx) + 1, ti.i32))
+
+        min_y = ti.max(0, ti.cast(ti.floor((tool_pos.y - holder_radius) / self.dx) - 1, ti.i32))
+        max_y = ti.min(self.res, ti.cast(ti.ceil((tool_pos.y + holder_radius) / self.dx) + 1, ti.i32))
+
+        min_z = ti.max(0, ti.cast(ti.floor(holder_z_start / self.dx) - 1, ti.i32))
+        max_z = ti.min(self.res, ti.cast(ti.ceil(holder_z_end / self.dx) + 1, ti.i32))
 
         for i, j, k in ti.ndrange((min_x, max_x), (min_y, max_y), (min_z, max_z)):
             p = ti.Vector([i, j, k]) * self.dx
@@ -294,9 +287,9 @@ class CNCSimulator:
         step = self.dx * 0.5
 
         # Number of samples in each dimension (covers tool bounding box + 1dx pad)
-        n_x = int(ti.ceil((2.0 * tool_radius + 2.0 * self.dx) / step)) + 1
-        n_y = int(ti.ceil((2.0 * tool_radius + 2.0 * self.dx) / step)) + 1
-        n_z = int(ti.ceil((tool_height + 2.0 * self.dx) / step)) + 1
+        n_x = ti.cast(ti.ceil((2.0 * tool_radius + 2.0 * self.dx) / step), ti.i32) + 1
+        n_y = ti.cast(ti.ceil((2.0 * tool_radius + 2.0 * self.dx) / step), ti.i32) + 1
+        n_z = ti.cast(ti.ceil((tool_height + 2.0 * self.dx) / step), ti.i32) + 1
 
         origin_x = tool_pos.x - tool_radius - self.dx
         origin_y = tool_pos.y - tool_radius - self.dx
@@ -363,9 +356,9 @@ class CNCSimulator:
         y = p_grid.y
         z = p_grid.z
 
-        x0 = int(ti.floor(x))
-        y0 = int(ti.floor(y))
-        z0 = int(ti.floor(z))
+        x0 = ti.cast(ti.floor(x), ti.i32)
+        y0 = ti.cast(ti.floor(y), ti.i32)
+        z0 = ti.cast(ti.floor(z), ti.i32)
 
         x1 = x0 + 1
         y1 = y0 + 1
@@ -724,7 +717,7 @@ class CNCSimulator:
                             norm = ti.math.normalize(ti.Vector([nx, ny, nz]))
                     elif d == d_stock:
                         mat_color = ti.Vector([0.2, 0.8, 0.2])
-                        norm = self.normal_sdf(self.sdf_stock, p)
+                        norm = self.compute_surface_normal(self.sdf_stock, p)
                         grid_p = p * float(self.res)
                         cx = int(grid_p.x) % 2
                         cy = int(grid_p.y) % 2
@@ -733,7 +726,7 @@ class CNCSimulator:
                             mat_color = mat_color * 0.8
                     elif d == d_target:
                         mat_color = ti.Vector([0.5, 0.5, 1.0])
-                        norm = self.normal_sdf(self.sdf_target, p)
+                        norm = self.compute_surface_normal(self.sdf_target, p)
 
                     light_dir = ti.Vector([1.0, 1.0, 1.0]).normalized()
                     diffuse = ti.max(0.0, norm.dot(light_dir))

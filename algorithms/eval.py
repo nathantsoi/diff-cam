@@ -123,6 +123,12 @@ def eval(checkpoint_path, fallback_resolution=None, fallback_max_steps=None):
         time.sleep(.15)
 
         # Compute progress metrics
+        step = info.get("step", 0)
+        vol = info.get("vol", None)
+        good_cuts = info.get("good_cuts", None)
+        bad_cuts = info.get("bad_cuts", None)
+        boundary_bonus = info.get("boundary_bonus", None)
+
         sdf_stock = sim.sdf_stock.to_numpy()
         sdf_target = sim.sdf_target.to_numpy()
         current_stock = float(np.sum(sdf_stock < 0))

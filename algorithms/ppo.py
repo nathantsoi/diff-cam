@@ -96,9 +96,15 @@ class Args:
 def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render_mode):
     def thunk(buf=None, seed=None, **kwargs):
         return pufferlib.emulation.GymnasiumPufferEnv(
-            env_creator=lambda: gym.make("CamEnv-v0", resolution=resolution, max_steps=max_steps, render_mode=render_mode),
+            env_creator=lambda: gym.make(
+                "CamEnv-v0",
+                resolution=resolution,
+                max_steps=max_steps,
+                render_mode=render_mode,
+            ),
             buf=buf,
         )
+
     return thunk
 
 
@@ -118,9 +124,18 @@ def conv_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 class Block(nn.Module):
     """Convolutional block: Conv3d → BatchNorm3d → ReLU"""
+
     def __init__(self, in_channels, out_channels, stride, kernel_size, padding):
         super().__init__()
-        self.conv = conv_init(nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding))
+        self.conv = conv_init(
+            nn.Conv3d(
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+            )
+        )
         self.batchnorm = nn.BatchNorm3d(out_channels)
         self.activation = nn.ReLU()
 
@@ -133,6 +148,7 @@ class Block(nn.Module):
 
 class SDF3DEncoder(nn.Module):
     """Encodes a 3D SDF observation into a feature vector."""
+
     def __init__(self, resolution):
         super().__init__()
 
@@ -146,9 +162,9 @@ class SDF3DEncoder(nn.Module):
         while current_resolution > 4:
             if in_channels == 2:
                 out_channels = 32
-            else:                
+            else:
                 out_channels = min(in_channels * 2, 256)
-            
+
             block = Block(in_channels, out_channels, stride=2, kernel_size=4, padding=1)
             layers.append(block)
 
@@ -180,14 +196,18 @@ class MLP_Agent(nn.Module):
     def __init__(self, envs):
         super().__init__()
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
+            layer_init(
+                nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)
+            ),
             nn.Tanh(),
             layer_init(nn.Linear(256, 128)),
             nn.Tanh(),
             layer_init(nn.Linear(128, 1), std=1.0),
         )
         self.actor = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
+            layer_init(
+                nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)
+            ),
             nn.Tanh(),
             layer_init(nn.Linear(256, 128)),
             nn.Tanh(),
@@ -207,6 +227,7 @@ class MLP_Agent(nn.Module):
 
 class LegacyAgent(nn.Module):
     """Original flat MLP agent for loading old checkpoints."""
+
     def __init__(self, envs):
         super().__init__()
         obs_size = np.array(envs.single_observation_space.shape).prod()
@@ -230,6 +251,7 @@ class LegacyAgent(nn.Module):
 
     def get_action_and_value(self, x, action=None):
         from torch.distributions.categorical import Categorical
+
         logits = self.actor(x)
         probs = Categorical(logits=logits)
         if action is None:
@@ -253,8 +275,8 @@ class AdityaAgent(nn.Module):
             nn.ReLU(),
             nn.Conv3d(16, 32, kernel_size=3, stride=2, padding=1),
             nn.ReLU(),
-            nn.AdaptiveAvgPool3d(2),   # always outputs (32, 2, 2, 2) = 256
-            nn.Flatten(),              # -> 256
+            nn.AdaptiveAvgPool3d(2),  # always outputs (32, 2, 2, 2) = 256
+            nn.Flatten(),  # -> 256
         )
         sdf_feat_dim = 32 * 2 * 2 * 2  # 256
 
@@ -266,13 +288,15 @@ class AdityaAgent(nn.Module):
             nn.ReLU(),
         )
 
-        self.actor_head = layer_init(nn.Linear(128, envs.single_action_space.n), std=0.01)
+        self.actor_head = layer_init(
+            nn.Linear(128, envs.single_action_space.n), std=0.01
+        )
         self.critic_head = layer_init(nn.Linear(128, 1), std=1.0)
 
     def _encode(self, x):
         """Split flat obs into tool state + 3D SDF grids, run through encoder."""
-        tool_state = x[:, :self.state_dim]
-        sdf_data = x[:, self.state_dim:]
+        tool_state = x[:, : self.state_dim]
+        sdf_data = x[:, self.state_dim :]
         half = sdf_data.shape[1] // 2
         stock = sdf_data[:, :half].reshape(-1, 1, self.res, self.res, self.res)
         target = sdf_data[:, half:].reshape(-1, 1, self.res, self.res, self.res)
@@ -289,7 +313,12 @@ class AdityaAgent(nn.Module):
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic_head(features)
+        return (
+            action,
+            probs.log_prob(action),
+            probs.entropy(),
+            self.critic_head(features),
+        )
 
 
 class Agent(nn.Module):
@@ -297,8 +326,8 @@ class Agent(nn.Module):
         super().__init__()
         # Compute resolution and number of voxels from env observation space
         obs_dim = int(np.prod(envs.single_observation_space.shape))
-        self.resolution = round((( obs_dim - 3) / 2) ** (1/3))
-        n_voxels = self.resolution ** 3
+        self.resolution = round(((obs_dim - 3) / 2) ** (1 / 3))
+        n_voxels = self.resolution**3
         n_actions = envs.single_action_space.n
 
         # Define encoder for the SDF observation
@@ -318,35 +347,44 @@ class Agent(nn.Module):
         """Reshape flat observation into (batch, 2, res, res, res) for encoding."""
         # Define batch size and number of voxels for reshaping
         batch_size = flat_obs.shape[0]
-        n_voxels = self.resolution ** 3
+        n_voxels = self.resolution**3
 
         # Break down the flat observation into tool position and SDFs, then reshape SDFs for encoding
         tool_pos = flat_obs[:, :3]
-        stock_sdf = flat_obs[:, 3:3 + n_voxels].reshape(batch_size, 1, self.resolution, self.resolution, self.resolution)
-        target_sdf = flat_obs[:, 3 + n_voxels:3 + 2 * n_voxels].reshape(batch_size, 1, self.resolution, self.resolution, self.resolution)
-        
+        stock_sdf = flat_obs[:, 3 : 3 + n_voxels].reshape(
+            batch_size, 1, self.resolution, self.resolution, self.resolution
+        )
+        target_sdf = flat_obs[:, 3 + n_voxels : 3 + 2 * n_voxels].reshape(
+            batch_size, 1, self.resolution, self.resolution, self.resolution
+        )
+
         sdf_obs = torch.cat([stock_sdf, target_sdf], dim=1)  # (batch, 2, res, res, res)
 
         return sdf_obs, tool_pos
-    
+
     def _forward_features(self, x):
         """Encode the SDF observation and fuse with tool position."""
         sdf_obs, tool_pos = self._reshape_obs_for_encoding(x)
         encoded_features = self.encoder(sdf_obs)
         fused_features = self.fusion(torch.cat([encoded_features, tool_pos], dim=1))
         return fused_features
-    
+
     def get_value(self, x):
         features = self._forward_features(x)
         return self.critic_head(features)
-    
+
     def get_action_and_value(self, x, action=None):
         features = self._forward_features(x)
         logits = self.actor_head(features)
         probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action), probs.entropy(), self.critic_head(features)
+        return (
+            action,
+            probs.log_prob(action),
+            probs.entropy(),
+            self.critic_head(features),
+        )
 
 
 if __name__ == "__main__":
@@ -372,7 +410,8 @@ if __name__ == "__main__":
     writer = SummaryWriter(f"runs/{run_name}")
     writer.add_text(
         "hyperparameters",
-        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
+        "|param|value|\n|-|-|\n%s"
+        % ("\n".join([f"|{key}|{value}|" for key, value in vars(args).items()])),
     )
 
     # TRY NOT TO MODIFY: seeding
@@ -386,31 +425,31 @@ if __name__ == "__main__":
     # env setup -- changed to use PufferLib
     envs = pufferlib.vector.make(
         make_env(
-            args.env_id, 
+            args.env_id,
             0,
-            args.capture_video, 
+            args.capture_video,
             run_name,
             args.resolution,
             args.max_steps,
-            args.render_mode
+            args.render_mode,
         ),
         num_envs=args.num_envs,
-        backend=pufferlib.vector.Serial,
+        backend=pufferlib.vector.Multiprocessing,
     )
-    assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
-    # Inject writer into each env - added this in there
-    for env in envs.envs:
-        base = env
-        while hasattr(base, 'env'):
-            base = base.env
-        base.writer = writer
+    assert isinstance(
+        envs.single_action_space, gym.spaces.Discrete
+    ), "only discrete action space is supported"
 
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
-    obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
-    actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
+    obs = torch.zeros(
+        (args.num_steps, args.num_envs) + envs.single_observation_space.shape
+    ).to(device)
+    actions = torch.zeros(
+        (args.num_steps, args.num_envs) + envs.single_action_space.shape
+    ).to(device)
     logprobs = torch.zeros((args.num_steps, args.num_envs)).to(device)
     rewards = torch.zeros((args.num_steps, args.num_envs)).to(device)
     dones = torch.zeros((args.num_steps, args.num_envs)).to(device)
@@ -447,14 +486,34 @@ if __name__ == "__main__":
             logprobs[step] = logprob
 
             # TRY NOT TO MODIFY: execute the game and log data.
-            next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
-            writer.add_scalar("charts/algo_reward", np.mean(reward), global_step)
+            next_obs, reward, terminations, truncations, infos = envs.step(
+                action.cpu().numpy()
+            )
+            print(infos)
+            # Log reward components from info
+            reward_keys = [
+                "vol",
+                "reward",
+                "good_cuts",
+                "bad_cuts",
+                "boundary_bonus",
+                "progress_reward",
+                "idle_penalty",
+                "holder_penalty",
+                "tool_cut_target",
+            ]
+            for key in reward_keys:
+                if key in infos:
+                    writer.add_scalar(f"reward/{key}", np.mean(infos[key]), global_step)
+
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
-            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+            next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(
+                next_done
+            ).to(device)
 
-            if args.render_mode == "human":
-                envs.envs[0].render()
+            #if args.render_mode == "human":
+            #    envs.envs[0].render()
 
             # Track episode returns manually
             ep_returns += np.array(reward, dtype=np.float64).flatten()
@@ -462,9 +521,15 @@ if __name__ == "__main__":
             done_mask = np.logical_or(terminations, truncations).flatten()
             for i in range(args.num_envs):
                 if done_mask[i]:
-                    print(f"global_step={global_step}, env={i}, episodic_return={ep_returns[i]:.4f}, episodic_length={ep_lengths[i]}")
-                    writer.add_scalar("charts/episodic_return", ep_returns[i], global_step)
-                    writer.add_scalar("charts/episodic_length", ep_lengths[i], global_step)
+                    print(
+                        f"global_step={global_step}, env={i}, episodic_return={ep_returns[i]:.4f}, episodic_length={ep_lengths[i]}"
+                    )
+                    writer.add_scalar(
+                        "charts/episodic_return", ep_returns[i], global_step
+                    )
+                    writer.add_scalar(
+                        "charts/episodic_length", ep_lengths[i], global_step
+                    )
                     ep_returns[i] = 0.0
                     ep_lengths[i] = 0
 
@@ -480,8 +545,12 @@ if __name__ == "__main__":
                 else:
                     nextnonterminal = 1.0 - dones[t + 1]
                     nextvalues = values[t + 1]
-                delta = rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
-                advantages[t] = lastgaelam = delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                delta = (
+                    rewards[t] + args.gamma * nextvalues * nextnonterminal - values[t]
+                )
+                advantages[t] = lastgaelam = (
+                    delta + args.gamma * args.gae_lambda * nextnonterminal * lastgaelam
+                )
             returns = advantages + values
 
         # flatten the batch
@@ -501,7 +570,9 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds])
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(
+                    b_obs[mb_inds], b_actions.long()[mb_inds]
+                )
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -509,15 +580,21 @@ if __name__ == "__main__":
                     # calculate approx_kl http://joschu.net/blog/kl-approx.html
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
-                    clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
+                    clipfracs += [
+                        ((ratio - 1.0).abs() > args.clip_coef).float().mean().item()
+                    ]
 
                 mb_advantages = b_advantages[mb_inds]
                 if args.norm_adv:
-                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (mb_advantages.std() + 1e-8)
+                    mb_advantages = (mb_advantages - mb_advantages.mean()) / (
+                        mb_advantages.std() + 1e-8
+                    )
 
                 # Policy loss
                 pg_loss1 = -mb_advantages * ratio
-                pg_loss2 = -mb_advantages * torch.clamp(ratio, 1 - args.clip_coef, 1 + args.clip_coef)
+                pg_loss2 = -mb_advantages * torch.clamp(
+                    ratio, 1 - args.clip_coef, 1 + args.clip_coef
+                )
                 pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                 # Value loss
@@ -549,16 +626,21 @@ if __name__ == "__main__":
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
-        
+
         # Saving checkpoint models
         if iteration % checkpoint_interval == 0:
-            torch.save({
-                "agent": agent.state_dict(),
-                "args": vars(args),
-            }, f"runs/{run_name}/checkpoint_{iteration}.pt")
+            torch.save(
+                {
+                    "agent": agent.state_dict(),
+                    "args": vars(args),
+                },
+                f"runs/{run_name}/checkpoint_{iteration}.pt",
+            )
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
-        writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
+        writer.add_scalar(
+            "charts/learning_rate", optimizer.param_groups[0]["lr"], global_step
+        )
         writer.add_scalar("losses/value_loss", v_loss.item(), global_step)
         writer.add_scalar("losses/policy_loss", pg_loss.item(), global_step)
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
@@ -567,13 +649,18 @@ if __name__ == "__main__":
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         print(f"SPS {iteration}:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        writer.add_scalar(
+            "charts/SPS", int(global_step / (time.time() - start_time)), global_step
+        )
 
     # Final checkpoint after training is complete
-    torch.save({
-        "agent": agent.state_dict(),
-        "args": vars(args),
-    }, f"runs/{run_name}/checkpoint_final.pt")
+    torch.save(
+        {
+            "agent": agent.state_dict(),
+            "args": vars(args),
+        },
+        f"runs/{run_name}/checkpoint_final.pt",
+    )
 
     envs.close()
     writer.close()
