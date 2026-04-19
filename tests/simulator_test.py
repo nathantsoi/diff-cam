@@ -1,6 +1,6 @@
 import pytest
 import taichi as ti
-from simulator.simulator import CNCSimulator
+from simulator.voxel_simulator import CNCSimulator
 
 # ========================================================
 # Test for simple component initializations

@@ -7,7 +7,7 @@ sys.path.insert(0, '/workspaces/puffertank/diff-cam')
 
 import numpy as np
 import taichi as ti
-from simulator.simulator import CNCSimulator
+from simulator.voxel_simulator import CNCSimulator
 
 # ── Config ──────────────────────────────────────────────
 RES = 64        # match PPO default

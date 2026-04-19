@@ -5,7 +5,7 @@ import gymnasium.spaces as spaces
 import numpy as np
 import pufferlib
 
-from simulator.batched_simulator import BatchedCNCSimulator
+from simulator.batched_voxel_simulator import BatchedCNCSimulator
 from cam_env.physics_config import (
     TIME_PENALTY, COMPLETION_BONUS, COMPLETION_THRESHOLD,
     PROXIMITY_COEF_INITIAL, PROXIMITY_ANNEAL_STEPS, PROXIMITY_CLIP,

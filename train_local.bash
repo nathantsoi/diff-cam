@@ -12,4 +12,4 @@ uv run python3 ./algorithms/ppo.py \
         --ent_coef 0.02 \
         --gamma 0.99 \
         --gae_lambda 0.95 \
-        --render_mode human
+        --render_mode rgb_array
