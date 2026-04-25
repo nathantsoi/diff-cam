@@ -1,3 +1,5 @@
+from doctest import debug
+
 import taichi as ti
 
 from simulator.simulator_utils import *
@@ -24,16 +26,16 @@ IDLE_THRESHOLD   = 0.1          # normalized cut threshold under which idle kick
 
 @ti.data_oriented
 class CNCSimulator:
-    _ti_initialized = False
 
-    def __init__(self, resolution=128, debug=False):
+    def __init__(self, resolution=32, shape="sphere", debug=False):
         # Initialize Taichi (only on first instantiation)
-        if not CNCSimulator._ti_initialized:
+        try:
             if ti._lib.core.with_cuda():
                 ti.init(arch=ti.gpu, debug=debug)
             else:
                 ti.init(arch=ti.cpu, debug=debug)
-            CNCSimulator._ti_initialized = True
+        except:
+            pass # taichi alrady initialized, ignore
 
         self.res = resolution
         self.dx = 1.0 / self.res
@@ -42,9 +44,33 @@ class CNCSimulator:
         # a fraction-of-grid quantity, independent of resolution.
         self.grid_norm = float(self.res ** 3)
 
-        # Define the SDF fields for stock and target geometry
+        # Stock
         self.sdf_stock = ti.field(dtype=ti.f32, shape=(self.res, self.res, self.res))
+
+        # Target
         self.sdf_target = ti.field(dtype=ti.f32, shape=(self.res, self.res, self.res))
+        shape_options = ["box", "cylinder", "sphere", "pyramid"]
+        self.shape_params = {}
+
+        if shape is None:
+            shape = ti.random.choice(shape_options)
+        self.shape = shape
+        if self.shape == "box":
+            self.shape_params["half_size"] = ti.Vector.field(3, dtype=ti.f32, shape=())
+            self.shape_params["center"] = ti.Vector.field(3, dtype=ti.f32, shape=())
+        elif self.shape == "cylinder":
+            self.shape_params["radius"] = ti.field(dtype=ti.f32, shape=())
+            self.shape_params["height"] = ti.field(dtype=ti.f32, shape=())
+        elif self.shape == "sphere":
+            self.shape_params["radius"] = ti.field(dtype=ti.f32, shape=())
+            self.shape_params["center"] = ti.Vector.field(3, dtype=ti.f32, shape=())
+        elif self.shape == "pyramid":
+            self.shape_params["base_half_size"] = ti.Vector.field(3, dtype=ti.f32, shape=())
+            self.shape_params["height"] = ti.field(dtype=ti.f32, shape=())
+            self.shape_params["center"] = ti.Vector.field(3, dtype=ti.f32, shape=())
+        else:
+            raise ValueError(f"Unsupported shape: {self.shape}")
+        
 
         # Stock snapshot BEFORE the cut — needed so autodiff differentiates the
         # same function the env evaluates: reward(stock_before, stock_after(tool_pos), ...)
@@ -95,6 +121,18 @@ class CNCSimulator:
     # Initialization kernels
     # ========================================================================
 
+    def initialize_target_sdf(self):
+        if self.shape == "sphere":
+            self.initialize_target_sphere(self.shape_params["radius"][None])
+        elif self.shape == "box":
+            self.initialize_target_cube(self.shape_params["half_size"][None].x)
+        elif self.shape == "cylinder":
+            self.initialize_target_cylinder(self.shape_params["radius"][None], self.shape_params["height"][None])
+        elif self.shape == "pyramid":
+            self.initialize_target_pyramid(self.shape_params["base_half_size"][None].x, self.shape_params["height"][None])
+        else:
+            raise ValueError(f"Unsupported shape: {self.shape}")
+
     @ti.kernel
     def initialize_target_sphere(self, radius: ti.f32):
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
@@ -136,32 +174,28 @@ class CNCSimulator:
             center = ti.Vector([0.5, 0.5, 0.5])
             self.sdf_stock[i, j, k] = box_sdf(p, center, half_size)
 
+
     def initialize_tool(self, pos, radius, height):
         self.tool_pos[None] = ti.Vector(pos)
         self.tool_radius[None] = radius
         self.tool_height[None] = height
 
-    # ========================================================================
-    # Tool / holder SDFs
-    # ========================================================================
-
     @ti.func
-    def dist_from_tool(self, p):
-        tool_pos = self.tool_pos[None]
-        tool_radius = self.tool_radius[None]
-        tool_height = self.tool_height[None]
+    def tool_sdf(self, p, tool_pos):
+         # cylindrical tool aligned with z
+        r = self.tool_radius[None]
+        h = self.tool_height[None]
 
-        dx = p.x - tool_pos.x
-        dy = p.y - tool_pos.y
-        d_h = ti.sqrt(dx * dx + dy * dy + 1e-12) - tool_radius   # explicit, with eps for grad stability
+        d_xy = ti.Vector([p.x - tool_pos.x, p.y - tool_pos.y]).norm() - r
 
         d_z_bottom = tool_pos.z - p.z
-        d_z_top    = p.z - (tool_pos.z + tool_height)
-        d_z        = ti.max(d_z_bottom, d_z_top)
-        return ti.max(d_h, d_z)
+        d_z_top = p.z - (tool_pos.z + h)
+        d_z = ti.max(d_z_bottom, d_z_top)
+
+        return ti.max(d_xy, d_z)
 
     @ti.func
-    def dist_from_holder(self, p):
+    def holder_sdf(self, p):
         tool_pos = self.tool_pos[None]
         tool_radius = self.tool_radius[None]
         tool_height = self.tool_height[None]
@@ -175,9 +209,10 @@ class CNCSimulator:
         d_h = ti.sqrt(dx * dx + dy * dy + 1e-12) - holder_radius
 
         d_z_bottom = holder_z_start - p.z
-        d_z_top    = p.z - (holder_z_start + holder_height)
-        d_z        = ti.max(d_z_bottom, d_z_top)
+        d_z_top = p.z - (holder_z_start + holder_height)
+        d_z = ti.max(d_z_bottom, d_z_top)
         return ti.max(d_h, d_z)
+
     # ========================================================================
     # Cutting
     # ========================================================================
@@ -188,6 +223,7 @@ class CNCSimulator:
         so the gradient computation can see both pre- and post-cut fields."""
         for i, j, k in ti.ndrange(self.res, self.res, self.res):
             self.sdf_stock_before[i, j, k] = self.sdf_stock[i, j, k]
+
 
     def apply_cut(self) -> float:
         """
@@ -217,7 +253,7 @@ class CNCSimulator:
 
         for i, j, k in ti.ndrange((min_x, max_x), (min_y, max_y), (min_z, max_z)):
             p = ti.Vector([i, j, k]) * self.dx
-            tool_dist = self.dist_from_tool(p)
+            tool_dist = self.tool_sdf(p, tool_pos)
             stock_dist = self.sdf_stock[i, j, k]
             new_dist = ti.max(stock_dist, -tool_dist)
 
@@ -265,7 +301,7 @@ class CNCSimulator:
 
         for i, j, k in ti.ndrange((min_x, max_x), (min_y, max_y), (min_z, max_z)):
             p = ti.Vector([i, j, k]) * self.dx
-            if self.dist_from_holder(p) < 0 and self.sdf_stock[i, j, k] < 0:
+            if self.holder_sdf(p) < 0 and self.sdf_stock[i, j, k] < 0:
                 collision = 1
         return collision
 
@@ -289,7 +325,7 @@ class CNCSimulator:
         for i, j, k in ti.ndrange(n_x, n_y, n_z):
             p = ti.Vector([origin_x + i * step, origin_y + j * step, origin_z + k * step])
             if (0.0 <= p.x <= 1.0 and 0.0 <= p.y <= 1.0 and 0.0 <= p.z <= 1.0):
-                if self.dist_from_tool(p) <= 0:
+                if self.tool_sdf(p, tool_pos) <= 0:
                     target_val = self.interpolate_sdf(self.sdf_target, p)
                     if target_val <= 0:
                         cuts_target = 1
@@ -453,7 +489,7 @@ class CNCSimulator:
             target_at_tool = self.interpolate_sdf(self.sdf_target, tool_pos)
 
             stock_before_at_tool = self.interpolate_sdf(self.sdf_stock_before, tool_pos)
-            tool_dist_at_tool = self.dist_from_tool(tool_pos)
+            tool_dist_at_tool = self.tool_sdf(tool_pos, tool_pos)
             stock_after_at_tool = ti.max(stock_before_at_tool, -tool_dist_at_tool)
 
             near_target_surface = ti.exp(-BOUNDARY_SIGMA * target_at_tool * target_at_tool)
@@ -724,7 +760,7 @@ class CNCSimulator:
                         d_target = ti.max(d_aabb, 2e-3)
 
                 if show_tool == 1:
-                    d_tool = ti.min(self.dist_from_tool(p), self.dist_from_holder(p))
+                    d_tool = ti.min(self.tool_sdf(p, self.tool_pos[None]), self.holder_sdf(p))
 
                 d = ti.min(d_stock, ti.min(d_target, d_tool))
 
@@ -733,21 +769,21 @@ class CNCSimulator:
                     mat_color = ti.Vector([0.8, 0.8, 0.8])
                     if d == d_tool:
                         mat_color = (ti.Vector([1.0, 0.2, 0.2])
-                            if self.dist_from_tool(p) < self.dist_from_holder(p)
+                            if self.tool_sdf(p, self.tool_pos[None]) < self.holder_sdf(p)
                             else ti.Vector([0.2, 0.2, 0.2]))
                         eps = 1e-3
                         dx = ti.Vector([eps, 0.0, 0.0])
                         dy = ti.Vector([0.0, eps, 0.0])
                         dz = ti.Vector([0.0, 0.0, eps])
-                        if self.dist_from_tool(p) < self.dist_from_holder(p):
-                            nx = self.dist_from_tool(p + dx) - self.dist_from_tool(p - dx)
-                            ny = self.dist_from_tool(p + dy) - self.dist_from_tool(p - dy)
-                            nz = self.dist_from_tool(p + dz) - self.dist_from_tool(p - dz)
+                        if self.tool_sdf(p, self.tool_pos[None]) < self.holder_sdf(p):
+                            nx = self.tool_sdf(p + dx, self.tool_pos[None]) - self.tool_sdf(p - dx, self.tool_pos[None])
+                            ny = self.tool_sdf(p + dy, self.tool_pos[None]) - self.tool_sdf(p - dy, self.tool_pos[None])
+                            nz = self.tool_sdf(p + dz, self.tool_pos[None]) - self.tool_sdf(p - dz, self.tool_pos[None])
                             norm = ti.math.normalize(ti.Vector([nx, ny, nz]))
                         else:
-                            nx = self.dist_from_holder(p + dx) - self.dist_from_holder(p - dx)
-                            ny = self.dist_from_holder(p + dy) - self.dist_from_holder(p - dy)
-                            nz = self.dist_from_holder(p + dz) - self.dist_from_holder(p - dz)
+                            nx = self.holder_sdf(p + dx) - self.holder_sdf(p - dx)
+                            ny = self.holder_sdf(p + dy) - self.holder_sdf(p - dy)
+                            nz = self.holder_sdf(p + dz) - self.holder_sdf(p - dz)
                             norm = ti.math.normalize(ti.Vector([nx, ny, nz]))
                     elif d == d_stock:
                         mat_color = ti.Vector([0.2, 0.8, 0.2])

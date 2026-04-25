@@ -32,6 +32,7 @@ class CamEnv(gym.Env):
         render_mode: Optional[str] = None,
         debug: bool = False,
         debug_gradients: bool = False,
+        use_buffer = True,
     ):
         """
         Args:
@@ -42,6 +43,7 @@ class CamEnv(gym.Env):
             debug_gradients: if True, compute per-component reward gradients
                 every step via autodiff (6 tape runs — expensive). If False,
                 info dict will not contain 'grad_mag_*' or 'grad_x/y/z'.
+            use_buffer: if True, maintain a buffer of past states for potential
         """
         super().__init__()
 
@@ -64,7 +66,9 @@ class CamEnv(gym.Env):
             low=-np.inf, high=np.inf, shape=(self.obs_dims,), dtype=np.float32
         )
 
+        self.use_buffer = use_buffer
         self.state_buffer = []
+        
 
         # Rendering state
         self.window = None
@@ -222,7 +226,7 @@ class CamEnv(gym.Env):
         super().reset(seed=seed)
         self._initialize_sim()
 
-        if len(self.state_buffer) > 0 and self.np_random.random() < 0.3:
+        if self.use_buffer and len(self.state_buffer) > 0 and self.np_random.random() < 0.3:
             saved = self.state_buffer[self.np_random.integers(len(self.state_buffer))]
             self.simulator.sdf_stock.from_numpy(saved["sdf_stock"])
             self.simulator.sdf_target.from_numpy(saved["sdf_target"])
