@@ -1,4 +1,5 @@
 from doctest import debug
+import os
 
 import taichi as ti
 
@@ -23,19 +24,28 @@ BOUNDARY_SIGMA   = 8.0          # exp(-sigma * target_dist^2) falloff near targe
 BOUNDARY_STOCK_OFFSET = 0.05    # stock-presence sigmoid offset
 IDLE_THRESHOLD   = 0.1          # normalized cut threshold under which idle kicks in
 
+_TI_INIT_PID = None
+
+def ensure_taichi_initialized(arch="gpu", debug=False):
+    global _TI_INIT_PID
+    if _TI_INIT_PID == os.getpid():
+        return
+    if arch == "gpu":
+        try:
+            ti.init(arch=ti.gpu, debug=debug)
+        except Exception:
+            ti.init(arch=ti.cpu, debug=debug)
+    else:
+        ti.init(arch=ti.cpu, debug=debug)
+    _TI_INIT_PID = os.getpid()
+
 
 @ti.data_oriented
 class CNCSimulator:
 
     def __init__(self, resolution=32, shape="sphere", debug=False):
         # Initialize Taichi (only on first instantiation)
-        try:
-            if ti._lib.core.with_cuda():
-                ti.init(arch=ti.gpu, debug=debug)
-            else:
-                ti.init(arch=ti.cpu, debug=debug)
-        except:
-            pass # taichi alrady initialized, ignore
+        ensure_taichi_initialized()
 
         self.res = resolution
         self.dx = 1.0 / self.res

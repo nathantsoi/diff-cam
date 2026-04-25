@@ -3,6 +3,7 @@ import os
 import random
 import time
 from dataclasses import dataclass
+import multiprocessing as mp
 
 import gymnasium as gym
 import numpy as np
@@ -93,19 +94,30 @@ class Args:
     """the render mode for the environment"""
 
 
-def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render_mode):
-    def thunk(buf=None, seed=None, **kwargs):
-        return pufferlib.emulation.GymnasiumPufferEnv(
-            env_creator=lambda: gym.make(
-                "CamEnv-v0",
-                resolution=resolution,
-                max_steps=max_steps,
-                render_mode=render_mode,
-            ),
-            buf=buf,
-        )
+# def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render_mode):
+#     def thunk(buf=None, seed=None, **kwargs):
+#         return pufferlib.emulation.GymnasiumPufferEnv(
+#             env_creator=lambda: gym.make(
+#                 "CamEnv-v0",
+#                 resolution=resolution,
+#                 max_steps=max_steps,
+#                 render_mode=render_mode,
+#             ),
+#             buf=buf,
+#         )
 
-    return thunk
+#     return thunk
+
+def env_creator(resolution, max_steps, render_mode, buf=None, seed=None, **kwargs):
+    return pufferlib.emulation.GymnasiumPufferEnv(
+        env_creator=lambda: gym.make(
+            "CamEnv-v0",
+            resolution=resolution,
+            max_steps=max_steps,
+            render_mode=render_mode,
+        ),
+        buf=buf,
+    )
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -388,6 +400,11 @@ class Agent(nn.Module):
 
 
 if __name__ == "__main__":
+    try:
+        mp.set_start_method("spawn", force=True)
+    except RuntimeError:
+        pass
+
     args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
@@ -424,14 +441,11 @@ if __name__ == "__main__":
 
     # env setup -- changed to use PufferLib
     envs = pufferlib.vector.make(
-        make_env(
-            args.env_id,
-            0,
-            args.capture_video,
-            run_name,
-            args.resolution,
-            args.max_steps,
-            args.render_mode,
+        env_creator,
+        env_kwargs=dict(
+            resolution=args.resolution,
+            max_steps=args.max_steps,
+            render_mode=args.render_mode,
         ),
         num_envs=args.num_envs,
         backend=pufferlib.vector.Multiprocessing,
