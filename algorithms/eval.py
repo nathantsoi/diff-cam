@@ -17,6 +17,89 @@ from algorithms.ppo import *
 SEED = 42
 
 
+import numpy as np
+from scipy.ndimage import distance_transform_edt
+
+
+def _surface_voxels(mask):
+    """
+    Return boolean mask of surface voxels: voxels inside the shape
+    that have at least one neighbor outside (6-connectivity).
+    """
+    if not mask.any():
+        return np.zeros_like(mask, dtype=bool)
+
+    # A voxel is on the surface if it's inside but any 6-neighbor is outside.
+    # Equivalent: inside AND NOT(eroded). We do erosion via shifts to avoid
+    # importing more scipy ops.
+    surface = np.zeros_like(mask, dtype=bool)
+    for axis in range(mask.ndim):
+        for shift in (-1, 1):
+            shifted = np.roll(mask, shift, axis=axis)
+            # Edge voxels: rolling wraps, so blank out the wrap row
+            slicer = [slice(None)] * mask.ndim
+            slicer[axis] = 0 if shift == 1 else -1
+            shifted[tuple(slicer)] = False
+            surface |= mask & ~shifted
+    return surface
+
+
+def _surface_distances(sdf_a, sdf_b, resolution):
+    """
+    For each surface voxel of A, distance to nearest surface voxel of B,
+    and vice versa. Returns (d_a_to_b, d_b_to_a) as 1D arrays in physical units.
+    """
+    dx = 1/resolution
+
+    mask_a = sdf_a < 0
+    mask_b = sdf_b < 0
+
+    surf_a = _surface_voxels(mask_a)
+    surf_b = _surface_voxels(mask_b)
+
+    if not surf_a.any() or not surf_b.any():
+        return np.array([]), np.array([])
+
+    # Distance transform: at every voxel, distance to the nearest TRUE voxel
+    # in the input. We invert surf_b so that distance is computed FROM surf_b.
+    dt_from_b = distance_transform_edt(~surf_b) * dx
+    dt_from_a = distance_transform_edt(~surf_a) * dx
+
+    d_a_to_b = dt_from_b[surf_a]   # at each A surface voxel, distance to nearest B surface
+    d_b_to_a = dt_from_a[surf_b]
+
+    return d_a_to_b, d_b_to_a
+
+
+# ---------- Public metrics ----------
+
+def dice(sdf_stock, sdf_target):
+    """Dice Similarity Coefficient. 1.0 = perfect overlap."""
+    a = sdf_stock < 0
+    b = sdf_target < 0
+    inter = np.logical_and(a, b).sum()
+    denom = a.sum() + b.sum()
+    if denom == 0:
+        return 1.0
+    return 2.0 * inter / denom
+
+
+def asd(sdf_stock, sdf_target, resolution):
+    """Average Symmetric Surface Distance, in physical units."""
+    d1, d2 = _surface_distances(sdf_stock, sdf_target, resolution)
+    if len(d1) == 0 or len(d2) == 0:
+        return float("inf")
+    return float((d1.sum() + d2.sum()) / (len(d1) + len(d2)))
+
+
+def hd95(sdf_stock, sdf_target, resolution):
+    """95th-percentile symmetric Hausdorff distance, in physical units."""
+    d1, d2 = _surface_distances(sdf_stock, sdf_target, resolution)
+    if len(d1) == 0 or len(d2) == 0:
+        return float("inf")
+    return float(max(np.percentile(d1, 95), np.percentile(d2, 95)))
+
+
 def _make_agent(state_dict, dummy_envs):
     """Auto-detect architecture from checkpoint keys and create the right agent."""
     if "critic.0.weight" in state_dict:
@@ -71,22 +154,23 @@ def run_episode(agent, resolution, max_steps, seed=None, render=False):
     sdf_stock = sim.sdf_stock.to_numpy()
     sdf_target = sim.sdf_target.to_numpy()
 
-    current_stock = float(np.sum(sdf_stock < 0))
+    # current_stock = float(np.sum(sdf_stock < 0))
 
-    overlap = float(np.sum((sdf_stock < 0) & (sdf_target < 0)))
-    overlap_pct = 100.0 * overlap / max(target_vol, 1)
+    # overlap = float(np.sum((sdf_stock < 0) & (sdf_target < 0)))
+    # overlap_pct = 100.0 * overlap / max(target_vol, 1)
 
-    excess_initial = initial_stock - target_vol
-    excess_now = current_stock - overlap
-    removed_pct = 100.0 * (1.0 - excess_now / max(excess_initial, 1))
-
+    # excess_initial = initial_stock - target_vol
+    # excess_now = current_stock - overlap
+    # removed_pct = 100.0 * (1.0 - excess_now / max(excess_initial, 1))
+    
     env.close()
 
     return {
         "reward": total_reward,
         "steps": info["step"],
-        "overlap_pct": overlap_pct,
-        "removed_pct": removed_pct,
+        "dice": dice(sdf_stock, sdf_target),
+        "asd": asd(sdf_stock, sdf_target, resolution),
+        "hd95": hd95(sdf_stock, sdf_target, resolution)
     }
 
 
@@ -109,6 +193,7 @@ def evaluate_n_runs(models, resolution, max_steps, num_runs=10, base_seed=42):
             run_data[name] = metrics
 
         paired_results.append(run_data)
+        print(f"Run {i} done")
 
     # -------- aggregate --------
     summary = {}

@@ -1,8 +1,4 @@
-from doctest import debug
 import random
-
-from numpy import shape
-from sympy import shape
 import taichi as ti
 
 from simulator.simulator_utils import *
@@ -14,9 +10,9 @@ class CSGSimulator:
         # initialize Taichi
         try:
             if ti._lib.core.with_cuda():
-                ti.init(arch=ti.gpu, debug=debug)
+                ti.init(arch=ti.gpu, debug=False)
             else:
-                ti.init(arch=ti.cpu, debug=debug)
+                ti.init(arch=ti.cpu, debug=False)
         except:
             pass  # taichi alrady initialized, ignore
 
@@ -97,7 +93,6 @@ class CSGSimulator:
         else:
             raise ValueError(f"Unsupported shape: {self.shape}")
 
-
     @ti.func
     def stock_sdf(self, p):
         center = ti.Vector([0.5, 0.5, 0.5])
@@ -106,13 +101,12 @@ class CSGSimulator:
 
         for t in range(self.max_steps):
             tool_p = self.tool_pos[t]
-            tool_d = dist_from_tool(p, tool_p)
+            # tool_d = dist_from_tool(p, tool_p)
 
             # subtract tool
             d = smooth_max(d, -tool_d, self.k)
 
         return d
-
 
     @ti.func
     def tool_sdf(self, p):
@@ -126,6 +120,25 @@ class CSGSimulator:
         d_z = ti.max(d_z_bottom, d_z_top)
 
         return ti.max(d_xy, d_z)
+
+    @ti.func
+    def holder_sdf(self, p):
+        tool_pos = self.tool_pos[None]
+        tool_radius = self.tool_radius[None]
+        tool_height = self.tool_height[None]
+
+        holder_radius = tool_radius * 2.0
+        holder_height = tool_height * 0.5
+        holder_z_start = tool_pos.z + tool_height
+
+        dx = p.x - tool_pos.x
+        dy = p.y - tool_pos.y
+        d_h = ti.sqrt(dx * dx + dy * dy + 1e-12) - holder_radius
+
+        d_z_bottom = holder_z_start - p.z
+        d_z_top = p.z - (holder_z_start + holder_height)
+        d_z = ti.max(d_z_bottom, d_z_top)
+        return ti.max(d_h, d_z)
 
 
     @ti.kernel
