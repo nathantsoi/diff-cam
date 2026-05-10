@@ -86,7 +86,7 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
     # additional arguments for CamEnv
-    resolution: int = 8
+    resolution: int = 32
     """the resolution of the camera observation"""
     max_steps: int = 512
     """the maximum number of steps per episode"""
@@ -503,27 +503,17 @@ if __name__ == "__main__":
             next_obs, reward, terminations, truncations, infos = envs.step(
                 action.cpu().numpy()
             )
-            print(infos)
+
             # Log reward components from info
             reward_keys = [
-                "step", 
-                "action", 
-                "vol", 
-                "reward",
-                "good_cuts", 
-                "bad_cuts", 
-                "boundary_bonus", 
-                "progress_reward",
-                "idle_penalty", 
-                "holder_penalty",
-                "grad_x", 
-                "grad_y", 
-                "grad_z", 
-                "grad_magnitude"
+                "vol", "reward",
+                "good_cuts", "bad_cuts",
+                "boundary", "progress", "idle", "holder",
             ]
             for key in reward_keys:
-                if key in infos:
-                    writer.add_scalar(f"reward/{key}", np.mean(infos[key]), global_step)
+                vals = [d[key] for d in infos if isinstance(d, dict) and key in d]
+                if vals:
+                    writer.add_scalar(f"reward/{key}", float(np.mean(vals)), global_step)
 
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)

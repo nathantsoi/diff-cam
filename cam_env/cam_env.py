@@ -8,19 +8,15 @@ import time
 from simulator.voxel_simulator import *
 
  
-REWARD_W_GOOD = 100.0
-REWARD_W_BAD = -200.0
-REWARD_W_BOUNDARY = 1.0
-REWARD_W_PROG = 50.0
-REWARD_W_IDLE = -1.0
-REWARD_W_HOLDER = -5.0
+REWARD_W_GOOD     =  100.0
+REWARD_W_BAD      = -200.0
+REWARD_W_BOUNDARY =    1.0
+REWARD_W_PROG     =   50.0
+REWARD_W_IDLE     =   -1.0
+REWARD_W_HOLDER   =   -5.0
 
-# Add near the top with the other reward constants
-IDLE_THRESHOLD = 1e-5            # raw normalized-voxel-fraction threshold
-BOUNDARY_SIGMA = 400.0           # bandwidth on target-SDF^2
-BOUNDARY_STOCK_OFFSET = 0.0      # bias inside the stock_presence sigmoid
-
-k = 10.0
+IDLE_THRESHOLD   = 1e-5
+K = 10.0
 
 _EMPTY_REWARD_INFO = {
     "step": 0,
@@ -160,74 +156,100 @@ class CamEnv(gym.Env):
         self.cam_center = ti.Vector([0.5, 0.5, 0.5])
         self.last_mouse_pos = self.window.get_cursor_pos()
 
-    def _get_obs_and_components(self) -> np.ndarray:
-        """Tool pos + clipped flattened stock + clipped flattened target."""
-        tool_pos = self.simulator.tool_pos[None].to_numpy().astype(np.float32)
-        sdf_stock = (
-            np.clip(self.simulator.sdf_stock.to_numpy(), -1.0, 1.0)
-            .astype(np.float32).flatten()
-        )
-        sdf_target = (
-            np.clip(self.simulator.sdf_target.to_numpy(), -1.0, 1.0)
-            .astype(np.float32).flatten()
-        )
+    def _get_tool_pos(self) -> np.ndarray:
+        return self.simulator.tool_pos[None].to_numpy().astype(np.float32)
 
-        return np.concatenate([tool_pos, sdf_stock, sdf_target]), tool_pos, sdf_stock, sdf_target
+    def _get_sdf_stock(self) -> np.ndarray:
+        return np.clip(self.simulator.sdf_stock.to_numpy(), -1.0, 1.0).astype(np.float32)
+
+    def _get_sdf_target(self) -> np.ndarray:
+        return np.clip(self.simulator.sdf_target.to_numpy(), -1.0, 1.0).astype(np.float32)
+
+    def _get_obs(self) -> np.ndarray:
+        return np.concatenate([
+            self._get_tool_pos(),
+            self._get_sdf_stock().flatten(),
+            self._get_sdf_target().flatten(),
+        ])
+
+    def _boundary_sigma(self, res: int) -> float:
+        return float(res * res)
 
     def _calculate_reward(
         self,
         sdf_stock_before: np.ndarray,
-        sdf_stock_after: np.ndarray,
-        sdf_target: np.ndarray,
-        tool_pos: np.ndarray,
+        sdf_stock_after:  np.ndarray,
+        sdf_target:       np.ndarray,
+        tool_pos:         np.ndarray,
     ):
         res = self.resolution
+        k_sdf = K * (res / 32.0)         # scale sharpness with resolution
+        sigma = self._boundary_sigma(res)
 
-        # Soft inside/outside masks (sigmoid on SDF).
-        inside_stock_before = 1.0 / (1.0 + np.exp(k * sdf_stock_before))
-        inside_stock_after  = 1.0 / (1.0 + np.exp(k * sdf_stock_after))
-        inside_target       = 1.0 / (1.0 + np.exp(k * sdf_target))
-        outside_target      = 1.0 / (1.0 + np.exp(-k * sdf_target))
+        # ----- Soft inside/outside masks (sigmoid on SDF) -----
+        # Numerically-safe sigmoid via clipping the exponent.
+        def _sig(x):
+            return 1.0 / (1.0 + np.exp(np.clip(x, -50.0, 50.0)))
+
+        inside_stock_before = _sig( k_sdf * sdf_stock_before)
+        inside_stock_after  = _sig( k_sdf * sdf_stock_after)
+        inside_target       = _sig( k_sdf * sdf_target)
+        outside_target      = _sig(-k_sdf * sdf_target)
         material_removed    = inside_stock_before - inside_stock_after
 
-        # 1. Cutting: good = removed-and-outside-target, bad = removed-and-inside-target.
+        # ----- 1. Cutting quality -----
         good_raw = float(np.sum(material_removed * outside_target) / self.grid_norm)
         bad_raw  = float(np.sum(material_removed * inside_target)  / self.grid_norm)
 
-        # 2. Progress: how much excess (outside target) was eliminated this step.
+
+        # ----- 2. Progress: excess material eliminated this step -----
         excess_before = float(np.sum(inside_stock_before * outside_target) / self.grid_norm)
         excess_after  = float(np.sum(inside_stock_after  * outside_target) / self.grid_norm)
         progress_raw = excess_before - excess_after
 
-        # 3. Idle gate is a smooth sigmoid on the RAW fraction of voxels touched.
+        # ----- 3. Idle penalty -----
+        # Smooth gate: ~0 when nothing was touched, ~1 once removal exceeds threshold.
         total_removed_raw = good_raw + bad_raw
-        idle_gate = 1.0 / (1.0 + np.exp(-k * (total_removed_raw - IDLE_THRESHOLD)))
-        idle_raw = -0.2 + 0.2 * idle_gate  # in [-0.2, 0.0]
+        K_IDLE = 1.0 / IDLE_THRESHOLD   # ~1e5, makes the gate flip near the threshold
+        idle_gate = 1.0 / (1.0 + np.exp(
+            np.clip(-K_IDLE * (total_removed_raw - IDLE_THRESHOLD), -50.0, 50.0)
+        ))
 
-        # 4. Boundary bonus, sampled at the tool-tip voxel.
+        idle_raw = 1.0 - idle_gate # idle_raw in [0, 1]: 1 == idle (no work done), 0 == cutting
+
+        # ----- 4. Boundary bonus at tool tip -----
         ix = int(np.clip(tool_pos[0] * res, 0, res - 1))
         iy = int(np.clip(tool_pos[1] * res, 0, res - 1))
         iz = int(np.clip(tool_pos[2] * res, 0, res - 1))
-        target_at_tool = float(sdf_target[ix, iy, iz])
-        stock_at_tool  = float(sdf_stock_after[ix, iy, iz])
 
-        near_target_surface = float(np.exp(-BOUNDARY_SIGMA * target_at_tool ** 2))
-        stock_presence      = 1.0 / (1.0 + np.exp(k * (stock_at_tool - BOUNDARY_STOCK_OFFSET)))
+        target_at_tool = float(sdf_target[ix, iy, iz])
+        stock_at_tool_before = float(sdf_stock_before[ix, iy, iz])
+
+        near_target_surface = float(np.exp(-sigma * target_at_tool ** 2))
+        stock_presence      = _sig(k_sdf * stock_at_tool_before)
+
         boundary_raw = float(near_target_surface * stock_presence * idle_gate)
 
-        # 5. Holder penalty: how much the holder base sits inside stock.
+        # ----- 5. Holder penalty -----
         tool_height = float(self.simulator.tool_height[None])
-        holder_z_idx = int(np.clip((tool_pos[2] + tool_height) * res, 0, res - 1))
-        stock_at_holder = float(sdf_stock_before[ix, iy, holder_z_idx])
-        holder_raw = 1.0 / (1.0 + np.exp(k * stock_at_holder))  # in [0, 1], 1 == fully buried
+        holder_z_lo = (tool_pos[2] + tool_height)
+        holder_z_hi = holder_z_lo + 0.5 * tool_height
 
-        # ---- Apply weights ----
-        good_cuts = REWARD_W_GOOD     * good_raw      # +
-        bad_cuts  = REWARD_W_BAD      * bad_raw       # weight is negative
-        progress  = REWARD_W_PROG     * progress_raw  # +
-        idle      = REWARD_W_IDLE     * idle_raw      # weight is negative
-        boundary  = REWARD_W_BOUNDARY * boundary_raw  # +
-        holder    = REWARD_W_HOLDER   * holder_raw    # weight is negative
+        z_lo_idx = int(np.clip(np.floor(holder_z_lo * res), 0, res - 1))
+        z_hi_idx = int(np.clip(np.ceil (holder_z_hi * res), 0, res))
+        z_hi_idx = max(z_hi_idx, z_lo_idx + 1)
+
+        holder_column = sdf_stock_after[ix, iy, z_lo_idx:z_hi_idx]
+        holder_buried = _sig(k_sdf * holder_column)             # in [0,1] per voxel
+        holder_raw = float(np.mean(holder_buried)) if holder_column.size else 0.0
+
+        # ----- Apply weights -----
+        good_cuts = REWARD_W_GOOD     * good_raw
+        bad_cuts  = REWARD_W_BAD      * bad_raw
+        progress  = REWARD_W_PROG     * progress_raw
+        idle      = REWARD_W_IDLE     * idle_raw
+        boundary  = REWARD_W_BOUNDARY * boundary_raw
+        holder    = REWARD_W_HOLDER   * holder_raw
 
         reward = good_cuts + bad_cuts + boundary + progress + idle + holder
 
@@ -257,10 +279,7 @@ class CamEnv(gym.Env):
             shape = saved["shape"]
             self.simulator = CNCSimulator(
                 resolution=self.resolution,
-                shape=shape,
-                stock_params={},
-                target_params={},
-                tool_params={},
+                shape=shape
             )
 
             self.simulator.sdf_stock.from_numpy(saved["sdf_stock"])
@@ -309,7 +328,7 @@ class CamEnv(gym.Env):
         self.simulator.init_tool_template()
         self.current_step = 0
 
-        obs, _, _, _ = self._get_obs_and_components()
+        obs = self._get_obs()
         info = {"step": 0}
         return obs, info
 
@@ -328,14 +347,21 @@ class CamEnv(gym.Env):
         z = float((action % 3) - 1)
 
         # --- Snapshot target ---
-        obs_before, tool_pos_before, sdf_stock_before, sdf_target_before = self._get_obs_and_components()
+        sdf_stock_before= self._get_sdf_stock()
 
         # --- Act: move tool, apply cut ---
         self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z))
         vol_removed = float(self.simulator.apply_cut()[0])
 
         # --- Snapshot stock AFTER cut---
-        obs_after, tool_pos_after, sdf_stock_after, sdf_target_after = self._get_obs_and_components()
+        tool_pos_after   = self._get_tool_pos()
+        sdf_stock_after  = self._get_sdf_stock()       
+        sdf_target_after = self._get_sdf_target()    
+        obs_after = np.concatenate([
+            tool_pos_after,
+            sdf_stock_after.flatten(),
+            sdf_target_after.flatten(),
+        ])
 
         reward_info = self._calculate_reward(
             sdf_stock_before, 
@@ -457,7 +483,7 @@ class CamEnv(gym.Env):
                 self.simulator.generate_stock_visualization_mesh()
             if self.show_part:
                 self.simulator.generate_target_visualization_mesh()
-            self.simulator.update_tool(self.simulator.tool_pos[None])
+            self.simulator.update_tool()
             ti.sync()
         except Exception as e:
             print(f"Error during mesh gen: {e}")

@@ -349,14 +349,23 @@ class CNCSimulator:
 
     @ti.kernel
     def update_tool(self):
+        """Refresh tool_points and holder_points to reflect the current tool_pos.
+
+        Reads tool_pos / tool_height from their 0-D fields. The env should call
+        this with no arguments after any change to tool position, radius, or
+        height (radius/height changes also require re-running init_tool_template).
+        """
+        tp = self.tool_pos[None]
+        th = self.tool_height[None]
+        holder_offset = ti.Vector([0.0, 0.0, th])
+
         n_tool = self.tool_count[None]
         for i in range(n_tool):
-            self.tool_points[i] = self.tool_template[i] + self.tool_pos
-        
+            self.tool_points[i] = self.tool_template[i] + tp
+
         n_holder = self.holder_count[None]
-        holder_offset = ti.Vector([0.0, 0.0, self.tool_height[None]])
         for i in range(n_holder):
-            self.holder_points[i] = self.holder_template[i] + self.tool_pos + holder_offset
+            self.holder_points[i] = self.holder_template[i] + tp + holder_offset
 
     @ti.kernel
     def generate_slices(self):
