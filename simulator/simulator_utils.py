@@ -39,11 +39,6 @@ def pyramid_sdf(p, cx, cy, base_z, half_base, height):
     return ti.max(d_bottom, ti.max(d_top, d_sides))
 
 
-@ti.func
-def boolean_subtract(stock_dist, tool_dist):
-    return ti.max(stock_dist, -tool_dist)
-
-
 # Math
 @ti.func
 def smooth_max(a, b, k):

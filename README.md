@@ -59,6 +59,8 @@ We employ a few evaluation metrics.
 - Measures are calculated for each episode for each policy
 - Summary statistics (mean, std) are computed
 - Note that this is only a fair comparison if the hyperparameters are the same
+Example:
+``` ```
 
 ## Testing
 

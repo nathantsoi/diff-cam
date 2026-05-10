@@ -5,36 +5,22 @@ from typing import Optional, Tuple, Dict, Any
 import taichi as ti
 import time
 
-from simulator.voxel_simulator import *
+from simulator.voxel_simulator import (
+    CNCSimulator,
+    # Import unified reward constants so env and sim cannot drift apart.
+    REWARD_K_SIGMOID,
+    REWARD_K_IDLE,
+    REWARD_W_GOOD,
+    REWARD_W_BAD,
+    REWARD_W_BOUND,
+    REWARD_W_PROG,
+    REWARD_W_IDLE,
+    REWARD_W_HOLDER,
+    BOUNDARY_SIGMA,
+    BOUNDARY_STOCK_OFFSET,
+    IDLE_THRESHOLD,
+)
 
- 
-REWARD_W_GOOD = 100.0
-REWARD_W_BAD = -200.0
-REWARD_W_BOUNDARY = 1.0
-REWARD_W_PROG = 50.0
-REWARD_W_IDLE = -1.0
-REWARD_W_HOLDER = -5.0
-
-# Add near the top with the other reward constants
-IDLE_THRESHOLD = 1e-5            # raw normalized-voxel-fraction threshold
-BOUNDARY_SIGMA = 400.0           # bandwidth on target-SDF^2
-BOUNDARY_STOCK_OFFSET = 0.0      # bias inside the stock_presence sigmoid
-
-k = 10.0
-
-_EMPTY_REWARD_INFO = {
-    "step": 0,
-    "action": [0, 0, 0],
-    "vol": 0.0,
-    "reward": 0.0,
-    "completed": False,
-    "good_cuts": 0.0,
-    "bad_cuts": 0.0,
-    "boundary": 0.0,
-    "progress": 0.0,
-    "idle": 0.0,
-    "holder": 0.0,
-}
 
 class CamEnv(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
@@ -45,6 +31,7 @@ class CamEnv(gym.Env):
         max_steps=512,
         render_mode: Optional[str] = None,
         debug: bool = False,
+        debug_gradients: bool = False,
         use_buffer = True,
     ):
         """
@@ -53,17 +40,19 @@ class CamEnv(gym.Env):
             max_steps: episode length cap.
             render_mode: "human" or "rgb_array".
             debug: Taichi debug mode (slower, better errors).
+            debug_gradients: if True, compute per-component reward gradients
+                every step via autodiff (6 tape runs — expensive). If False,
+                info dict will not contain 'grad_mag_*' or 'grad_x/y/z'.
             use_buffer: if True, maintain a buffer of past states for potential
         """
         super().__init__()
 
         self.resolution = resolution
         self.dx = 1.0 / resolution
-        self.grid_norm = float(resolution ** 3)
-
         self.max_steps = max_steps
         self.render_mode = render_mode
         self.debug = debug
+        self.debug_gradients = debug_gradients
 
         self.simulator = None
         self.global_step = 0
@@ -80,7 +69,6 @@ class CamEnv(gym.Env):
         self.use_buffer = use_buffer
         self.state_buffer = []
         
-        self.last_info = dict(_EMPTY_REWARD_INFO)
 
         # Rendering state
         self.window = None
@@ -104,29 +92,18 @@ class CamEnv(gym.Env):
         self.show_raymarch = False
         self.show_help = False
 
+        self.last_grad_diff = np.zeros(3, dtype=np.float32)
+        self.last_move_dir = np.zeros(3, dtype=np.float32)
+        self.last_info = {}
+
     @staticmethod
     def _normalize(v: np.ndarray) -> np.ndarray:
         norm = np.linalg.norm(v)
         return v / norm if norm > 1e-8 else v
 
-    def _initialize_sim(self, shape: str, stock_params: dict, target_params: dict, tool_params: dict):
-        """(Re)build the simulator with concrete params. Called every reset."""
-        self.simulator = CNCSimulator(
-            resolution=self.resolution,
-            shape=shape,
-        )
-        self.simulator.initialize_stock(half_size=stock_params["half_size"])
-        if shape == "sphere":
-            self.simulator.initialize_target_sphere(radius=target_params["radius"])
-        elif shape == "box":
-            self.simulator.initialize_target_box(half_size=target_params["half_size"])
-        elif shape == "cylinder":
-            self.simulator.initialize_target_cylinder(radius=target_params["radius"], height=target_params["height"])
-        elif shape == "pyramid":
-            self.simulator.initialize_target_pyramid(half_base=target_params["half_base"], height=target_params["height"])
-        else:
-            raise ValueError(f"Unknown shape: {shape}")
-        self.simulator.initialize_tool(tool_params["tool_pos"], tool_params["radius"], tool_params["height"])
+    def _initialize_sim(self):
+        if self.simulator is None:
+            self.simulator = CNCSimulator(resolution=self.resolution, debug=self.debug)
 
     def _initialize_render(self):
         if self.window is not None:
@@ -160,7 +137,7 @@ class CamEnv(gym.Env):
         self.cam_center = ti.Vector([0.5, 0.5, 0.5])
         self.last_mouse_pos = self.window.get_cursor_pos()
 
-    def _get_obs_and_components(self) -> np.ndarray:
+    def _get_obs(self) -> np.ndarray:
         """Tool pos + clipped flattened stock + clipped flattened target."""
         tool_pos = self.simulator.tool_pos[None].to_numpy().astype(np.float32)
         sdf_stock = (
@@ -171,8 +148,7 @@ class CamEnv(gym.Env):
             np.clip(self.simulator.sdf_target.to_numpy(), -1.0, 1.0)
             .astype(np.float32).flatten()
         )
-
-        return np.concatenate([tool_pos, sdf_stock, sdf_target]), tool_pos, sdf_stock, sdf_target
+        return np.concatenate([tool_pos, sdf_stock, sdf_target])
 
     def _calculate_reward(
         self,
@@ -182,168 +158,146 @@ class CamEnv(gym.Env):
         tool_pos: np.ndarray,
     ):
         res = self.resolution
+        k = REWARD_K_SIGMOID
+        grid_norm = float(res ** 3)
 
-        # Soft inside/outside masks (sigmoid on SDF).
+        # 1. Cutting reward (voxel-wise, summed, normalized by grid)
         inside_stock_before = 1.0 / (1.0 + np.exp(k * sdf_stock_before))
         inside_stock_after  = 1.0 / (1.0 + np.exp(k * sdf_stock_after))
         inside_target       = 1.0 / (1.0 + np.exp(k * sdf_target))
         outside_target      = 1.0 / (1.0 + np.exp(-k * sdf_target))
-        material_removed    = inside_stock_before - inside_stock_after
 
-        # 1. Cutting: good = removed-and-outside-target, bad = removed-and-inside-target.
-        good_raw = float(np.sum(material_removed * outside_target) / self.grid_norm)
-        bad_raw  = float(np.sum(material_removed * inside_target)  / self.grid_norm)
+        material_removed = inside_stock_before - inside_stock_after
+        good_cuts = float(np.sum(material_removed * outside_target) / grid_norm)
+        bad_cuts  = float(np.sum(material_removed * inside_target)  / grid_norm)
 
-        # 2. Progress: how much excess (outside target) was eliminated this step.
-        excess_before = float(np.sum(inside_stock_before * outside_target) / self.grid_norm)
-        excess_after  = float(np.sum(inside_stock_after  * outside_target) / self.grid_norm)
-        progress_raw = excess_before - excess_after
+        # 2. Progress (same normalization)
+        excess_before = float(np.sum(inside_stock_before * outside_target) / grid_norm)
+        excess_after  = float(np.sum(inside_stock_after  * outside_target) / grid_norm)
+        progress = excess_before - excess_after
 
-        # 3. Idle gate is a smooth sigmoid on the RAW fraction of voxels touched.
-        total_removed_raw = good_raw + bad_raw
-        idle_gate = 1.0 / (1.0 + np.exp(-k * (total_removed_raw - IDLE_THRESHOLD)))
-        idle_raw = -0.2 + 0.2 * idle_gate  # in [-0.2, 0.0]
+        # 3. Idle — uses normalized total_removed, same as simulator
+        total_removed = good_cuts + bad_cuts
+        idle = -0.2 + 0.2 * (1.0 / (1.0 + np.exp(-REWARD_K_IDLE * (total_removed - IDLE_THRESHOLD))))
 
-        # 4. Boundary bonus, sampled at the tool-tip voxel.
+        # 4. Boundary bonus (point-sampled at tool tip)
         ix = int(np.clip(tool_pos[0] * res, 0, res - 1))
         iy = int(np.clip(tool_pos[1] * res, 0, res - 1))
         iz = int(np.clip(tool_pos[2] * res, 0, res - 1))
         target_at_tool = float(sdf_target[ix, iy, iz])
         stock_at_tool  = float(sdf_stock_after[ix, iy, iz])
 
-        near_target_surface = float(np.exp(-BOUNDARY_SIGMA * target_at_tool ** 2))
-        stock_presence      = 1.0 / (1.0 + np.exp(k * (stock_at_tool - BOUNDARY_STOCK_OFFSET)))
-        boundary_raw = float(near_target_surface * stock_presence * idle_gate)
+        near_target_surface = np.exp(-BOUNDARY_SIGMA * target_at_tool ** 2)
+        stock_presence = 1.0 / (1.0 + np.exp(k * (stock_at_tool - BOUNDARY_STOCK_OFFSET)))
+        cutting_mask = 1.0 / (1.0 + np.exp(-REWARD_K_IDLE * (total_removed - IDLE_THRESHOLD)))
+        boundary = float(near_target_surface * stock_presence * cutting_mask)
 
-        # 5. Holder penalty: how much the holder base sits inside stock.
+        # 5. Holder penalty (point-sampled at holder base)
         tool_height = float(self.simulator.tool_height[None])
-        holder_z_idx = int(np.clip((tool_pos[2] + tool_height) * res, 0, res - 1))
+        holder_z = tool_pos[2] + tool_height
+        holder_z_idx = int(np.clip(holder_z * res, 0, res - 1))
+        # Use sdf_stock_before here to match the simulator (post-cut is the same
+        # anywhere the cut didn't reach, and the holder base is above the tool
+        # so the cut doesn't touch it — so pre vs post is equivalent there).
         stock_at_holder = float(sdf_stock_before[ix, iy, holder_z_idx])
-        holder_raw = 1.0 / (1.0 + np.exp(k * stock_at_holder))  # in [0, 1], 1 == fully buried
+        holder_inside = 1.0 / (1.0 + np.exp(k * stock_at_holder))
+        holder = float(-holder_inside)  # negative contribution
 
-        # ---- Apply weights ----
-        good_cuts = REWARD_W_GOOD     * good_raw      # +
-        bad_cuts  = REWARD_W_BAD      * bad_raw       # weight is negative
-        progress  = REWARD_W_PROG     * progress_raw  # +
-        idle      = REWARD_W_IDLE     * idle_raw      # weight is negative
-        boundary  = REWARD_W_BOUNDARY * boundary_raw  # +
-        holder    = REWARD_W_HOLDER   * holder_raw    # weight is negative
-
-        reward = good_cuts + bad_cuts + boundary + progress + idle + holder
-
+        reward = (
+            REWARD_W_GOOD   * good_cuts
+          - REWARD_W_BAD    * bad_cuts
+          + REWARD_W_BOUND  * boundary
+          + REWARD_W_PROG   * progress
+          + REWARD_W_IDLE   * idle
+          + REWARD_W_HOLDER * holder
+        )
         return {
-            "reward":    float(reward),
-            "good_cuts": float(good_cuts),
-            "bad_cuts":  float(bad_cuts),
-            "boundary":  float(boundary),
-            "progress":  float(progress),
-            "idle":      float(idle),
-            "holder":    float(holder),
+            "reward":   float(reward),
+            "good":     good_cuts,
+            "bad":      bad_cuts,
+            "boundary": boundary,
+            "progress": progress,
+            "idle":     idle,
+            "holder":   holder,
         }
 
     def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
+        """Gymnasium-compliant reset (accepts options)."""
         super().reset(seed=seed)
+        self._initialize_sim()
 
-        resume_from_buffer = (
-            self.use_buffer
-            and len(self.state_buffer) > 0
-            and self.np_random.random() < 0.3
-        )
-
-        if resume_from_buffer:
-            # ---- Resume from a past state ----
+        if self.use_buffer and len(self.state_buffer) > 0 and self.np_random.random() < 0.3:
             saved = self.state_buffer[self.np_random.integers(len(self.state_buffer))]
-
-            shape = saved["shape"]
-            self.simulator = CNCSimulator(
-                resolution=self.resolution,
-                shape=shape,
-                stock_params={},
-                target_params={},
-                tool_params={},
-            )
-
             self.simulator.sdf_stock.from_numpy(saved["sdf_stock"])
             self.simulator.sdf_target.from_numpy(saved["sdf_target"])
-            self.simulator.tool_pos[None] = ti.Vector(saved["tool_pos"])
-            self.simulator.tool_radius[None] = saved.get("tool_radius", 0.1)
-            self.simulator.tool_height[None] = saved.get("tool_height", 0.2)
-
+            x = float(saved["tool_pos"][0])
+            y = float(saved["tool_pos"][1])
+            z = float(saved["tool_pos"][2])
+            self.simulator.initialize_tool(
+                [x, y, z], float(saved["tool_radius"]), float(saved["tool_height"])
+            )
         else:
-            # ---- Sample a fresh problem ----
-            shape = str(self.np_random.choice(["sphere", "box", "cylinder", "pyramid"]))
+            x = round(float(self.np_random.uniform(0.1, 0.9)) / self.dx) * self.dx
+            y = round(float(self.np_random.uniform(0.1, 0.9)) / self.dx) * self.dx
+            z = round(0.9 / self.dx) * self.dx
+            radius = round(float(self.np_random.uniform(0.05, 0.15)) / self.dx) * self.dx
+            height = round(float(self.np_random.uniform(0.2, 0.4)) / self.dx) * self.dx
+            if self.debug:
+                print(f"Init tool at {[x, y, z]}, r={radius:.4f}, h={height:.4f}")
+            self.simulator.initialize_tool([x, y, z], radius, height)
+            self.simulator.initialize_stock(half_size=(round(0.4 / self.dx) * self.dx))
 
-            stock_params = {"half_size": round(0.4 / self.dx) * self.dx}
-
+            shape = self.np_random.choice(["sphere", "cube", "cylinder", "pyramid"])
             if shape == "sphere":
-                target_params = {
-                    "radius": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
-                }
-            elif shape == "box":
-                target_params = {
-                    "half_size": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
-                }
+                r = round(float(self.np_random.uniform(0.15, 0.3)) / self.dx) * self.dx
+                self.simulator.initialize_target_sphere(r)
+            elif shape == "cube":
+                s = round(float(self.np_random.uniform(0.15, 0.3)) / self.dx) * self.dx
+                self.simulator.initialize_target_cube(s)
             elif shape == "cylinder":
-                target_params = {
-                    "radius": round(float(self.np_random.uniform(0.10, 0.25)) / self.dx) * self.dx,
-                    "height": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
-                }
-            else:  # pyramid
-                target_params = {
-                    "half_base": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
-                    "height":    round(float(self.np_random.uniform(0.20, 0.40)) / self.dx) * self.dx,
-                }
-
-            tool_params = {
-                "radius": round(float(self.np_random.uniform(0.05, 0.15)) / self.dx) * self.dx,
-                "height": round(float(self.np_random.uniform(0.10, 0.30)) / self.dx) * self.dx,
-                "tool_pos": [
-                    round(float(self.np_random.uniform(0.1, 0.9)) / self.dx) * self.dx,
-                    round(float(self.np_random.uniform(0.1, 0.9)) / self.dx) * self.dx,
-                    round(0.9 / self.dx) * self.dx,
-                ]
-            }
-
-            self._initialize_sim(shape, stock_params, target_params, tool_params)
+                r = round(float(self.np_random.uniform(0.1, 0.25)) / self.dx) * self.dx
+                h = round(float(self.np_random.uniform(0.15, 0.3)) / self.dx) * self.dx
+                self.simulator.initialize_target_cylinder(r, h)
+            elif shape == "pyramid":
+                b = round(float(self.np_random.uniform(0.15, 0.3)) / self.dx) * self.dx
+                h = round(float(self.np_random.uniform(0.2, 0.4)) / self.dx) * self.dx
+                self.simulator.initialize_target_pyramid(b, h)
 
         self.simulator.init_tool_template()
         self.current_step = 0
 
-        obs, _, _, _ = self._get_obs_and_components()
-        info = {"step": 0}
+        obs = self._get_obs()
+        info = {"step": 0, "excess": self.simulator.compute_excess()}
         return obs, info
 
-    def _append_state_buffer(self, state):
-        if self.use_buffer:
-            self.state_buffer.append(state)
-            if len(self.state_buffer) > 500:
-                self.state_buffer.pop(0)
+    def _holder_hit_stock(self):
+        return self.simulator.check_holder_collision() == 1
+
+    def _tool_cuts_into_target(self):
+        return self.simulator.check_tool_intersects_target() == 1
 
     def step(self, action):
         self.global_step += 1
         self.current_step += 1
 
-        x = float((action // 9) - 1)
-        y = float(((action // 3) % 3) - 1)
-        z = float((action % 3) - 1)
+        x = (action // 9) - 1
+        y = ((action // 3) % 3) - 1
+        z = (action % 3) - 1
 
-        # --- Snapshot target ---
-        obs_before, tool_pos_before, sdf_stock_before, sdf_target_before = self._get_obs_and_components()
+        # --- Snapshot stock BEFORE cut (for autodiff to see pre-cut state) ---
+        self.simulator.snapshot_stock()
+        sdf_target_np = self.simulator.sdf_target.to_numpy()
+        sdf_stock_before_np = self.simulator.sdf_stock.to_numpy()
 
         # --- Act: move tool, apply cut ---
         self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z))
-        vol_removed = float(self.simulator.apply_cut()[0])
+        vol_removed = self.simulator.apply_cut()
 
-        # --- Snapshot stock AFTER cut---
-        obs_after, tool_pos_after, sdf_stock_after, sdf_target_after = self._get_obs_and_components()
-
-        reward_info = self._calculate_reward(
-            sdf_stock_before, 
-            sdf_stock_after, 
-            sdf_target_after, # same as sdf_target_before
-            tool_pos_after
-        )
-
+        # --- Gradients (optional, expensive: 7 tape runs) ---
+        # Must be called while sdf_stock_before still holds the pre-cut snapshot.
+        # snapshot_stock() was called above, and we haven't overwritten it.
+        reward_info = self.simulator.compute_reward_and_gradients() # reward from simulator's autodiff, not the separate calculation in _calculate_reward
+        grad = reward_info["grad"]
         reward = reward_info["reward"]
         good_cuts = reward_info["good_cuts"]
         bad_cuts = reward_info["bad_cuts"]
@@ -352,17 +306,30 @@ class CamEnv(gym.Env):
         idle = reward_info["idle"]
         holder = reward_info["holder"]
 
+        # --- Read post-cut state ---
+        tool_pos_after = self.simulator.tool_pos[None].to_numpy()
+        sdf_stock_after_np = self.simulator.sdf_stock.to_numpy()
+
+        obs = self._get_obs()
+
+        # --- Reward from simulator - repeat ---
+        # reward_components = self._calculate_reward(
+        #     sdf_stock_before_np, sdf_stock_after_np, sdf_target_np, tool_pos_after
+        # )
+        # reward = reward_components["reward"]
+        
 
         # --- State buffer for resumable resets ---
         if vol_removed > 0 and self.np_random.random() < 0.1:
-            self._append_state_buffer({
-                "shape": self.simulator.shape,
-                "sdf_stock": sdf_stock_after.copy(),
-                "sdf_target": sdf_target_after.copy(),
+            self.state_buffer.append({
+                "sdf_stock": sdf_stock_after_np.copy(),
+                "sdf_target": sdf_target_np.copy(),
                 "tool_pos": tool_pos_after.copy(),
                 "tool_radius": float(self.simulator.tool_radius[None]),
                 "tool_height": float(self.simulator.tool_height[None]),
             })
+            if len(self.state_buffer) > 500:
+                self.state_buffer.pop(0)
 
         truncated = self.current_step >= self.max_steps
         terminated = False
@@ -381,10 +348,16 @@ class CamEnv(gym.Env):
             "progress":        progress,
             "idle":            idle,
             "holder":          holder,
+
+            # Gradients
+            "grad_x": float(grad[0]),
+            "grad_y": float(grad[1]),
+            "grad_z": float(grad[2]),
+            "grad_magnitude": float(np.linalg.norm(grad)),
             }
 
         self.last_info = info
-        return obs_after, float(reward), terminated, truncated, info
+        return obs, float(reward), terminated, truncated, info
 
     # ========================================================================
     # Rendering
@@ -510,8 +483,11 @@ class CamEnv(gym.Env):
                                      color=(1.0, 0.2, 0.2),
                                      index_count=self.simulator.tool_count[None])
                 tool_pos_py = self.simulator.tool_pos[None]
+                self.grad_points[0] = tool_pos_py
+                self.grad_points[1] = tool_pos_py + ti.Vector(self.last_grad_diff.tolist()) * 0.15
+                self.grad_colors[0] = [1, 1, 0]; self.grad_colors[1] = [1, 1, 0]
                 self.move_points[0] = tool_pos_py
-                #self.move_points[1] = tool_pos_py + ti.Vector(self.last_move_dir.tolist()) * 0.15
+                self.move_points[1] = tool_pos_py + ti.Vector(self.last_move_dir.tolist()) * 0.15
                 self.move_colors[0] = [0, 1, 1]; self.move_colors[1] = [0, 1, 1]
                 self.scene.lines(self.grad_points, width=4.0, per_vertex_color=self.grad_colors)
                 self.scene.lines(self.move_points, width=4.0, per_vertex_color=self.move_colors)
@@ -554,7 +530,7 @@ class CamEnv(gym.Env):
 
 
 if __name__ == "__main__":
-    env = CamEnv(resolution=32, max_steps=128, render_mode="human")
+    env = CamEnv(resolution=32, max_steps=128, render_mode="human", debug_gradients=True)
     obs, info = env.reset()
     done = False
     while not done:
@@ -570,5 +546,7 @@ if __name__ == "__main__":
               f"holder={info['holder']:+.4f} | "
               f"progress={info['progress']:+.4f} | "
               f"boundary={info['boundary']:+.4f} | "
-              f"idle={info['idle']:+.4f}")
+              f"idle={info['idle']:+.4f} | "
+              f"grad=({info.get('grad_x', 0.0):+.4f}, {info.get('grad_y', 0.0):+.4f}, {info.get('grad_z', 0.0):+.4f}) | "
+              f"|∇R|={info.get('grad_magnitude', 0.0):.4f}")
     env.close()
