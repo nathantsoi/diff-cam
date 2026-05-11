@@ -440,6 +440,11 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
     # env setup -- changed to use PufferLib
+    if args.num_envs == 1:
+        backend = pufferlib.vector.Serial
+    else:
+        backend = pufferlib.vector.Multiprocessing
+        
     envs = pufferlib.vector.make(
         env_creator,
         env_kwargs=dict(
@@ -448,7 +453,7 @@ if __name__ == "__main__":
             render_mode=args.render_mode,
         ),
         num_envs=args.num_envs,
-        backend=pufferlib.vector.Multiprocessing,
+        backend=backend,
     )
     assert isinstance(
         envs.single_action_space, gym.spaces.Discrete
