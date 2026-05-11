@@ -100,6 +100,8 @@ def hd95(sdf_stock, sdf_target, resolution):
     return float(max(np.percentile(d1, 95), np.percentile(d2, 95)))
 
 
+# -------- Evaluation code --------
+
 def _make_agent(state_dict, dummy_envs):
     """Auto-detect architecture from checkpoint keys and create the right agent."""
     if "critic.0.weight" in state_dict:
@@ -115,24 +117,15 @@ def _make_agent(state_dict, dummy_envs):
     return agent
 
 
-def run_episode(agent, resolution, max_steps, seed=None, render=False):
-    """ returns metric for one specific run """
-    env = gym.make(
-        "CamEnv-v0",
-        resolution=resolution,
-        max_steps=max_steps,
-        render_mode="human" if render else None,
-        use_buffer=False,
-    )
-
+def run_episode(agent, env, seed=None, render=True):
+    """Run one episode on the given env. Returns metrics dict."""
     if seed is not None:
         obs, info = env.reset(seed=seed)
     else:
         obs, info = env.reset()
 
     sim = env.unwrapped.simulator
-    initial_stock = float(np.sum(sim.sdf_stock.to_numpy() < 0))
-    target_vol = float(np.sum(sim.sdf_target.to_numpy() < 0))
+    resolution = env.unwrapped.resolution
 
     total_reward = 0
     done = False
@@ -148,87 +141,154 @@ def run_episode(agent, resolution, max_steps, seed=None, render=False):
 
         if render:
             env.render()
-            time.sleep(0.05)
+            # bail out if the user closed the window
+            if env.unwrapped.window is not None and not env.unwrapped.window.running:
+                break
 
-    # Final metrics
     sdf_stock = sim.sdf_stock.to_numpy()
     sdf_target = sim.sdf_target.to_numpy()
-
-    # current_stock = float(np.sum(sdf_stock < 0))
-
-    # overlap = float(np.sum((sdf_stock < 0) & (sdf_target < 0)))
-    # overlap_pct = 100.0 * overlap / max(target_vol, 1)
-
-    # excess_initial = initial_stock - target_vol
-    # excess_now = current_stock - overlap
-    # removed_pct = 100.0 * (1.0 - excess_now / max(excess_initial, 1))
-    
-    env.close()
 
     return {
         "reward": total_reward,
         "steps": info["step"],
         "dice": dice(sdf_stock, sdf_target),
         "asd": asd(sdf_stock, sdf_target, resolution),
-        "hd95": hd95(sdf_stock, sdf_target, resolution)
+        "hd95": hd95(sdf_stock, sdf_target, resolution),
     }
 
 
-def evaluate_n_runs(models, resolution, max_steps, num_runs=10, base_seed=42):
+def evaluate_n_runs(models, num_runs=10, base_seed=42, render=True, shape=None, stock_params=None, target_params=None, tool_params=None):
     """
-    policies: dict[str, agent]
-    returns:
-        paired_results: list of per-run dicts
-        summary: aggregated stats
-    """
+    Evaluate each model on num_runs episodes.
 
+    Order: model-outer, run-inner. One env per model, reused across all runs
+    of that model, then torn down before moving to the next model. This minimizes
+    Taichi window lifecycle churn.
+
+    Pairing is preserved via seed: (model_A, seed=k) and (model_B, seed=k) see
+    the same scenario, so downstream paired statistics are still valid.
+
+    Args:
+        models: dict[str, dict] with keys 'agent', 'resolution', 'max_steps'.
+        num_runs: number of episodes per model.
+        base_seed: seed for run i is base_seed + i.
+        render: whether to render each episode.
+
+    Returns:
+        paired_results: list of per-run dicts in seed-major order, matching
+            the original API: [{"seed": s, model_name: metrics, ...}, ...].
+        summary: aggregated stats per model per metric.
+    """
+    # Collect per-model results keyed by seed, so we can reassemble paired
+    # order at the end regardless of evaluation order.
+    per_model = {name: {} for name in models}
+
+    for name, model_info in models.items():
+        print(f"\nEvaluating {name}")
+        env = gym.make(
+            "CamEnv-v0",
+            resolution=model_info["resolution"],
+            max_steps=model_info["max_steps"],
+            shape=shape,
+            stock_params=stock_params,
+            target_params=target_params,
+            tool_params=tool_params,
+            render_mode="human" if render else None,
+            use_buffer=False,
+        )
+
+        try:
+            for i in range(num_runs):
+                seed = base_seed + i
+                metrics = run_episode(
+                    model_info["agent"],
+                    env,
+                    seed=seed,
+                    render=render,
+                )
+                per_model[name][seed] = metrics
+                print(
+                    f"run {i} (seed {seed}): "
+                    f"reward={metrics['reward']:+.3f} "
+                    f"dice={metrics['dice']:.3f} "
+                    f"asd={metrics['asd']:.4f} "
+                    f"hd95={metrics['hd95']:.4f}"
+                )
+        finally:
+            env.close()
+
+    # Reassemble in seed-major order to preserve the original paired_results shape.
     paired_results = []
-
     for i in range(num_runs):
         seed = base_seed + i
         run_data = {"seed": seed}
-
-        for name, agent in models.items():
-            metrics = run_episode(agent, resolution, max_steps, seed)
-            run_data[name] = metrics
-
+        for name in models:
+            run_data[name] = per_model[name][seed]
         paired_results.append(run_data)
-        print(f"Run {i} done")
 
-    # -------- aggregate --------
+    # Aggregate
     summary = {}
-
-    for name in models.keys():
-        metrics = paired_results[0][name].keys()
-
+    for name in models:
+        metric_keys = paired_results[0][name].keys()
         summary[name] = {}
-        for m in metrics:
+        for m in metric_keys:
             vals = np.array([run[name][m] for run in paired_results])
-            summary[name][m] = {
-                "mean": float(np.mean(vals)),
-                "std": float(np.std(vals)),
-                "min": float(np.min(vals)),
-                "max": float(np.max(vals)),
-            }
+            # Filter inf (asd/hd95 return inf when a surface is empty)
+            finite = vals[np.isfinite(vals)]
+            if len(finite) == 0:
+                summary[name][m] = {"mean": float("inf"), "std": 0.0,
+                                    "min": float("inf"), "max": float("inf")}
+            else:
+                summary[name][m] = {
+                    "mean": float(np.mean(finite)),
+                    "std":  float(np.std(finite)),
+                    "min":  float(np.min(finite)),
+                    "max":  float(np.max(finite)),
+                }
 
     return paired_results, summary
 
 
-def load_agent(checkpoint_path, resolution, max_steps):
+def load_agent(checkpoint_path):
+    """Load an agent and its environment hyperparameters from a checkpoint."""
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
 
+    resolution = None
+    max_steps = None
+
     if isinstance(checkpoint, dict) and "args" in checkpoint:
+        # Our custom checkpoint format
+        saved_args = checkpoint["args"]
+        resolution = saved_args.get("resolution")
+        max_steps = saved_args.get("max_steps")
         state_dict = checkpoint.get("agent", checkpoint)
     else:
+        # Native pufferlib checkpoint (or other raw state dict)
         state_dict = checkpoint.get("agent", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-        
-    # Strip "agent." prefix if present (from PuffeRLWrapperPolicy)
+
+    # Check for parameters injected as buffers
+    if resolution is None and "env_resolution" in state_dict:
+        resolution = state_dict["env_resolution"].item()
+    if max_steps is None and "env_max_steps" in state_dict:
+        max_steps = state_dict["env_max_steps"].item()
+
+    if resolution is None or max_steps is None:
+        raise ValueError(
+            f"Checkpoint '{checkpoint_path}' does not contain environment parameters "
+            f"(resolution, max_steps) in 'args' dict or as injected buffers. "
+            f"Cannot evaluate without these."
+        )
+
+    # Strip "agent." prefix if present (from PuffeRLWrapperPolicy) and remove injected buffers
     stripped = {}
     for k, v in state_dict.items():
+        if k in ("env_resolution", "env_max_steps"):
+            continue
         new_key = k.replace("agent.", "", 1) if k.startswith("agent.") else k
         stripped[new_key] = v
     state_dict = stripped
 
+    print(f"  -> resolution={resolution}, max_steps={max_steps}")
 
     dummy_envs = pufferlib.vector.make(
         lambda buf=None, **kwargs: pufferlib.emulation.GymnasiumPufferEnv(
@@ -245,144 +305,19 @@ def load_agent(checkpoint_path, resolution, max_steps):
 
     agent = _make_agent(state_dict, dummy_envs)
     dummy_envs.close()
-    return agent
 
+    return {
+        "agent": agent,
+        "resolution": resolution,
+        "max_steps": max_steps,
+    }
 
-# def eval(checkpoint_path, fallback_resolution=None, fallback_max_steps=None):
-#     # Load checkpoint once
-#     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
-
-#     resolution = None
-#     max_steps = None
-
-#     if isinstance(checkpoint, dict) and "args" in checkpoint:
-#         # Our custom checkpoint format
-#         saved_args = checkpoint["args"]
-#         resolution = saved_args.get("resolution")
-#         max_steps = saved_args.get("max_steps")
-#         state_dict = checkpoint.get("agent", checkpoint)
-#     else:
-#         # Native pufferlib checkpoint (or other raw state dict)
-#         state_dict = checkpoint.get("agent", checkpoint) if isinstance(checkpoint, dict) else checkpoint
-
-#     # Check for parameters injected as buffers
-#     if resolution is None and "env_resolution" in state_dict:
-#         resolution = state_dict["env_resolution"].item()
-#     if max_steps is None and "env_max_steps" in state_dict:
-#         max_steps = state_dict["env_max_steps"].item()
-
-#     if resolution is None or max_steps is None:
-#         if fallback_resolution is not None and fallback_max_steps is not None:
-#              print("Warning: Checkpoint missing internal parameters, using provided CLI fallbacks.")
-#              resolution = fallback_resolution
-#              max_steps = fallback_max_steps
-#         else:
-#              raise ValueError(
-#                 "Checkpoint does not contain 'args' dictionary or injected buffer parameters.\n"
-#                 "This checkpoint appears to be missing its environment parameters (resolution, max_steps).\n"
-#                 "Evaluation now strictly requires checkpoints saved with these parameters OR for you to pass "
-#                 "--resolution and --max-steps explicitly via the CLI."
-#              )
-
-#     # Strip "agent." prefix if present (from PuffeRLWrapperPolicy) and remove injected buffers
-#     stripped = {}
-#     for k, v in state_dict.items():
-#         if k in ["env_resolution", "env_max_steps"]:
-#             continue
-#         new_key = k.replace("agent.", "", 1) if k.startswith("agent.") else k
-#         stripped[new_key] = v
-#     state_dict = stripped
-
-#     print(f"Using resolution={resolution}, max_steps={max_steps}")
-
-#     # Dummy vectorized env to get shapes for Agent init
-#     dummy_envs = pufferlib.vector.make(
-#         lambda buf=None, **kwargs: pufferlib.emulation.GymnasiumPufferEnv(
-#             env_creator=lambda: gym.make("CamEnv-v0", resolution=resolution, max_steps=max_steps),
-#             buf=buf,
-#         ),
-#         num_envs=1,
-#         backend=pufferlib.vector.Serial,
-#     )
-
-#     agent = _make_agent(state_dict, dummy_envs)
-#     dummy_envs.close()
-
-#     # Real env with rendering
-#     env = gym.make("CamEnv-v0", resolution=resolution, max_steps=max_steps, render_mode="human")
-#     obs, info = env.reset()
-
-#     # Get initial stock/target volumes for comparison
-#     sim = env.unwrapped.simulator
-#     initial_stock = float(np.sum(sim.sdf_stock.to_numpy() < 0))
-#     target_vol = float(np.sum(sim.sdf_target.to_numpy() < 0))
-
-#     print(f"\n{'='*60}")
-#     print(f"Evaluating checkpoint: {checkpoint_path}")
-#     print(f"Resolution: {resolution}, Max steps: {max_steps}")
-#     print(f"Initial stock voxels: {initial_stock:.0f}")
-#     print(f"Target voxels:        {target_vol:.0f}")
-#     print(f"Voxels to remove:     {initial_stock - target_vol:.0f}")
-#     print(f"{'='*60}")
-#     print(f"{'Step':>5} {'Action':>12} {'Reward':>8} {'Value':>8} {'Stock':>8} {'Overlap%':>9} {'Removed%':>9}")
-#     print(f"{'-'*5} {'-'*12} {'-'*8} {'-'*8} {'-'*8} {'-'*9} {'-'*9}")
-
-#     total_reward = 0
-#     done = False
-
-#     while not done:
-#         with torch.no_grad():
-#             obs_tensor = torch.Tensor(obs).unsqueeze(0)
-#             action, _, _, value = agent.get_action_and_value(obs_tensor)
-
-#         obs, reward, terminated, truncated, info = env.step(action.item())
-#         total_reward += reward
-#         done = terminated or truncated
-
-#         env.render()
-#         time.sleep(.15)
-
-#         # Compute progress metrics
-#         step = info.get("step", 0)
-#         vol = info.get("vol", None)
-#         good_cuts = info.get("good_cuts", None)
-#         bad_cuts = info.get("bad_cuts", None)
-#         boundary_bonus = info.get("boundary_bonus", None)
-
-#         sdf_stock = sim.sdf_stock.to_numpy()
-#         sdf_target = sim.sdf_target.to_numpy()
-#         current_stock = float(np.sum(sdf_stock < 0))
-#         # Overlap: voxels that are in stock AND in target (good — should keep these)
-#         overlap = float(np.sum((sdf_stock < 0) & (sdf_target < 0)))
-#         overlap_pct = 100.0 * overlap / max(target_vol, 1)
-#         # How much excess stock has been removed
-#         excess_initial = initial_stock - target_vol
-#         excess_now = current_stock - overlap
-#         removed_pct = 100.0 * (1.0 - excess_now / max(excess_initial, 1))
-
-#         a = action.item()
-#         x = (a // 9) - 1
-#         y = ((a // 3) % 3) - 1
-#         z = (a % 3) - 1
-#         print(f"{info['step']:>5} {str([x,y,z]):>12} {reward:>8.4f} {value.item():>8.4f} {current_stock:>8.0f} {overlap_pct:>8.1f}% {removed_pct:>8.1f}%")
-
-#     print(f"\n{'='*60}")
-#     print(f"Episode finished in {info['step']} steps")
-#     print(f"Total reward:        {total_reward:.4f}")
-#     print(f"Target preserved:    {overlap_pct:.1f}% (want 100%)")
-#     print(f"Excess removed:      {removed_pct:.1f}% (want 100%)")
-#     print(f"{'='*60}\n")
-#     env.close()
-
-
+# KNOWN ERROR: eval script exits after 5 runs if rendering on
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--checkpoints", nargs="+", required=True)
-    parser.add_argument("--resolution", type=int, required=True)
-    parser.add_argument("--max-steps", type=int, required=True)
-
-    parser.add_argument("--n-runs", type=int, default=10)
+    parser.add_argument("--num-runs", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
 
     args = parser.parse_args()
@@ -392,24 +327,38 @@ if __name__ == "__main__":
 
     for ckpt in args.checkpoints:
         print(f"Loading {ckpt}")
-        models[ckpt] = load_agent(
-            ckpt,
-            args.resolution,
-            args.max_steps,
+        models[ckpt] = load_agent(ckpt)
+
+    # Warn if checkpoints disagree on env hyperparameters
+    resolutions = {m["resolution"] for m in models.values()}
+    max_steps_set = {m["max_steps"] for m in models.values()}
+    if len(resolutions) > 1 or len(max_steps_set) > 1:
+        print(
+            "\nWARNING: checkpoints have differing env hyperparameters. "
+            f"resolutions={resolutions}, max_steps={max_steps_set}. "
+            "Each model will run in its own env; results are not strictly paired.\n"
         )
 
     # ---- evaluate ----
+    shape = "sphere"
+    stock_params = {"half_size": 0.4}
+    target_params = {"radius": 0.3}
+    tool_params = {"radius": 0.1, "height": 0.4, "tool_pos": (0.5, 0.5, 0.8)}
+
     paired_results, summary = evaluate_n_runs(
         models,
-        args.resolution,
-        args.max_steps,
-        num_runs=args.n_runs,
+        num_runs=args.num_runs,
         base_seed=args.seed,
+        render=False,
+        shape=shape,
+        stock_params=stock_params,
+        target_params=target_params,
+        tool_params=tool_params
     )
 
     # ---- print summary ----
     print("\n" + "="*60)
-    print(f"Evaluation over {args.n_runs} runs")
+    print(f"Evaluation over {args.num_runs} runs")
     print("="*60)
 
     for model_name, metrics in summary.items():

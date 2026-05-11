@@ -17,9 +17,6 @@ from torch.utils.tensorboard import SummaryWriter
 import pufferlib
 import pufferlib.vector
 import pufferlib.emulation
-import pufferlib.environments
-
-from cam_env.cam_env import CamEnv
 
 
 @dataclass

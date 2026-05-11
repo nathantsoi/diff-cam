@@ -39,6 +39,10 @@ class CamEnv(gym.Env):
         self,
         resolution=32,
         max_steps=512,
+        shape = None,
+        stock_params = None,
+        target_params = None,
+        tool_params = None,
         render_mode: Optional[str] = None,
         debug: bool = False,
         use_buffer = True,
@@ -47,6 +51,10 @@ class CamEnv(gym.Env):
         Args:
             resolution: grid resolution.
             max_steps: episode length cap.
+            shape: the shape of the target object.
+            stock_params: parameters for the stock object.
+            target_params: parameters for the target object.
+            tool_params: parameters for the cutting tool.
             render_mode: "human" or "rgb_array".
             debug: Taichi debug mode (slower, better errors).
             use_buffer: if True, maintain a buffer of past states for potential
@@ -56,10 +64,16 @@ class CamEnv(gym.Env):
         self.resolution = resolution
         self.dx = 1.0 / resolution
         self.grid_norm = float(resolution ** 3)
+        self.boundary_sigma = float(resolution * resolution)
 
         self.max_steps = max_steps
         self.render_mode = render_mode
         self.debug = debug
+
+        self.shape = shape
+        self.stock_params = stock_params
+        self.target_params = target_params
+        self.tool_params = tool_params
 
         self.simulator = None
         self.global_step = 0
@@ -172,9 +186,6 @@ class CamEnv(gym.Env):
             self._get_sdf_target().flatten(),
         ])
 
-    def _boundary_sigma(self, res: int) -> float:
-        return float(res * res)
-
     def _calculate_reward(
         self,
         sdf_stock_before: np.ndarray,
@@ -183,8 +194,7 @@ class CamEnv(gym.Env):
         tool_pos:         np.ndarray,
     ):
         res = self.resolution
-        k_sdf = K * (res / 32.0)         # scale sharpness with resolution
-        sigma = self._boundary_sigma(res)
+        k_sdf = K * (res / 32.0)         # scale sharpness with resolution      # controls boundary bonus falloff; higher means bonus is more tightly concentrated near the surface
 
         # ----- Soft inside/outside masks (sigmoid on SDF) -----
         # Numerically-safe sigmoid via clipping the exponent.
@@ -225,7 +235,7 @@ class CamEnv(gym.Env):
         target_at_tool = float(sdf_target[ix, iy, iz])
         stock_at_tool_before = float(sdf_stock_before[ix, iy, iz])
 
-        near_target_surface = float(np.exp(-sigma * target_at_tool ** 2))
+        near_target_surface = float(np.exp(-self.boundary_sigma * target_at_tool ** 2))
         stock_presence      = _sig(k_sdf * stock_at_tool_before)
 
         boundary_raw = float(near_target_surface * stock_presence * idle_gate)
@@ -263,7 +273,7 @@ class CamEnv(gym.Env):
             "holder":    float(holder),
         }
 
-    def reset(self, seed: Optional[int] = None, options: Optional[Dict[str, Any]] = None):
+    def reset(self, seed: Optional[int] = None):
         super().reset(seed=seed)
 
         resume_from_buffer = (
@@ -290,38 +300,53 @@ class CamEnv(gym.Env):
 
         else:
             # ---- Sample a fresh problem ----
-            shape = str(self.np_random.choice(["sphere", "box", "cylinder", "pyramid"]))
+            if self.shape is not None:
+                shape = self.shape
+            else:
+                shape = str(self.np_random.choice(["sphere", "box", "cylinder", "pyramid"]))
 
-            stock_params = {"half_size": round(0.4 / self.dx) * self.dx}
+            # Set stock params
+            if self.stock_params is not None:
+                stock_params = self.stock_params
+            else:
+                stock_params = {"half_size": round(0.4 / self.dx) * self.dx}
 
-            if shape == "sphere":
-                target_params = {
-                    "radius": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
-                }
-            elif shape == "box":
-                target_params = {
-                    "half_size": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
-                }
-            elif shape == "cylinder":
-                target_params = {
-                    "radius": round(float(self.np_random.uniform(0.10, 0.25)) / self.dx) * self.dx,
-                    "height": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
-                }
-            else:  # pyramid
-                target_params = {
-                    "half_base": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
-                    "height":    round(float(self.np_random.uniform(0.20, 0.40)) / self.dx) * self.dx,
-                }
+            # Set target params
+            if self.target_params is not None:
+                target_params = self.target_params
+            else:
+                if shape == "sphere":
+                    target_params = {
+                        "radius": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
+                    }
+                elif shape == "box":
+                    target_params = {
+                        "half_size": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
+                    }
+                elif shape == "cylinder":
+                    target_params = {
+                        "radius": round(float(self.np_random.uniform(0.10, 0.25)) / self.dx) * self.dx,
+                        "height": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
+                    }
+                else:  # pyramid
+                    target_params = {
+                        "half_base": round(float(self.np_random.uniform(0.15, 0.30)) / self.dx) * self.dx,
+                        "height":    round(float(self.np_random.uniform(0.20, 0.40)) / self.dx) * self.dx,
+                    }
 
-            tool_params = {
-                "radius": round(float(self.np_random.uniform(0.05, 0.15)) / self.dx) * self.dx,
-                "height": round(float(self.np_random.uniform(0.10, 0.30)) / self.dx) * self.dx,
-                "tool_pos": [
-                    round(float(self.np_random.uniform(0.1, 0.9)) / self.dx) * self.dx,
-                    round(float(self.np_random.uniform(0.1, 0.9)) / self.dx) * self.dx,
-                    round(0.9 / self.dx) * self.dx,
-                ]
-            }
+            # Set tool params
+            if self.tool_params is not None:
+                tool_params = self.tool_params
+            else:
+                tool_params = {
+                    "radius": round(float(self.np_random.uniform(0.05, 0.15)) / self.dx) * self.dx,
+                    "height": round(float(self.np_random.uniform(0.10, 0.30)) / self.dx) * self.dx,
+                    "tool_pos": [
+                        round(float(self.np_random.uniform(0.1, 0.9)) / self.dx) * self.dx,
+                        round(float(self.np_random.uniform(0.1, 0.9)) / self.dx) * self.dx,
+                        round(0.9 / self.dx) * self.dx,
+                    ]
+                }
 
             self._initialize_sim(shape, stock_params, target_params, tool_params)
 
