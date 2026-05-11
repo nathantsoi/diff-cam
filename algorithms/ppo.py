@@ -520,6 +520,7 @@ if __name__ == "__main__":
             ]
             for key in reward_keys:
                 vals = [d[key] for d in infos if isinstance(d, dict) and key in d]
+                #print(f"[reward-log] step={global_step} key={key} val={float(np.mean(vals))}", flush=True)
                 if vals:
                     writer.add_scalar(f"reward/{key}", float(np.mean(vals)), global_step)
 
