@@ -2,7 +2,7 @@
 
 uv run python3 ./algorithms/ppo.py \
         --total_timesteps 10000000 \
-        --num_envs 4 \
+        --num_envs 1 \
         --resolution 32 \
         --num_steps 2048 \
         --max_steps 4096 \

@@ -400,6 +400,7 @@ class Agent(nn.Module):
 
 
 if __name__ == "__main__":
+    print("Starting ppo.py main function!")
     try:
         mp.set_start_method("spawn", force=True)
     except RuntimeError:
@@ -412,6 +413,8 @@ if __name__ == "__main__":
     num_checkpoints = 4
     checkpoint_interval = max(1, args.num_iterations // num_checkpoints)
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    print(f"Run name: {run_name}")
+
     if args.track:
         import wandb
 
