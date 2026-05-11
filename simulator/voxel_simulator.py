@@ -35,6 +35,7 @@ class CNCSimulator:
 
         # ----- Stock  -----
         self.sdf_stock = ti.field(dtype=ti.f32, shape=(self.res, self.res, self.res))
+        self.sdf_stock_before = ti.field(dtype=ti.f32, shape=(self.res, self.res, self.res)) # for reward calculation
 
         # ----- Target  -----
         shape_options = ["box", "cylinder", "sphere", "pyramid"]
@@ -48,6 +49,9 @@ class CNCSimulator:
         self.tool_pos = ti.Vector.field(3, dtype=ti.f32, shape=())
         self.tool_radius = ti.field(dtype=ti.f32, shape=())
         self.tool_height = ti.field(dtype=ti.f32, shape=())
+
+        # ----- Reward -----
+        self.reward_components = ti.field(dtype=ti.f32, shape=6)  # good, bad, prog, idle, bdry, holder
 
         # ----- Visualization -----
         self.initialize_visualization()
@@ -248,6 +252,73 @@ class CNCSimulator:
             if self.holder_sdf(p) < 0 and self.sdf_stock[i, j, k] < 0:
                 collision = 1
         return collision
+
+    @ti.kernel
+    def set_sdf_stock_before(self):
+        for I in ti.grouped(self.sdf_stock):
+            self.sdf_stock_before[I] = self.sdf_stock[I]
+
+    @ti.kernel
+    def compute_reward_components(self, k_sdf: ti.f32, boundary_sigma: ti.f32, k_idle: ti.f32, idle_thresh: ti.f32):
+        good = 0.0; bad = 0.0; excess_before = 0.0; excess_after = 0.0
+        inv_norm = 1.0 / self.grid_norm
+
+        for i, j, k in ti.ndrange(self.res, self.res, self.res):
+            sdf_stock_before = self.sdf_stock_before[i, j, k]
+            sdf_stock_after = self.sdf_stock[i, j, k]
+            sdf_target = self.sdf_target[i, j, k]
+
+            # numerically-safe sigmoid
+            in_sb = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0,  k_sdf * sdf_stock_before))))
+            in_sa = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0,  k_sdf * sdf_stock_after))))
+            in_t  = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0,  k_sdf * sdf_target))))
+            out_t = 1.0 - in_t  # sigmoid(-x) = 1 - sigmoid(x), saves an exp
+
+            removed = in_sb - in_sa
+            good += removed * out_t
+            bad  += removed * in_t
+            excess_before += in_sb * out_t
+            excess_after  += in_sa * out_t
+
+        # good + bad
+        good *= inv_norm
+        bad *= inv_norm
+
+        # progress
+        progress = (excess_before - excess_after) * inv_norm
+
+        # idle
+        total_removed = good + bad
+        idle_gate = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0, -k_idle * (total_removed - idle_thresh)))))
+        idle = 1.0 - idle_gate
+
+        # boundary
+        tp = self.tool_pos[None]
+        ix = ti.max(0, ti.min(self.res - 1, int(tp.x * self.res)))
+        iy = ti.max(0, ti.min(self.res - 1, int(tp.y * self.res)))
+        iz = ti.max(0, ti.min(self.res - 1, int(tp.z * self.res)))
+        t_at_tool = self.sdf_target[ix, iy, iz]
+        s_at_tool = self.sdf_stock_before[ix, iy, iz]
+        near_surf = ti.exp(-boundary_sigma * t_at_tool * t_at_tool)
+        stock_pres = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0, k_sdf * s_at_tool))))
+        boundary = near_surf * stock_pres * idle_gate
+
+        # holder
+        th = self.tool_height[None]
+        z_lo = ti.max(0, ti.min(self.res - 1, int(ti.floor((tp.z + th) * self.res))))
+        z_hi = ti.max(z_lo + 1, ti.min(self.res, int(ti.ceil((tp.z + 1.5 * th) * self.res))))
+        holder_sum = 0.0
+        for kk in range(z_lo, z_hi):
+            v = self.sdf_stock[ix, iy, kk]
+            holder_sum += 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0, k_sdf * v))))
+        holder = holder_sum / ti.cast(z_hi - z_lo, ti.f32)
+
+        self.reward_components[0] = good
+        self.reward_components[1] = bad
+        self.reward_components[2] = progress
+        self.reward_components[3] = idle
+        self.reward_components[4] = boundary
+        self.reward_components[5] = holder
 
     # ========================================================================
     # Interpolation / normals

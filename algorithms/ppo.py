@@ -18,6 +18,8 @@ import pufferlib
 import pufferlib.vector
 import pufferlib.emulation
 
+from cam_env.cam_env import CamEnv # needed for env registration
+
 
 @dataclass
 class Args:

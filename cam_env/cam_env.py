@@ -6,12 +6,13 @@ import taichi as ti
 import time
 
 from simulator.voxel_simulator import *
+from cam_env.cam_env import *
 
  
 REWARD_W_GOOD     =  100.0
 REWARD_W_BAD      = -200.0
 REWARD_W_BOUNDARY =    1.0
-REWARD_W_PROG     =   50.0
+REWARD_W_PROGRESS     =   50.0
 REWARD_W_IDLE     =   -1.0
 REWARD_W_HOLDER   =   -5.0
 
@@ -91,6 +92,9 @@ class CamEnv(gym.Env):
         self.state_buffer = []
         
         self.last_info = dict(_EMPTY_REWARD_INFO)
+
+        # cache
+        self._sdf_target = None
 
         # Rendering state
         self.window = None
@@ -183,7 +187,7 @@ class CamEnv(gym.Env):
         return np.concatenate([
             self._get_tool_pos(),
             self._get_sdf_stock().flatten(),
-            self._get_sdf_target().flatten(),
+            self._sdf_target.flatten(), # use cache
         ])
 
     def _calculate_reward(
@@ -193,6 +197,7 @@ class CamEnv(gym.Env):
         sdf_target:       np.ndarray,
         tool_pos:         np.ndarray,
     ):
+        """DEPRECATED: Use the simulator's compute_reward_components() kernel instead, which is much faster on GPU."""
         res = self.resolution
         k_sdf = K * (res / 32.0)         # scale sharpness with resolution      # controls boundary bonus falloff; higher means bonus is more tightly concentrated near the surface
 
@@ -254,12 +259,12 @@ class CamEnv(gym.Env):
         holder_raw = float(np.mean(holder_buried)) if holder_column.size else 0.0
 
         # ----- Apply weights -----
-        good_cuts = REWARD_W_GOOD     * good_raw
-        bad_cuts  = REWARD_W_BAD      * bad_raw
-        progress  = REWARD_W_PROG     * progress_raw
-        idle      = REWARD_W_IDLE     * idle_raw
-        boundary  = REWARD_W_BOUNDARY * boundary_raw
-        holder    = REWARD_W_HOLDER   * holder_raw
+        good_cuts = REWARD_W_GOOD         * good_raw
+        bad_cuts  = REWARD_W_BAD          * bad_raw
+        progress  = REWARD_W_PROGRESS     * progress_raw
+        idle      = REWARD_W_IDLE         * idle_raw
+        boundary  = REWARD_W_BOUNDARY     * boundary_raw
+        holder    = REWARD_W_HOLDER       * holder_raw
 
         reward = good_cuts + bad_cuts + boundary + progress + idle + holder
 
@@ -353,6 +358,8 @@ class CamEnv(gym.Env):
         self.simulator.init_tool_template()
         self.current_step = 0
 
+        self._sdf_target = self._get_sdf_target() # cache
+
         obs = self._get_obs()
         info = {"step": 0}
         return obs, info
@@ -371,46 +378,34 @@ class CamEnv(gym.Env):
         y = float(((action // 3) % 3) - 1)
         z = float((action % 3) - 1)
 
-        # --- Snapshot target ---
-        sdf_stock_before= self._get_sdf_stock()
+        self.simulator.set_sdf_stock_before() # need to do this so reward kernel can use it
 
-        # --- Act: move tool, apply cut ---
+        # act
         self.simulator.move_tool_one_unit(ti.math.vec3(x, y, z))
         vol_removed = float(self.simulator.apply_cut()[0])
 
-        # --- Snapshot stock AFTER cut---
-        tool_pos_after   = self._get_tool_pos()
-        sdf_stock_after  = self._get_sdf_stock()       
-        sdf_target_after = self._get_sdf_target()    
-        obs_after = np.concatenate([
-            tool_pos_after,
-            sdf_stock_after.flatten(),
-            sdf_target_after.flatten(),
-        ])
+        # extract reward
+        self.simulator.compute_reward_components(K * (self.resolution/32.0), self.boundary_sigma,1.0/IDLE_THRESHOLD, IDLE_THRESHOLD)
+        components = self.simulator.reward_components.to_numpy()
 
-        reward_info = self._calculate_reward(
-            sdf_stock_before, 
-            sdf_stock_after, 
-            sdf_target_after, # same as sdf_target_before
-            tool_pos_after
-        )
 
-        reward = reward_info["reward"]
-        good_cuts = reward_info["good_cuts"]
-        bad_cuts = reward_info["bad_cuts"]
-        boundary = reward_info["boundary"]
-        progress = reward_info["progress"]
-        idle = reward_info["idle"]
-        holder = reward_info["holder"]
+        good_cuts = REWARD_W_GOOD * components[0]
+        bad_cuts = REWARD_W_BAD * components[1]
+        boundary = REWARD_W_BOUNDARY * components[4]
+        progress = REWARD_W_PROGRESS * components[2]
+        idle = REWARD_W_IDLE * components[3]
+        holder = REWARD_W_HOLDER * components[5]
+
+        reward = good_cuts + bad_cuts + boundary + progress + idle + holder
 
 
         # --- State buffer for resumable resets ---
         if vol_removed > 0 and self.np_random.random() < 0.1:
             self._append_state_buffer({
                 "shape": self.simulator.shape,
-                "sdf_stock": sdf_stock_after.copy(),
-                "sdf_target": sdf_target_after.copy(),
-                "tool_pos": tool_pos_after.copy(),
+                "sdf_stock": self.simulator.sdf_stock.to_numpy().copy(),
+                "sdf_target": self.simulator.sdf_target.to_numpy().copy(),
+                "tool_pos": self.simulator.tool_pos[None].to_numpy().copy(),
                 "tool_radius": float(self.simulator.tool_radius[None]),
                 "tool_height": float(self.simulator.tool_height[None]),
             })
@@ -435,7 +430,7 @@ class CamEnv(gym.Env):
             }
 
         self.last_info = info
-        return obs_after, float(reward), terminated, truncated, info
+        return self._get_obs(), float(reward), terminated, truncated, info
 
     # ========================================================================
     # Rendering
