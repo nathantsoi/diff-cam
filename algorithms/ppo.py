@@ -147,12 +147,13 @@ class Block(nn.Module):
                 padding=padding,
             )
         )
-        self.batchnorm = nn.BatchNorm3d(out_channels)
+        # self.batchnorm = nn.BatchNorm3d(out_channels)
+        self.norm = nn.GroupNorm(num_groups=min(8, out_channels), num_channels=out_channels)
         self.activation = nn.ReLU()
 
     def forward(self, x):
         x = self.conv(x)
-        x = self.batchnorm(x)
+        x = self.norm(x)
         x = self.activation(x)
         return x
 
@@ -167,11 +168,11 @@ class SDF3DEncoder(nn.Module):
         self.resolution = resolution
         layers = []
         current_resolution = resolution
-        in_channels = 2
+        in_channels = 4
 
         # Add blocks until the resolution is reduced to 4x4x4 or smaller
         while current_resolution > 4:
-            if in_channels == 2:
+            if in_channels == 4:
                 out_channels = 32
             else:
                 out_channels = min(in_channels * 2, 256)
@@ -187,7 +188,7 @@ class SDF3DEncoder(nn.Module):
 
         # Compute the feature dimension after the conv layers
         with torch.no_grad():
-            dummy = torch.zeros(1, 2, resolution, resolution, resolution)
+            dummy = torch.zeros(1, 4, resolution, resolution, resolution)
             self.feature_dim = int(np.prod(self.encoder(dummy).shape[1:]))
 
         # Define the fully connected layer to get the final feature vector
@@ -197,7 +198,7 @@ class SDF3DEncoder(nn.Module):
         )
 
     def forward(self, x):
-        """x: (batch, 2, res, res, res) → (batch, 512)"""
+        """x: (batch, 4, res, res, res) → (batch, 512)"""
         x = self.encoder(x)
         x = x.reshape(x.shape[0], -1)
         return self.fc(x)
@@ -337,7 +338,7 @@ class Agent(nn.Module):
         super().__init__()
         # Compute resolution and number of voxels from env observation space
         obs_dim = int(np.prod(envs.single_observation_space.shape))
-        self.resolution = round(((obs_dim - 3) / 2) ** (1 / 3))
+        self.resolution = round(((obs_dim - 5) / 2) ** (1 / 3))
         n_voxels = self.resolution**3
         n_actions = envs.single_action_space.n
 
@@ -354,22 +355,54 @@ class Agent(nn.Module):
         self.actor_head = layer_init(nn.Linear(256, n_actions), std=0.01)
         self.critic_head = layer_init(nn.Linear(256, 1), std=1.0)
 
+        # add buffers
+        res = self.resolution
+        coords = torch.linspace(0.0, 1.0, res)
+        gz, gy, gx = torch.meshgrid(coords, coords, coords, indexing='ij')
+        self.register_buffer('_gx', gx.unsqueeze(0).unsqueeze(0))
+        self.register_buffer('_gy', gy.unsqueeze(0).unsqueeze(0))
+        self.register_buffer('_gz', gz.unsqueeze(0).unsqueeze(0))
+
     def _reshape_obs_for_encoding(self, flat_obs):
-        """Reshape flat observation into (batch, 2, res, res, res) for encoding."""
+        """Reshape flat observation into (batch, 4, res, res, res) for encoding."""
         # Define batch size and number of voxels for reshaping
         batch_size = flat_obs.shape[0]
         n_voxels = self.resolution**3
 
         # Break down the flat observation into tool position and SDFs, then reshape SDFs for encoding
         tool_pos = flat_obs[:, :3]
-        stock_sdf = flat_obs[:, 3 : 3 + n_voxels].reshape(
-            batch_size, 1, self.resolution, self.resolution, self.resolution
-        )
-        target_sdf = flat_obs[:, 3 + n_voxels : 3 + 2 * n_voxels].reshape(
+        tool_radius = flat_obs[:, 3:4]
+        tool_height = flat_obs[:, 4:5]
+
+        # channel 0 
+        stock_sdf = flat_obs[:, 5 : 5 + n_voxels].reshape(
             batch_size, 1, self.resolution, self.resolution, self.resolution
         )
 
-        sdf_obs = torch.cat([stock_sdf, target_sdf], dim=1)  # (batch, 2, res, res, res)
+        # channel 1
+        target_sdf = flat_obs[:, 5 + n_voxels : 5 + 2 * n_voxels].reshape(
+            batch_size, 1, self.resolution, self.resolution, self.resolution
+        )
+
+        # channel 2 — compute the difference between stock and target SDFs to capture local geometry changes
+        diff = stock_sdf - target_sdf
+
+        # channel 3 — rasterize the cylindrical tool's SDF onto the voxel grid.
+        tx = tool_pos[:, 0].view(batch_size, 1, 1, 1, 1)
+        ty = tool_pos[:, 1].view(batch_size, 1, 1, 1, 1)
+        tz = tool_pos[:, 2].view(batch_size, 1, 1, 1, 1)
+        tr = tool_radius.view(batch_size, 1, 1, 1, 1)
+        th = tool_height.view(batch_size, 1, 1, 1, 1)
+
+        d_xy = ((self._gx - tx) ** 2 + (self._gy - ty) ** 2).sqrt() - tr
+        d_z_bottom = tz - self._gz
+        d_z_top    = self._gz - (tz + th)
+        d_z = torch.maximum(d_z_bottom, d_z_top)
+        tool_sdf = torch.maximum(d_xy, d_z)
+        tool_sdf = torch.clamp(tool_sdf, -1.0, 1.0)  # match the range of the other SDF channels
+
+        # combine into one sdf_obs
+        sdf_obs = torch.cat([stock_sdf, target_sdf, diff, tool_sdf], dim=1)  # (batch, 4, res, res, res)
 
         return sdf_obs, tool_pos
 

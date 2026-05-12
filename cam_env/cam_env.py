@@ -82,7 +82,7 @@ class CamEnv(gym.Env):
         self.action_dims = [3, 3, 3]
         self.action_space = spaces.Discrete(int(np.prod(self.action_dims)))
 
-        self.obs_dims = 3 + (resolution**3) + (resolution**3)
+        self.obs_dims = 3 + 2 + (resolution**3) + (resolution**3)
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(self.obs_dims,), dtype=np.float32
         )
@@ -185,6 +185,10 @@ class CamEnv(gym.Env):
     def _get_obs(self) -> np.ndarray:
         return np.concatenate([
             self._get_tool_pos(),
+            np.array([
+                float(self.simulator.tool_radius[None]),
+                float(self.simulator.tool_height[None]),
+            ], dtype=np.float32),
             self._get_sdf_stock().flatten(),
             self._sdf_target.flatten(), # use cache
         ])
