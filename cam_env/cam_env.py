@@ -9,12 +9,12 @@ from simulator.voxel_simulator import *
 from cam_env.cam_env import *
 
  
-REWARD_W_GOOD     =  100.0
-REWARD_W_BAD      = -200.0
-REWARD_W_BOUNDARY =    1.0
-REWARD_W_PROGRESS     =   50.0
-REWARD_W_IDLE     =   -1.0
-REWARD_W_HOLDER   =   -5.0
+REWARD_W_GOOD       =   100.0
+REWARD_W_BAD        = -2000.0
+REWARD_W_BOUNDARY   =    20.0
+REWARD_W_PROGRESS   =   -10.0
+REWARD_W_IDLE       =    -2.0
+REWARD_W_HOLDER     =   -10.0
 
 IDLE_THRESHOLD   = 1e-5
 K = 10.0
@@ -65,7 +65,6 @@ class CamEnv(gym.Env):
         self.resolution = resolution
         self.dx = 1.0 / resolution
         self.grid_norm = float(resolution ** 3)
-        self.boundary_sigma = float(resolution * resolution)
 
         self.max_steps = max_steps
         self.render_mode = render_mode
@@ -385,7 +384,7 @@ class CamEnv(gym.Env):
         vol_removed = float(self.simulator.apply_cut()[0])
 
         # extract reward
-        self.simulator.compute_reward_components(K * (self.resolution/32.0), self.boundary_sigma,1.0/IDLE_THRESHOLD, IDLE_THRESHOLD)
+        self.simulator.compute_reward_components(K * (self.resolution/32.0), IDLE_THRESHOLD)
         components = self.simulator.reward_components.to_numpy()
 
 

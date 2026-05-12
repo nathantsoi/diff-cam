@@ -1,5 +1,6 @@
 import os
 import random
+import math
 
 import taichi as ti
 
@@ -32,6 +33,7 @@ class CNCSimulator:
         self.res = resolution
         self.dx = 1.0 / self.res
         self.grid_norm = float(self.res ** 3)
+        self.boundary_sigma = math.log(2.0) / (self.dx * self.dx)
 
         # ----- Stock  -----
         self.sdf_stock = ti.field(dtype=ti.f32, shape=(self.res, self.res, self.res))
@@ -228,38 +230,12 @@ class CNCSimulator:
         self.tool_pos[None] = new_pos
 
     @ti.kernel
-    def check_holder_collision(self) -> ti.i32:
-        """Returns 1 if holder intersects stock, 0 otherwise."""
-        tool_pos = self.tool_pos[None]
-        tool_radius = self.tool_radius[None]
-        tool_height = self.tool_height[None]
-
-        holder_radius = tool_radius * 2.0
-        holder_height = tool_height * 0.5
-        holder_z_start = tool_pos.z + tool_height
-        holder_z_end = holder_z_start + holder_height
-
-        collision = 0
-        min_x = ti.max(0, ti.cast(ti.floor((tool_pos.x - holder_radius) / self.dx) - 1, ti.i32))
-        max_x = ti.min(self.res, ti.cast(ti.ceil((tool_pos.x + holder_radius) / self.dx) + 1, ti.i32))
-        min_y = ti.max(0, ti.cast(ti.floor((tool_pos.y - holder_radius) / self.dx) - 1, ti.i32))
-        max_y = ti.min(self.res, ti.cast(ti.ceil((tool_pos.y + holder_radius) / self.dx) + 1, ti.i32))
-        min_z = ti.max(0, ti.cast(ti.floor(holder_z_start / self.dx) - 1, ti.i32))
-        max_z = ti.min(self.res, ti.cast(ti.ceil(holder_z_end / self.dx) + 1, ti.i32))
-
-        for i, j, k in ti.ndrange((min_x, max_x), (min_y, max_y), (min_z, max_z)):
-            p = ti.Vector([i, j, k]) * self.dx
-            if self.holder_sdf(p) < 0 and self.sdf_stock[i, j, k] < 0:
-                collision = 1
-        return collision
-
-    @ti.kernel
     def set_sdf_stock_before(self):
         for I in ti.grouped(self.sdf_stock):
             self.sdf_stock_before[I] = self.sdf_stock[I]
 
     @ti.kernel
-    def compute_reward_components(self, k_sdf: ti.f32, boundary_sigma: ti.f32, k_idle: ti.f32, idle_thresh: ti.f32):
+    def compute_reward_components(self, k_sdf: ti.f32, idle_thresh: ti.f32):
         good = 0.0; bad = 0.0; excess_before = 0.0; excess_after = 0.0
         inv_norm = 1.0 / self.grid_norm
 
@@ -268,51 +244,87 @@ class CNCSimulator:
             sdf_stock_after = self.sdf_stock[i, j, k]
             sdf_target = self.sdf_target[i, j, k]
 
-            # numerically-safe sigmoid
-            in_sb = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0,  k_sdf * sdf_stock_before))))
+            # numerically-safe soft 0/1 indicator of whether we're inside stock or target
+            in_sb = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0,  k_sdf * sdf_stock_before)))) 
             in_sa = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0,  k_sdf * sdf_stock_after))))
             in_t  = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0,  k_sdf * sdf_target))))
             out_t = 1.0 - in_t  # sigmoid(-x) = 1 - sigmoid(x), saves an exp
 
-            removed = in_sb - in_sa
-            good += removed * out_t
-            bad  += removed * in_t
-            excess_before += in_sb * out_t
+            removed = in_sb - in_sa # was anything removed from this voxel?
+            good += removed * out_t   # good if we removed material that was outside the target
+            bad  += removed * in_t  # bad if we removed material that was inside the target
+
+            excess_before += in_sb * out_t 
             excess_after  += in_sa * out_t
 
         # good + bad
-        good *= inv_norm
-        bad *= inv_norm
+        good *= inv_norm # approx how much world-volume was a good cut
+        bad *= inv_norm # approx how much world-volume was a bad cut
 
         # progress
-        progress = (excess_before - excess_after) * inv_norm
+        progress = excess_after * inv_norm # how much still needs to be removed to reach the target
 
         # idle
+        k_idle = 1.0 / idle_thresh # controls how quickly idle penalty ramps up as we approach the target; higher means more aggressive ramp-up 
         total_removed = good + bad
         idle_gate = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0, -k_idle * (total_removed - idle_thresh)))))
-        idle = 1.0 - idle_gate
+        idle = 1.0 - idle_gate # idle penalty is high when total_removed is small, but ramps down to 0 as total_removed exceeds idle_thresh
 
-        # boundary
+        # boundary -- soft "near target surface AND in stock" averaged over the tool's volume
         tp = self.tool_pos[None]
-        ix = ti.max(0, ti.min(self.res - 1, int(tp.x * self.res)))
-        iy = ti.max(0, ti.min(self.res - 1, int(tp.y * self.res)))
-        iz = ti.max(0, ti.min(self.res - 1, int(tp.z * self.res)))
-        t_at_tool = self.sdf_target[ix, iy, iz]
-        s_at_tool = self.sdf_stock_before[ix, iy, iz]
-        near_surf = ti.exp(-boundary_sigma * t_at_tool * t_at_tool)
-        stock_pres = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0, k_sdf * s_at_tool))))
-        boundary = near_surf * stock_pres * idle_gate
+        tool_radius = self.tool_radius[None]
+        th = self.tool_height[None]
+
+        tmin_x = ti.max(0, ti.cast(ti.floor((tp.x - tool_radius) / self.dx), ti.i32))
+        tmax_x = ti.min(self.res, ti.cast(ti.ceil((tp.x + tool_radius) / self.dx), ti.i32))
+        tmin_y = ti.max(0, ti.cast(ti.floor((tp.y - tool_radius) / self.dx), ti.i32))
+        tmax_y = ti.min(self.res, ti.cast(ti.ceil((tp.y + tool_radius) / self.dx), ti.i32))
+        tz_lo = ti.max(0, ti.cast(ti.floor(tp.z / self.dx), ti.i32))
+        tz_hi = ti.min(self.res, ti.cast(ti.ceil((tp.z + th) / self.dx), ti.i32))
+
+        boundary_sum = 0.0
+        tool_inside_sum = 0.0
+        for i, j, kk in ti.ndrange((tmin_x, tmax_x), (tmin_y, tmax_y), (tz_lo, tz_hi)):
+            p = ti.Vector([i, j, kk]) * self.dx
+            t_inside = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0, k_sdf * self.tool_sdf(p, tp)))))
+            t_at = self.sdf_target[i, j, kk]
+            s_at = self.sdf_stock_before[i, j, kk]
+            near = ti.exp(-self.boundary_sigma * t_at * t_at)
+            pres = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0, k_sdf * s_at))))
+            boundary_sum += t_inside * near * pres
+            tool_inside_sum += t_inside
+
+        boundary_raw = 0.0
+        if tool_inside_sum > 1e-6:
+            boundary_raw = boundary_sum / tool_inside_sum
+        boundary = boundary_raw * idle_gate
 
         # holder
-        th = self.tool_height[None]
-        z_lo = ti.max(0, ti.min(self.res - 1, int(ti.floor((tp.z + th) * self.res))))
-        z_hi = ti.max(z_lo + 1, ti.min(self.res, int(ti.ceil((tp.z + 1.5 * th) * self.res))))
-        holder_sum = 0.0
-        for kk in range(z_lo, z_hi):
-            v = self.sdf_stock[ix, iy, kk]
-            holder_sum += 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0, k_sdf * v))))
-        holder = holder_sum / ti.cast(z_hi - z_lo, ti.f32)
+        tool_radius = self.tool_radius[None]
+        holder_radius = tool_radius * 2.0
 
+        min_x = ti.max(0, ti.cast(ti.floor((tp.x - holder_radius) / self.dx), ti.i32))
+        max_x = ti.min(self.res, ti.cast(ti.ceil((tp.x + holder_radius) / self.dx), ti.i32))
+        min_y = ti.max(0, ti.cast(ti.floor((tp.y - holder_radius) / self.dx), ti.i32))
+        max_y = ti.min(self.res, ti.cast(ti.ceil((tp.y + holder_radius) / self.dx), ti.i32))
+        z_lo = ti.max(0, ti.cast(ti.floor((tp.z + th) / self.dx), ti.i32))
+        z_hi = ti.min(self.res, ti.cast(ti.ceil((tp.z + 1.5 * th) / self.dx), ti.i32))
+
+        holder_sum = 0.0
+        holder_disk_sum = 0.0
+        for i, j, kk in ti.ndrange((min_x, max_x), (min_y, max_y), (z_lo, z_hi)):
+            p = ti.Vector([i, j, kk]) * self.dx
+            h_inside = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0, k_sdf * self.holder_sdf(p)))))
+            s_inside = 1.0 / (1.0 + ti.exp(ti.max(-50.0, ti.min(50.0, k_sdf * self.sdf_stock[i, j, kk]))))
+            holder_sum += h_inside * s_inside
+            holder_disk_sum += h_inside
+
+        holder = 0.0
+        if holder_disk_sum > 1e-6:
+            holder = holder_sum / holder_disk_sum
+
+
+        # write to field
         self.reward_components[0] = good
         self.reward_components[1] = bad
         self.reward_components[2] = progress
