@@ -20,7 +20,7 @@ singularity exec --nv \
         --total_timesteps 10000000 \
         --num_envs 16 \
         --resolution 32 \
-        --num_steps 2048 \
+        --num_steps 512 \
         --max_steps 4096 \
         --num_minibatches 8 \
         --update_epochs 4 \
