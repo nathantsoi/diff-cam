@@ -18,7 +18,7 @@ singularity exec --nv \
     $SCRATCH/diff-cam.sif \
     python3 -u /app/algorithms/ppo.py \
         --total_timesteps 10000000 \
-        --num_envs 8 \
+        --num_envs 16 \
         --resolution 32 \
         --num_steps 2048 \
         --max_steps 4096 \
