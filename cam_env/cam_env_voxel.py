@@ -6,7 +6,7 @@ import taichi as ti
 import time
 
 from simulator.voxel_simulator import *
-from cam_env.cam_env import *
+from cam_env.cam_env_voxel import *
 
  
 REWARD_W_GOOD       =   100.0

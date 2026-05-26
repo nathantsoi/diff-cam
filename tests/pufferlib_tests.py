@@ -2,7 +2,7 @@ import gymnasium as gym
 import pufferlib
 import pufferlib.vector
 
-from cam_env.cam_env import CamEnv
+from cam_env.cam_env_voxel import CamEnv
 
 def make_env():
     def thunk():

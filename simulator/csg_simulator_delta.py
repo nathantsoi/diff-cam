@@ -5,21 +5,24 @@ from simulator.simulator_utils import *
 
 
 @ti.data_oriented
-class CSGSimulator:
+class CSGSimulatorDelta:
     """
     Differentiable CSG simulator for CNC trajectory optimization.
 
-    Parameter: tool_pos, a sequence of T tool positions (T × 3 floats).
-    The simulator carves the stock by subtracting a cylindrical tool at each
-    position in turn, then computes a terminal loss against a target shape.
-    Adam (external) optimizes tool_pos to minimize the loss.
+    Parameter: tool_delta, a sequence of T per-step displacements (T × 3 floats).
+    Tool positions are reconstructed by a cumulative sum from a fixed start:
 
-    Note: positions are independent — no continuity constraint. The optimizer
-    can produce trajectories where adjacent waypoints are arbitrarily far
-    apart. A smoothness penalty can be added to compute_loss if needed.
+        tool_pos[0]   = tool_start          (fixed, not learnable)
+        tool_pos[t+1] = tool_pos[t] + tool_delta[t]
+
+    The simulator carves the stock by subtracting a swept cylinder for each
+    segment, then computes a terminal loss against a target shape. Adam
+    (external) optimizes tool_delta to minimize the loss.
+
     """
 
-    def __init__(self, resolution=32, max_steps=512, k_init=5.0, target_shape=None):
+    def __init__(self, resolution=32, max_steps=512, k_init=5.0,
+                 target_shape=None, tool_start=(0.5, 0.5, 1.0)):
         try:
             if ti._lib.core.with_cuda():
                 ti.init(arch=ti.gpu, debug=False, default_fp=ti.f32)
@@ -33,24 +36,24 @@ class CSGSimulator:
         self.dx = 1.0 / resolution
         self.inv_dx = float(resolution)
 
-        # CSG smoothing sharpness — anneal during training.
-        # Low k = soft (gradients flow through many tool steps).
-        # High k = sharp (behaves like true CSG).
-        self.k = ti.field(dtype=ti.f32, shape=())
+        self.k = ti.field(dtype=ti.f32, shape=()) # anneal during training
         self.k[None] = k_init
 
         # ---- Tool (learnable) ----
-        # T × 3 independent positions. Adam touches these directly.
-        self.tool_pos = ti.Vector.field(
+        self.tool_delta = ti.Vector.field(
             3, dtype=ti.f32, shape=max_steps, needs_grad=True
         )
+        self.tool_pos = ti.Vector.field(
+            3, dtype=ti.f32, shape=max_steps + 1, needs_grad=True
+        )
+
+        self.tool_start = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self.tool_start[None] = ti.Vector(list(tool_start))
+
         self.tool_radius = ti.field(dtype=ti.f32, shape=())
         self.tool_height = ti.field(dtype=ti.f32, shape=())
 
-        # ---- Stock (voxel SDF, one slice per timestep) ----
-        # Index 0 = initial block. Index t+1 = after cut t.
-        # Memory: (max_steps+1) * res^3 * 4 bytes.
-        # T=512, R=32 → ~67 MB. T=4096, R=32 → ~537 MB.
+        # ---- Stock ----
         self.stock = ti.field(
             dtype=ti.f32,
             shape=(max_steps + 1, resolution, resolution, resolution),
@@ -107,7 +110,11 @@ class CSGSimulator:
 
     @ti.func
     def tool_sdf(self, p, t):
-        """Smoothed swept-cylinder SDF: tool sweeps from tool_pos[t] to tool_pos[t+1]."""
+        """Smoothed swept-cylinder SDF: tool sweeps from tool_pos[t] to tool_pos[t+1].
+
+        With the delta parametrization, tool_pos[t+1] == tool_pos[t] + tool_delta[t],
+        so the swept segment for cut t is exactly the displacement tool_delta[t].
+        """
         r = self.tool_radius[None]
         h = self.tool_height[None]
         kv = self.k[None]
@@ -186,14 +193,27 @@ class CSGSimulator:
             self.target[i, j, k] = self.target_sdf(p)
 
     # ========================================================================
-    # Forward pass: init → carving → loss
+    # Forward pass: reconstruct positions → init → carving → loss
     # ========================================================================
-    #
-    # IMPORTANT: Taichi autodiff requires kernels to be EITHER a single
-    # top-level for-loop OR purely serial statements — not mixed. Any scalar
-    # reads or computations that used to sit above the for-loop must live
-    # INSIDE the loop body. The compiler hoists loop-invariants automatically,
-    # so there is no performance penalty.
+
+    @ti.kernel
+    def reconstruct_positions(self, T: ti.i32):
+        """Cumulative-sum scan: tool_pos[t+1] = tool_pos[t] + tool_delta[t].
+
+        This is the one new kernel. It MUST run serially — each iteration
+        depends on the previous one's result — so ti.loop_config(serialize=True)
+        is mandatory. Without it, Taichi would parallelize the top-level loop
+        and the scan would be wrong (and so would its gradient).
+
+        It is gradient-tracked: tool_pos.grad accumulates the indirect-path
+        contributions, and Taichi's autodiff propagates those back into
+        tool_delta.grad. Run this inside the same ti.ad.Tape as the carving.
+        """
+        ti.loop_config(serialize=True)
+        for _ in range(1):
+            self.tool_pos[0] = self.tool_start[None]
+            for t in range(T):
+                self.tool_pos[t + 1] = self.tool_pos[t] + self.tool_delta[t]
 
     @ti.kernel
     def init_stock(self):
@@ -208,7 +228,7 @@ class CSGSimulator:
 
     @ti.kernel
     def apply_cut(self, t: ti.i32):
-        """stock[t+1] = smooth_max(stock[t], -tool_sdf at tool_pos[t])."""
+        """stock[t+1] = smooth_max(stock[t], -tool_sdf at segment t)."""
         for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
             kv = self.k[None]  # moved inside loop for autodiff
             p = ti.Vector([(i + 0.5) * self.dx,
@@ -240,7 +260,7 @@ class CSGSimulator:
             gouge = target_occ * (1.0 - stock_occ)
             residual = (1.0 - target_occ) * stock_occ
 
-            w_gouge = 50.0
+            w_gouge = 2.0
             w_residual = 1.0
             ti.atomic_add(
                 self.loss[None],
@@ -248,26 +268,22 @@ class CSGSimulator:
             )
 
     def forward(self, num_active_steps):
-        """Pure forward pass. Wrap in ti.ad.Tape externally if you need gradients."""
+        """Pure forward pass. Wrap in ti.ad.Tape externally if you need gradients.
+
+        num_active_steps is the number of tool positions in use; with
+        num_active_steps positions there are num_active_steps-1 segments/cuts.
+        reconstruct_positions is part of the forward pass and must be inside
+        the same Tape as the carving for tool_delta.grad to be correct.
+        """
+        self.reconstruct_positions(num_active_steps - 1)
         self.init_stock()
-        for t in range(num_active_steps-1):
+        for t in range(num_active_steps - 1):
             self.apply_cut(t)
-        self.compute_loss(num_active_steps-1)
+        self.compute_loss(num_active_steps - 1)
 
    # ========================================================================
     # Rendering
     # ========================================================================
-    #
-    # The render path is READ-ONLY w.r.t. the gradient-tracked fields
-    # (stock, tool_pos). It only writes to raymarch_buffer, which has no
-    # gradients. So it's safe to call after each apply_cut during training
-    # or eval — but never INSIDE a ti.ad.Tape block.
-    #
-    # Workflow:
-    #   sim.apply_cut(t)
-    #   sim.set_current_step(t + 1)   # tells renderer which slot to read
-    #   sim.render(camera_pos, ...)
-    #   gui.set_image(sim.raymarch_buffer); gui.show()
  
     @ti.func
     def interpolate_stock(self, p):
@@ -498,10 +514,9 @@ class CSGSimulator:
         z_center = z_base + 0.5 * h
         d_z = ti.sqrt((p.z - z_center) ** 2 + 1e-8) - 0.5 * h
 
-        # --- Combine (same smooth-CSG combination as before) ---
+        # --- Combine (hard max for crisp edges) ---
         d_xy_pos = ti.max(d_xy, 0.0)
         d_z_pos = ti.max(d_z, 0.0)
         outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
         inside = -ti.max(-ti.max(d_xy, d_z), 0.0)
-        return outside + inside
         return outside + inside

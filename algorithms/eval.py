@@ -10,7 +10,7 @@ import pufferlib
 import pufferlib.vector
 import pufferlib.emulation
 
-from cam_env.cam_env import CamEnv
+from cam_env.cam_env_voxel import CamEnv
 
 from algorithms.ppo import *
 

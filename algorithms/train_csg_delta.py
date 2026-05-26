@@ -5,7 +5,6 @@ from matplotlib import pyplot as plt
 
 from simulator.csg_metrics import _gouge
 from simulator.csg_metrics import _residual
-from simulator.csg_simulator import CSGSimulator
 from simulator.csg_simulator_delta import CSGSimulatorDelta
 from simulator.csg_metrics import *
 
@@ -16,7 +15,12 @@ RENDER_EVERY = 1  # replay the full trajectory animation every N Adam iters
 
 
 # --- Setup ---
-sim = CSGSimulator(resolution=32, max_steps=T, k_init=10.0, target_shape="sphere")
+# CSGSimulator is now the delta-parametrized version: the learnable parameter
+# is tool_delta (T per-step displacements), and tool_pos is reconstructed by a
+# cumulative sum from a fixed tool_start. With T tool positions there are T-1
+# segments / cuts, so tool_delta has T-1 meaningful entries.
+sim = CSGSimulatorDelta(resolution=32, max_steps=T, k_init=10.0, target_shape="sphere",
+                   tool_start=(0.5, 0.5, 1.0))
 sim.target_params["radius"][None] = 0.4
 sim.target_params["center"][None] = [0.5, 0.5, 0.5]
 sim.tool_radius[None] = 0.05
@@ -27,8 +31,12 @@ sim.set_target_volume()
 R = sim.resolution
 dx = sim.dx
 
-# --- Init parameters (T tool positions, random in the unit cube) ---
-init = np.random.uniform(0.2, 0.8, size=(T, 3)).astype(np.float32)
+# --- Init parameters (T-1 per-step displacements) ---
+# Deltas default to zero in the simulator, which gives degenerate zero-length
+# sweeps and a dead initial gradient, so seed them with small random steps.
+# Note we optimize T-1 displacements, not T positions; position 0 is fixed
+# (tool_start) and positions 1..T-1 are reconstructed.
+init = np.random.uniform(-0.05, 0.05, size=(T - 1, 3)).astype(np.float32)
 params = torch.tensor(init, requires_grad=True)
 opt = torch.optim.Adam([params], lr=LR)
 
@@ -74,15 +82,20 @@ def train():
         if not gui.running:
             break
 
-        # Push current params into Taichi
-        sim.tool_pos.from_torch(params.detach())
+        # Push current params (the displacements) into Taichi's tool_delta.
+        # tool_delta has shape max_steps; we fill the first T-1 entries.
+        sim.tool_delta.from_torch(params.detach())
 
-        # Forward + backward
+        # Forward + backward. forward() calls reconstruct_positions() first,
+        # so the cumulative-sum scan that builds tool_pos from tool_delta is
+        # inside the Tape and its gradients are recorded.
         with ti.ad.Tape(loss=sim.loss):
             sim.forward(T)
 
-        # Pull gradient back into PyTorch and step
-        params.grad = sim.tool_pos.grad.to_torch()
+        # Pull the gradient w.r.t. the DELTAS (not positions) back into PyTorch.
+        # tool_delta.grad already contains both the direct path (cut t's swept
+        # segment) and the indirect path (every later cut), summed by autodiff.
+        params.grad = sim.tool_delta.grad.to_torch()[:T - 1]
         opt.step()
         opt.zero_grad()
 
@@ -91,8 +104,10 @@ def train():
         print(f"iter {it:3d} | loss = {loss:.5f}")
 
         # --- Gradient diagnostics ---
-        grad = sim.tool_pos.grad.to_torch()[:T]  # (T, 3)
-        pos = params.detach()                     # (T, 3)
+        # Gradient is w.r.t. the deltas; positions are read back from the
+        # reconstructed tool_pos field (slots 0..T-1) for reporting.
+        grad = sim.tool_delta.grad.to_torch()[:T - 1]   # (T-1, 3)
+        pos = sim.tool_pos.to_torch()[:T]               # (T, 3) reconstructed
 
         grad_norms = grad.norm(dim=1)             # per-timestep ‖∇‖
         gnp = grad.numpy()
@@ -107,12 +122,15 @@ def train():
         print(f"grad mean (xyz)   = {gnp.mean(axis=0)}")
         print(f"grad std  (xyz)   = {gnp.std(axis=0)}")
         print(f"grad abs.max (xyz)= {np.abs(gnp).max(axis=0)}")
-        print(f"# zero-grad steps = {(grad_norms < 1e-10).sum().item()} / {T}")
+        print(f"# zero-grad steps = {(grad_norms < 1e-10).sum().item()} / {T - 1}")
         print(f"# nan/inf in grad = {(~torch.isfinite(grad)).sum().item()}")
 
-        # Show the actual numbers for first, middle, last few timesteps
-        print("\nper-step detail  [pos] -> [grad]")
-        sample_idx = [0, 1, 2, T//4, T//2, 3*T//4, T-3, T-2, T-1]
+        # Show the actual numbers for first, middle, last few timesteps.
+        # pos has T rows (reconstructed positions); grad has T-1 rows (deltas).
+        # Sample within the delta range so both lookups are valid.
+        print("\nper-step detail  [pos] -> [delta grad]")
+        sample_idx = [0, 1, 2, (T - 1)//4, (T - 1)//2, 3*(T - 1)//4,
+                      T-4, T-3, T-2]
         for t in sample_idx:
             p = pnp[t]
             g = gnp[t]
@@ -149,12 +167,16 @@ def train():
         print()
 
     # --- Save result ---
-    np.save("trajectory.npy", params.detach().numpy())
-    print("Saved to trajectory.npy")
+    # Save both the learned displacements and the reconstructed positions.
+    np.save("trajectory_deltas.npy", params.detach().numpy())
+    sim.tool_delta.from_torch(params.detach())
+    sim.reconstruct_positions(T - 1)
+    np.save("trajectory.npy", sim.tool_pos.to_torch()[:T].numpy())
+    print("Saved deltas to trajectory_deltas.npy and positions to trajectory.npy")
 
     # Final replay
     if gui.running:
-        sim.tool_pos.from_torch(params.detach())
+        sim.tool_delta.from_torch(params.detach())
         sim.forward(T)
         render_trajectory(sim, T, label="final")
     
