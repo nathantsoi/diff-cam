@@ -25,7 +25,7 @@ class CSGSimulatorDelta:
         self,
         resolution=32,
         max_steps=512,
-        k_init=5.0,
+        k_init=10.0,
         target_shape=None,
         tool_start=(0.5, 0.5, 1.0),
     ):

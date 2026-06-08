@@ -15,10 +15,6 @@ RENDER_EVERY = 1  # replay the full trajectory animation every N Adam iters
 
 
 # --- Setup ---
-# CSGSimulator is now the delta-parametrized version: the learnable parameter
-# is tool_delta (T per-step displacements), and tool_pos is reconstructed by a
-# cumulative sum from a fixed tool_start. With T tool positions there are T-1
-# segments / cuts, so tool_delta has T-1 meaningful entries.
 sim = CSGSimulatorDelta(resolution=32, max_steps=T, k_init=10.0, target_shape="sphere",
                    tool_start=(0.5, 0.5, 1.0))
 sim.target_params["radius"][None] = 0.4
@@ -32,10 +28,6 @@ R = sim.resolution
 dx = sim.dx
 
 # --- Init parameters (T-1 per-step displacements) ---
-# Deltas default to zero in the simulator, which gives degenerate zero-length
-# sweeps and a dead initial gradient, so seed them with small random steps.
-# Note we optimize T-1 displacements, not T positions; position 0 is fixed
-# (tool_start) and positions 1..T-1 are reconstructed.
 init = np.random.uniform(-0.05, 0.05, size=(T - 1, 3)).astype(np.float32)
 params = torch.tensor(init, requires_grad=True)
 opt = torch.optim.Adam([params], lr=LR)

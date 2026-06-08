@@ -96,38 +96,6 @@ class CamEnv(gym.Env):
         self.simulator.tool_radius[None] = self.tool_radius
         self.simulator.tool_height[None] = self.tool_height
 
-    def _initialize_render(self):
-        if self.window is not None:
-            return
-
-        self.window = ti.ui.Window("CNC RL Environment", (1024, 768))
-        self.canvas = self.window.get_canvas()
-        self.scene = self.window.get_scene()
-        self.camera = ti.ui.Camera()
-        self.gui = self.window.get_gui()
-
-        self.camera.position(1.5, 1.5, 1.5)
-        self.camera.lookat(0.5, 0.5, 0.5)
-        self.camera.up(0, 0, 1)
-        self.camera.projection_mode(ti.ui.ProjectionMode.Perspective)
-
-        self.axes_points = ti.Vector.field(3, dtype=ti.f32, shape=6)
-        self.axes_colors = ti.Vector.field(3, dtype=ti.f32, shape=6)
-        self.axes_points[0] = [0, 0, 0]; self.axes_points[1] = [1, 0, 0]
-        self.axes_colors[0] = [1, 0, 0]; self.axes_colors[1] = [1, 0, 0]
-        self.axes_points[2] = [0, 0, 0]; self.axes_points[3] = [0, 1, 0]
-        self.axes_colors[2] = [0, 1, 0]; self.axes_colors[3] = [0, 1, 0]
-        self.axes_points[4] = [0, 0, 0]; self.axes_points[5] = [0, 0, 1]
-        self.axes_colors[4] = [0, 0, 1]; self.axes_colors[5] = [0, 0, 1]
-
-        self.grad_points = ti.Vector.field(3, dtype=ti.f32, shape=2)
-        self.grad_colors = ti.Vector.field(3, dtype=ti.f32, shape=2)
-        self.move_points = ti.Vector.field(3, dtype=ti.f32, shape=2)
-        self.move_colors = ti.Vector.field(3, dtype=ti.f32, shape=2)
-
-        self.cam_center = ti.Vector([0.5, 0.5, 0.5])
-        self.last_mouse_pos = self.window.get_cursor_pos()
-
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
 
