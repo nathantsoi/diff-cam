@@ -335,6 +335,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "autopep8" },
+    { name = "ffmpeg" },
     { name = "flax" },
     { name = "gym" },
     { name = "gymnasium" },
@@ -359,6 +360,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "autopep8", specifier = ">=2.3.2" },
+    { name = "ffmpeg", specifier = ">=1.4" },
     { name = "flax", specifier = ">=0.10.7" },
     { name = "gym", specifier = ">=0.23.0" },
     { name = "gymnasium", specifier = ">=0.29.1" },
@@ -436,6 +438,12 @@ sdist = { url = "https://files.pythonhosted.org/packages/2e/2c/8384832b7a6b1fd6b
 wheels = [
     { url = "https://files.pythonhosted.org/packages/05/2c/ffc08c54c05cdce6fbed2aeebc46348dbe180c6d2c541c7af7ba0aa5f5f8/Farama_Notifications-0.0.4-py3-none-any.whl", hash = "sha256:14de931035a41961f7c056361dc7f980762a143d05791ef5794a751a2caf05ae", size = 2511, upload-time = "2023-02-27T18:28:39.447Z" },
 ]
+
+[[package]]
+name = "ffmpeg"
+version = "1.4"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f0/cc/3b7408b8ecf7c1d20ad480c3eaed7619857bf1054b690226e906fdf14258/ffmpeg-1.4.tar.gz", hash = "sha256:6931692c890ff21d39938433c2189747815dca0c60ddc7f9bb97f199dba0b5b9", size = 5055, upload-time = "2018-10-08T07:50:05.748Z" }
 
 [[package]]
 name = "filelock"

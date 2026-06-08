@@ -2,10 +2,19 @@ import numpy as np
 import torch
 import taichi as ti
 from matplotlib import pyplot as plt
+import os
+import shutil
+import tempfile
+import datetime
+ 
+try:
+    from taichi.tools import VideoManager
+except Exception:  # older Taichi (< 1.0) exposed it as ti.VideoManager
+    from taichi import VideoManager
 
 from simulator.csg_metrics import _gouge
 from simulator.csg_metrics import _residual
-from simulator.csg_simulator_delta import CSGSimulatorDelta
+from simulator.csg_simulator import CSGSimulatorDelta
 from simulator.csg_metrics import *
 
 T = 64
@@ -13,6 +22,15 @@ N_ITERS = 128
 LR = 5e-3
 RENDER_EVERY = 1  # replay the full trajectory animation every N Adam iters
 
+
+RECORD_VIDEO = True
+VIDEO_FPS = 24
+VIDEO_EVERY = 1   # save a video every N iterations
+
+RUN_DIR = os.path.join("runs", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+VIDEO_DIR = os.path.join(RUN_DIR, "videos")
+os.makedirs(VIDEO_DIR, exist_ok=True)
+print(f"[run] saving videos to {VIDEO_DIR}")
 
 # --- Setup ---
 sim = CSGSimulatorDelta(resolution=32, max_steps=T, k_init=10.0, target_shape="sphere",
@@ -43,6 +61,95 @@ dices, asds, hs95s = [], [], []
 # --- GUI for live rendering ---
 gui = ti.GUI("CSG Training", res=(1024, 768))
 
+def _frame_uint8(buffer_field):
+    """Pull the raymarch buffer to a uint8 RGB array.
+ 
+    raymarch_buffer is shape (W, H, 3) float in [0, 1] -- the same (width,
+    height) ordering Taichi's image tools expect, so we DON'T transpose here.
+    VideoManager applies Taichi's orientation, producing a frame oriented
+    exactly like the GUI window.
+    """
+    img = buffer_field.to_numpy()
+    return (np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8)
+
+
+def record_iteration_video(
+    sim,
+    gui,
+    T,
+    out_path,
+    fps=24,
+    label="",
+    keep_frames=False,
+    mp4=True,
+    gif=False,
+):
+    """Render stock[0..T], show it live, and save one video for this iteration.
+ 
+    Drop-in replacement for render_trajectory() when you also want a file.
+    Each frame is rendered once and reused for both the GUI and the encoder.
+ 
+    sim         : CSGSimulatorDelta, already forwarded for this iteration.
+    gui         : the ti.GUI for live display. Pass None to skip the live view.
+    T           : number of trajectory steps.
+    out_path    : final video path, e.g. runs/<ts>/videos/iter_0007.mp4
+    fps         : frames per second of the output.
+    label       : caption shown on the live GUI (not burned into the video).
+    keep_frames : keep the intermediate PNGs instead of deleting the temp dir.
+    mp4 / gif   : which container(s) to build.
+    """
+    frames_dir = tempfile.mkdtemp(prefix="csg_frames_")
+    vm = VideoManager(output_dir=frames_dir, framerate=fps, automatic_build=False)
+ 
+    try:
+        for t in range(T):
+            if gui is not None and not gui.running:
+                break
+ 
+            sim.set_current_step(t)
+            sim.render(
+                cam_pos=(2.0, 2.0, 1.6),
+                cam_target=(0.5, 0.5, 0.5),
+                cam_up=(0.0, 0.0, 1.0),
+                show_stock=True,
+                show_target=True,
+                show_tool=(t < T),  # hide tool on the final frame
+            )
+ 
+            # Same buffer feeds both the encoder and the live window.
+            vm.write_frame(_frame_uint8(sim.raymarch_buffer))
+ 
+            if gui is not None:
+                gui.set_image(sim.raymarch_buffer)
+                gui.text(
+                    f"{label}  step {t}/{T}",
+                    pos=(0.02, 0.97),
+                    color=0xFFFFFF,
+                    font_size=18,
+                )
+                gui.show()
+ 
+        vm.make_video(gif=gif, mp4=mp4)
+ 
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        if mp4:
+            shutil.move(vm.get_output_filename(".mp4"), out_path)
+        if gif:
+            shutil.move(
+                vm.get_output_filename(".gif"),
+                os.path.splitext(out_path)[0] + ".gif",
+            )
+    except Exception as e:
+        print(f"[video] failed to build {out_path}: {e}")
+        print(
+            "[video] mp4/gif encoding needs ffmpeg on your PATH "
+            "(e.g. `conda install ffmpeg`, `brew install ffmpeg`, "
+            "or `apt install ffmpeg`)."
+        )
+    finally:
+        if not keep_frames:
+            shutil.rmtree(frames_dir, ignore_errors=True)
+ 
 
 def render_trajectory(sim, T, label=""):
     """Step through stock[0..T], showing the tool at each position.
@@ -129,9 +236,10 @@ def train():
             print(f"  t={t:3d}  pos=({p[0]:+.3f},{p[1]:+.3f},{p[2]:+.3f})  "
                 f"grad=({g[0]:+.3e},{g[1]:+.3e},{g[2]:+.3e})  ‖g‖={grad_norms[t]:.3e}")
 
-        # Render every few interations
-        if it % RENDER_EVERY == 0:
-            render_trajectory(sim, T, label=f"iter {it}")
+        # Record a video of the full trajectory for this iteration.
+        if RECORD_VIDEO and it % VIDEO_EVERY == 0:
+            out_path = os.path.join(VIDEO_DIR, f"iter_{it:04d}.mp4")
+            record_iteration_video(sim, gui, T, out_path,fps=VIDEO_FPS, label=f"iter {it}")
 
         stock = sim.stock.to_numpy()[T - 1]
         target = sim.target.to_numpy()

@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = [
     "autopep8>=2.3.2",
+    "ffmpeg>=1.4",
     "flax>=0.10.7",
     "gym>=0.23.0",
     "gymnasium>=0.29.1",

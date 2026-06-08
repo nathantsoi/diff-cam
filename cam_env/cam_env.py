@@ -5,7 +5,7 @@ from typing import Optional, Tuple, Dict, Any
 import taichi as ti
 import time
 
-from simulator.csg_simulator_delta import *
+from simulator.csg_simulator import *
 
 
 class CamEnv(gym.Env):

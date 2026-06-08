@@ -43,6 +43,3 @@ def pyramid_sdf(p, cx, cy, base_z, half_base, height):
 @ti.func
 def smooth_max(a, b, k):
     return (1.0 / k) * ti.log(ti.exp(k * a) + ti.exp(k * b))
-
-
-
