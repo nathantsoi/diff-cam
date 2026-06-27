@@ -1,323 +1,206 @@
+"""GradMill: differentiable-simulation trajectory optimization (the paper's novel method).
+
+This optimizes a tool trajectory (``T-1`` per-step displacements) directly via
+Adam over the differentiable Taichi CSG simulator (``CSGSimulatorDelta``) -- no
+RL, no policy. Gradients of the terminal geometry loss flow back through every
+cut via ``ti.ad.Tape`` into ``sim.tool_delta.grad``.
+
+Logging, metric calculation, video encoding and STL export reuse the *same code
+paths* as the PPO baselines (``algorithms/csg_ppo.py``) so the runs are directly
+comparable:
+
+* metrics come from ``eval.eval_csg._metrics`` (Dice / ASD / HD95),
+* videos are encoded by ``policy_video._encode_mp4`` (ffmpeg) from raymarched
+  frames -- identical to ``CamEnvDiff``'s rgb_array path,
+* meshes are exported by ``policy_video._sdf_to_stl``,
+* WandB / TensorBoard are wired up exactly like ``csg_ppo.py``.
+
+Run outputs are written under ``runs/CamEnvDiff-v0__train_csg__<seed>__<ts>/``
+-- the same env/simulator as ``csg_ppo`` (``exp_name`` distinguishes the method).
+
+Example (mirrors the csg_ppo baseline command):
+    uv run python -m algorithms.train_csg --iters 128 --resolution 32 \
+        --max_steps 64 --save_model --eval_freq 1 --record_video_freq 100 \
+        --video_fps 30
+"""
+
+import os
+import random
+import time
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 import taichi as ti
+import tyro
 from matplotlib import pyplot as plt
-import os
-import shutil
-import tempfile
-import datetime
- 
-try:
-    from taichi.tools import VideoManager
-except Exception:  # older Taichi (< 1.0) exposed it as ti.VideoManager
-    from taichi import VideoManager
+from torch.utils.tensorboard import SummaryWriter
 
-from simulator.csg_metrics import _gouge
-from simulator.csg_metrics import _residual
+from simulator.csg_metrics import _gouge, _residual, sdf_to_mask
 from simulator.csg_simulator import CSGSimulatorDelta
-from simulator.csg_metrics import *
+from eval.eval_csg import _metrics
+from algorithms.policy_video import _encode_mp4, _sdf_to_stl, raymarch_buffer_to_rgb
 
-# ---------------------------------------------------------------------------
-# Hyperparameters / run state.
-#
-# These are module-level globals so the helper functions below (which were
-# written against globals) keep working. main() repopulates them from the
-# command line via `global` before training starts; the defaults here are only
-# so the module is import-safe (e.g. for the evaluator).
-# ---------------------------------------------------------------------------
-T = 64                 # number of tool motions (trajectory length)
-N_ITERS = 128          # Adam iterations
-LR = 5e-3              # learning rate
-RENDER_EVERY = 1       # replay the full trajectory animation every N Adam iters
-
-RECORD_VIDEO = True
-VIDEO_FPS = 24
-VIDEO_EVERY = 1        # save a video every N iterations
-
-RUN_DIR = None
-VIDEO_DIR = None
-
-# Simulator / optimization state (set in main()).
-sim = None
-params = None
-opt = None
-gui = None             # ti.GUI handle, or None when running headless
-R = None
-dx = None
-
-# Metric accumulators (one entry per iteration).
-X = []
-losses = []
-gradients = []
-gouges, residuals = [], []
-dices, asds, hs95s = [], [], []
+# Fixed render camera (matches the look of the live GUI / paper figures).
+CAM_POS = (2.0, 2.0, 1.6)
+CAM_TARGET = (0.5, 0.5, 0.5)
+CAM_UP = (0.0, 0.0, 1.0)
 
 
-def _frame_uint8(buffer_field):
-    """Pull the raymarch buffer to a uint8 RGB array.
- 
-    raymarch_buffer is shape (W, H, 3) float in [0, 1] -- the same (width,
-    height) ordering Taichi's image tools expect, so we DON'T transpose here.
-    VideoManager applies Taichi's orientation, producing a frame oriented
-    exactly like the GUI window.
-    """
-    img = buffer_field.to_numpy()
-    return (np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8)
+@dataclass
+class Args:
+    exp_name: str = "train_csg"
+    """the name of this experiment"""
+    seed: int = 1
+    """seed of the experiment"""
+    track: bool = True
+    """if toggled, this experiment will be tracked with Weights and Biases"""
+    wandb_project_name: str = "diffcam"
+    """the wandb's project name"""
+    wandb_entity: str = "diffcam"
+    """the entity (team) of wandb's project"""
+    env_id: str = "CamEnvDiff-v0"
+    """run-name prefix; same env/simulator as csg_ppo (exp_name distinguishes the method)"""
+    save_model: bool = False
+    """whether to save the learned trajectory into the `runs/{run_name}` folder"""
+
+    # eval / video cadence -- measured in Adam iterations (same flags as csg_ppo)
+    eval_freq: int = 0
+    """compute + log Dice/ASD/HD95 every N iterations (0 = disabled)"""
+    record_video_freq: int = 0
+    """render + upload a trajectory rollout video every N iterations (0 = disabled)"""
+    video_fps: int = 30
+    """frames per second for recorded videos"""
+
+    # Optimization
+    iters: int = 128
+    """number of Adam iterations"""
+    learning_rate: float = 5e-3
+    """Adam learning rate"""
+    anneal_lr: bool = False
+    """linearly anneal the learning rate to 0 over training"""
+
+    # CamEnvDiff / CSG specific (mirrors csg_ppo)
+    resolution: int = 32
+    """voxel grid resolution per axis"""
+    max_steps: int = 64
+    """trajectory length T (number of tool motions)"""
+    target_shape: str = "sphere"
+    """target shape: 'box', 'cylinder', 'sphere', 'pyramid'"""
+    k_init: float = 10.0
+    """initial smoothness parameter for the smooth-min/max SDF ops"""
+
+    # Local interactive view
+    headless: bool = False
+    """disable the live GUI (auto-disabled if no display is available)"""
 
 
-def record_iteration_video(
-    sim,
-    gui,
-    T,
-    out_path,
-    fps=24,
-    label="",
-    keep_frames=False,
-    mp4=True,
-    gif=False,
-):
-    """Render stock[0..T], show it live, and save one video for this iteration.
- 
-    Drop-in replacement for render_trajectory() when you also want a file.
-    Each frame is rendered once and reused for both the GUI and the encoder.
- 
-    sim         : CSGSimulatorDelta, already forwarded for this iteration.
-    gui         : the ti.GUI for live display. Pass None to skip the live view.
-    T           : number of trajectory steps.
-    out_path    : final video path, e.g. runs/<ts>/videos/iter_0007.mp4
-    fps         : frames per second of the output.
-    label       : caption shown on the live GUI (not burned into the video).
-    keep_frames : keep the intermediate PNGs instead of deleting the temp dir.
-    mp4 / gif   : which container(s) to build.
-    """
-    frames_dir = tempfile.mkdtemp(prefix="csg_frames_")
-    vm = VideoManager(output_dir=frames_dir, framerate=fps, automatic_build=False)
- 
-    try:
-        for t in range(T):
-            if gui is not None and not gui.running:
-                break
- 
-            sim.set_current_step(t)
-            sim.render(
-                cam_pos=(2.0, 2.0, 1.6),
-                cam_target=(0.5, 0.5, 0.5),
-                cam_up=(0.0, 0.0, 1.0),
-                show_stock=True,
-                show_target=True,
-                show_tool=(t < T),  # hide tool on the final frame
-            )
- 
-            # Same buffer feeds both the encoder and the live window.
-            vm.write_frame(_frame_uint8(sim.raymarch_buffer))
- 
-            if gui is not None:
-                gui.set_image(sim.raymarch_buffer)
-                gui.text(
-                    f"{label}  step {t}/{T}",
-                    pos=(0.02, 0.97),
-                    color=0xFFFFFF,
-                    font_size=18,
-                )
-                gui.show()
- 
-        vm.make_video(gif=gif, mp4=mp4)
- 
-        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-        if mp4:
-            shutil.move(vm.get_output_filename(".mp4"), out_path)
-        if gif:
-            shutil.move(
-                vm.get_output_filename(".gif"),
-                os.path.splitext(out_path)[0] + ".gif",
-            )
-    except Exception as e:
-        print(f"[video] failed to build {out_path}: {e}")
-        print(
-            "[video] mp4/gif encoding needs ffmpeg on your PATH "
-            "(e.g. `conda install ffmpeg`, `brew install ffmpeg`, "
-            "or `apt install ffmpeg`)."
-        )
-    finally:
-        if not keep_frames:
-            shutil.rmtree(frames_dir, ignore_errors=True)
- 
-
-def render_trajectory(sim, T, label=""):
-    """Step through stock[0..T], showing the tool at each position.
-
-    sim.forward() has already populated every stock slot for the current
-    trajectory, so we just advance current_step and re-render each frame.
-    """
+def render_trajectory_live(sim, gui, T, label=""):
+    """Replay stock[0..T] in the live GUI (interactive runs only)."""
     if gui is None:
         return
     for t in range(T):
         if not gui.running:
             return
         sim.set_current_step(t)
-        sim.render(
-            cam_pos=(2.0, 2.0, 1.6),
-            cam_target=(0.5, 0.5, 0.5),
-            cam_up=(0.0, 0.0, 1.0),
-            show_stock=True,
-            show_target=True,
-            show_tool=(t < T),  # hide tool on the final frame
-        )
+        sim.render(cam_pos=CAM_POS, cam_target=CAM_TARGET, cam_up=CAM_UP,
+                   show_stock=True, show_target=True, show_tool=(t < T))
         gui.set_image(sim.raymarch_buffer)
         gui.text(f"{label}  step {t}/{T}", pos=(0.02, 0.97),
                  color=0xFFFFFF, font_size=18)
         gui.show()
 
 
-def train():
-    for it in range(N_ITERS):
-        X.append(it)
+def record_video(sim, gui, T, out_path, fps):
+    """Render stock[0..T] as raymarched frames and encode one mp4 via ffmpeg.
+
+    Uses the simulator's ``raymarch_buffer`` -- the same renderer ``CamEnvDiff``
+    uses -- and ``policy_video._encode_mp4`` -- the same encoder ``csg_ppo``
+    uses. Frames are also pushed to the live GUI when one is available. Never
+    raises into training. Returns the written path or None.
+    """
+    frames = []
+    for t in range(T):
         if gui is not None and not gui.running:
             break
+        sim.set_current_step(t)
+        sim.render(cam_pos=CAM_POS, cam_target=CAM_TARGET, cam_up=CAM_UP,
+                   show_stock=True, show_target=True, show_tool=(t < T))
+        ti.sync()
+        frames.append(raymarch_buffer_to_rgb(sim.raymarch_buffer))
+        if gui is not None:
+            gui.set_image(sim.raymarch_buffer)
+            gui.text(f"step {t}/{T}", pos=(0.02, 0.97),
+                     color=0xFFFFFF, font_size=18)
+            gui.show()
+    if not frames:
+        return None
+    try:
+        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+        _encode_mp4(frames, out_path, fps)
+        return out_path
+    except Exception as e:  # never kill training over a video
+        print(f"[video] failed to build {out_path}: {e}")
+        return None
 
-        # Push current params (the displacements) into Taichi's tool_delta.
-        # tool_delta has shape max_steps; we fill the first T-1 entries.
-        sim.tool_delta.from_torch(params.detach())
 
-        # Forward + backward. forward() calls reconstruct_positions() first,
-        # so the cumulative-sum scan that builds tool_pos from tool_delta is
-        # inside the Tape and its gradients are recorded.
-        with ti.ad.Tape(loss=sim.loss):
-            sim.forward(T)
+def eval_metrics(sim, T, dx):
+    """Dice/ASD/HD95 (shared `_metrics` path) + gouge/residual of the carved stock."""
+    stock = sim.stock.to_numpy()[T - 1]
+    target = sim.target.to_numpy()
+    m = _metrics(stock, target, dx)  # {"dice", "asd", "hd95"} -- same as csg_ppo
+    pred_mask = sdf_to_mask(stock)
+    target_mask = sdf_to_mask(target)
+    m["gouge"] = float(_gouge(pred_mask, target_mask) * (dx ** 3))
+    m["residual"] = float(_residual(pred_mask, target_mask) * (dx ** 3))
+    return m
 
-        # Pull the gradient w.r.t. the DELTAS (not positions) back into PyTorch.
-        # tool_delta.grad already contains both the direct path (cut t's swept
-        # segment) and the indirect path (every later cut), summed by autodiff.
-        params.grad = sim.tool_delta.grad.to_torch()[:T - 1]
-        opt.step()
-        opt.zero_grad()
 
-        loss = float(sim.loss[None])
-        losses.append(loss)
-        print(f"iter {it:3d} | loss = {loss:.5f}")
+def export_stls(sim, T, dx, run_name, step, track):
+    """Export initial stock / carved stock / target meshes (shared `_sdf_to_stl`)."""
+    initial_stock = sim.stock.to_numpy()[0].copy()      # before the first cut
+    carved_stock = sim.stock.to_numpy()[T - 1].copy()
+    target = sim.target.to_numpy().copy()
 
-        # --- Gradient diagnostics ---
-        # Gradient is w.r.t. the deltas; positions are read back from the
-        # reconstructed tool_pos field (slots 0..T-1) for reporting.
-        grad = sim.tool_delta.grad.to_torch()[:T - 1]   # (T-1, 3)
-        pos = sim.tool_pos.to_torch()[:T]               # (T, 3) reconstructed
+    mesh_dir = os.path.join("runs", run_name, "meshes")
+    os.makedirs(mesh_dir, exist_ok=True)
+    written = []
+    for name, sdf in (("stock_initial", initial_stock),
+                      ("stock_carved", carved_stock),
+                      ("target", target)):
+        path = os.path.join(mesh_dir, f"{name}_step_{step:09d}.stl")
+        try:
+            if _sdf_to_stl(sdf, dx, path):
+                written.append(path)
+        except Exception as e:
+            print(f"[stl] failed to export {name}: {e}")
+    print(f"[stl] exported {len(written)} STL(s) to {mesh_dir}")
+    if track and written:
+        import wandb
+        for path in written:
+            wandb.save(path, base_path=os.path.dirname(path), policy="now")
+    return written
 
-        grad_norms = grad.norm(dim=1)             # per-timestep ‖∇‖
-        gnp = grad.numpy()
-        pnp = pos.numpy()
 
-        print(f"\n--- iter {it} gradient report ---")
-        print(f"loss              = {float(sim.loss[None]):.6f}")
-        print(f"‖grad‖ global     = {grad.norm().item():.6e}")
-        print(f"‖grad‖ per-step   min={grad_norms.min().item():.3e}  "
-            f"median={grad_norms.median().item():.3e}  "
-            f"max={grad_norms.max().item():.3e}")
-        print(f"grad mean (xyz)   = {gnp.mean(axis=0)}")
-        print(f"grad std  (xyz)   = {gnp.std(axis=0)}")
-        print(f"grad abs.max (xyz)= {np.abs(gnp).max(axis=0)}")
-        print(f"# zero-grad steps = {(grad_norms < 1e-10).sum().item()} / {T - 1}")
-        print(f"# nan/inf in grad = {(~torch.isfinite(grad)).sum().item()}")
-
-        # Show the actual numbers for first, middle, last few timesteps.
-        # pos has T rows (reconstructed positions); grad has T-1 rows (deltas).
-        # Sample within the delta range so both lookups are valid.
-        print("\nper-step detail  [pos] -> [delta grad]")
-        sample_idx = [0, 1, 2, (T - 1)//4, (T - 1)//2, 3*(T - 1)//4,
-                      T-4, T-3, T-2]
-        for t in sample_idx:
-            p = pnp[t]
-            g = gnp[t]
-            print(f"  t={t:3d}  pos=({p[0]:+.3f},{p[1]:+.3f},{p[2]:+.3f})  "
-                f"grad=({g[0]:+.3e},{g[1]:+.3e},{g[2]:+.3e})  ‖g‖={grad_norms[t]:.3e}")
-
-        # Record a video of the full trajectory for this iteration.
-        if RECORD_VIDEO and it % VIDEO_EVERY == 0:
-            out_path = os.path.join(VIDEO_DIR, f"iter_{it:04d}.mp4")
-            record_iteration_video(sim, gui, T, out_path,fps=VIDEO_FPS, label=f"iter {it}")
-
-        stock = sim.stock.to_numpy()[T - 1]
-        target = sim.target.to_numpy()
-
-        pred_mask = sdf_to_mask(stock)
-        target_mask = sdf_to_mask(target)
-
-        gouge = _gouge(pred_mask, target_mask) * (dx**3)
-        residual = _residual(pred_mask, target_mask) * (dx**3)
-        dice = dice_score(pred_mask, target_mask)
-        asd = average_surface_distance(pred_mask, target_mask) * dx
-        haus95 = hd95(pred_mask, target_mask) * dx
-
-        gouges.append(gouge)
-        residuals.append(residual)
-        dices.append(dice)
-        asds.append(asd)
-        hs95s.append(haus95)
-
-        print("Gouge :", gouge)
-        print("Residual :", residual)
-        print("Dice :", dice)
-        print("ASD  :", asd)
-        print("HD95 :", haus95)
-        print()
-
-    # --- Save result ---
-    # Save both the learned displacements and the reconstructed positions.
-    # Write into the run directory and also to the repo-root paths that the
-    # CAM round-trip demo / G-code export read by default.
-    deltas = params.detach().numpy()
-    sim.tool_delta.from_torch(params.detach())
-    sim.reconstruct_positions(T - 1)
-    positions = sim.tool_pos.to_torch()[:T].numpy()
-
-    for prefix in (RUN_DIR, "."):
-        np.save(os.path.join(prefix, "trajectory_deltas.npy"), deltas)
-        np.save(os.path.join(prefix, "trajectory.npy"), positions)
-    print(f"Saved deltas/positions to {RUN_DIR}/ (and repo-root trajectory*.npy)")
-
-    # Final replay (interactive only)
-    if gui is not None and gui.running:
-        sim.tool_delta.from_torch(params.detach())
-        sim.forward(T)
-        render_trajectory(sim, T, label="final")
-    
-
-def plot():
-    target_volume = sim.target_volume[None]
+def plot(run_name, iter_X, losses, eval_X, dices, asds, hs95s, gouges, residuals,
+         target_volume, gui):
     fig, axs = plt.subplots(nrows=3, ncols=2, figsize=(16, 12))
 
-    axs[0][0].plot(X, dices)
-    axs[0][0].set_xlabel("Iteration")
-    axs[0][0].set_title("Dice Score")
-
-    axs[0][1].plot(X, asds)
-    axs[0][1].set_xlabel("Iteration")
-    axs[0][1].set_title("ASD")
-    axs[0][1].set_ylim(0, 1)
-
-    axs[1][0].plot(X, hs95s)
-    axs[1][0].set_xlabel("Iteration")
-    axs[1][0].set_title("HD95")
-    axs[1][0].set_ylim(0, 1)
-
-    axs[1][1].plot(X, losses)
-    axs[1][1].set_xlabel("Iteration")
-    axs[1][1].set_title("Loss")
-
-    axs[2][0].plot(X, gouges, label="Gouge Volume (should go down to 0)")
-    axs[2][0].axhline(target_volume, color='r', linestyle='--', label='Target Volume (upper bound)')
-    axs[2][0].legend()
-    axs[2][0].set_xlabel("Iteration")
-    axs[2][0].set_title("Gouge Volume")
-    axs[2][0].set_ylim(0, 1)
-
-    axs[2][1].plot(X, residuals, label="Residual Volume (should go down to 0)")
-    axs[2][1].legend()
-    axs[2][1].set_xlabel("Iteration")
-    axs[2][1].set_title("Residual Volume")
-    axs[2][1].set_ylim(0, 1)
+    axs[1][1].plot(iter_X, losses);  axs[1][1].set_title("Loss")
+    if eval_X:  # metric curves are only populated on eval iterations
+        axs[0][0].plot(eval_X, dices);  axs[0][0].set_title("Dice Score")
+        axs[0][1].plot(eval_X, asds);   axs[0][1].set_title("ASD");  axs[0][1].set_ylim(0, 1)
+        axs[1][0].plot(eval_X, hs95s);  axs[1][0].set_title("HD95"); axs[1][0].set_ylim(0, 1)
+        axs[2][0].plot(eval_X, gouges, label="Gouge Volume (-> 0)")
+        axs[2][0].axhline(target_volume, color="r", linestyle="--", label="Target Volume")
+        axs[2][0].legend(); axs[2][0].set_title("Gouge Volume"); axs[2][0].set_ylim(0, 1)
+        axs[2][1].plot(eval_X, residuals, label="Residual Volume (-> 0)")
+        axs[2][1].legend(); axs[2][1].set_title("Residual Volume"); axs[2][1].set_ylim(0, 1)
+    for ax in axs.ravel():
+        ax.set_xlabel("Iteration")
 
     plt.tight_layout()
-    out_path = os.path.join(RUN_DIR, "metrics.png")
+    out_path = os.path.join("runs", run_name, "metrics.png")
     plt.savefig(out_path, dpi=120)
     print(f"[plot] saved metrics figure to {out_path}")
     if gui is not None:
@@ -325,48 +208,53 @@ def plot():
 
 
 def main():
-    import argparse
+    args = tyro.cli(Args)
 
-    global T, N_ITERS, LR, RECORD_VIDEO, VIDEO_FPS, VIDEO_EVERY
-    global RUN_DIR, VIDEO_DIR, sim, params, opt, gui, R, dx
+    T = args.max_steps
+    dx = 1.0 / args.resolution
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    run_dir = os.path.join("runs", run_name)
+    video_dir = os.path.join(run_dir, "videos")
+    os.makedirs(video_dir, exist_ok=True)
+    print(f"[run] writing outputs to {run_dir}")
 
-    p = argparse.ArgumentParser(
-        description="GradMill analytic gradient-descent trajectory optimization (continuous mode)."
+    if args.track:
+        from cam_env.utils import load_env_or_abort
+        load_env_or_abort()
+        import wandb
+
+        wandb.init(
+            project=args.wandb_project_name,
+            entity=args.wandb_entity,
+            sync_tensorboard=True,
+            config=vars(args),
+            name=run_name,
+            monitor_gym=True,
+            save_code=True,
+        )
+    writer = SummaryWriter(run_dir)
+    writer.add_text(
+        "hyperparameters",
+        "|param|value|\n|-|-|\n%s" % ("\n".join([f"|{k}|{v}|" for k, v in vars(args).items()])),
     )
-    p.add_argument("--iters", type=int, default=N_ITERS, help="Adam iterations")
-    p.add_argument("--steps", type=int, default=T, help="trajectory length T (tool motions)")
-    p.add_argument("--lr", type=float, default=LR, help="learning rate")
-    p.add_argument("--resolution", type=int, default=32, help="voxel grid resolution per axis")
-    p.add_argument("--shape", type=str, default="sphere", help="target shape")
-    p.add_argument("--out", type=str, default=None, help="run directory (default runs/<timestamp>)")
-    p.add_argument("--headless", action="store_true",
-                   help="disable the live GUI (auto-enabled if no display is available)")
-    p.add_argument("--no-video", action="store_true", help="do not record per-iteration videos")
-    args = p.parse_args()
 
-    T = args.steps
-    N_ITERS = args.iters
-    LR = args.lr
-    RECORD_VIDEO = not args.no_video
+    # Seeding (mirrors csg_ppo)
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
-    RUN_DIR = args.out or os.path.join(
-        "runs", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-    VIDEO_DIR = os.path.join(RUN_DIR, "videos")
-    os.makedirs(VIDEO_DIR, exist_ok=True)
-    print(f"[run] writing outputs to {RUN_DIR}")
-
-    # --- Live GUI (optional) ---
+    # --- Live GUI (interactive only) ---
     gui = None
     if not args.headless:
         try:
-            gui = ti.GUI("CSG Training", res=(1024, 768))
+            gui = ti.GUI("GradMill Training", res=(1024, 768))
         except Exception as e:
             print(f"[gui] no display available, running headless ({e})")
             gui = None
 
-    # --- Simulator setup ---
-    sim = CSGSimulatorDelta(resolution=args.resolution, max_steps=T, k_init=10.0,
-                            target_shape=args.shape, tool_start=(0.5, 0.5, 1.0))
+    # --- Simulator setup (must match CamEnvDiff.reset / eval_csg defaults) ---
+    sim = CSGSimulatorDelta(resolution=args.resolution, max_steps=T, k_init=args.k_init,
+                            target_shape=args.target_shape, tool_start=(0.5, 0.5, 1.0))
     sim.target_params["radius"][None] = 0.4
     sim.target_params["center"][None] = [0.5, 0.5, 0.5]
     sim.tool_radius[None] = 0.05
@@ -374,18 +262,136 @@ def main():
     sim.bake_target_grid()
     sim.set_target_volume()
 
-    R = sim.resolution
-    dx = sim.dx
-
     # --- Init parameters (T-1 per-step displacements) ---
     init = np.random.uniform(-0.05, 0.05, size=(T - 1, 3)).astype(np.float32)
     params = torch.tensor(init, requires_grad=True)
-    opt = torch.optim.Adam([params], lr=LR)
+    opt = torch.optim.Adam([params], lr=args.learning_rate)
 
+    # Metric accumulators (for the final plot). Losses are per-iteration; the
+    # geometry metrics are only computed on eval iterations, so they carry their
+    # own x-axis (eval_X).
+    iter_X, losses = [], []
+    eval_X, dices, asds, hs95s, gouges, residuals = [], [], [], [], [], []
+
+    from tqdm import tqdm
+    last_video_iter, last_eval_iter = -1, -1
+    start_time = time.time()
+    it = 0
+    pbar = tqdm(range(args.iters), desc=run_name)
     try:
-        train()
+        for it in pbar:
+            if gui is not None and not gui.running:
+                break
+
+            if args.anneal_lr:
+                lrnow = (1.0 - it / max(1, args.iters)) * args.learning_rate
+                opt.param_groups[0]["lr"] = lrnow
+
+            # Push current displacements into Taichi, then forward+backward.
+            sim.tool_delta.from_torch(params.detach())
+            with ti.ad.Tape(loss=sim.loss):
+                sim.forward(T)
+
+            grad = sim.tool_delta.grad.to_torch()[:T - 1]  # (T-1, 3)
+            params.grad = grad
+            opt.step()
+            opt.zero_grad()
+
+            loss = float(sim.loss[None])
+            grad_norm = float(grad.norm().item())
+            losses.append(loss)
+            iter_X.append(it)
+
+            # --- per-iter scalars (TensorBoard; synced to wandb via sync_tensorboard) ---
+            writer.add_scalar("losses/loss", loss, it)
+            writer.add_scalar("charts/grad_norm", grad_norm, it)
+            writer.add_scalar("charts/learning_rate", opt.param_groups[0]["lr"], it)
+            sps = it / max(1e-9, time.time() - start_time)
+            writer.add_scalar("charts/SPS", sps, it)
+
+            do_eval = args.eval_freq > 0 and it % args.eval_freq == 0
+            do_video = args.record_video_freq > 0 and it % args.record_video_freq == 0
+
+            # --- eval metrics (shared `_metrics` path; same keys as csg_ppo) ---
+            if do_eval:
+                m = eval_metrics(sim, T, dx)
+                writer.add_scalar("eval/dice", m["dice"], it)
+                writer.add_scalar("eval/asd", m["asd"], it)
+                writer.add_scalar("eval/hd95", m["hd95"], it)
+                writer.add_scalar("metrics/gouge", m["gouge"], it)
+                writer.add_scalar("metrics/residual", m["residual"], it)
+                eval_X.append(it)
+                dices.append(m["dice"]); asds.append(m["asd"]); hs95s.append(m["hd95"])
+                gouges.append(m["gouge"]); residuals.append(m["residual"])
+                last_eval_iter = it
+                pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['dice']:.3f}")
+            else:
+                pbar.set_postfix(loss=f"{loss:.4f}", grad=f"{grad_norm:.2e}")
+
+            # --- video (raymarch -> ffmpeg; logged under media/policy_rollout) ---
+            if do_video:
+                out_path = os.path.join(video_dir, f"policy_step_{it:09d}.mp4")
+                if record_video(sim, gui, T, out_path, args.video_fps) and args.track:
+                    import wandb
+                    writer.flush()
+                    wandb.log(
+                        {"media/policy_rollout": wandb.Video(out_path, fps=args.video_fps, format="mp4")},
+                        step=it,
+                    )
+                last_video_iter = it
+            elif gui is not None:
+                render_trajectory_live(sim, gui, T, label=f"iter {it}")
+
+        # --- Final capture: ensure the last model is recorded (mirrors csg_ppo) ---
+        if args.record_video_freq > 0 and it != last_video_iter:
+            out_path = os.path.join(video_dir, f"policy_step_{it:09d}.mp4")
+            if record_video(sim, gui, T, out_path, args.video_fps) and args.track:
+                import wandb
+                writer.flush()
+                wandb.log(
+                    {"media/policy_rollout": wandb.Video(out_path, fps=args.video_fps, format="mp4")},
+                    step=it,
+                )
+        if args.eval_freq > 0 and it != last_eval_iter:
+            m = eval_metrics(sim, T, dx)
+            writer.add_scalar("eval/dice", m["dice"], it)
+            writer.add_scalar("eval/asd", m["asd"], it)
+            writer.add_scalar("eval/hd95", m["hd95"], it)
+            writer.add_scalar("metrics/gouge", m["gouge"], it)
+            writer.add_scalar("metrics/residual", m["residual"], it)
+            eval_X.append(it)
+            dices.append(m["dice"]); asds.append(m["asd"]); hs95s.append(m["hd95"])
+            gouges.append(m["gouge"]); residuals.append(m["residual"])
+
+        # Export the final geometry (initial stock, carved stock, target).
+        export_stls(sim, T, dx, run_name, it, args.track)
+
+        # --- Save the learned trajectory (this is GradMill's "model") ---
+        deltas = params.detach().numpy()
+        sim.tool_delta.from_torch(params.detach())
+        sim.reconstruct_positions(T - 1)
+        positions = sim.tool_pos.to_torch()[:T].numpy()
+        if args.save_model:
+            np.save(os.path.join(run_dir, "trajectory_deltas.npy"), deltas)
+            np.save(os.path.join(run_dir, "trajectory.npy"), positions)
+            print(f"[{run_name}] trajectory saved to {run_dir}/trajectory.npy")
+        # Repo-root copy for the CAM round-trip demo / G-code export defaults.
+        np.save("trajectory_deltas.npy", deltas)
+        np.save("trajectory.npy", positions)
+
+        # Final interactive replay.
+        if gui is not None and gui.running:
+            sim.tool_delta.from_torch(params.detach())
+            sim.forward(T)
+            render_trajectory_live(sim, gui, T, label="final")
     finally:
-        plot()
+        if iter_X:
+            plot(run_name, iter_X, losses, eval_X, dices, asds, hs95s, gouges,
+                 residuals, float(sim.target_volume[None]), gui)
+        writer.close()
+        if args.track:
+            import wandb
+            wandb.finish()
 
 
 if __name__ == "__main__":

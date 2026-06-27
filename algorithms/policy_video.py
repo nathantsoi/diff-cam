@@ -169,6 +169,20 @@ class PolicyVideoRecorder:
             self._env = None
 
 
+def raymarch_buffer_to_rgb(buffer_field):
+    """Convert a simulator ``raymarch_buffer`` to a standard ``(H, W, 3)`` uint8 image.
+
+    The Taichi raymarch buffer is ``(W, H, 3)`` float in [0, 1] with a
+    bottom-left origin. We transpose to ``(H, W, 3)`` and flip vertically so the
+    frame matches the top-left orientation ``env.render()`` returns and that
+    ``_encode_mp4`` expects -- the single shared conversion used by both
+    ``CamEnvDiff._render_rgb_array`` and the gradient-descent trainer.
+    """
+    img = np.asarray(buffer_field.to_numpy())
+    img = (np.clip(img, 0.0, 1.0) * 255).astype(np.uint8)
+    return np.transpose(img, (1, 0, 2))[::-1]
+
+
 def _encode_mp4(frames, out_path, fps):
     """Pipe raw RGB frames to ffmpeg -> h264 mp4 (standard orientation)."""
     arr = np.ascontiguousarray(np.stack(frames), dtype=np.uint8)  # (T, H, W, 3)

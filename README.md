@@ -59,16 +59,24 @@ scripts/              # launchers, SLURM jobs, round-trip + export demos
 ### Continuous — analytic gradient descent (GradMill, Method 1)
 
 Directly optimizes the per-step delta toolpath through the differentiable CSG
-simulator. Writes `trajectory.npy` / `trajectory_deltas.npy` (and copies, plus a
-`metrics.png`, under `runs/<timestamp>/`).
+simulator (no policy/RL). Logging, metrics, video encoding and STL export reuse
+the **same code paths** as the PPO trainers, so runs are directly comparable.
+Outputs land under `runs/CamEnvDiff-v0__train_csg__<seed>__<ts>/` (same
+env/simulator as `csg_ppo`; `train_csg` in the name marks the method): the learned
+`trajectory.npy` / `trajectory_deltas.npy` (read by the evaluator and CAM layer)
+are written there with `--save_model` (and always copied to the repo root for the
+CAM round-trip demo), alongside `videos/`, `meshes/` and a `metrics.png`. It
+shares the `--eval_freq` / `--record_video_freq` / `--video_fps` / `--track`
+flags with the PPO trainers — see
+[Recording policy videos](#recording-policy-videos-during-training).
 
 ```bash
-# Interactive (needs a display):
-uv run python -m algorithms.train_csg --iters 128 --steps 64 --resolution 32
+# Headless (HPC / no display) — comparable to the csg_ppo baseline below:
+uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 32 \
+    --save_model --eval_freq 1 --record_video_freq 100 --video_fps 30
 
-# Headless (HPC / no display):
-uv run python -m algorithms.train_csg --headless --no-video \
-    --iters 128 --steps 64 --resolution 32 --out runs/gradmill_run
+# Interactive live GUI (needs a display):
+uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 32
 ```
 
 ### Continuous — PPO baseline (Method 2)
@@ -164,18 +172,21 @@ uv run python -m algorithms.ppo --total-timesteps 2000000 --num-envs 4 \
     --resolution 32 --max-steps 256 --record_video_freq 100 --video_fps 30
 ```
 
-**Gradient descent (`train_csg.py`).** Replays the optimized toolpath through the
-raymarch renderer each iteration and writes mp4/gif under `runs/<timestamp>/videos/`.
-It is on by default; pass `--no-video` to disable (and `--headless` to skip the
-live GUI). Cadence/frame-rate are the module-level `VIDEO_EVERY` / `VIDEO_FPS`.
+**Gradient descent (`train_csg.py`).** Uses the **same** flags, encoder and
+metric/STL code paths as the PPO trainers above — `--eval_freq`,
+`--record_video_freq`, `--video_fps`, `--track` / `--no-track` — measured in Adam
+iterations. Each video raymarches the optimized toolpath and is encoded to mp4
+(ffmpeg) at `runs/<run>/videos/policy_step_<iter>.mp4`, uploaded to
+`media/policy_rollout`. Geometry metrics land under `eval/dice`, `eval/asd`,
+`eval/hd95` (the differentiable objective is logged as `losses/loss`; there is
+**no `eval/reward`**, since this method has no RL reward), with `gouge`/`residual`
+under `metrics/*`. The final STL meshes are exported just like the PPO trainers.
+Pass `--headless` to skip the live GUI (auto-disabled when no display is present).
 
 ```bash
-# Differentiable gradient descent, with video (default, needs a display for the live GUI):
-uv run python -m algorithms.train_csg --iters 128 --steps 64 --resolution 32
-
-# Differentiable gradient descent, headless and no video:
-uv run python -m algorithms.train_csg --headless --no-video \
-    --iters 128 --steps 64 --resolution 32 --out runs/gradmill_run
+# Headless, eval every iteration + video every 100 iterations:
+uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 32 \
+    --save_model --eval_freq 1 --record_video_freq 100 --video_fps 30
 ```
 
 > The continuous env renders by GPU raymarching; the discrete voxel env renders

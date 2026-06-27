@@ -295,12 +295,10 @@ class CamEnvDiff(gym.Env):
             int(self.show_tool),
         )
         ti.sync()
-        # raymarch_buffer is (W, H, 3) float32 in [0,1] -> transpose to (H, W, 3) uint8
-        img = self.simulator.raymarch_buffer.to_numpy()
-        img = np.clip(img, 0.0, 1.0)
-        img = (img * 255).astype(np.uint8)
-        img = np.transpose(img, (1, 0, 2))[::-1]  # taichi origin is bottom-left
-        return img
+        # raymarch_buffer is (W, H, 3) float32 in [0,1]; the shared helper
+        # transposes/flips it to standard (H, W, 3) uint8 (top-left origin).
+        from algorithms.policy_video import raymarch_buffer_to_rgb
+        return raymarch_buffer_to_rgb(self.simulator.raymarch_buffer)
 
     def render(self):
         if self.render_mode == "human":
