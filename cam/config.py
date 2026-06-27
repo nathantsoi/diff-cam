@@ -28,10 +28,33 @@ class MachineConfig:
     units: str = "mm"             # "mm" -> G21, "inch" -> G20
     precision: int = 6            # decimal places for coordinate words
 
+    # --- Machine / post-processor setup --------------------------------------
+    # Used by machine-specific posts (e.g. the Haas post). The generic RS274
+    # post ignores everything below.
+    program_number: int = 1       # Haas O-number (O00001)
+    program_name: str = "DIFFCAM" # program comment / name
+    tool_number: int = 1          # Txx for the tool change
+    length_offset: int = 0        # G43 Hxx register; 0 -> mirror tool_number
+    spindle_rpm: float = 5000.0   # Sxxxx M03
+    coolant: bool = True          # flood coolant (M08 / M09)
+    work_offset: str = "G54"      # work coordinate system
+    retract_mm: float = 10.0      # clearance plane above the top of the workspace
+    plunge_feed: float = 200.0    # Z plunge feed rate, mm/min
+
     @property
     def units_code(self) -> str:
         """Modal G-code for the configured units."""
         return "G21" if self.units == "mm" else "G20"
+
+    @property
+    def safe_z_mm(self) -> float:
+        """Clearance Z (mm): ``retract_mm`` above the top of the unit cube."""
+        return self.workspace_mm + self.retract_mm
+
+    @property
+    def h_register(self) -> int:
+        """Tool-length-offset register for G43 (defaults to the tool number)."""
+        return self.length_offset or self.tool_number
 
     @property
     def feed_mm_per_s(self) -> float:

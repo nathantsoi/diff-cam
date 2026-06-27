@@ -1,4 +1,3 @@
-from flax.linen import checkpoint
 import gymnasium as gym
 import torch
 import argparse
@@ -103,15 +102,8 @@ def hd95(sdf_stock, sdf_target, resolution):
 # -------- Evaluation code --------
 
 def _make_agent(state_dict, dummy_envs):
-    """Auto-detect architecture from checkpoint keys and create the right agent."""
-    if "critic.0.weight" in state_dict:
-        # Old flat MLP checkpoint
-        print("Detected legacy MLP checkpoint — using LegacyAgent")
-        agent = LegacyAgent(dummy_envs)
-    else:
-        # New 3D CNN checkpoint
-        print("Detected 3D CNN checkpoint — using Agent")
-        agent = Agent(dummy_envs)
+    """Build the discrete 3D-CNN agent and load weights."""
+    agent = Agent(dummy_envs)
     agent.load_state_dict(state_dict)
     agent.eval()
     return agent
@@ -157,7 +149,7 @@ def run_episode(agent, env, seed=None, render=True):
     }
 
 
-def evaluate_n_runs(models, num_runs=10, base_seed=42, render=True, shape=None, stock_params=None, target_params=None, tool_params=None):
+def evaluate_n_runs(models, num_runs=10, base_seed=42, render=False):
     """
     Evaluate each model on num_runs episodes.
 
@@ -186,15 +178,10 @@ def evaluate_n_runs(models, num_runs=10, base_seed=42, render=True, shape=None, 
     for name, model_info in models.items():
         print(f"\nEvaluating {name}")
         env = gym.make(
-            "CamEnv-v0",
+            "CamEnvVoxel-v0",
             resolution=model_info["resolution"],
             max_steps=model_info["max_steps"],
-            shape=shape,
-            stock_params=stock_params,
-            target_params=target_params,
-            tool_params=tool_params,
             render_mode="human" if render else None,
-            use_buffer=False,
         )
 
         try:
@@ -293,7 +280,7 @@ def load_agent(checkpoint_path):
     dummy_envs = pufferlib.vector.make(
         lambda buf=None, **kwargs: pufferlib.emulation.GymnasiumPufferEnv(
             env_creator=lambda: gym.make(
-                "CamEnv-v0",
+                "CamEnvVoxel-v0",
                 resolution=resolution,
                 max_steps=max_steps,
             ),
@@ -319,6 +306,11 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoints", nargs="+", required=True)
     parser.add_argument("--num-runs", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--render", dest="render", action="store_true",
+                        help="render each episode in a Taichi window (needs a display)")
+    parser.add_argument("--no-render", dest="render", action="store_false",
+                        help="run headless (default)")
+    parser.set_defaults(render=False)
 
     args = parser.parse_args()
 
@@ -340,20 +332,11 @@ if __name__ == "__main__":
         )
 
     # ---- evaluate ----
-    shape = "sphere"
-    stock_params = {"half_size": 0.4}
-    target_params = {"radius": 0.3}
-    tool_params = {"radius": 0.1, "height": 0.4, "tool_pos": (0.5, 0.5, 0.8)}
-
     paired_results, summary = evaluate_n_runs(
         models,
         num_runs=args.num_runs,
         base_seed=args.seed,
-        render=False,
-        shape=shape,
-        stock_params=stock_params,
-        target_params=target_params,
-        tool_params=tool_params
+        render=args.render,
     )
 
     # ---- print summary ----

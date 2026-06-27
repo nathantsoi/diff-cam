@@ -1,4 +1,4 @@
-# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+# docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppopy
 import os
 import random
 import time
@@ -10,10 +10,15 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import tyro
-from torch.distributions.normal import Normal
+from torch.distributions.categorical import Categorical
 from torch.utils.tensorboard import SummaryWriter
 
-from cam_env.cam_env import CamEnv # needed for env registration
+import pufferlib
+import pufferlib.vector
+import pufferlib.emulation
+import pufferlib.environments
+
+from cam_env.cam_env_voxel import CamEnv
 
 
 @dataclass
@@ -34,23 +39,17 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
-    save_model: bool = False
-    """whether to save model into the `runs/{run_name}` folder"""
-    upload_model: bool = False
-    """whether to upload the saved model to huggingface"""
-    hf_entity: str = ""
-    """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    env_id: str = "CamEnv-v0"
+    env_id: str = "CamEnvVoxel-v0"
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
-    learning_rate: float = 3e-4
+    learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 4
     """the number of parallel game environments"""
-    num_steps: int = 2048
+    num_steps: int = 512
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -58,9 +57,9 @@ class Args:
     """the discount factor gamma"""
     gae_lambda: float = 0.95
     """the lambda for the general advantage estimation"""
-    num_minibatches: int = 32
+    num_minibatches: int = 4
     """the number of mini-batches"""
-    update_epochs: int = 10
+    update_epochs: int = 4
     """the K epochs to update the policy"""
     norm_adv: bool = True
     """Toggles advantages normalization"""
@@ -68,7 +67,7 @@ class Args:
     """the surrogate clipping coefficient"""
     clip_vloss: bool = True
     """Toggles whether or not to use a clipped loss for the value function, as per the paper."""
-    ent_coef: float = 0.0
+    ent_coef: float = 0.01
     """coefficient of the entropy"""
     vf_coef: float = 0.5
     """coefficient of the value function"""
@@ -85,37 +84,51 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
-    # --- CamEnv specific ---
-    resolution: int = 32
-    """voxel grid resolution per axis"""
-    max_steps: int = 64
-    """max episode steps (== max_cuts + 1 in CamEnv)"""
-    target_shape: str = "sphere"
-    """target shape: 'box', 'cylinder', 'sphere', 'pyramid', or None for random"""
-    k_init: float = 10.0
-    """initial smoothness parameter for the smooth-min/max SDF ops"""
+    # additional arguments for CamEnv
+    resolution: int = 8
+    """the resolution of the camera observation"""
+    max_steps: int = 256
+    """the maximum number of steps per episode"""
+    render_mode: str = "rgb_array"
+    """the render mode for the environment"""
 
 
-def make_env(env_id, idx, capture_video, run_name, gamma,
-             resolution=32, max_steps=64, target_shape="sphere"):
-    def thunk():
-        env_kwargs = dict(resolution=resolution, max_steps=max_steps,
-                          target_shape=target_shape)
-        if capture_video and idx == 0:
-            env = gym.make(env_id, render_mode="rgb_array", **env_kwargs)
-            env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
-        else:
-            env = gym.make(env_id, **env_kwargs)
-        env = gym.wrappers.FlattenObservation(env)  # deal with dm_control's Dict observation space
-        env = gym.wrappers.RecordEpisodeStatistics(env)
-        env = gym.wrappers.ClipAction(env)
-        env = gym.wrappers.NormalizeObservation(env)
-        env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10))
-        env = gym.wrappers.NormalizeReward(env, gamma=gamma)
-        env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
-        return env
-
+def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render_mode):
+    def thunk(buf=None, seed=None, **kwargs):
+        return pufferlib.emulation.GymnasiumPufferEnv(
+            env_creator=lambda: gym.make("CamEnvVoxel-v0", resolution=resolution, max_steps=max_steps, render_mode=render_mode),
+            buf=buf,
+        )
     return thunk
+
+
+# class Agent(nn.Module):
+#     def __init__(self, envs):
+#         super().__init__()
+#         self.critic = nn.Sequential(
+#             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
+#             nn.Tanh(),
+#             layer_init(nn.Linear(256, 128)),
+#             nn.Tanh(),
+#             layer_init(nn.Linear(128, 1), std=1.0),
+#         )
+#         self.actor = nn.Sequential(
+#             layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 256)),
+#             nn.Tanh(),
+#             layer_init(nn.Linear(256, 128)),
+#             nn.Tanh(),
+#             layer_init(nn.Linear(128, envs.single_action_space.n), std=0.01),
+#         )
+
+#     def get_value(self, x):
+#         return self.critic(x)
+
+#     def get_action_and_value(self, x, action=None):
+#         logits = self.actor(x)
+#         probs = Categorical(logits=logits)
+#         if action is None:
+#             action = probs.sample()
+#         return action, probs.log_prob(action), probs.entropy(), self.critic(x)
 
 
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
@@ -123,112 +136,127 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
+def conv_init(layer, std=np.sqrt(2), bias_const=0.0):
+    """Same orthogonal init applied to conv layers for consistency."""
+    torch.nn.init.orthogonal_(layer.weight, std)
+    if layer.bias is not None:
+        torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
 
-class VoxelEncoder(nn.Module):
-    """Small 3D CNN over a (2, R, R, R) stack of [stock, target] SDFs.
-    """
- 
-    def __init__(self, resolution: int, out_dim: int = 256):
+class Block(nn.Module):
+    """Convolutional block: Conv3d → BatchNorm3d → ReLU"""
+    def __init__(self, in_channels, out_channels, stride, kernel_size, padding):
         super().__init__()
+        self.conv = conv_init(nn.Conv3d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding))
+        self.batchnorm = nn.BatchNorm3d(out_channels)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        x = self.conv(x)
+        x = self.batchnorm(x)
+        x = self.activation(x)
+        return x
+
+class SDF3DEncoder(nn.Module):
+    """Encodes a 3D SDF observation into a feature vector."""
+    def __init__(self, resolution):
+        super().__init__()
+
+        # Define the convolutional layers based on the resolution
         self.resolution = resolution
-        # stride-2 downsampling, ReLU. Orthogonal init with sqrt(2) gain.
-        self.conv = nn.Sequential(
-            layer_init(nn.Conv3d(2, 16, kernel_size=3, stride=2, padding=1)),   # R   -> R/2
-            nn.ReLU(),
-            layer_init(nn.Conv3d(16, 32, kernel_size=3, stride=2, padding=1)),  # R/2 -> R/4
-            nn.ReLU(),
-            layer_init(nn.Conv3d(32, 64, kernel_size=3, stride=2, padding=1)),  # R/4 -> R/8
-            nn.ReLU(),
-        )
-        # Determine flat feature size with a dry run.
+        layers = []
+        current_resolution = resolution
+        in_channels = 2
+
+        # Add blocks until the resolution is reduced to 4x4x4 or smaller
+        while current_resolution > 4:
+            if in_channels == 2:
+                out_channels = 32
+            else:                
+                out_channels = min(in_channels * 2, 256)
+            
+            block = Block(in_channels, out_channels, stride=2, kernel_size=4, padding=1)
+            layers.append(block)
+
+            in_channels = out_channels
+            current_resolution = (current_resolution - 4 + 2 * 1) // 2 + 1
+
+        # Define encoder as a sequential of the blocks
+        self.encoder = nn.Sequential(*layers)
+
+        # Compute the feature dimension after the conv layers
         with torch.no_grad():
             dummy = torch.zeros(1, 2, resolution, resolution, resolution)
-            feat = self.conv(dummy)
-            self.flat_dim = int(np.prod(feat.shape[1:]))
-        self.proj = nn.Sequential(
-            layer_init(nn.Linear(self.flat_dim, out_dim)),
+            self.feature_dim = int(np.prod(self.encoder(dummy).shape[1:]))
+
+        # Define the fully connected layer to get the final feature vector
+        self.fc = nn.Sequential(
+            layer_init(nn.Linear(self.feature_dim, 512)),
             nn.ReLU(),
         )
-        self.out_dim = out_dim
- 
-    def forward(self, voxels):
-        # voxels: (B, 2, R, R, R)
-        h = self.conv(voxels)
-        h = h.view(h.size(0), -1)
-        return self.proj(h)
- 
- 
+
+    def forward(self, x):
+        """x: (batch, 2, res, res, res) → (batch, 512)"""
+        x = self.encoder(x)
+        x = x.reshape(x.shape[0], -1)
+        return self.fc(x)
+
 class Agent(nn.Module):
-    """Actor-critic over CamEnv's split observation.
- 
-    Observation layout (must match CamEnv._get_obs):
-        [ tool_pos (3) | radius (1) | height (1) | stock_grid (R^3) | target_grid (R^3) ]
-    """
- 
-    def __init__(self, envs, resolution: int, initial_logstd: float = -1.0):
+    def __init__(self, envs):
         super().__init__()
-        self.resolution = resolution
-        self.R3 = resolution ** 3
-        # Layout offsets for splitting the flat obs.
-        self.scalar_dim = 5  # 3 tool_pos + radius + height
-        action_dim = int(np.prod(envs.single_action_space.shape))
- 
-        self.encoder = VoxelEncoder(resolution, out_dim=256)
- 
-        feature_dim = self.encoder.out_dim + self.scalar_dim
- 
-        self.critic = nn.Sequential(
-            layer_init(nn.Linear(feature_dim, 128)),
-            nn.Tanh(),
-            layer_init(nn.Linear(128, 128)),
-            nn.Tanh(),
-            layer_init(nn.Linear(128, 1), std=1.0),
+
+        # Compute resolution and number of voxels from env observation space
+        obs_dim = int(np.prod(envs.single_observation_space.shape))
+        self.resolution = round((( obs_dim - 3) / 2) ** (1/3))
+        n_voxels = self.resolution ** 3
+        n_actions = envs.single_action_space.n
+
+        # Define encoder for the SDF observation
+        self.encoder = SDF3DEncoder(self.resolution)
+
+        # Define fusion layer to combine encoded stock and target features with tool position
+        self.fusion = nn.Sequential(
+            layer_init(nn.Linear(512 + 3, 256)),
+            nn.ReLU(),
         )
-        self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(feature_dim, 128)),
-            nn.Tanh(),
-            layer_init(nn.Linear(128, 128)),
-            nn.Tanh(),
-            layer_init(nn.Linear(128, action_dim), std=0.01),
-        )
-        self.actor_logstd = nn.Parameter(
-            torch.ones(1, action_dim) * initial_logstd
-        )
- 
-    def _split_obs(self, x):
-        """Split flat obs into (scalar, voxels[B, 2, R, R, R])."""
-        B = x.size(0)
-        R = self.resolution
-        scalar = x[:, : self.scalar_dim]                                    # (B, 5)
-        stock = x[:, self.scalar_dim : self.scalar_dim + self.R3]           # (B, R^3)
-        target = x[:, self.scalar_dim + self.R3 : self.scalar_dim + 2 * self.R3]
-        stock = stock.view(B, 1, R, R, R)
-        target = target.view(B, 1, R, R, R)
-        voxels = torch.cat([stock, target], dim=1)                          # (B, 2, R, R, R)
-        return scalar, voxels
- 
-    def features(self, x):
-        scalar, voxels = self._split_obs(x)
-        h = self.encoder(voxels)
-        return torch.cat([h, scalar], dim=1)
- 
+
+        # Define separate heads for actor and critic
+        self.actor_head = layer_init(nn.Linear(256, n_actions), std=0.01)
+        self.critic_head = layer_init(nn.Linear(256, 1), std=1.0)
+
+    def _reshape_obs_for_encoding(self, flat_obs):
+        """Reshape flat observation into (batch, 2, res, res, res) for encoding."""
+        # Define batch size and number of voxels for reshaping
+        batch_size = flat_obs.shape[0]
+        n_voxels = self.resolution ** 3
+
+        # Break down the flat observation into tool position and SDFs, then reshape SDFs for encoding
+        tool_pos = flat_obs[:, :3]
+        stock_sdf = flat_obs[:, 3:3 + n_voxels].reshape(batch_size, 1, self.resolution, self.resolution, self.resolution)
+        target_sdf = flat_obs[:, 3 + n_voxels:3 + 2 * n_voxels].reshape(batch_size, 1, self.resolution, self.resolution, self.resolution)
+        
+        sdf_obs = torch.cat([stock_sdf, target_sdf], dim=1)  # (batch, 2, res, res, res)
+
+        return sdf_obs, tool_pos
+    
+    def _forward_features(self, x):
+        """Encode the SDF observation and fuse with tool position."""
+        sdf_obs, tool_pos = self._reshape_obs_for_encoding(x)
+        encoded_features = self.encoder(sdf_obs)
+        fused_features = self.fusion(torch.cat([encoded_features, tool_pos], dim=1))
+        return fused_features
+    
     def get_value(self, x):
-        return self.critic(self.features(x))
- 
+        features = self._forward_features(x)
+        return self.critic_head(features)
+    
     def get_action_and_value(self, x, action=None):
-        feats = self.features(x)
-        action_mean = self.actor_mean(feats)
-        action_logstd = self.actor_logstd.expand_as(action_mean)
-        action_std = torch.exp(action_logstd)
-        probs = Normal(action_mean, action_std)
+        features = self._forward_features(x)
+        logits = self.actor_head(features)
+        probs = Categorical(logits=logits)
         if action is None:
             action = probs.sample()
-        return (
-            action,
-            probs.log_prob(action).sum(1),
-            probs.entropy().sum(1),
-            self.critic(feats),
-        )
+        return action, probs.log_prob(action), probs.entropy(), self.critic_head(features)
 
 
 if __name__ == "__main__":
@@ -236,6 +264,8 @@ if __name__ == "__main__":
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)
     args.num_iterations = args.total_timesteps // args.batch_size
+    num_checkpoints = 4
+    checkpoint_interval = max(1, args.num_iterations // num_checkpoints)
     run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     if args.track:
         import wandb
@@ -263,15 +293,29 @@ if __name__ == "__main__":
 
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
-    # env setup
-    envs = gym.vector.SyncVectorEnv(
-        [make_env(args.env_id, i, args.capture_video, run_name, args.gamma,
-                  resolution=args.resolution, max_steps=args.max_steps,
-                  target_shape=args.target_shape) for i in range(args.num_envs)]
+    # env setup -- changed to use PufferLib
+    envs = pufferlib.vector.make(
+        make_env(
+            args.env_id, 
+            0,
+            args.capture_video, 
+            run_name,
+            args.resolution,
+            args.max_steps,
+            args.render_mode
+        ),
+        num_envs=args.num_envs,
+        backend=pufferlib.vector.Serial,
     )
-    assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
+    assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
+    # Inject writer into each env - added this in there
+    for env in envs.envs:
+        base = env
+        while hasattr(base, 'env'):
+            base = base.env
+        base.writer = writer
 
-    agent = Agent(envs, resolution=args.resolution, initial_logstd=-1).to(device)
+    agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # ALGO Logic: Storage setup
@@ -310,9 +354,13 @@ if __name__ == "__main__":
 
             # TRY NOT TO MODIFY: execute the game and log data.
             next_obs, reward, terminations, truncations, infos = envs.step(action.cpu().numpy())
+            writer.add_scalar("charts/algo_reward", np.mean(reward), global_step)
             next_done = np.logical_or(terminations, truncations)
             rewards[step] = torch.tensor(reward).to(device).view(-1)
             next_obs, next_done = torch.Tensor(next_obs).to(device), torch.Tensor(next_done).to(device)
+
+            if args.render_mode == "human":
+                envs.envs[0].render()
 
             if "final_info" in infos:
                 for info in infos["final_info"]:
@@ -354,7 +402,7 @@ if __name__ == "__main__":
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
 
-                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions[mb_inds])
+                _, newlogprob, entropy, newvalue = agent.get_action_and_value(b_obs[mb_inds], b_actions.long()[mb_inds])
                 logratio = newlogprob - b_logprobs[mb_inds]
                 ratio = logratio.exp()
 
@@ -402,6 +450,13 @@ if __name__ == "__main__":
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
         var_y = np.var(y_true)
         explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+        
+        # Saving checkpoint models
+        if iteration % checkpoint_interval == 0:
+            torch.save({
+                "agent": agent.state_dict(),
+                "args": vars(args),
+            }, f"runs/{run_name}/checkpoint_{iteration}.pt")
 
         # TRY NOT TO MODIFY: record rewards for plotting purposes
         writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
@@ -412,15 +467,14 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
+        print(f"SPS {iteration}:", int(global_step / (time.time() - start_time)))
         writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
 
-    if args.save_model:
-        model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
-        # Self-describing checkpoint: the eval scripts read `args` to rebuild
-        # the env (resolution / max_steps / target_shape) and the Agent.
-        torch.save({"agent": agent.state_dict(), "args": vars(args)}, model_path)
-        print(f"model saved to {model_path}")
+    # Final checkpoint after training is complete
+    torch.save({
+        "agent": agent.state_dict(),
+        "args": vars(args),
+    }, f"runs/{run_name}/checkpoint_final.pt")
 
     envs.close()
     writer.close()

@@ -24,7 +24,12 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["cam_env*", "simulator*", "algorithms*"]
+include = ["cam_env*", "simulator*", "algorithms*", "cam*", "eval*"]
+
+[tool.pytest.ini_options]
+# Only collect the unit-test suite under tests/. The repo-root test_perf.py and
+# test_mpi.py are standalone benchmark / MPI scripts, not pytest tests.
+testpaths = ["tests"]
 
 [tool.uv]
 extra-index-url = ["https://download.pytorch.org/whl/cu128"]

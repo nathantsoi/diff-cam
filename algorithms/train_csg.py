@@ -17,49 +17,41 @@ from simulator.csg_metrics import _residual
 from simulator.csg_simulator import CSGSimulatorDelta
 from simulator.csg_metrics import *
 
-T = 64
-N_ITERS = 128
-LR = 5e-3
-RENDER_EVERY = 1  # replay the full trajectory animation every N Adam iters
-
+# ---------------------------------------------------------------------------
+# Hyperparameters / run state.
+#
+# These are module-level globals so the helper functions below (which were
+# written against globals) keep working. main() repopulates them from the
+# command line via `global` before training starts; the defaults here are only
+# so the module is import-safe (e.g. for the evaluator).
+# ---------------------------------------------------------------------------
+T = 64                 # number of tool motions (trajectory length)
+N_ITERS = 128          # Adam iterations
+LR = 5e-3              # learning rate
+RENDER_EVERY = 1       # replay the full trajectory animation every N Adam iters
 
 RECORD_VIDEO = True
 VIDEO_FPS = 24
-VIDEO_EVERY = 1   # save a video every N iterations
+VIDEO_EVERY = 1        # save a video every N iterations
 
-RUN_DIR = os.path.join("runs", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-VIDEO_DIR = os.path.join(RUN_DIR, "videos")
-os.makedirs(VIDEO_DIR, exist_ok=True)
-print(f"[run] saving videos to {VIDEO_DIR}")
+RUN_DIR = None
+VIDEO_DIR = None
 
-# --- Setup ---
-sim = CSGSimulatorDelta(resolution=32, max_steps=T, k_init=10.0, target_shape="sphere",
-                   tool_start=(0.5, 0.5, 1.0))
-sim.target_params["radius"][None] = 0.4
-sim.target_params["center"][None] = [0.5, 0.5, 0.5]
-sim.tool_radius[None] = 0.05
-sim.tool_height[None] = 0.15
-sim.bake_target_grid()
-sim.set_target_volume()
+# Simulator / optimization state (set in main()).
+sim = None
+params = None
+opt = None
+gui = None             # ti.GUI handle, or None when running headless
+R = None
+dx = None
 
-R = sim.resolution
-dx = sim.dx
-
-# --- Init parameters (T-1 per-step displacements) ---
-init = np.random.uniform(-0.05, 0.05, size=(T - 1, 3)).astype(np.float32)
-params = torch.tensor(init, requires_grad=True)
-opt = torch.optim.Adam([params], lr=LR)
-
-
+# Metric accumulators (one entry per iteration).
 X = []
 losses = []
 gradients = []
 gouges, residuals = [], []
 dices, asds, hs95s = [], [], []
 
-
-# --- GUI for live rendering ---
-gui = ti.GUI("CSG Training", res=(1024, 768))
 
 def _frame_uint8(buffer_field):
     """Pull the raymarch buffer to a uint8 RGB array.
@@ -157,6 +149,8 @@ def render_trajectory(sim, T, label=""):
     sim.forward() has already populated every stock slot for the current
     trajectory, so we just advance current_step and re-render each frame.
     """
+    if gui is None:
+        return
     for t in range(T):
         if not gui.running:
             return
@@ -178,7 +172,7 @@ def render_trajectory(sim, T, label=""):
 def train():
     for it in range(N_ITERS):
         X.append(it)
-        if not gui.running:
+        if gui is not None and not gui.running:
             break
 
         # Push current params (the displacements) into Taichi's tool_delta.
@@ -268,14 +262,20 @@ def train():
 
     # --- Save result ---
     # Save both the learned displacements and the reconstructed positions.
-    np.save("trajectory_deltas.npy", params.detach().numpy())
+    # Write into the run directory and also to the repo-root paths that the
+    # CAM round-trip demo / G-code export read by default.
+    deltas = params.detach().numpy()
     sim.tool_delta.from_torch(params.detach())
     sim.reconstruct_positions(T - 1)
-    np.save("trajectory.npy", sim.tool_pos.to_torch()[:T].numpy())
-    print("Saved deltas to trajectory_deltas.npy and positions to trajectory.npy")
+    positions = sim.tool_pos.to_torch()[:T].numpy()
 
-    # Final replay
-    if gui.running:
+    for prefix in (RUN_DIR, "."):
+        np.save(os.path.join(prefix, "trajectory_deltas.npy"), deltas)
+        np.save(os.path.join(prefix, "trajectory.npy"), positions)
+    print(f"Saved deltas/positions to {RUN_DIR}/ (and repo-root trajectory*.npy)")
+
+    # Final replay (interactive only)
+    if gui is not None and gui.running:
         sim.tool_delta.from_torch(params.detach())
         sim.forward(T)
         render_trajectory(sim, T, label="final")
@@ -317,10 +317,76 @@ def plot():
     axs[2][1].set_ylim(0, 1)
 
     plt.tight_layout()
-    plt.show()
+    out_path = os.path.join(RUN_DIR, "metrics.png")
+    plt.savefig(out_path, dpi=120)
+    print(f"[plot] saved metrics figure to {out_path}")
+    if gui is not None:
+        plt.show()
 
 
-try:
-    train()
-finally:
-    plot()
+def main():
+    import argparse
+
+    global T, N_ITERS, LR, RECORD_VIDEO, VIDEO_FPS, VIDEO_EVERY
+    global RUN_DIR, VIDEO_DIR, sim, params, opt, gui, R, dx
+
+    p = argparse.ArgumentParser(
+        description="GradMill analytic gradient-descent trajectory optimization (continuous mode)."
+    )
+    p.add_argument("--iters", type=int, default=N_ITERS, help="Adam iterations")
+    p.add_argument("--steps", type=int, default=T, help="trajectory length T (tool motions)")
+    p.add_argument("--lr", type=float, default=LR, help="learning rate")
+    p.add_argument("--resolution", type=int, default=32, help="voxel grid resolution per axis")
+    p.add_argument("--shape", type=str, default="sphere", help="target shape")
+    p.add_argument("--out", type=str, default=None, help="run directory (default runs/<timestamp>)")
+    p.add_argument("--headless", action="store_true",
+                   help="disable the live GUI (auto-enabled if no display is available)")
+    p.add_argument("--no-video", action="store_true", help="do not record per-iteration videos")
+    args = p.parse_args()
+
+    T = args.steps
+    N_ITERS = args.iters
+    LR = args.lr
+    RECORD_VIDEO = not args.no_video
+
+    RUN_DIR = args.out or os.path.join(
+        "runs", datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
+    VIDEO_DIR = os.path.join(RUN_DIR, "videos")
+    os.makedirs(VIDEO_DIR, exist_ok=True)
+    print(f"[run] writing outputs to {RUN_DIR}")
+
+    # --- Live GUI (optional) ---
+    gui = None
+    if not args.headless:
+        try:
+            gui = ti.GUI("CSG Training", res=(1024, 768))
+        except Exception as e:
+            print(f"[gui] no display available, running headless ({e})")
+            gui = None
+
+    # --- Simulator setup ---
+    sim = CSGSimulatorDelta(resolution=args.resolution, max_steps=T, k_init=10.0,
+                            target_shape=args.shape, tool_start=(0.5, 0.5, 1.0))
+    sim.target_params["radius"][None] = 0.4
+    sim.target_params["center"][None] = [0.5, 0.5, 0.5]
+    sim.tool_radius[None] = 0.05
+    sim.tool_height[None] = 0.15
+    sim.bake_target_grid()
+    sim.set_target_volume()
+
+    R = sim.resolution
+    dx = sim.dx
+
+    # --- Init parameters (T-1 per-step displacements) ---
+    init = np.random.uniform(-0.05, 0.05, size=(T - 1, 3)).astype(np.float32)
+    params = torch.tensor(init, requires_grad=True)
+    opt = torch.optim.Adam([params], lr=LR)
+
+    try:
+        train()
+    finally:
+        plot()
+
+
+if __name__ == "__main__":
+    main()

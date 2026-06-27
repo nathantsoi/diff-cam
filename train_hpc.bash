@@ -21,10 +21,11 @@ singularity exec --nv \
         --num_envs 16 \
         --resolution 32 \
         --num_steps 512 \
-        --max_steps 4096 \
+        --max_steps 64 \
         --num_minibatches 8 \
         --update_epochs 4 \
         --learning_rate 3e-4 \
         --ent_coef 0.02 \
         --gamma 0.99 \
-        --gae_lambda 0.95
+        --gae_lambda 0.95 \
+        --save_model
