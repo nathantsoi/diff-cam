@@ -186,7 +186,7 @@ Pass `--headless` to skip the live GUI (auto-disabled when no display is present
 ```bash
 # Headless, eval every iteration + video every 100 iterations:
 uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 32 \
-    --save_model --eval_freq 1 --record_video_freq 100 --video_fps 30
+    --save_model --eval_freq 1 --record_video_freq 25 --video_fps 30
 ```
 
 > The continuous env renders by GPU raymarching; the discrete voxel env renders
