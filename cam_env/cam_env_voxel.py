@@ -202,17 +202,18 @@ class CamEnvDisc(gym.Env):
 
 
 
-    def reset(self, seed: Optional[int] = None):
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         """ Resets the environment to an initial state and returns an initial observation.
         
         Args:
             seed (Optional[int]): An optional seed for random number generation.
+            options (Optional[dict]): Additional options for resetting the environment.
 
         Returns:
             obs (Dict[str, Any]): The initial observation of the environment.
             info (Dict[str, Any]): Additional information about the reset.
         """
-        super().reset(seed=seed)
+        super().reset(seed=seed, options=options)
 
         self._initialize_sim()
 

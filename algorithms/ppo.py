@@ -104,7 +104,9 @@ class Args:
 def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render_mode):
     def thunk(buf=None, seed=None, **kwargs):
         return pufferlib.emulation.GymnasiumPufferEnv(
-            env_creator=lambda: gym.make("CamEnvDisc-v0", resolution=resolution, max_steps=max_steps, render_mode=render_mode),
+            env_creator=lambda: gym.wrappers.RecordEpisodeStatistics(
+                gym.make("CamEnvDisc-v0", resolution=resolution, max_steps=max_steps, render_mode=render_mode)
+            ),
             buf=buf,
         )
     return thunk
