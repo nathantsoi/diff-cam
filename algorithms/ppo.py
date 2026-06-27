@@ -91,6 +91,12 @@ class Args:
     """the maximum number of steps per episode"""
     render_mode: str = "rgb_array"
     """the render mode for the environment"""
+    record_video_freq: int = 0
+    """record + upload a greedy policy rollout video every N training iterations (0 = disabled)"""
+    video_fps: int = 30
+    """frames per second for recorded policy videos"""
+    video_seed: int = 0
+    """seed for the video rollout env (reproducible scenarios across iterations)"""
 
 
 def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render_mode):
@@ -321,6 +327,16 @@ if __name__ == "__main__":
     agent = Agent(envs).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
+    # Optional: record + upload greedy policy rollout videos during training.
+    recorder = None
+    if args.record_video_freq > 0:
+        from algorithms.policy_video import make_discrete_recorder
+
+        recorder = make_discrete_recorder(
+            run_name=run_name, resolution=args.resolution, max_steps=args.max_steps,
+            env_id=args.env_id, fps=args.video_fps, track=args.track, device=device,
+        )
+
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
@@ -477,11 +493,16 @@ if __name__ == "__main__":
         tqdm.write(f"[{run_name}] SPS {iteration}: {sps}")
         writer.add_scalar("charts/SPS", sps, global_step)
 
+        if recorder is not None and iteration % args.record_video_freq == 0:
+            recorder.record(agent, global_step, seed=args.video_seed)
+
     # Final checkpoint after training is complete
     torch.save({
         "agent": agent.state_dict(),
         "args": vars(args),
     }, f"runs/{run_name}/checkpoint_final.pt")
 
+    if recorder is not None:
+        recorder.close()
     envs.close()
     writer.close()

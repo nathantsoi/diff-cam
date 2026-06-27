@@ -75,11 +75,18 @@ class CamEnv(gym.Env):
 
 
     def _initialize_render(self):
-        """ Initializes GGUI rendering components (lazy initialization). """
+        """ Initializes GGUI rendering components (lazy initialization).
+
+        For ``render_mode == "rgb_array"`` the window is created off-screen
+        (``show_window=False``) so frames can be captured headlessly (HPC /
+        containers) via ``window.get_image_buffer_as_numpy()``.
+        """
         if self.window is not None:
             return
 
-        self.window = ti.ui.Window("CNC RL Environment", (1024, 768))
+        show_window = self.render_mode != "rgb_array"
+        self.window = ti.ui.Window("CNC RL Environment", (1024, 768),
+                                   show_window=show_window)
         self.canvas = self.window.get_canvas()
         self.scene = self.window.get_scene()
         self.camera = ti.ui.Camera()
@@ -115,7 +122,8 @@ class CamEnv(gym.Env):
 
         # Camera state
         self.cam_center = ti.Vector([0.5, 0.5, 0.5])
-        self.last_mouse_pos = self.window.get_cursor_pos()
+        # get_cursor_pos() is only valid for on-screen windows.
+        self.last_mouse_pos = self.window.get_cursor_pos() if show_window else (0.0, 0.0)
 
 
     def _get_obs(self) -> Dict[str, Any]:
@@ -517,7 +525,55 @@ class CamEnv(gym.Env):
 
 
     def _render_rgb_array(self):
-        raise NotImplementedError()
+        """ Headless GGUI render: returns an (H, W, 3) uint8 image.
+
+        Renders the same 3D particle scene as ``_render_human`` (no input
+        handling or GUI overlay) into an off-screen window and reads back the
+        framebuffer. The orbit camera uses the default/last orbit state.
+        """
+        self._initialize_render()
+        self._update_camera()
+
+        # Generate visualization meshes (same as the human 3D branch).
+        try:
+            if self.show_stock:
+                self.simulator.generate_stock_visualization_mesh()
+            if self.show_part:
+                self.simulator.generate_target_visualization_mesh()
+            self.simulator.update_tool(self.simulator.tool_pos[None])
+            ti.sync()
+        except Exception as e:
+            print(f"Error during mesh gen: {e}")
+
+        self.scene.set_camera(self.camera)
+        self.scene.ambient_light((0.5, 0.5, 0.5))
+
+        if self.show_stock:
+            count = min(self.simulator.stock_count[None], self.simulator.stock_points.shape[0])
+            if count > 0:
+                self.scene.particles(self.simulator.stock_points, radius=0.005,
+                                     color=(0.2, 0.8, 0.2), index_count=count)
+        if self.show_part:
+            count = min(self.simulator.target_count[None], self.simulator.target_points.shape[0])
+            if count > 0:
+                self.scene.particles(self.simulator.target_points, radius=0.005,
+                                     color=(0.5, 0.5, 1.0), index_count=count)
+        if self.show_tool:
+            self.scene.particles(self.simulator.tool_points, radius=0.005,
+                                 color=(1.0, 0.2, 0.2), index_count=self.simulator.tool_count[None])
+        if self.show_holder:
+            self.scene.particles(self.simulator.holder_points, radius=0.005,
+                                 color=(0.2, 0.2, 0.2), index_count=self.simulator.holder_count[None])
+
+        self.scene.point_light(pos=(2, 2, 2), color=(1, 1, 1))
+        self.scene.lines(self.axes_points, width=5.0, per_vertex_color=self.axes_colors)
+        self.canvas.scene(self.scene)
+
+        # get_image_buffer_as_numpy() is (W, H, 4) float32 RGBA in [0,1] with a
+        # bottom-left origin -> (H, W, 3) uint8, top-left origin.
+        img = self.window.get_image_buffer_as_numpy()
+        img = (np.clip(img[:, :, :3], 0.0, 1.0) * 255).astype(np.uint8)
+        return np.transpose(img, (1, 0, 2))[::-1]
 
 
     def render(self):
@@ -526,7 +582,7 @@ class CamEnv(gym.Env):
         if self.render_mode == "human":
             self._render_human()
         elif self.render_mode == "rgb_array":
-            self._render_rgb_array()
+            return self._render_rgb_array()
 
 
     def close(self):

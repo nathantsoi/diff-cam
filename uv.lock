@@ -350,6 +350,7 @@ dependencies = [
     { name = "torch" },
     { name = "trimesh" },
     { name = "tyro" },
+    { name = "wandb" },
 ]
 
 [package.dev-dependencies]
@@ -375,6 +376,7 @@ requires-dist = [
     { name = "torch", specifier = ">=2.9.1" },
     { name = "trimesh", specifier = ">=4.11.1" },
     { name = "tyro", specifier = ">=1.0.5" },
+    { name = "wandb", specifier = ">=0.24.0" },
 ]
 
 [package.metadata.requires-dev]

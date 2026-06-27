@@ -34,6 +34,12 @@ class Args:
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
+    record_video_freq: int = 0
+    """record + upload a greedy policy rollout video every N training iterations (0 = disabled)"""
+    video_fps: int = 30
+    """frames per second for recorded policy videos"""
+    video_seed: int = 0
+    """seed for the video rollout env (reproducible scenarios across iterations)"""
     save_model: bool = False
     """whether to save model into the `runs/{run_name}` folder"""
     upload_model: bool = False
@@ -280,6 +286,17 @@ if __name__ == "__main__":
     agent = Agent(envs, resolution=args.resolution, initial_logstd=-1).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
+    # Optional: record + upload greedy policy rollout videos during training.
+    recorder = None
+    if args.record_video_freq > 0:
+        from algorithms.policy_video import make_continuous_recorder
+
+        recorder = make_continuous_recorder(
+            run_name=run_name, resolution=args.resolution, max_steps=args.max_steps,
+            target_shape=args.target_shape, env_id=args.env_id,
+            fps=args.video_fps, track=args.track, device=device,
+        )
+
     # ALGO Logic: Storage setup
     obs = torch.zeros((args.num_steps, args.num_envs) + envs.single_observation_space.shape).to(device)
     actions = torch.zeros((args.num_steps, args.num_envs) + envs.single_action_space.shape).to(device)
@@ -425,6 +442,9 @@ if __name__ == "__main__":
         tqdm.write(f"[{run_name}] SPS: {sps}")
         writer.add_scalar("charts/SPS", sps, global_step)
 
+        if recorder is not None and iteration % args.record_video_freq == 0:
+            recorder.record(agent, global_step, seed=args.video_seed)
+
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
         # Self-describing checkpoint: the eval scripts read `args` to rebuild
@@ -432,5 +452,7 @@ if __name__ == "__main__":
         torch.save({"agent": agent.state_dict(), "args": vars(args)}, model_path)
         tqdm.write(f"[{run_name}] model saved to {model_path}")
 
+    if recorder is not None:
+        recorder.close()
     envs.close()
     writer.close()

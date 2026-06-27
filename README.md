@@ -83,6 +83,18 @@ uv run python -m algorithms.csg_ppo \
 `--save_model` writes a self-describing checkpoint
 `runs/<run>/csg_ppo.cleanrl_model` (`{"agent", "args"}`) that the evaluator
 reads. Convenience wrapper: `bash train_local.bash` (it calls `uv run` internally).
+`--num_envs` runs that many parallel environments (each its own simulator).
+
+Add `--record_video_freq N` to also record + upload a greedy policy-rollout video
+(and Dice/ASD/HD95 metrics) to wandb every `N` iterations — see
+[Recording policy videos](#recording-policy-videos-during-training):
+
+```bash
+uv run python -m algorithms.csg_ppo \
+    --total_timesteps 10000000 --num_envs 4 --resolution 32 --max_steps 64 \
+    --num_steps 512 --num_minibatches 8 --update_epochs 4 --save_model \
+    --record_video_freq 25 --video_fps 30
+```
 
 ### Discrete — PPO (voxel)
 
@@ -94,6 +106,71 @@ uv run python -m algorithms.ppo \
 
 Checkpoints are written to `runs/<run>/checkpoint_{iter}.pt` and
 `checkpoint_final.pt`.
+
+### Recording policy videos during training
+
+All three trainers can render the policy/toolpath **headlessly** during training
+and upload short videos — plus the same Dice/ASD/HD95 metrics the evaluator
+reports — to Weights & Biases. No display is needed, so this works on HPC nodes
+and inside the Apptainer image (which ships `ffmpeg`). It is fully optional and
+off by default; if encoding ever fails it warns and training continues.
+
+Both PPO trainers (`csg_ppo.py` and `ppo.py`) share the same flags — a dedicated
+off-screen env rolls the current policy out *greedily* (like the evaluator) every
+`--record_video_freq` iterations:
+
+| flag | default | meaning |
+|------|---------|---------|
+| `--record_video_freq N` | `0` | record + upload a greedy rollout video every `N` iterations (`0` disables it entirely — no env built, no overhead) |
+| `--video_fps F` | `30` | frame rate of the encoded mp4 |
+| `--video_seed S` | `0` | seed for the rollout env, so the scenario is fixed across iterations and videos are comparable |
+| `--track` / `--no-track` | `--track` | upload to wandb; with `--no-track` the mp4s are still written locally |
+
+Videos appear in wandb under `media/policy_rollout`; reward and geometry land
+under `eval/reward`, `eval/dice`, `eval/asd`, `eval/hd95`. Local copies are
+written to `runs/<run>/videos/policy_step_<global_step>.mp4`.
+
+```bash
+# Continuous PPO, no video (default):
+uv run python -m algorithms.csg_ppo --total_timesteps 10000000 --num_envs 4 \
+    --resolution 32 --max_steps 64 --save_model
+
+# Continuous PPO, video + metrics to wandb every 25 iterations:
+uv run python -m algorithms.csg_ppo --total_timesteps 10000000 --num_envs 4 \
+    --resolution 32 --max_steps 64 --save_model \
+    --record_video_freq 25 --video_fps 30
+```
+
+The discrete voxel PPO (`ppo.py`) renders its 3D GGUI scene off-screen for the
+video:
+
+```bash
+# Discrete PPO, no video (default):
+uv run python -m algorithms.ppo --total-timesteps 2000000 --num-envs 4 \
+    --resolution 32 --max-steps 256
+
+# Discrete PPO, video + metrics to wandb every 25 iterations:
+uv run python -m algorithms.ppo --total-timesteps 2000000 --num-envs 4 \
+    --resolution 32 --max-steps 256 --record_video_freq 25 --video_fps 30
+```
+
+**Gradient descent (`train_csg.py`).** Replays the optimized toolpath through the
+raymarch renderer each iteration and writes mp4/gif under `runs/<timestamp>/videos/`.
+It is on by default; pass `--no-video` to disable (and `--headless` to skip the
+live GUI). Cadence/frame-rate are the module-level `VIDEO_EVERY` / `VIDEO_FPS`.
+
+```bash
+# Differentiable gradient descent, with video (default, needs a display for the live GUI):
+uv run python -m algorithms.train_csg --iters 128 --steps 64 --resolution 32
+
+# Differentiable gradient descent, headless and no video:
+uv run python -m algorithms.train_csg --headless --no-video \
+    --iters 128 --steps 64 --resolution 32 --out runs/gradmill_run
+```
+
+> The continuous env renders by GPU raymarching; the discrete voxel env renders
+> its 3D particle scene through an off-screen Taichi GGUI window — both work
+> without a display.
 
 ### HPC (TACC Lonestar6)
 

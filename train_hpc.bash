@@ -29,3 +29,6 @@ singularity exec --nv \
         --gamma 0.99 \
         --gae_lambda 0.95 \
         --save_model
+        # Optional: record a greedy policy rollout video every N iterations and
+        # upload it to wandb (requires --track). e.g.:
+        # --record_video_freq 25 --video_fps 30
