@@ -2,11 +2,11 @@ import gymnasium as gym
 import pufferlib
 import pufferlib.vector
 
-from cam_env.cam_env_voxel import CamEnv
+from cam_env.cam_env_voxel import CamEnvDisc
 
 def make_env():
     def thunk():
-        env = gym.make("CamEnv-v0", resolution=64, max_steps=100)
+        env = gym.make("CamEnvDiff-v0", resolution=64, max_steps=100)
         return env
     return thunk
 

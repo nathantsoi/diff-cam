@@ -1,4 +1,3 @@
-from flax.linen import checkpoint
 import gymnasium as gym
 import torch
 import argparse
@@ -10,7 +9,7 @@ import pufferlib
 import pufferlib.vector
 import pufferlib.emulation
 
-from cam_env.cam_env_voxel import CamEnv
+from cam_env.cam_env_voxel import CamEnvDisc
 
 from algorithms.ppo import *
 
@@ -103,15 +102,8 @@ def hd95(sdf_stock, sdf_target, resolution):
 # -------- Evaluation code --------
 
 def _make_agent(state_dict, dummy_envs):
-    """Auto-detect architecture from checkpoint keys and create the right agent."""
-    if "critic.0.weight" in state_dict:
-        # Old flat MLP checkpoint
-        print("Detected legacy MLP checkpoint — using LegacyAgent")
-        agent = LegacyAgent(dummy_envs)
-    else:
-        # New 3D CNN checkpoint
-        print("Detected 3D CNN checkpoint — using Agent")
-        agent = Agent(dummy_envs)
+    """Build the discrete 3D-CNN agent and load weights."""
+    agent = Agent(dummy_envs)
     agent.load_state_dict(state_dict)
     agent.eval()
     return agent
@@ -157,7 +149,7 @@ def run_episode(agent, env, seed=None, render=True):
     }
 
 
-def evaluate_n_runs(models, num_runs=10, base_seed=42, render=True, shape=None, stock_params=None, target_params=None, tool_params=None):
+def evaluate_n_runs(models, num_runs=10, base_seed=42, render=False):
     """
     Evaluate each model on num_runs episodes.
 
@@ -183,20 +175,34 @@ def evaluate_n_runs(models, num_runs=10, base_seed=42, render=True, shape=None, 
     # order at the end regardless of evaluation order.
     per_model = {name: {} for name in models}
 
+    import os
+
+    import wandb
+
     for name, model_info in models.items():
         print(f"\nEvaluating {name}")
         env = gym.make(
-            "CamEnv-v0",
+            "CamEnvDisc-v0",
             resolution=model_info["resolution"],
             max_steps=model_info["max_steps"],
-            shape=shape,
-            stock_params=stock_params,
-            target_params=target_params,
-            tool_params=tool_params,
             render_mode="human" if render else None,
-            use_buffer=False,
         )
 
+        run = wandb.init(
+            project="diffcam",
+            entity="diffcam",
+            job_type="evaluation",
+            name=f"eval_checkpoint_{os.path.basename(name)}_{int(time.time())}",
+            config={
+                "checkpoint_path": name,
+                "resolution": model_info["resolution"],
+                "max_steps": model_info["max_steps"],
+                "num_runs": num_runs,
+                "base_seed": base_seed,
+            }
+        )
+
+        table = wandb.Table(columns=["run_index", "seed", "reward", "steps", "dice", "asd", "hd95"])
         try:
             for i in range(num_runs):
                 seed = base_seed + i
@@ -214,8 +220,39 @@ def evaluate_n_runs(models, num_runs=10, base_seed=42, render=True, shape=None, 
                     f"asd={metrics['asd']:.4f} "
                     f"hd95={metrics['hd95']:.4f}"
                 )
+
+                # Log episodic metrics to wandb
+                wandb.log({
+                    "episode/run_index": i,
+                    "episode/seed": seed,
+                    "episode/reward": metrics["reward"],
+                    "episode/steps": metrics["steps"],
+                    "episode/dice": metrics["dice"],
+                    "episode/asd": metrics["asd"],
+                    "episode/hd95": metrics["hd95"],
+                })
+                table.add_data(i, seed, metrics["reward"], metrics["steps"], metrics["dice"], metrics["asd"], metrics["hd95"])
+
+            wandb.log({"eval_results_table": table})
+
+            # Calculate and log summary metrics
+            for key in ("reward", "steps", "dice", "asd", "hd95"):
+                vals = np.array([per_model[name][s][key] for s in per_model[name]], dtype=np.float64)
+                finite = vals[np.isfinite(vals)]
+                if len(finite):
+                    wandb.run.summary[f"mean_{key}"] = float(finite.mean())
+                    wandb.run.summary[f"std_{key}"] = float(finite.std())
+                    wandb.run.summary[f"min_{key}"] = float(finite.min())
+                    wandb.run.summary[f"max_{key}"] = float(finite.max())
+                    wandb.log({
+                        f"summary/mean_{key}": float(finite.mean()),
+                        f"summary/std_{key}": float(finite.std()),
+                        f"summary/min_{key}": float(finite.min()),
+                        f"summary/max_{key}": float(finite.max()),
+                    })
         finally:
             env.close()
+            run.finish()
 
     # Reassemble in seed-major order to preserve the original paired_results shape.
     paired_results = []
@@ -293,7 +330,7 @@ def load_agent(checkpoint_path):
     dummy_envs = pufferlib.vector.make(
         lambda buf=None, **kwargs: pufferlib.emulation.GymnasiumPufferEnv(
             env_creator=lambda: gym.make(
-                "CamEnv-v0",
+                "CamEnvDisc-v0",
                 resolution=resolution,
                 max_steps=max_steps,
             ),
@@ -314,11 +351,19 @@ def load_agent(checkpoint_path):
 
 # KNOWN ERROR: eval script exits after 5 runs if rendering on
 if __name__ == "__main__":
+    from cam_env.utils import load_env_or_abort
+    load_env_or_abort()
+
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--checkpoints", nargs="+", required=True)
     parser.add_argument("--num-runs", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--render", dest="render", action="store_true",
+                        help="render each episode in a Taichi window (needs a display)")
+    parser.add_argument("--no-render", dest="render", action="store_false",
+                        help="run headless (default)")
+    parser.set_defaults(render=False)
 
     args = parser.parse_args()
 
@@ -340,20 +385,11 @@ if __name__ == "__main__":
         )
 
     # ---- evaluate ----
-    shape = "sphere"
-    stock_params = {"half_size": 0.4}
-    target_params = {"radius": 0.3}
-    tool_params = {"radius": 0.1, "height": 0.4, "tool_pos": (0.5, 0.5, 0.8)}
-
     paired_results, summary = evaluate_n_runs(
         models,
         num_runs=args.num_runs,
         base_seed=args.seed,
-        render=False,
-        shape=shape,
-        stock_params=stock_params,
-        target_params=target_params,
-        tool_params=tool_params
+        render=args.render,
     )
 
     # ---- print summary ----

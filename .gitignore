@@ -3,4 +3,8 @@ imgui.ini
 runs/*
 *.egg-info
 __pycache__/
-data/
+/data/
+wandb/
+.env
+/trajectory.npy
+/trajectory_deltas.npy

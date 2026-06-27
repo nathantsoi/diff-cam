@@ -18,7 +18,7 @@ def test_simulator_stock_initialization():
     try:
         ti.init(arch=ti.cpu)
         sim = CNCSimulator(resolution=128)
-        sim.initialize_stock(0.4)
+        sim.initialize_stock_primitive()
     except Exception as e:
         pytest.fail(f"Simulator stock initialization failed: {e}")
 
@@ -27,7 +27,7 @@ def test_simulator_target_initialization():
     try:
         ti.init(arch=ti.cpu)
         sim = CNCSimulator(resolution=128)
-        sim.initialize_target_sphere(0.2)
+        sim.initialize_target_sphere_primitive(0.2)
     except Exception as e:
         pytest.fail(f"Simulator stock initialization failed: {e}")
 
@@ -36,7 +36,7 @@ def test_simulator_tool_initialization():
     try:
         ti.init(arch=ti.cpu)
         sim = CNCSimulator(resolution=128)
-        sim.initialize_tool([0.0, 0.5, 0.5], 0.1, 0.3)
+        sim.initialize_tool_primitive([0.0, 0.5, 0.5], 0.1, 0.3)
     except Exception as e:
         pytest.fail(f"Simulator stock initialization failed: {e}")
 
@@ -47,9 +47,9 @@ def test_simulator_tool_initialization():
 def test_simulator_move_x_single():
     ti.init(arch=ti.cpu)
     sim = CNCSimulator(resolution=128)
-    sim.initialize_stock(0.4)
-    sim.initialize_target_sphere(0.2)
-    sim.initialize_tool([0.0, 0.5, 0.5], 0.1, 0.3)
+    sim.initialize_stock_primitive()
+    sim.initialize_target_sphere_primitive(0.2)
+    sim.initialize_tool_primitive([0.0, 0.5, 0.5], 0.1, 0.3)
 
     prev = sim.tool_pos.to_numpy().copy()
     sim.move_tool_one_unit(ti.Vector([1.0, 0.0, 0.0]))
@@ -63,9 +63,9 @@ def test_simulator_move_x_single():
 def test_simulator_move_y_single():
     ti.init(arch=ti.cpu)
     sim = CNCSimulator(resolution=128)
-    sim.initialize_stock(0.4)
-    sim.initialize_target_sphere(0.2)
-    sim.initialize_tool([0.0, 0.5, 0.5], 0.1, 0.3)
+    sim.initialize_stock_primitive()
+    sim.initialize_target_sphere_primitive(0.2)
+    sim.initialize_tool_primitive([0.0, 0.5, 0.5], 0.1, 0.3)
 
     prev = sim.tool_pos.to_numpy().copy()
     sim.move_tool_one_unit(ti.Vector([0.0, 1.0, 0.0]))
@@ -79,9 +79,9 @@ def test_simulator_move_y_single():
 def test_simulator_move_z_single():
     ti.init(arch=ti.cpu)
     sim = CNCSimulator(resolution=128)
-    sim.initialize_stock(0.4)
-    sim.initialize_target_sphere(0.2)
-    sim.initialize_tool([0.0, 0.5, 0.5], 0.1, 0.3)
+    sim.initialize_stock_primitive()
+    sim.initialize_target_sphere_primitive(0.2)
+    sim.initialize_tool_primitive([0.0, 0.5, 0.5], 0.1, 0.3)
 
     prev = sim.tool_pos.to_numpy().copy()
     sim.move_tool_one_unit(ti.Vector([0.0, 0.0, 1.0]))
@@ -95,9 +95,9 @@ def test_simulator_move_z_single():
 def test_simulator_move_diagonal_single():
     ti.init(arch=ti.cpu)
     sim = CNCSimulator(resolution=128)
-    sim.initialize_stock(0.4)
-    sim.initialize_target_sphere(0.2)
-    sim.initialize_tool([0.0, 0.5, 0.5], 0.1, 0.3)
+    sim.initialize_stock_primitive()
+    sim.initialize_target_sphere_primitive(0.2)
+    sim.initialize_tool_primitive([0.0, 0.5, 0.5], 0.1, 0.3)
 
     prev = sim.tool_pos.to_numpy().copy()
     sim.move_tool_one_unit(ti.Vector([1.0, 1.0, 0.0]))
@@ -111,9 +111,9 @@ def test_simulator_move_diagonal_single():
 def test_simulator_move_x_multiple():
     ti.init(arch=ti.cpu)
     sim = CNCSimulator(resolution=128)
-    sim.initialize_stock(0.4)
-    sim.initialize_target_sphere(0.2)
-    sim.initialize_tool([0.0, 0.5, 0.5], 0.1, 0.3)
+    sim.initialize_stock_primitive()
+    sim.initialize_target_sphere_primitive(0.2)
+    sim.initialize_tool_primitive([0.0, 0.5, 0.5], 0.1, 0.3)
 
     prev = sim.tool_pos.to_numpy().copy()
     sim.move_tool_one_unit(ti.Vector([1.0, 0.0, 0.0]))
@@ -129,9 +129,9 @@ def test_simulator_move_x_multiple():
 def test_simulator_move_roundabout():
     ti.init(arch=ti.cpu)
     sim = CNCSimulator(resolution=128)
-    sim.initialize_stock(0.4)
-    sim.initialize_target_sphere(0.2)
-    sim.initialize_tool([0.0, 0.5, 0.5], 0.1, 0.3)
+    sim.initialize_stock_primitive()
+    sim.initialize_target_sphere_primitive(0.2)
+    sim.initialize_tool_primitive([0.0, 0.5, 0.5], 0.1, 0.3)
 
     prev = sim.tool_pos.to_numpy().copy()
     sim.move_tool_one_unit(ti.Vector([1.0, 0.0, 0.0]))

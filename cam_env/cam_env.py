@@ -8,7 +8,7 @@ import time
 from simulator.csg_simulator import *
 
 
-class CamEnv(gym.Env):
+class CamEnvDiff(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
     def __init__(
@@ -18,6 +18,7 @@ class CamEnv(gym.Env):
         k_init=10.0,
         target_shape = "sphere",
         render_mode: Optional[str] = None,
+        init_taichi: bool = True,
     ):
         """
         Args:
@@ -47,6 +48,7 @@ class CamEnv(gym.Env):
         self.current_step = 0
 
         self.k_init = k_init
+        self.init_taichi = init_taichi
 
         voxels_per_step = 3.0                       # design choice
         self.max_delta = voxels_per_step * self.dx
@@ -90,8 +92,9 @@ class CamEnv(gym.Env):
             resolution=self.resolution,
             max_steps=self.max_steps,
             k_init=self.k_init,
-            target_shape=self.target_shape,            
+            target_shape=self.target_shape,
             tool_start=self.tool_start,
+            init_taichi=self.init_taichi,
         )
         self.simulator.tool_radius[None] = self.tool_radius
         self.simulator.tool_height[None] = self.tool_height
@@ -292,12 +295,10 @@ class CamEnv(gym.Env):
             int(self.show_tool),
         )
         ti.sync()
-        # raymarch_buffer is (W, H, 3) float32 in [0,1] -> transpose to (H, W, 3) uint8
-        img = self.simulator.raymarch_buffer.to_numpy()
-        img = np.clip(img, 0.0, 1.0)
-        img = (img * 255).astype(np.uint8)
-        img = np.transpose(img, (1, 0, 2))[::-1]  # taichi origin is bottom-left
-        return img
+        # raymarch_buffer is (W, H, 3) float32 in [0,1]; the shared helper
+        # transposes/flips it to standard (H, W, 3) uint8 (top-left origin).
+        from algorithms.policy_video import raymarch_buffer_to_rgb
+        return raymarch_buffer_to_rgb(self.simulator.raymarch_buffer)
 
     def render(self):
         if self.render_mode == "human":
@@ -316,7 +317,7 @@ class CamEnv(gym.Env):
 
 
 if __name__ == "__main__":
-    env = CamEnv(resolution=32, max_steps=64, target_shape="sphere", render_mode="human")
+    env = CamEnvDiff(resolution=32, max_steps=64, target_shape="sphere", render_mode="human")
     obs, info = env.reset()
     done = False
     while not done:

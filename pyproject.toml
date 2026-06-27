@@ -15,16 +15,23 @@ dependencies = [
     "pufferlib>=3.0.0",
     "pyyaml>=6.0.3",
     "rtree>=1.4.1",
+    "scikit-image>=0.25.2",
     "scipy>=1.15.3",
     "taichi>=1.6.0",
     "tensorboard>=2.20.0",
     "torch>=2.9.1",
     "trimesh>=4.11.1",
     "tyro>=1.0.5",
+    "wandb>=0.28.0",
 ]
 
 [tool.setuptools.packages.find]
-include = ["cam_env*", "simulator*", "algorithms*"]
+include = ["cam_env*", "simulator*", "algorithms*", "cam*", "eval*"]
+
+[tool.pytest.ini_options]
+# Only collect the unit-test suite under tests/. The repo-root test_perf.py and
+# test_mpi.py are standalone benchmark / MPI scripts, not pytest tests.
+testpaths = ["tests"]
 
 [tool.uv]
 extra-index-url = ["https://download.pytorch.org/whl/cu128"]

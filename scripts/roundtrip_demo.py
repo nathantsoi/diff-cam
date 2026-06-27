@@ -44,6 +44,8 @@ def main():
     ap.add_argument("--feed", type=float, default=600.0)
     ap.add_argument("--dt", type=float, default=0.05)
     ap.add_argument("--resolution", type=int, default=24)
+    ap.add_argument("--post", default="rs274",
+                    help="post-processor / G-code dialect (rs274 | haas)")
     ap.add_argument("--no-carve", action="store_true",
                     help="skip the simulator carved-stock comparison")
     args = ap.parse_args()
@@ -54,7 +56,7 @@ def main():
         "roundtrip_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
     )
     os.makedirs(out_dir, exist_ok=True)
-    gcode_path = os.path.join(out_dir, "trajectory.ngc")
+    gcode_path = os.path.join(out_dir, "trajectory.nc" if args.post == "haas" else "trajectory.ngc")
     print(f"[run] writing outputs to {out_dir}")
 
     cfg = MachineConfig(workspace_mm=args.workspace_mm, feed=args.feed, dt=args.dt)
@@ -64,7 +66,7 @@ def main():
     print(f"Loaded original trajectory: {original.shape} points")
 
     # 1. Export to G-code.
-    gcode = save_gcode(original, gcode_path, cfg)
+    gcode = save_gcode(original, gcode_path, cfg, post=args.post)
     n_lines = len([ln for ln in gcode.splitlines() if ln and not ln.startswith("(")])
     print(f"Exported G-code: {n_lines} blocks -> {gcode_path}")
 
@@ -78,7 +80,13 @@ def main():
 
     # 3. Geometric similarity.
     print("\n=== Trajectory similarity (original vs executed) ===")
-    print(f"  waypoint round-trip error : {waypoint_roundtrip_error(original, recovered_wp, scale):.3e} mm")
+    if len(recovered_wp) == len(original):
+        print(f"  waypoint round-trip error : {waypoint_roundtrip_error(original, recovered_wp, scale):.3e} mm")
+    else:
+        # Posts that add approach/retract moves (e.g. haas) change the waypoint
+        # count, so the strict waypoint round-trip metric does not apply.
+        print(f"  waypoint round-trip error : n/a "
+              f"({len(recovered_wp)} waypoints vs {len(original)}; post '{args.post}' adds approach moves)")
     print(f"  discrete Frechet          : {discrete_frechet(original, executed, scale):.3e} mm")
     print(f"  DTW (mean matched dist)   : {dtw_distance(original, executed, scale):.3e} mm")
     print(f"  arc-length resampled RMSE : {resampled_rmse(original, executed, scale=scale):.3e} mm")

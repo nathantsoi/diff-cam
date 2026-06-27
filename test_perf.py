@@ -1,4 +1,4 @@
-"""Profile each component of the CamEnv step loop — v2 (fused build_obs).
+"""Profile each component of the CamEnvDisc step loop — v2 (fused build_obs).
 
 Compares OLD flow (to_numpy + cpu obs) vs NEW flow (fused GPU kernel).
 """

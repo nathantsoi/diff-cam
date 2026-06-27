@@ -42,7 +42,8 @@ echo "Python : $(python --version)"
 echo "CWD    : $(pwd)"
 echo ""
 
-python -u algorithms/ppo.py \
+# Discrete (voxel) PPO. Launch as a module so cam_env / simulator import.
+python -u -m algorithms.ppo \
     --cuda \
     --total-timesteps 2000000 \
     --num-envs 3 \

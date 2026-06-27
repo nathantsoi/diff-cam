@@ -28,14 +28,24 @@ class CSGSimulatorDelta:
         k_init=10.0,
         target_shape=None,
         tool_start=(0.5, 0.5, 1.0),
+        init_taichi=True,
     ):
-        try:
-            if ti._lib.core.with_cuda():
-                ti.init(arch=ti.gpu, debug=False, default_fp=ti.f32)
-            else:
-                ti.init(arch=ti.cpu, debug=False, default_fp=ti.f32)
-        except:
-            pass  # taichi already initialized
+        # ti.init() RESETS the whole Taichi runtime, invalidating every field
+        # allocated by any previously-created simulator. That is fine when each
+        # process uses one simulator at a time (training with a single env, or
+        # eval scoring checkpoints sequentially), but it corrupts simulators
+        # that must co-exist in one process. Pass init_taichi=False to allocate
+        # this simulator's fields on the *already-running* runtime instead of
+        # resetting it -- Taichi supports adding fields after materialization.
+        if init_taichi:
+            try:
+                if ti._lib.core.with_cuda():
+                    ti.init(arch=ti.gpu, debug=False, default_fp=ti.f32)
+                else:
+                    ti.init(arch=ti.cpu, debug=False, default_fp=ti.f32)
+            except:
+                pass  # taichi already initialized
+            ti.set_logging_level(ti.WARN)
 
         self.resolution = resolution
         self.max_steps = max_steps

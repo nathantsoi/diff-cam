@@ -30,7 +30,7 @@ from cam.gcode_parser import PLANE_XY
 
 HERE = os.path.dirname(__file__)
 REPO = os.path.dirname(HERE)
-REAL_TRAJ = os.path.join(REPO, "trajectory.npy")
+REAL_TRAJ = os.path.join(HERE, "data", "trajectory.npy")
 
 
 # ---------------------------------------------------------------------------
