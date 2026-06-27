@@ -419,6 +419,7 @@ if __name__ == "__main__":
         clipfracs = []
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
+            break_loop = False
             for start in range(0, args.batch_size, args.minibatch_size):
                 end = start + args.minibatch_size
                 mb_inds = b_inds[start:end]
@@ -432,6 +433,10 @@ if __name__ == "__main__":
                     old_approx_kl = (-logratio).mean()
                     approx_kl = ((ratio - 1) - logratio).mean()
                     clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
+
+                if args.target_kl is not None and approx_kl > args.target_kl:
+                    break_loop = True
+                    break
 
                 mb_advantages = b_advantages[mb_inds]
                 if args.norm_adv:
@@ -465,7 +470,7 @@ if __name__ == "__main__":
                 nn.utils.clip_grad_norm_(agent.parameters(), args.max_grad_norm)
                 optimizer.step()
 
-            if args.target_kl is not None and approx_kl > args.target_kl:
+            if break_loop:
                 break
 
         y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
