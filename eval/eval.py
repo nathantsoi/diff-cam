@@ -175,6 +175,10 @@ def evaluate_n_runs(models, num_runs=10, base_seed=42, render=False):
     # order at the end regardless of evaluation order.
     per_model = {name: {} for name in models}
 
+    import os
+
+    import wandb
+
     for name, model_info in models.items():
         print(f"\nEvaluating {name}")
         env = gym.make(
@@ -184,6 +188,21 @@ def evaluate_n_runs(models, num_runs=10, base_seed=42, render=False):
             render_mode="human" if render else None,
         )
 
+        run = wandb.init(
+            project="diffcam",
+            entity="diffcam",
+            job_type="evaluation",
+            name=f"eval_checkpoint_{os.path.basename(name)}_{int(time.time())}",
+            config={
+                "checkpoint_path": name,
+                "resolution": model_info["resolution"],
+                "max_steps": model_info["max_steps"],
+                "num_runs": num_runs,
+                "base_seed": base_seed,
+            }
+        )
+
+        table = wandb.Table(columns=["run_index", "seed", "reward", "steps", "dice", "asd", "hd95"])
         try:
             for i in range(num_runs):
                 seed = base_seed + i
@@ -201,8 +220,39 @@ def evaluate_n_runs(models, num_runs=10, base_seed=42, render=False):
                     f"asd={metrics['asd']:.4f} "
                     f"hd95={metrics['hd95']:.4f}"
                 )
+
+                # Log episodic metrics to wandb
+                wandb.log({
+                    "episode/run_index": i,
+                    "episode/seed": seed,
+                    "episode/reward": metrics["reward"],
+                    "episode/steps": metrics["steps"],
+                    "episode/dice": metrics["dice"],
+                    "episode/asd": metrics["asd"],
+                    "episode/hd95": metrics["hd95"],
+                })
+                table.add_data(i, seed, metrics["reward"], metrics["steps"], metrics["dice"], metrics["asd"], metrics["hd95"])
+
+            wandb.log({"eval_results_table": table})
+
+            # Calculate and log summary metrics
+            for key in ("reward", "steps", "dice", "asd", "hd95"):
+                vals = np.array([per_model[name][s][key] for s in per_model[name]], dtype=np.float64)
+                finite = vals[np.isfinite(vals)]
+                if len(finite):
+                    wandb.run.summary[f"mean_{key}"] = float(finite.mean())
+                    wandb.run.summary[f"std_{key}"] = float(finite.std())
+                    wandb.run.summary[f"min_{key}"] = float(finite.min())
+                    wandb.run.summary[f"max_{key}"] = float(finite.max())
+                    wandb.log({
+                        f"summary/mean_{key}": float(finite.mean()),
+                        f"summary/std_{key}": float(finite.std()),
+                        f"summary/min_{key}": float(finite.min()),
+                        f"summary/max_{key}": float(finite.max()),
+                    })
         finally:
             env.close()
+            run.finish()
 
     # Reassemble in seed-major order to preserve the original paired_results shape.
     paired_results = []
@@ -301,6 +351,9 @@ def load_agent(checkpoint_path):
 
 # KNOWN ERROR: eval script exits after 5 runs if rendering on
 if __name__ == "__main__":
+    from cam_env.utils import load_env_or_abort
+    load_env_or_abort()
+
     parser = argparse.ArgumentParser()
 
     parser.add_argument("--checkpoints", nargs="+", required=True)

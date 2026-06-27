@@ -26,11 +26,11 @@ class Args:
     """if toggled, `torch.backends.cudnn.deterministic=False`"""
     cuda: bool = True
     """if toggled, cuda will be enabled by default"""
-    track: bool = False
+    track: bool = True
     """if toggled, this experiment will be tracked with Weights and Biases"""
-    wandb_project_name: str = "cleanRL"
+    wandb_project_name: str = "diffcam"
     """the wandb's project name"""
-    wandb_entity: str = None
+    wandb_entity: str = "diffcam"
     """the entity (team) of wandb's project"""
     capture_video: bool = False
     """whether to capture videos of the agent performances (check out `videos` folder)"""
@@ -232,6 +232,9 @@ class Agent(nn.Module):
 
 
 if __name__ == "__main__":
+    from cam_env.utils import load_env_or_abort
+    load_env_or_abort()
+
     args = tyro.cli(Args)
     args.batch_size = int(args.num_envs * args.num_steps)
     args.minibatch_size = int(args.batch_size // args.num_minibatches)

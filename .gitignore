@@ -4,3 +4,5 @@ runs/*
 *.egg-info
 __pycache__/
 data/
+wandb/
+.env

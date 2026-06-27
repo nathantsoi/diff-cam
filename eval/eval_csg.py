@@ -111,14 +111,79 @@ def eval_trajectory(path, resolution, do_gcode, post, workspace_mm):
         raise ValueError(f"{path} must hold an (T, 3) array; got {positions.shape}")
     print(f"Loaded trajectory: {positions.shape} from {path}")
 
-    m, _, _ = carve_trajectory_metrics(positions, resolution=resolution)
-    print("\n=== Internal metrics (carved stock vs target) ===")
-    print(f"  Dice : {m['dice']:.4f}")
-    print(f"  ASD  : {m['asd']:.4f}")
-    print(f"  HD95 : {m['hd95']:.4f}")
+    import os
+    import time
 
-    if not do_gcode:
-        return
+    import wandb
+    run = wandb.init(
+        project="diffcam",
+        entity="diffcam",
+        job_type="evaluation",
+        name=f"eval_trajectory_{os.path.basename(path)}_{int(time.time())}",
+        config={
+            "trajectory_path": path,
+            "resolution": resolution,
+            "do_gcode": do_gcode,
+            "post": post,
+            "workspace_mm": workspace_mm,
+        }
+    )
+
+    try:
+        m, _, _ = carve_trajectory_metrics(positions, resolution=resolution)
+        print("\n=== Internal metrics (carved stock vs target) ===")
+        print(f"  Dice : {m['dice']:.4f}")
+        print(f"  ASD  : {m['asd']:.4f}")
+        print(f"  HD95 : {m['hd95']:.4f}")
+
+        wandb.log({
+            "trajectory/dice": m["dice"],
+            "trajectory/asd": m["asd"],
+            "trajectory/hd95": m["hd95"],
+        })
+
+        if not do_gcode:
+            return
+
+        from cam import (
+            MachineConfig, trajectory_to_gcode, parse_gcode, segment_waypoints,
+            gcode_to_trajectory, discrete_frechet, dtw_distance, resampled_rmse,
+            waypoint_roundtrip_error,
+        )
+
+        cfg = MachineConfig(workspace_mm=workspace_mm)
+        scale = cfg.workspace_mm
+        gcode = trajectory_to_gcode(positions, cfg, post=post)
+        segments = parse_gcode(gcode, cfg)
+        recovered = segment_waypoints(segments)
+        executed, times = gcode_to_trajectory(gcode, cfg)
+
+        print(f"\n=== G-code round-trip (post='{post}') ===")
+        print(f"  program blocks            : {len([l for l in gcode.splitlines() if l and not l.startswith('(')])}")
+        print(f"  executed samples          : {executed.shape[0]} ({times[-1]:.2f}s of motion)")
+        print(f"  waypoint round-trip error : {waypoint_roundtrip_error(positions, recovered, scale):.3e} mm")
+        print(f"  discrete Frechet          : {discrete_frechet(positions, executed, scale):.3e} mm")
+        print(f"  DTW (mean matched dist)   : {dtw_distance(positions, executed, scale):.3e} mm")
+        print(f"  arc-length resampled RMSE : {resampled_rmse(positions, executed, scale=scale):.3e} mm")
+
+        me, _, _ = carve_trajectory_metrics(executed, resolution=resolution)
+        print("  --- carved stock of executed program vs target ---")
+        print(f"  Dice : {me['dice']:.4f}   ASD : {me['asd']:.4f}   HD95 : {me['hd95']:.4f}")
+
+        wandb.log({
+            "gcode/blocks": len([l for l in gcode.splitlines() if l and not l.startswith('(')]),
+            "gcode/executed_samples": executed.shape[0],
+            "gcode/motion_time": times[-1],
+            "gcode/waypoint_roundtrip_error": waypoint_roundtrip_error(positions, recovered, scale),
+            "gcode/discrete_frechet": discrete_frechet(positions, executed, scale),
+            "gcode/dtw": dtw_distance(positions, executed, scale),
+            "gcode/rmse": resampled_rmse(positions, executed, scale=scale),
+            "gcode/executed_dice": me["dice"],
+            "gcode/executed_asd": me["asd"],
+            "gcode/executed_hd95": me["hd95"],
+        })
+    finally:
+        run.finish()
 
     from cam import (
         MachineConfig, trajectory_to_gcode, parse_gcode, segment_waypoints,
@@ -197,11 +262,32 @@ def _rollout(agent, env, seed):
 
 def eval_checkpoints(paths, num_runs, base_seed):
     results = {}
+    import os
+    import time
+
+    import wandb
+
     for path in paths:
         print(f"\nEvaluating {path}")
         agent, env, res, ms = _load_ppo_agent(path)
         print(f"  -> resolution={res}, max_steps={ms}")
+
+        run = wandb.init(
+            project="diffcam",
+            entity="diffcam",
+            job_type="evaluation",
+            name=f"eval_checkpoint_{os.path.basename(path)}_{int(time.time())}",
+            config={
+                "checkpoint_path": path,
+                "resolution": res,
+                "max_steps": ms,
+                "num_runs": num_runs,
+                "base_seed": base_seed,
+            }
+        )
+
         per_run = []
+        table = wandb.Table(columns=["run_index", "seed", "reward", "dice", "asd", "hd95"])
         try:
             for i in range(num_runs):
                 seed = base_seed + i
@@ -209,8 +295,34 @@ def eval_checkpoints(paths, num_runs, base_seed):
                 per_run.append({"seed": seed, "reward": r, **m})
                 print(f"  run {i} (seed {seed}): reward={r:+.3f} "
                       f"dice={m['dice']:.3f} asd={m['asd']:.4f} hd95={m['hd95']:.4f}")
+
+                # Log episodic metrics to wandb
+                wandb.log({
+                    "episode/run_index": i,
+                    "episode/seed": seed,
+                    "episode/reward": r,
+                    "episode/dice": m["dice"],
+                    "episode/asd": m["asd"],
+                    "episode/hd95": m["hd95"],
+                })
+                table.add_data(i, seed, r, m["dice"], m["asd"], m["hd95"])
+
+            wandb.log({"eval_results_table": table})
+
+            # Calculate and log summary metrics
+            for key in ("reward", "dice", "asd", "hd95"):
+                vals = np.array([r[key] for r in per_run], dtype=np.float64)
+                finite = vals[np.isfinite(vals)]
+                if len(finite):
+                    wandb.run.summary[f"mean_{key}"] = float(finite.mean())
+                    wandb.run.summary[f"std_{key}"] = float(finite.std())
+                    wandb.log({
+                        f"summary/mean_{key}": float(finite.mean()),
+                        f"summary/std_{key}": float(finite.std()),
+                    })
         finally:
             env.close()
+            run.finish()
         results[path] = per_run
 
     print("\n=== Summary (mean +/- std over runs) ===")
@@ -227,6 +339,9 @@ def eval_checkpoints(paths, num_runs, base_seed):
 
 
 def main():
+    from cam_env.utils import load_env_or_abort
+    load_env_or_abort()
+
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     src = ap.add_mutually_exclusive_group(required=True)
