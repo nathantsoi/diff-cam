@@ -45,6 +45,7 @@ class CSGSimulatorDelta:
                     ti.init(arch=ti.cpu, debug=False, default_fp=ti.f32)
             except:
                 pass  # taichi already initialized
+            ti.set_logging_level(ti.WARN)
 
         self.resolution = resolution
         self.max_steps = max_steps

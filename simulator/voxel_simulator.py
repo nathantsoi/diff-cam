@@ -8,6 +8,8 @@ if ti._lib.core.with_cuda():
     ti.init(arch=ti.gpu, debug=True)
 else:
     ti.init(arch=ti.cpu, debug=True)
+ti.set_logging_level(ti.WARN)
+
 
 @ti.data_oriented
 class CNCSimulator:
