@@ -386,7 +386,7 @@ if __name__ == "__main__":
             if "final_info" in infos:
                 for info in infos["final_info"]:
                     if info and "episode" in info:
-                        tqdm.write(f"[{run_name}] global_step={global_step}, episodic_return={info['episode']['r']}")
+                        #tqdm.write(f"[{run_name}] global_step={global_step}, episodic_return={info['episode']['r']}")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
@@ -490,7 +490,7 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         sps = int(global_step / (time.time() - start_time))
         pbar.set_postfix(SPS=sps)
-        tqdm.write(f"[{run_name}] SPS {iteration}: {sps}")
+        #tqdm.write(f"[{run_name}] SPS {iteration}: {sps}")
         writer.add_scalar("charts/SPS", sps, global_step)
 
         if recorder is not None and iteration % args.record_video_freq == 0:
