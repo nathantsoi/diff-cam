@@ -1,3 +1,6 @@
-__pycache__/*
+imgui.in
 imgui.ini
-runs/
+runs/*
+*.egg-info
+__pycache__/
+data/

@@ -20,109 +20,83 @@ uv sync
 
 See [docs/design.md](docs/design.md) for design details.
 
-## PPO Training
+## Simulators
+
+Currently, there are two simulators: voxel_simulator.py and csg_simulator.py
+
+- voxel_simulator.py = Uses voxelization to initialize stock, target, and tool geometries. Applies cuts sequentially using a max operation. Rewards are meant to be differentiable, although the entire voxel space is not. 
+- csg_simulator.py = Uses a constructive solid geometry approach to define geometries (fully differentiable). The compute_loss function mirrors the reward function in the RL approach.
+
+## Environment and PPO
+- cam_env.py = Defines a Gymnasium environment for the voxelization simulator with each individual action moving the tool in one direction (and applying cutting). 
+- ppo.py is the CleanRL implementation of the PPO algorithm. It trains an agent using CamEnv-v0
+
+## Differentiable Simulation
+- UNDER CONSTRUCTION. Gradient descent will be employed 
+
+## Training
 To run locally, run the command:
 ```bash
-uv run ./algorithms/ppo.py
+uv run ./train_local.bash
 ```
 
-To run on lonestar6, ensure that the diff-cam repo and the singularity exist in the $SCRATCH directory. To train, use the command from the diff-cam repo. Ensure that your allocation and training hyperparameters are correct - these are currently hard-coded. 
+To run on lonestar6, run
+```cd $SCRATCH$```, ```cd diff-cam``` and ensure that your allocation and training hyperparameters are correct - these are currently hard-coded. 
 ```bash
 sbatch train_hpc.bash
 ```
 
 
-## AMD GPU Support
+## Measures
+We employ a few evaluation metrics.
+- Dice Similarity Coefficient (DSC)
+- Average Surface-to-Surface Distance (ASD)
+- 95% Hausdorff Distance (HD95)
 
-Taichi support for AMD GPUs may be possible via the ROCm: see <https://rocm.docs.amd.com/projects/taichi/en/latest/install/taichi-install.html>
 
-## Running Tests with Pytest
+## Evaluation
+- 10 randomly-generated episodes. Each model is tested against each episode
+- Measures are calculated for each episode for each policy
+- Summary statistics (mean, std) are computed
+- Note that this is only a fair comparison if the hyperparameters are the same
+Example:
+``` ```
+
+## CAM / G-code (`cam/`)
+
+The `cam/` package bridges optimized trajectories and real CNC G-code, following
+the LinuxCNC pipeline (interpreter → canonical moves → trajectory planner):
+
+- `cam.trajectory_to_gcode(positions)` — export an `(T, 3)` unit-cube trajectory
+  to RS274/NGC G-code (`G21`/`G90`/`G61`, `G0` to start, `G1` feeds, `M2`).
+- `cam.parse_gcode(text)` — parse G-code back to motion segments (G0/G1 plus
+  G2/G3 arcs, units, distance modes).
+- `cam.plan_trajectory(segments)` / `cam.gcode_to_trajectory(text)` — re-plan
+  ("execute") the G-code into a time-sampled trajectory using an
+  acceleration-limited **trapezoidal** velocity profile in **exact-stop (G61)**
+  mode, so the tool passes through every waypoint.
+- `cam.trajectory_metrics` — path-similarity metrics (discrete Fréchet, DTW,
+  arc-length-resampled RMSE, waypoint round-trip error).
+- `cam.sim_exec.carve_stock(positions)` — execute a trajectory in the simulator
+  with a hard (step-count-invariant) CSG carve, for carved-stock validation.
+
+End-to-end round-trip demo (`trajectory → G-code → executed trajectory`):
+
+```bash
+uv run python scripts/roundtrip_demo.py
+```
+
+This reports trajectory similarity (≈ machine precision for the saved
+trajectory) and carved-stock Dice (≈ 0.99).
+
+## Testing
 
 ```bash
 uv run pytest
 ```
 
-# TACC Installation & Setup
+## AMD GPU Support
 
-This repository includes automated scripts to handle environment setup on TACC (Texas Advanced Computing Center) systems.
-
-> Always clone and install this repository in your **`$SCRATCH`** directory.
-> TACC `$HOME` directories have a strict 10GB limit. Python environments and dataset caches will fill this immediately, causing system errors.
-
-## 1. First-Time Setup
-
-1. ssh into TACC:
-```bash
-ssh -m hmac-sha2-512 neilvakharia45@ls6.tacc.utexas.edu
-```
-Password is your TACC password and Passcode is your TACC Token from Duo.
+Taichi support for AMD GPUs may be possible via the ROCm: see <https://rocm.docs.amd.com/projects/taichi/en/latest/install/taichi-install.html>
 
 
-2. Navigate to Scratch and clone the repo:
-```bash
-cd $SCRATCH
-git clone https://github.com/nathantsoi/diff-cam.git
-cd diff-cam
-```
-
-
-3. Make the setup scripts executable:
-```bash
-chmod +x scripts/*.sh
-```
-
-
-4. **Initialize the Machine:**
-Run this script once to install `uv` (if missing) and configure cache directories to use `$SCRATCH` instead of `$HOME`.
-```bash
-./scripts/00_init_machine.sh
-```
-
-
----
-
-## 2. Installation Methods
-
-Choose **one** of the following methods to install dependencies.
-
-### Option A: Compute Node + Uv
-
-Uses uv sync which requires a dev node
-
-1. **Request an interactive Dev Node (A100):**
-```bash
-idev -p gpu-a100-dev -N 1 -n 1 -t 01:00:00
-
-```
-
-*Wait until the command finishes and your prompt changes (indicating you are on a compute node).*
-2. **Run the installer:**
-```bash
-# Ensure you are in the repo folder
-cd $SCRATCH/diff-cam
-
-# Run the script
-./scripts/01_install_compute.sh
-```
-
-### Option B: Login Node Only via Pip 
-
-Use this method if you cannot get a compute node or prefer standard `pip`.
-
-1. **Run the installer directly on the login node:**
-```bash
-./scripts/01_install_login.sh
-
-```
-
-
----
-
-## 3. Usage
-
-To run the project later, simply activate the environment:
-
-```bash
-source .venv/bin/activate
-
-```

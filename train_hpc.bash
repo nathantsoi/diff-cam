@@ -5,7 +5,7 @@
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -p gpu-a100-small
-#SBATCH -t 24:00:00
+#SBATCH -t 48:00:00
 #SBATCH -A IRI25030
 
 module load tacc-apptainer
@@ -16,11 +16,11 @@ singularity exec --nv \
     --bind $SCRATCH/diff-cam/cam_env:/opt/conda/lib/python3.11/site-packages/cam_env \
     --bind $SCRATCH/diff-cam/algorithms:/app/algorithms \
     $SCRATCH/diff-cam.sif \
-    python3 /app/algorithms/ppo.py \
+    python3 -u /app/algorithms/csg_ppo.py \
         --total_timesteps 10000000 \
-        --num_envs 1 \
+        --num_envs 16 \
         --resolution 32 \
-        --num_steps 2048 \
+        --num_steps 512 \
         --max_steps 4096 \
         --num_minibatches 8 \
         --update_epochs 4 \
