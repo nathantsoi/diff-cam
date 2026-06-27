@@ -1,9 +1,6 @@
-__pycache__/*
 imgui.in
 imgui.ini
 runs/*
-cam_env/__pycache__/*
-algorithms/__pycache__/*
-simulator/__pycache__/*
-tests/__pycache__/*
-diff_cam.egg-info/*
+*.egg-info
+__pycache__/
+data/

@@ -62,6 +62,33 @@ We employ a few evaluation metrics.
 Example:
 ``` ```
 
+## CAM / G-code (`cam/`)
+
+The `cam/` package bridges optimized trajectories and real CNC G-code, following
+the LinuxCNC pipeline (interpreter → canonical moves → trajectory planner):
+
+- `cam.trajectory_to_gcode(positions)` — export an `(T, 3)` unit-cube trajectory
+  to RS274/NGC G-code (`G21`/`G90`/`G61`, `G0` to start, `G1` feeds, `M2`).
+- `cam.parse_gcode(text)` — parse G-code back to motion segments (G0/G1 plus
+  G2/G3 arcs, units, distance modes).
+- `cam.plan_trajectory(segments)` / `cam.gcode_to_trajectory(text)` — re-plan
+  ("execute") the G-code into a time-sampled trajectory using an
+  acceleration-limited **trapezoidal** velocity profile in **exact-stop (G61)**
+  mode, so the tool passes through every waypoint.
+- `cam.trajectory_metrics` — path-similarity metrics (discrete Fréchet, DTW,
+  arc-length-resampled RMSE, waypoint round-trip error).
+- `cam.sim_exec.carve_stock(positions)` — execute a trajectory in the simulator
+  with a hard (step-count-invariant) CSG carve, for carved-stock validation.
+
+End-to-end round-trip demo (`trajectory → G-code → executed trajectory`):
+
+```bash
+uv run python scripts/roundtrip_demo.py
+```
+
+This reports trajectory similarity (≈ machine precision for the saved
+trajectory) and carved-stock Dice (≈ 0.99).
+
 ## Testing
 
 ```bash
