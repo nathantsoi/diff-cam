@@ -313,6 +313,8 @@ if __name__ == "__main__":
     next_done = torch.zeros(args.num_envs).to(device)
 
     from tqdm import tqdm
+    iteration = 0           # bound even if the loop never runs
+    last_video_iter = -1    # iteration whose model was last recorded
     pbar = tqdm(range(1, args.num_iterations + 1), desc=run_name)
     for iteration in pbar:
         # Annealing the rate if instructed to do so.
@@ -449,6 +451,7 @@ if __name__ == "__main__":
 
         if recorder is not None and iteration % args.record_video_freq == 0:
             recorder.record(agent, global_step, seed=args.video_seed)
+            last_video_iter = iteration
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
@@ -458,6 +461,12 @@ if __name__ == "__main__":
         tqdm.write(f"[{run_name}] model saved to {model_path}")
 
     if recorder is not None:
+        # Always capture the *final* model -- whether training ran to completion
+        # or stopped early -- unless the last iteration already recorded it.
+        if iteration != last_video_iter:
+            recorder.record(agent, global_step, seed=args.video_seed)
+        # Export the final model's geometry (initial stock, carved stock, target).
+        recorder.export_stls(agent, global_step, seed=args.video_seed)
         recorder.close()
     envs.close()
     writer.close()

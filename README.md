@@ -93,7 +93,7 @@ Add `--record_video_freq N` to also record + upload a greedy policy-rollout vide
 uv run python -m algorithms.csg_ppo \
     --total_timesteps 10000000 --num_envs 4 --resolution 32 --max_steps 64 \
     --num_steps 512 --num_minibatches 8 --update_epochs 4 --save_model \
-    --record_video_freq 25 --video_fps 30
+    --record_video_freq 100 --video_fps 30
 ```
 
 ### Discrete — PPO (voxel)
@@ -130,6 +130,12 @@ Videos appear in wandb under `media/policy_rollout`; reward and geometry land
 under `eval/reward`, `eval/dice`, `eval/asd`, `eval/hd95`. Local copies are
 written to `runs/<run>/videos/policy_step_<global_step>.mp4`.
 
+After training finishes (including on early stopping), the **final** model's
+geometry is also exported as STL meshes — the initial uncarved stock, the carved
+stock, and the target part — to `runs/<run>/meshes/` (and uploaded to wandb when
+`--track`). Meshes are the zero-level surface of each SDF (marching cubes) in the
+unit-cube frame.
+
 ```bash
 # Continuous PPO, no video (default):
 uv run python -m algorithms.csg_ppo --total_timesteps 10000000 --num_envs 4 \
@@ -138,7 +144,7 @@ uv run python -m algorithms.csg_ppo --total_timesteps 10000000 --num_envs 4 \
 # Continuous PPO, video + metrics to wandb every 25 iterations:
 uv run python -m algorithms.csg_ppo --total_timesteps 10000000 --num_envs 4 \
     --resolution 32 --max_steps 64 --save_model \
-    --record_video_freq 25 --video_fps 30
+    --record_video_freq 100 --video_fps 30
 ```
 
 The discrete voxel PPO (`ppo.py`) renders its 3D GGUI scene off-screen for the
@@ -151,7 +157,7 @@ uv run python -m algorithms.ppo --total-timesteps 2000000 --num-envs 4 \
 
 # Discrete PPO, video + metrics to wandb every 25 iterations:
 uv run python -m algorithms.ppo --total-timesteps 2000000 --num-envs 4 \
-    --resolution 32 --max-steps 256 --record_video_freq 25 --video_fps 30
+    --resolution 32 --max-steps 256 --record_video_freq 100 --video_fps 30
 ```
 
 **Gradient descent (`train_csg.py`).** Replays the optimized toolpath through the
