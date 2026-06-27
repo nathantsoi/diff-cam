@@ -8,7 +8,7 @@ import time
 from simulator.csg_simulator import *
 
 
-class CamEnv(gym.Env):
+class CamEnvDiff(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
     def __init__(
@@ -319,7 +319,7 @@ class CamEnv(gym.Env):
 
 
 if __name__ == "__main__":
-    env = CamEnv(resolution=32, max_steps=64, target_shape="sphere", render_mode="human")
+    env = CamEnvDiff(resolution=32, max_steps=64, target_shape="sphere", render_mode="human")
     obs, info = env.reset()
     done = False
     while not done:

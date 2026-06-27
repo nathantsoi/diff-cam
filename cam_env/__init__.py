@@ -1,14 +1,14 @@
 from gymnasium.envs.registration import register
 
 register(
-    id="CamEnv-v0",
-    entry_point="cam_env.cam_env:CamEnv",
+    id="CamEnvDiff-v0",
+    entry_point="cam_env.cam_env:CamEnvDiff",
     kwargs={'resolution': 64, 'max_steps': 1000}
 )
 
 register(
-    id="CamEnvVoxel-v0",
-    entry_point="cam_env.cam_env_voxel:CamEnv",
+    id="CamEnvDisc-v0",
+    entry_point="cam_env.cam_env_voxel:CamEnvDisc",
     kwargs={'resolution': 64, 'max_steps': 100}
 )
 

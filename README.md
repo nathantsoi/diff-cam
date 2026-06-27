@@ -7,8 +7,8 @@ layer that turns optimized toolpaths into machine-ready G-code.
 
 | Mode | State representation | Action space | Methods | Env id |
 |------|----------------------|--------------|---------|--------|
-| **Continuous (CSG / GradMill)** | Parametric SDFs, smooth boolean cuts | continuous `Box(3)` delta moves | analytic gradient descent **and** PPO | `CamEnv-v0` |
-| **Discrete (voxel)** | voxel SDF grid | `Discrete(27)` (±1 per axis) | PPO | `CamEnvVoxel-v0` |
+| **Continuous (CSG / GradMill)** | Parametric SDFs, smooth boolean cuts | continuous `Box(3)` delta moves | analytic gradient descent **and** PPO | `CamEnvDiff-v0` |
+| **Discrete (voxel)** | voxel SDF grid | `Discrete(27)` (±1 per axis) | PPO | `CamEnvDisc-v0` |
 
 > Run everything as a **module** from the repo root (`python -m algorithms.…`,
 > `python -m eval.…`). Running a script by path (`python algorithms/ppo.py`)
@@ -41,8 +41,8 @@ simulator/
   voxel_simulator.py  # discrete voxel simulator (CNCSimulator)
   csg_metrics.py      # Dice / ASD / HD95 + gouge/residual on SDF grids
 cam_env/
-  cam_env.py          # continuous Gymnasium env  -> CamEnv-v0
-  cam_env_voxel.py    # discrete  Gymnasium env  -> CamEnvVoxel-v0
+  cam_env.py          # continuous Gymnasium env  -> CamEnvDiff-v0
+  cam_env_voxel.py    # discrete  Gymnasium env  -> CamEnvDisc-v0
 algorithms/
   train_csg.py        # continuous: analytic gradient descent (GradMill, Method 1)
   csg_ppo.py          # continuous: PPO baseline (Method 2)
@@ -205,7 +205,7 @@ uv run python -m eval.eval_csg --checkpoints runs/*/csg_ppo.cleanrl_model --num-
 
 ```bash
 uv run python -m eval.eval \
-    --checkpoints runs/CamEnvVoxel-v0__ppo__*/checkpoint_final.pt \
+    --checkpoints runs/CamEnvDisc-v0__ppo__*/checkpoint_final.pt \
     --num-runs 10 --no-render
 ```
 

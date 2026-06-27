@@ -7,7 +7,7 @@ import time
 
 from simulator.voxel_simulator import CNCSimulator
 
-class CamEnv(gym.Env):
+class CamEnvDisc(gym.Env):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 30}
 
     def __init__(self, resolution=128, max_steps=100, render_mode: Optional[str] = None):
@@ -594,7 +594,7 @@ class CamEnv(gym.Env):
 
 if __name__ == "__main__":
     # Test the environment with random actions
-    env = CamEnv(resolution=8, max_steps=512, render_mode="human")
+    env = CamEnvDisc(resolution=8, max_steps=512, render_mode="human")
     obs, info = env.reset()
     done = False
 

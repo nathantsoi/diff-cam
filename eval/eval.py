@@ -9,7 +9,7 @@ import pufferlib
 import pufferlib.vector
 import pufferlib.emulation
 
-from cam_env.cam_env_voxel import CamEnv
+from cam_env.cam_env_voxel import CamEnvDisc
 
 from algorithms.ppo import *
 
@@ -182,7 +182,7 @@ def evaluate_n_runs(models, num_runs=10, base_seed=42, render=False):
     for name, model_info in models.items():
         print(f"\nEvaluating {name}")
         env = gym.make(
-            "CamEnvVoxel-v0",
+            "CamEnvDisc-v0",
             resolution=model_info["resolution"],
             max_steps=model_info["max_steps"],
             render_mode="human" if render else None,
@@ -330,7 +330,7 @@ def load_agent(checkpoint_path):
     dummy_envs = pufferlib.vector.make(
         lambda buf=None, **kwargs: pufferlib.emulation.GymnasiumPufferEnv(
             env_creator=lambda: gym.make(
-                "CamEnvVoxel-v0",
+                "CamEnvDisc-v0",
                 resolution=resolution,
                 max_steps=max_steps,
             ),

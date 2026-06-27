@@ -10,7 +10,7 @@ Two artifacts can be scored, both with the same internal geometric metrics
 
 * ``--checkpoints a.cleanrl_model b...`` -- one or more continuous-PPO
   checkpoints from ``algorithms/csg_ppo.py``. Each policy is rolled out
-  deterministically in ``CamEnv-v0`` and the resulting stock is scored. Several
+  deterministically in ``CamEnvDiff-v0`` and the resulting stock is scored. Several
   checkpoints are evaluated on the same per-seed scenarios so the numbers are
   paired/comparable.
 
@@ -40,7 +40,7 @@ from simulator.csg_metrics import (
     hd95,
 )
 
-# Default target/tool geometry -- must match CamEnv.reset() and train_csg.py.
+# Default target/tool geometry -- must match CamEnvDiff.reset() and train_csg.py.
 TARGET_SHAPE = "sphere"
 TARGET_RADIUS = 0.4
 TARGET_CENTER = [0.5, 0.5, 0.5]
@@ -219,7 +219,7 @@ def _load_ppo_agent(checkpoint_path):
     import gymnasium as gym
     from types import SimpleNamespace
     from algorithms.csg_ppo import Agent
-    import cam_env  # noqa: F401  registers CamEnv-v0
+    import cam_env  # noqa: F401  registers CamEnvDiff-v0
 
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     if not (isinstance(ckpt, dict) and "args" in ckpt and "agent" in ckpt):
@@ -232,7 +232,7 @@ def _load_ppo_agent(checkpoint_path):
     max_steps = int(a["max_steps"])
     target_shape = a.get("target_shape", TARGET_SHAPE)
 
-    env = gym.make("CamEnv-v0", resolution=resolution, max_steps=max_steps,
+    env = gym.make("CamEnvDiff-v0", resolution=resolution, max_steps=max_steps,
                    target_shape=target_shape)
     shim = SimpleNamespace(single_action_space=env.action_space)
     agent = Agent(shim, resolution=resolution)

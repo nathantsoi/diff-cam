@@ -18,7 +18,7 @@ import pufferlib.vector
 import pufferlib.emulation
 import pufferlib.environments
 
-from cam_env.cam_env_voxel import CamEnv
+from cam_env.cam_env_voxel import CamEnvDisc
 
 
 @dataclass
@@ -41,7 +41,7 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
 
     # Algorithm specific arguments
-    env_id: str = "CamEnvVoxel-v0"
+    env_id: str = "CamEnvDisc-v0"
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
@@ -84,7 +84,7 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
-    # additional arguments for CamEnv
+    # additional arguments for CamEnvDisc
     resolution: int = 8
     """the resolution of the camera observation"""
     max_steps: int = 256
@@ -102,7 +102,7 @@ class Args:
 def make_env(env_id, idx, capture_video, run_name, resolution, max_steps, render_mode):
     def thunk(buf=None, seed=None, **kwargs):
         return pufferlib.emulation.GymnasiumPufferEnv(
-            env_creator=lambda: gym.make("CamEnvVoxel-v0", resolution=resolution, max_steps=max_steps, render_mode=render_mode),
+            env_creator=lambda: gym.make("CamEnvDisc-v0", resolution=resolution, max_steps=max_steps, render_mode=render_mode),
             buf=buf,
         )
     return thunk

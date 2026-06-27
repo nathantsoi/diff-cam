@@ -13,7 +13,7 @@ import tyro
 from torch.distributions.normal import Normal
 from torch.utils.tensorboard import SummaryWriter
 
-from cam_env.cam_env import CamEnv # needed for env registration
+from cam_env.cam_env import CamEnvDiff # needed for env registration
 
 
 @dataclass
@@ -48,7 +48,7 @@ class Args:
     """the user or org name of the model repository from the Hugging Face Hub"""
 
     # Algorithm specific arguments
-    env_id: str = "CamEnv-v0"
+    env_id: str = "CamEnvDiff-v0"
     """the id of the environment"""
     total_timesteps: int = 1000000
     """total timesteps of the experiments"""
@@ -91,11 +91,11 @@ class Args:
     num_iterations: int = 0
     """the number of iterations (computed in runtime)"""
 
-    # --- CamEnv specific ---
+    # --- CamEnvDiff specific ---
     resolution: int = 32
     """voxel grid resolution per axis"""
     max_steps: int = 64
-    """max episode steps (== max_cuts + 1 in CamEnv)"""
+    """max episode steps (== max_cuts + 1 in CamEnvDiff)"""
     target_shape: str = "sphere"
     """target shape: 'box', 'cylinder', 'sphere', 'pyramid', or None for random"""
     k_init: float = 10.0
@@ -168,9 +168,9 @@ class VoxelEncoder(nn.Module):
  
  
 class Agent(nn.Module):
-    """Actor-critic over CamEnv's split observation.
+    """Actor-critic over CamEnvDiff's split observation.
  
-    Observation layout (must match CamEnv._get_obs):
+    Observation layout (must match CamEnvDiff._get_obs):
         [ tool_pos (3) | radius (1) | height (1) | stock_grid (R^3) | target_grid (R^3) ]
     """
  

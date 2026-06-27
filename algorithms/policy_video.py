@@ -9,7 +9,7 @@ the carved stock vs target, plus reward) to Weights & Biases.
 
 It is policy/env-agnostic: the greedy action selection and the metric computation
 are passed in as callables, so the same recorder serves both the continuous
-(``CamEnv-v0``) and discrete (``CamEnvVoxel-v0``) trainers. Use the
+(``CamEnvDiff-v0``) and discrete (``CamEnvDisc-v0``) trainers. Use the
 ``make_continuous_recorder`` / ``make_discrete_recorder`` factories.
 
 Frames are encoded by piping raw RGB straight to the system ``ffmpeg``, which
@@ -123,7 +123,7 @@ def _encode_mp4(frames, out_path, fps):
 
 
 # ---------------------------------------------------------------------------
-# Continuous (CamEnv-v0 / csg_ppo.py)
+# Continuous (CamEnvDiff-v0 / csg_ppo.py)
 # ---------------------------------------------------------------------------
 def _continuous_action(agent, obs_t):
     # deterministic: mean action (mirrors eval_csg._rollout)
@@ -139,7 +139,7 @@ def _continuous_metrics(env, resolution):
 
 
 def make_continuous_recorder(run_name, resolution, max_steps, target_shape,
-                             env_id="CamEnv-v0", fps=30, track=False, device="cpu"):
+                             env_id="CamEnvDiff-v0", fps=30, track=False, device="cpu"):
     """Recorder for the continuous CSG PPO policy.
 
     init_taichi=False is critical: the dedicated render env's simulator must
@@ -148,7 +148,7 @@ def make_continuous_recorder(run_name, resolution, max_steps, target_shape,
     training envs (so Taichi is initialized) and before they reset.
     """
     import gymnasium as gym
-    import cam_env  # noqa: F401  registers CamEnv-v0
+    import cam_env  # noqa: F401  registers CamEnvDiff-v0
 
     env = gym.make(env_id, render_mode="rgb_array", resolution=resolution,
                    max_steps=max_steps, target_shape=target_shape, init_taichi=False)
@@ -160,7 +160,7 @@ def make_continuous_recorder(run_name, resolution, max_steps, target_shape,
 
 
 # ---------------------------------------------------------------------------
-# Discrete (CamEnvVoxel-v0 / ppo.py)
+# Discrete (CamEnvDisc-v0 / ppo.py)
 # ---------------------------------------------------------------------------
 def _discrete_action(agent, obs_t):
     # deterministic: argmax over the categorical logits
@@ -182,14 +182,14 @@ def _discrete_metrics(env, resolution):
 
 
 def make_discrete_recorder(run_name, resolution, max_steps,
-                           env_id="CamEnvVoxel-v0", fps=30, track=False, device="cpu"):
+                           env_id="CamEnvDisc-v0", fps=30, track=False, device="cpu"):
     """Recorder for the discrete voxel PPO policy.
 
     The voxel simulator initializes Taichi once at module import, so (unlike the
     continuous side) there is no per-env ti.init reset to work around.
     """
     import gymnasium as gym
-    import cam_env  # noqa: F401  registers CamEnvVoxel-v0
+    import cam_env  # noqa: F401  registers CamEnvDisc-v0
 
     env = gym.make(env_id, render_mode="rgb_array", resolution=resolution,
                    max_steps=max_steps)
