@@ -88,7 +88,7 @@ class PolicyVideoRecorder:
             metrics = self.compute_metrics(env) if self.compute_metrics else {}
             metric_str = " ".join(f"{k}={v:.4f}" for k, v in metrics.items())
             tag = "video" if record_video else "eval"
-            print(f"[{tag}] step {global_step}: reward={total_reward:+.4f} {metric_str}")
+            #print(f"[{tag}] step {global_step}: reward={total_reward:+.4f} {metric_str}")
 
             log = {"eval/reward": total_reward}
             log.update({f"eval/{k}": v for k, v in metrics.items()})
