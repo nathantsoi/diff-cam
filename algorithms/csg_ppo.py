@@ -446,7 +446,7 @@ if __name__ == "__main__":
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         sps = int(global_step / (time.time() - start_time))
         pbar.set_postfix(SPS=sps)
-        tqdm.write(f"[{run_name}] SPS: {sps}")
+        #tqdm.write(f"[{run_name}] SPS: {sps}")
         writer.add_scalar("charts/SPS", sps, global_step)
 
         if recorder is not None and iteration % args.record_video_freq == 0:
