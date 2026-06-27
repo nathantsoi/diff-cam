@@ -292,7 +292,9 @@ if __name__ == "__main__":
     next_obs = torch.Tensor(next_obs).to(device)
     next_done = torch.zeros(args.num_envs).to(device)
 
-    for iteration in range(1, args.num_iterations + 1):
+    from tqdm import tqdm
+    pbar = tqdm(range(1, args.num_iterations + 1), desc=run_name)
+    for iteration in pbar:
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
             frac = 1.0 - (iteration - 1.0) / args.num_iterations
@@ -320,7 +322,7 @@ if __name__ == "__main__":
             if "final_info" in infos:
                 for info in infos["final_info"]:
                     if info and "episode" in info:
-                        print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+                        tqdm.write(f"[{run_name}] global_step={global_step}, episodic_return={info['episode']['r']}")
                         writer.add_scalar("charts/episodic_return", info["episode"]["r"], global_step)
                         writer.add_scalar("charts/episodic_length", info["episode"]["l"], global_step)
 
@@ -415,15 +417,17 @@ if __name__ == "__main__":
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
-        print("SPS:", int(global_step / (time.time() - start_time)))
-        writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+        sps = int(global_step / (time.time() - start_time))
+        pbar.set_postfix(SPS=sps)
+        tqdm.write(f"[{run_name}] SPS: {sps}")
+        writer.add_scalar("charts/SPS", sps, global_step)
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
         # Self-describing checkpoint: the eval scripts read `args` to rebuild
         # the env (resolution / max_steps / target_shape) and the Agent.
         torch.save({"agent": agent.state_dict(), "args": vars(args)}, model_path)
-        print(f"model saved to {model_path}")
+        tqdm.write(f"[{run_name}] model saved to {model_path}")
 
     envs.close()
     writer.close()
