@@ -99,8 +99,11 @@ class Args:
 def make_env(env_id, idx, capture_video, run_name, gamma,
              resolution=32, max_steps=64, target_shape="sphere"):
     def thunk():
+        # Only the first env initializes Taichi. ti.init() resets the whole
+        # runtime and would invalidate every other env's simulator fields, so
+        # envs 1.. allocate on the runtime env 0 set up (init_taichi=False).
         env_kwargs = dict(resolution=resolution, max_steps=max_steps,
-                          target_shape=target_shape)
+                          target_shape=target_shape, init_taichi=(idx == 0))
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array", **env_kwargs)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")

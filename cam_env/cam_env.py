@@ -18,6 +18,7 @@ class CamEnv(gym.Env):
         k_init=10.0,
         target_shape = "sphere",
         render_mode: Optional[str] = None,
+        init_taichi: bool = True,
     ):
         """
         Args:
@@ -47,6 +48,7 @@ class CamEnv(gym.Env):
         self.current_step = 0
 
         self.k_init = k_init
+        self.init_taichi = init_taichi
 
         voxels_per_step = 3.0                       # design choice
         self.max_delta = voxels_per_step * self.dx
@@ -90,8 +92,9 @@ class CamEnv(gym.Env):
             resolution=self.resolution,
             max_steps=self.max_steps,
             k_init=self.k_init,
-            target_shape=self.target_shape,            
+            target_shape=self.target_shape,
             tool_start=self.tool_start,
+            init_taichi=self.init_taichi,
         )
         self.simulator.tool_radius[None] = self.tool_radius
         self.simulator.tool_height[None] = self.tool_height
