@@ -60,46 +60,58 @@ class PolicyVideoRecorder:
         self.device = device
 
     @torch.no_grad()
-    def record(self, agent, global_step, seed):
-        """Roll the policy out greedily, encode an mp4, and log it to wandb."""
+    def evaluate(self, agent, global_step, seed, record_video=False):
+        """Greedily roll the policy out once and log eval metrics to wandb.
+
+        Always computes + logs the geometry metrics (Dice / ASD / HD95 + reward)
+        under ``eval/<key>``. When ``record_video`` is True it also renders each
+        frame, encodes an mp4, and logs it under ``media/policy_rollout``;
+        otherwise rendering is skipped entirely (cheap metrics-only eval).
+        """
         try:
             env = self._env
 
-            # --- greedy rollout ---
+            # --- greedy rollout (render frames only if we're encoding a video) ---
             obs, _ = env.reset(seed=seed)
-            frames = [env.render()]
+            frames = [env.render()] if record_video else None
             total_reward, done = 0.0, False
             while not done:
                 obs_t = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
                 action = self.select_action(agent, obs_t)
                 obs, reward, terminated, truncated, _ = env.step(action)
                 total_reward += float(reward)
-                frames.append(env.render())
+                if record_video:
+                    frames.append(env.render())
                 done = terminated or truncated
 
             # --- geometric metrics of the carved stock vs target (same as eval) ---
             metrics = self.compute_metrics(env) if self.compute_metrics else {}
             metric_str = " ".join(f"{k}={v:.4f}" for k, v in metrics.items())
-            print(f"[video] step {global_step}: reward={total_reward:+.4f} {metric_str}")
+            tag = "video" if record_video else "eval"
+            print(f"[{tag}] step {global_step}: reward={total_reward:+.4f} {metric_str}")
 
-            # --- encode mp4 (raw RGB -> system ffmpeg) ---
-            video_dir = os.path.join("runs", self.run_name, "videos")
-            os.makedirs(video_dir, exist_ok=True)
-            out_path = os.path.join(video_dir, f"policy_step_{global_step:09d}.mp4")
-            _encode_mp4(frames, out_path, self.fps)
+            log = {"eval/reward": total_reward}
+            log.update({f"eval/{k}": v for k, v in metrics.items()})
 
-            # --- upload video + metrics to wandb ---
+            # --- optionally encode mp4 (raw RGB -> system ffmpeg) ---
+            if record_video:
+                video_dir = os.path.join("runs", self.run_name, "videos")
+                os.makedirs(video_dir, exist_ok=True)
+                out_path = os.path.join(video_dir, f"policy_step_{global_step:09d}.mp4")
+                _encode_mp4(frames, out_path, self.fps)
+                if self.track and os.path.exists(out_path):
+                    import wandb
+
+                    log["media/policy_rollout"] = wandb.Video(out_path, fps=self.fps, format="mp4")
+
+            # --- upload metrics (+ video) to wandb ---
             if self.track:
                 import wandb
 
-                log = {"eval/reward": total_reward}
-                log.update({f"eval/{k}": v for k, v in metrics.items()})
-                if os.path.exists(out_path):
-                    log["media/policy_rollout"] = wandb.Video(out_path, fps=self.fps, format="mp4")
                 wandb.log(log, step=global_step)
-            return out_path
-        except Exception as e:  # never kill training over a video
-            print(f"[video] failed to record policy rollout at step {global_step}: {e}")
+            return metrics
+        except Exception as e:  # never kill training over an eval/video
+            print(f"[{'video' if record_video else 'eval'}] failed at step {global_step}: {e}")
             return None
 
     @torch.no_grad()

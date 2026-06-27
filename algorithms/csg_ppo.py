@@ -36,6 +36,8 @@ class Args:
     """whether to capture videos of the agent performances (check out `videos` folder)"""
     record_video_freq: int = 0
     """record + upload a greedy policy rollout video every N training iterations (0 = disabled)"""
+    eval_freq: int = 0
+    """run a greedy eval rollout + log Dice/ASD/HD95/reward every N iterations (0 = disabled); no video unless the video cadence also lands on this iteration"""
     video_fps: int = 30
     """frames per second for recorded policy videos"""
     video_seed: int = 0
@@ -286,9 +288,9 @@ if __name__ == "__main__":
     agent = Agent(envs, resolution=args.resolution, initial_logstd=-1).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
-    # Optional: record + upload greedy policy rollout videos during training.
+    # Optional: greedy eval (metrics) and/or video recording during training.
     recorder = None
-    if args.record_video_freq > 0:
+    if args.record_video_freq > 0 or args.eval_freq > 0:
         from algorithms.policy_video import make_continuous_recorder
 
         recorder = make_continuous_recorder(
@@ -314,7 +316,8 @@ if __name__ == "__main__":
 
     from tqdm import tqdm
     iteration = 0           # bound even if the loop never runs
-    last_video_iter = -1    # iteration whose model was last recorded
+    last_video_iter = -1    # iteration whose model was last recorded as video
+    last_eval_iter = -1     # iteration whose model was last evaluated (metrics)
     pbar = tqdm(range(1, args.num_iterations + 1), desc=run_name)
     for iteration in pbar:
         # Annealing the rate if instructed to do so.
@@ -375,6 +378,7 @@ if __name__ == "__main__":
         # Optimizing the policy and value network
         b_inds = np.arange(args.batch_size)
         clipfracs = []
+        early_stopped = False
         for epoch in range(args.update_epochs):
             np.random.shuffle(b_inds)
             break_loop = False
@@ -393,6 +397,7 @@ if __name__ == "__main__":
                     clipfracs += [((ratio - 1.0).abs() > args.clip_coef).float().mean().item()]
 
                 if args.target_kl is not None and approx_kl > args.target_kl:
+                    early_stopped = True
                     break_loop = True
                     break
 
@@ -442,6 +447,7 @@ if __name__ == "__main__":
         writer.add_scalar("losses/entropy", entropy_loss.item(), global_step)
         writer.add_scalar("losses/old_approx_kl", old_approx_kl.item(), global_step)
         writer.add_scalar("losses/approx_kl", approx_kl.item(), global_step)
+        writer.add_scalar("losses/early_stop", 1.0 if early_stopped else 0.0, global_step)
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         sps = int(global_step / (time.time() - start_time))
@@ -449,9 +455,14 @@ if __name__ == "__main__":
         #tqdm.write(f"[{run_name}] SPS: {sps}")
         writer.add_scalar("charts/SPS", sps, global_step)
 
-        if recorder is not None and iteration % args.record_video_freq == 0:
-            recorder.record(agent, global_step, seed=args.video_seed)
-            last_video_iter = iteration
+        if recorder is not None:
+            do_video = args.record_video_freq > 0 and iteration % args.record_video_freq == 0
+            do_eval = args.eval_freq > 0 and iteration % args.eval_freq == 0
+            if do_video or do_eval:
+                recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=do_video)
+                last_eval_iter = iteration
+                if do_video:
+                    last_video_iter = iteration
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
@@ -461,10 +472,12 @@ if __name__ == "__main__":
         tqdm.write(f"[{run_name}] model saved to {model_path}")
 
     if recorder is not None:
-        # Always capture the *final* model -- whether training ran to completion
-        # or stopped early -- unless the last iteration already recorded it.
-        if iteration != last_video_iter:
-            recorder.record(agent, global_step, seed=args.video_seed)
+        # Capture the *final* model once: a video if recording is enabled, else a
+        # metrics-only eval -- unless the last iteration already did it.
+        if args.record_video_freq > 0 and iteration != last_video_iter:
+            recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=True)
+        elif args.eval_freq > 0 and iteration != last_eval_iter:
+            recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=False)
         # Export the final model's geometry (initial stock, carved stock, target).
         recorder.export_stls(agent, global_step, seed=args.video_seed)
         recorder.close()

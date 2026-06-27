@@ -116,19 +116,23 @@ and inside the Apptainer image (which ships `ffmpeg`). It is fully optional and
 off by default; if encoding ever fails it warns and training continues.
 
 Both PPO trainers (`csg_ppo.py` and `ppo.py`) share the same flags — a dedicated
-off-screen env rolls the current policy out *greedily* (like the evaluator) every
-`--record_video_freq` iterations:
+off-screen env rolls the current policy out *greedily* (like the evaluator). Eval
+metrics and video recording are on independent cadences: a cheap metrics-only
+eval can run frequently, while the (more expensive) video is encoded only at
+`--record_video_freq`:
 
 | flag | default | meaning |
 |------|---------|---------|
-| `--record_video_freq N` | `0` | record + upload a greedy rollout video every `N` iterations (`0` disables it entirely — no env built, no overhead) |
+| `--eval_freq N` | `0` | run a greedy eval rollout + log Dice/ASD/HD95/reward every `N` iterations (`0` disables). No video is encoded unless the video cadence also lands on that iteration. |
+| `--record_video_freq N` | `0` | additionally record + upload a greedy rollout **video** every `N` iterations (`0` disables) |
 | `--video_fps F` | `30` | frame rate of the encoded mp4 |
-| `--video_seed S` | `0` | seed for the rollout env, so the scenario is fixed across iterations and videos are comparable |
+| `--video_seed S` | `0` | seed for the rollout env, so the scenario is fixed across iterations and runs are comparable |
 | `--track` / `--no-track` | `--track` | upload to wandb; with `--no-track` the mp4s are still written locally |
 
-Videos appear in wandb under `media/policy_rollout`; reward and geometry land
-under `eval/reward`, `eval/dice`, `eval/asd`, `eval/hd95`. Local copies are
-written to `runs/<run>/videos/policy_step_<global_step>.mp4`.
+The recorder is built if **either** cadence is enabled. Metrics land in wandb
+under `eval/reward`, `eval/dice`, `eval/asd`, `eval/hd95` (logged on every eval
+*and* every video); videos appear under `media/policy_rollout`, with local copies
+at `runs/<run>/videos/policy_step_<global_step>.mp4`.
 
 After training finishes (including on early stopping), the **final** model's
 geometry is also exported as STL meshes — the initial uncarved stock, the carved
@@ -141,10 +145,10 @@ unit-cube frame.
 uv run python -m algorithms.csg_ppo --total_timesteps 10000000 --num_envs 4 \
     --resolution 32 --max_steps 64 --save_model
 
-# Continuous PPO, video + metrics to wandb every 25 iterations:
+# Continuous PPO, eval metrics every iteration, video only every 100 iterations:
 uv run python -m algorithms.csg_ppo --total_timesteps 10000000 --num_envs 4 \
     --resolution 32 --max_steps 64 --save_model \
-    --record_video_freq 100 --video_fps 30
+    --eval_freq 1 --record_video_freq 100 --video_fps 30
 ```
 
 The discrete voxel PPO (`ppo.py`) renders its 3D GGUI scene off-screen for the
