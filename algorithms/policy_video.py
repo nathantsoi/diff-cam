@@ -260,19 +260,24 @@ def _continuous_target_sdf(env):
 
 
 def make_continuous_recorder(run_name, resolution, max_steps, target_shape,
-                             env_id="CamEnvDiff-v0", fps=30, track=False, device="cpu"):
+                             env_id="CamEnvDiff-v0", fps=30, track=False, device="cpu",
+                             stock_size_in=(1.0, 1.0, 1.0), voxel_size_mm=0.5):
     """Recorder for the continuous CSG PPO policy.
 
     init_taichi=False is critical: the dedicated render env's simulator must
     co-exist with the training env(s) in this process, so it allocates on the
     already-running Taichi runtime instead of resetting it. Build this AFTER the
     training envs (so Taichi is initialized) and before they reset.
+
+    Pass the same ``stock_size_in`` / ``voxel_size_mm`` as the training envs so
+    the recorder's grid matches the policy's expected observation shape.
     """
     import gymnasium as gym
     import cam_env  # noqa: F401  registers CamEnvDiff-v0
 
     env = gym.make(env_id, render_mode="rgb_array", resolution=resolution,
-                   max_steps=max_steps, target_shape=target_shape, init_taichi=False)
+                   max_steps=max_steps, target_shape=target_shape, init_taichi=False,
+                   stock_size_in=stock_size_in, voxel_size_mm=voxel_size_mm)
     return PolicyVideoRecorder(
         env, run_name, select_action=_continuous_action,
         compute_metrics=lambda e: _continuous_metrics(e, resolution),

@@ -170,6 +170,11 @@ def parse_gcode(text: str, config: MachineConfig = MachineConfig()):
                 plane = PLANE_YZ
             # other G-codes (G61/G64/etc.) carry no geometry here
 
+        # G10 (programmable data input -- e.g. setting the G54 work-offset table)
+        # carries X/Y/Z words but is NOT a motion; skip the block entirely.
+        if 10.0 in gcodes:
+            continue
+
         if "F" in block:
             feed = block["F"] * unit_scale
 
@@ -194,14 +199,15 @@ def parse_gcode(text: str, config: MachineConfig = MachineConfig()):
             have_pos = True
             continue
 
-        scale = config.workspace_vec   # (3,) per-axis mm
-
+        # Coordinate words are in the work coordinate system (mm) relative to the
+        # top-centre G54 origin; invert the export mapping to normalized stock
+        # coords [0,1]^3.
         if motion_mode in (0, 1):
             kind = "rapid" if motion_mode == 0 else "feed"
             seg = MotionSegment(
                 kind=kind,
-                start=pos_mm.copy() / scale,
-                end=new_pos.copy() / scale,
+                start=config.wcs_to_unit(pos_mm.copy()),
+                end=config.wcs_to_unit(new_pos.copy()),
                 feed=0.0 if kind == "rapid" else feed,
             )
             segments.append(seg)
@@ -216,10 +222,10 @@ def parse_gcode(text: str, config: MachineConfig = MachineConfig()):
                 center_mm = _arc_center_from_offsets(pos_mm, offset_words, plane)
             seg = MotionSegment(
                 kind="arc",
-                start=pos_mm.copy() / scale,
-                end=new_pos.copy() / scale,
+                start=config.wcs_to_unit(pos_mm.copy()),
+                end=config.wcs_to_unit(new_pos.copy()),
                 feed=feed,
-                center=center_mm / scale,
+                center=config.wcs_to_unit(center_mm),
                 cw=cw,
                 plane=plane,
             )  # NOTE: arcs assume near-isotropic scale; anisotropic envelopes warp circles

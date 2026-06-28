@@ -93,8 +93,9 @@ class RS274Post(PostProcessor):
 
     def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
         positions = self._validate(positions)
-        # Normalized [0,1] -> mm (per-axis envelope), then mm -> output units.
-        pts_out = _len_out(positions * config.workspace_vec, config)
+        # Normalized stock coords [0,1] -> work-coordinate-system mm (top-centre
+        # G54), then mm -> output units.
+        pts_out = _len_out(config.to_wcs(positions), config)
         feed_out = _feed_out(config.feed, config)
         p = config.precision
 
@@ -148,8 +149,9 @@ class HaasPost(PostProcessor):
 
     def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
         positions = self._validate(positions)
-        # Normalized [0,1] -> mm (per-axis envelope), then mm -> output units.
-        pts_out = _len_out(positions * config.workspace_vec, config)
+        # Normalized stock coords [0,1] -> work-coordinate-system mm (top-centre
+        # G54), then mm -> output units.
+        pts_out = _len_out(config.to_wcs(positions), config)
         feed_out = _feed_out(config.feed, config)
         plunge_out = _feed_out(config.plunge_feed, config)
         p = config.precision
@@ -166,6 +168,21 @@ class HaasPost(PostProcessor):
             f"G43 H{config.h_register} Z{safe}",   # length offset, rapid to clearance
             f"S{_fmt(config.spindle_rpm, 0)} M03", # spindle CW
         ]
+
+        # Program the work offset (G54..G59) to the stock origin in machine
+        # coords, so the program is self-contained: coords below are relative to
+        # the stock's top-centre and the controller knows where that sits. The
+        # operator need only confirm the machine zero. Pxx selects the fixture
+        # offset register: G54->P1, G55->P2, ...
+        if config.stock_origin_in is not None:
+            ox, oy, oz = _len_out(config.stock_origin_vec, config)
+            p_reg = int(config.work_offset[1:]) - 53  # "G54" -> 1
+            idx = lines.index(config.work_offset) + 1
+            lines.insert(
+                idx,
+                f"G10 L2 P{p_reg} X{_fmt(ox, p)} Y{_fmt(oy, p)} Z{_fmt(oz, p)}",
+            )
+
         if config.coolant:
             lines.append("M08")
 

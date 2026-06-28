@@ -51,6 +51,10 @@ def carve_stock(
     target_shape="sphere",
     tool_radius=3.175,   # mm (1/4" end mill)
     tool_height=25.0,    # mm
+    stock_size_in=(1.0, 1.0, 1.0),   # stock box (the normalized cube), inches
+    voxel_size_mm=0.5,               # sub-mm precision knob
+    work_volume_in=(16.0, 12.0, 10.0),
+    stock_origin_in=None,
 ):
     """Run ``positions`` through the simulator and return the final stock SDF grid.
 
@@ -71,6 +75,10 @@ def carve_stock(
         max_steps=n_pos - 1,
         target_shape=target_shape,
         tool_start=tuple(float(v) for v in positions[0]),
+        stock_size_in=stock_size_in,
+        voxel_size_mm=voxel_size_mm,
+        work_volume_in=work_volume_in,
+        stock_origin_in=stock_origin_in,
     )
     sim.tool_radius[None] = tool_radius
     sim.tool_height[None] = tool_height

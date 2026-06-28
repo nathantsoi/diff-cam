@@ -9,8 +9,8 @@ parameterisation-invariant way. We provide:
   * ``resampled_rmse``   -- RMSE after arc-length resampling both paths
   * ``waypoint_roundtrip_error`` -- max error of recovered export/parse waypoints
 
-All operate on ``(N, 3)`` arrays in unit-cube coordinates. Pass ``scale`` (e.g.
-``MachineConfig.workspace_mm``) to report distances in millimetres.
+All operate on ``(N, 3)`` arrays in unit-cube (stock-box) coordinates. Pass
+``scale`` (e.g. ``MachineConfig.stock_size_vec``) to report distances in mm.
 """
 
 import numpy as np

@@ -107,11 +107,21 @@ class Args:
     holder_margin: float = 0.0
     """required holder standoff in unit-cube length (>0 keeps a clearance gap before contact)"""
 
-    # Units & speed limits (enforced by per-step clipping in the simulator)
+    # Stock box (the normalized cube, voxelized) & machine work volume
+    stock_size_in: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    """stock box (x, y, z up) in inches -- the normalized cube [0,1]^3 (only this is voxelized)"""
+    voxel_size_mm: float = 0.5
+    """physical voxel edge in mm -- the sub-mm precision knob (overrides --resolution)"""
     workspace_in: tuple[float, float, float] = (16.0, 12.0, 10.0)
-    """machine envelope (x, y, z up) in inches -- default Haas Mini Mill cutting volume"""
-    target_radius_mm: float = 100.0
-    """target sphere/cylinder radius in mm"""
+    """machine work volume (x, y, z up) in inches -- default Haas Mini Mill (toolhead limits)"""
+    stock_origin_in: tuple[float, float, float] | None = None
+    """work origin (G54) = stock top-centre in machine inches (export/validation only)"""
+
+    # Units & speed limits (enforced by per-step clipping in the simulator)
+    target_radius_mm: float = 11.43
+    """target sphere/cylinder radius (or box/pyramid half-size) in mm (default 0.9 in diameter)"""
+    target_height_mm: float = 22.86
+    """target cylinder/pyramid height in mm (default 0.9 in); ignored for sphere/box"""
     tool_radius_mm: float = 3.175
     """cutter radius in mm (default 1/4" end mill)"""
     tool_height_mm: float = 25.0
@@ -299,15 +309,21 @@ def main():
             gui = None
 
     # --- Simulator setup (must match CamEnvDiff.reset / eval_csg defaults) ---
-    # The envelope defaults to the Haas Mini Mill (16x12x10 in); sizes are mm.
+    # The normalized cube is the STOCK box (default 1 in cube at 0.5 mm voxels);
+    # the work volume (Mini Mill 16x12x10 in) is separate metadata. Sizes are mm.
     sim = CSGSimulatorDelta(resolution=args.resolution, max_steps=T, k_init=args.k_init,
                             target_shape=args.target_shape, tool_start=(0.5, 0.5, 1.0),
-                            workspace_in=args.workspace_in, dt=args.dt,
+                            stock_size_in=args.stock_size_in,
+                            voxel_size_mm=args.voxel_size_mm,
+                            work_volume_in=args.workspace_in,
+                            stock_origin_in=args.stock_origin_in, dt=args.dt,
                             rapid_ipm=args.rapid_ipm, feed_ipm=args.feed_ipm,
                             safe_distance_in=args.safe_distance_in,
                             enforce_speed_limits=args.enforce_speed_limits)
-    sim.target_params["radius"][None] = args.target_radius_mm
-    sim.target_params["center"][None] = [0.5, 0.5, 0.5]
+    sim.set_target_params(radius_mm=args.target_radius_mm,
+                          height_mm=args.target_height_mm,
+                          half_size_mm=args.target_radius_mm,
+                          center=(0.5, 0.5, 0.5))
     sim.tool_radius[None] = args.tool_radius_mm
     sim.tool_height[None] = args.tool_height_mm
     # Tool holder: 2.5 inch diameter cylinder above the cutter (mm; default).

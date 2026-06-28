@@ -40,12 +40,16 @@ from simulator.csg_metrics import (
     hd95,
 )
 
-# Default target/tool geometry -- must match CamEnvDiff.reset() and train_csg.py.
-# Sizes are in MILLIMETRES (the simulator now works on a physical, possibly
-# non-cubic envelope -- default Haas Mini Mill 16x12x10 in). Center is a
-# normalized [0,1] position.
+# Default target/tool/stock geometry -- must match CamEnvDiff.reset() and
+# train_csg.py. Sizes are in MILLIMETRES. The normalized cube [0,1]^3 is the
+# STOCK box (only it is voxelized); the machine work volume is separate metadata.
+# Center is a normalized [0,1] position inside the stock.
+STOCK_SIZE_IN = (1.0, 1.0, 1.0)   # stock box, inches
+VOXEL_SIZE_MM = 0.5               # sub-mm precision knob
+WORK_VOLUME_IN = (16.0, 12.0, 10.0)  # Haas Mini Mill toolhead limits
 TARGET_SHAPE = "sphere"
-TARGET_RADIUS = 100.0   # mm
+TARGET_RADIUS = 11.43   # mm (0.9 in diameter sphere/cylinder inside the stock)
+TARGET_HEIGHT = 22.86   # mm (0.9 in tall cylinder/pyramid; ignored for sphere/box)
 TARGET_CENTER = [0.5, 0.5, 0.5]
 TOOL_RADIUS = 3.175     # mm (1/4" end mill)
 TOOL_HEIGHT = 25.0      # mm
@@ -70,10 +74,13 @@ def _metrics(stock_grid, target_grid, dx):
     return out
 
 
-def carve_trajectory_metrics(positions, resolution=32, target_shape=TARGET_SHAPE):
+def carve_trajectory_metrics(positions, resolution=32, target_shape=TARGET_SHAPE,
+                             voxel_size_mm=VOXEL_SIZE_MM):
     """Hard-carve a trajectory and score the result against the baked target.
 
-    Returns (metrics_dict, stock_grid, target_grid).
+    The normalized cube is the STOCK box (``STOCK_SIZE_IN``); ``voxel_size_mm``
+    sets the sub-mm carving precision (``resolution`` is only a fallback when it
+    is None). Returns (metrics_dict, stock_grid, target_grid).
     """
     from cam.sim_exec import _HardCarveSimulator
 
@@ -87,11 +94,14 @@ def carve_trajectory_metrics(positions, resolution=32, target_shape=TARGET_SHAPE
         max_steps=len(positions) - 1,
         target_shape=target_shape,
         tool_start=tuple(float(v) for v in positions[0]),
+        stock_size_in=STOCK_SIZE_IN,
+        voxel_size_mm=voxel_size_mm,
+        work_volume_in=WORK_VOLUME_IN,
     )
     sim.tool_radius[None] = TOOL_RADIUS
     sim.tool_height[None] = TOOL_HEIGHT
-    sim.target_params["radius"][None] = TARGET_RADIUS
-    sim.target_params["center"][None] = TARGET_CENTER
+    sim.set_target_params(radius_mm=TARGET_RADIUS, height_mm=TARGET_HEIGHT,
+                          half_size_mm=TARGET_RADIUS, center=TARGET_CENTER)
     sim.bake_target_grid()
     sim.set_target_volume()
 
@@ -109,7 +119,8 @@ def carve_trajectory_metrics(positions, resolution=32, target_shape=TARGET_SHAPE
 # ---------------------------------------------------------------------------
 # Trajectory evaluation (gradient descent output, or any saved path)
 # ---------------------------------------------------------------------------
-def eval_trajectory(path, resolution, do_gcode, post, config):
+def eval_trajectory(path, resolution, do_gcode, post, config, voxel_size_mm=VOXEL_SIZE_MM,
+                    target_shape=TARGET_SHAPE):
     positions = np.load(path).astype(np.float64)
     if positions.ndim != 2 or positions.shape[1] != 3:
         raise ValueError(f"{path} must hold an (T, 3) array; got {positions.shape}")
@@ -127,6 +138,8 @@ def eval_trajectory(path, resolution, do_gcode, post, config):
         config={
             "trajectory_path": path,
             "resolution": resolution,
+            "voxel_size_mm": voxel_size_mm,
+            "stock_size_in": list(STOCK_SIZE_IN),
             "do_gcode": do_gcode,
             "post": post,
             "workspace_vec_mm": config.workspace_vec.tolist(),
@@ -134,7 +147,9 @@ def eval_trajectory(path, resolution, do_gcode, post, config):
     )
 
     try:
-        m, _, _ = carve_trajectory_metrics(positions, resolution=resolution)
+        m, _, _ = carve_trajectory_metrics(positions, resolution=resolution,
+                                           voxel_size_mm=voxel_size_mm,
+                                           target_shape=target_shape)
         print("\n=== Internal metrics (carved stock vs target) ===")
         print(f"  Dice : {m['dice']:.4f}")
         print(f"  ASD  : {m['asd']:.4f}")
@@ -156,7 +171,7 @@ def eval_trajectory(path, resolution, do_gcode, post, config):
         )
 
         cfg = config
-        ws = cfg.workspace_vec   # (3,) mm per-axis envelope
+        ws = cfg.stock_size_vec   # (3,) mm per-axis stock box (the normalized cube)
         gcode = trajectory_to_gcode(positions, cfg, post=post)
         segments = parse_gcode(gcode, cfg)
         recovered = segment_waypoints(segments)
@@ -177,7 +192,9 @@ def eval_trajectory(path, resolution, do_gcode, post, config):
         print(f"  DTW (mean matched dist)   : {dtw_distance(pos_mm, exec_mm, 1.0):.3e} mm")
         print(f"  arc-length resampled RMSE : {resampled_rmse(pos_mm, exec_mm, scale=1.0):.3e} mm")
 
-        me, _, _ = carve_trajectory_metrics(executed, resolution=resolution)
+        me, _, _ = carve_trajectory_metrics(executed, resolution=resolution,
+                                            voxel_size_mm=voxel_size_mm,
+                                            target_shape=target_shape)
         print("  --- carved stock of executed program vs target ---")
         print(f"  Dice : {me['dice']:.4f}   ASD : {me['asd']:.4f}   HD95 : {me['hd95']:.4f}")
 
@@ -340,7 +357,12 @@ def main():
     src.add_argument("--checkpoints", nargs="+",
                      help="one or more continuous-PPO checkpoints from csg_ppo.py")
     ap.add_argument("--resolution", type=int, default=32,
-                    help="grid resolution for trajectory carving / scoring")
+                    help="fallback voxel count along the stock's longest axis (used only if --voxel-size-mm is 0)")
+    ap.add_argument("--voxel-size-mm", type=float, default=VOXEL_SIZE_MM,
+                    help="physical voxel edge (mm) for carving/scoring -- the sub-mm precision knob")
+    ap.add_argument("--target-shape", type=str, default=TARGET_SHAPE,
+                    choices=["sphere", "cylinder", "box", "pyramid"],
+                    help="target part shape (must match what the trajectory was optimized for)")
     ap.add_argument("--num-runs", type=int, default=10,
                     help="episodes per checkpoint (checkpoint mode)")
     ap.add_argument("--seed", type=int, default=42, help="base seed")
@@ -348,22 +370,32 @@ def main():
                     help="also round-trip the trajectory through the CAM/G-code layer")
     ap.add_argument("--post", type=str, default="rs274",
                     help="post-processor for --gcode (rs274 | haas)")
-    ap.add_argument("--workspace-in", type=float, nargs=3, default=[16.0, 12.0, 10.0],
+    ap.add_argument("--workspace-in", type=float, nargs=3, default=list(WORK_VOLUME_IN),
                     metavar=("X", "Y", "Z"),
-                    help="machine envelope (x y z) in inches for G-code (default Mini Mill)")
+                    help="machine work volume (x y z) in inches (default Mini Mill)")
     ap.add_argument("--workspace-mm", type=float, default=None,
-                    help="cube edge length (mm); overrides --workspace-in with a cube")
+                    help="work-volume cube edge length (mm); overrides --workspace-in")
+    ap.add_argument("--stock-size-in", type=float, nargs=3, default=list(STOCK_SIZE_IN),
+                    metavar=("X", "Y", "Z"),
+                    help="stock box (x y z) in inches -- the normalized cube (default 1 in cube)")
+    ap.add_argument("--stock-origin-in", type=float, nargs=3, default=None,
+                    metavar=("X", "Y", "Z"),
+                    help="work origin (G54) = stock top-centre in machine inches")
     args = ap.parse_args()
 
     from cam import MachineConfig
     cfg = MachineConfig(
         workspace_mm=args.workspace_mm if args.workspace_mm else 100.0,
         workspace_in=None if args.workspace_mm else tuple(args.workspace_in),
+        stock_size_in=tuple(args.stock_size_in),
+        stock_origin_in=tuple(args.stock_origin_in) if args.stock_origin_in else None,
     )
 
     if args.trajectory:
+        vox = args.voxel_size_mm if args.voxel_size_mm else None
         eval_trajectory(args.trajectory, args.resolution, args.gcode,
-                        args.post, cfg)
+                        args.post, cfg, voxel_size_mm=vox,
+                        target_shape=args.target_shape)
     else:
         eval_checkpoints(args.checkpoints, args.num_runs, args.seed)
 

@@ -37,7 +37,7 @@ display is only needed for interactive visualization.
 
 ```
 simulator/
-  csg_simulator.py    # continuous, differentiable CSG simulator (PSDFs); configurable (Mini Mill) envelope, cubic voxels, feed/rapid speed clipping
+  csg_simulator.py    # continuous, differentiable CSG simulator (PSDFs); voxelizes only the STOCK box (placed at a G54 origin inside the Mini Mill work volume), cubic voxels, feed/rapid speed clipping
   voxel_simulator.py  # discrete voxel simulator (CNCSimulator)
   csg_metrics.py      # Dice / ASD / HD95 + gouge/residual on SDF grids
 cam_env/
@@ -71,61 +71,74 @@ shares the `--eval_freq` / `--record_video_freq` / `--video_fps` / `--track`
 flags with the PPO trainers — see
 [Recording policy videos](#recording-policy-videos-during-training).
 
-`--resolution 203` gives **2 mm cubic voxels** on the Mini Mill envelope, and
-`--dt 0.4` makes each feed step ≈ 1 voxel (see [Machine envelope & resolution](#machine-envelope--resolution)).
+The normalized cube is the **stock box** (default a **1 in cube**), so
+`--voxel_size_mm 0.5` gives **sub-mm cubic voxels** on a tiny grid (51³, ~0.14 GB),
+and `--dt 0.12` makes each feed step ≈ 1 voxel (see
+[Stock box, work volume & precision](#stock-box-work-volume--precision)).
 
 ```bash
 # Headless (HPC / no display) — comparable to the csg_ppo baseline below:
-uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4 \
+uv run python -m algorithms.train_csg --iters 128 --max_steps 64 \
+    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --target_radius_mm 11.43 --dt 0.12 \
     --save_model --eval_freq 1 --record_video_freq 100 --video_fps 30 --progress_bar
 
 # Interactive live GUI (needs a display):
-uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4
+uv run python -m algorithms.train_csg --iters 128 --max_steps 64 \
+    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12
 ```
 
-#### Machine envelope & resolution
+#### Stock box, work volume & precision
 
-The simulator runs on a configurable, possibly **non-cubic** machine envelope.
-The default is the **Haas Mini Mill** cutting volume — **16 × 12 × 10 in**
-(x, y; z up) = 406.4 × 304.8 × 254.0 mm. Geometry lives in the normalized box
-`[0,1]³` (so trajectories stay scale-free), but the voxel grid uses **per-axis
-dimensions** `(Nx, Ny, Nz)` chosen so every voxel is a physical **cube** of side
-`v` mm — keeping the cutter and cuts undistorted. `--resolution` is the voxel
-count along the **longest** axis; the others get proportionally fewer voxels.
-Set the envelope with `--workspace_in X Y Z` (inches); tool/target sizes are in
-millimetres (`--tool_radius_mm`, `--tool_height_mm`, `--target_radius_mm`).
+There are **two** boxes, and keeping them separate is what makes sub-mm precision
+cheap:
 
-**Resolution for non-sub-voxel cuts.** A cut only registers if the cutter spans
-several voxels. The `stock[max_steps+1, Nx,Ny,Nz]` field dominates memory, and
-under autodiff it is allocated **twice** (value + gradient), so peak VRAM is
-≈ `2 × (max_steps+1) × Nx·Ny·Nz × 4 B`. Below: peak at the default
-`--max_steps 64` (65 slices, f32), and whether it fits an **80 GB** GPU:
+- **Stock box** — the raw block you actually machine. The normalized geometry box
+  `[0,1]³` *is* the stock box (so trajectories stay scale-free), and **only the
+  stock is voxelized**. Set it with `--stock_size_in X Y Z` (inches); the default
+  is a **1 in cube**. RAM scales with the *part*, not the machine.
+- **Machine work volume** — the toolhead's reachable envelope (toolhead limits),
+  default the **Haas Mini Mill** **16 × 12 × 10 in** = 406.4 × 304.8 × 254.0 mm.
+  Set it with `--workspace_in X Y Z` (inches). It is *not* voxelized; it is used
+  for G-code export, the holder-collision barrier, and a reachability check.
 
-| voxel `v` | `--resolution` | grid `Nx×Ny×Nz` | peak VRAM (value+grad) | fits 80 GB | 1/4″ tool Ø |
-|-----------|----------------|------------------|------------------------|------------|-------------|
-| 4 mm   | 102 | 102×76×64   | 0.3 GB  | ✅ | 1.6 vox |
-| 3 mm   | 135 | 135×102×85  | 0.6 GB  | ✅ | 2.1 vox |
-| **2 mm** | **203** | **203×152×127** | **2.0 GB** | ✅ | **3.2 vox** |
-| 1.5 mm | 271 | 271×203×169 | 4.8 GB  | ✅ | 4.2 vox |
-| 1 mm   | 406 | 406×305×254 | 16.4 GB | ✅ | 6.3 vox |
-| 0.8 mm | 508 | 508×381×318 | 32.0 GB | ✅ | 7.9 vox |
-| 0.6 mm | 677 | 677×508×423 | 75.6 GB | ✅ (tight) | 10.6 vox |
-| 0.5 mm | 813 | 813×610×508 | 131 GB  | ❌ | 12.7 vox |
+The stock is placed in the machine at a **work origin (G54 offset)** — its
+**top-centre** — set with `--stock_origin_in X Y Z` (inches). Exported G-code is
+relative to that origin (`Z = 0` at the stock top, plunges go negative).
 
-→ **~2 mm voxels** (`--resolution 203`, the default in the examples) is a strong
-sweet spot — a 1/4″ cutter spans ~3 voxels at only ~2 GB peak. With **80 GB** of
-VRAM there is large headroom: go to **1 mm** (`--resolution 406`, ~16 GB, ~6
-voxels across the cutter) for finer cuts, or down to ~**0.6 mm** (~76 GB) if you
-also drop `--max_steps` (peak scales linearly with it). 0.5 mm needs ~131 GB —
-halve `--max_steps` to fit.
+The voxel grid uses **per-axis** dimensions `(Nx, Ny, Nz)` chosen so every voxel
+is a physical **cube** of side `v` mm — keeping the cutter and cuts undistorted.
+Set the precision directly with **`--voxel_size_mm`** (the sub-mm knob); if you
+omit it, `--resolution` is used as a fallback (voxel count along the stock's
+**longest** axis). Tool/target sizes are in millimetres (`--tool_radius_mm`,
+`--tool_height_mm`, `--target_radius_mm`).
+
+**Memory.** The `stock[max_steps+1, Nx,Ny,Nz]` field dominates memory, and under
+autodiff it is allocated **twice** (value + gradient), so peak VRAM is
+≈ `2 × (max_steps+1) × Nx·Ny·Nz × 4 B`. Because only the small stock is
+voxelized, sub-mm is trivially affordable. Below: peak for the default **1 in
+cube** stock at `--max_steps 64` (65 slices, f32):
+
+| `--voxel_size_mm` | grid `Nx×Ny×Nz` (1″ cube) | peak VRAM (value+grad) | 1/4″ tool Ø |
+|-------------------|----------------------------|------------------------|-------------|
+| 1.0 mm   | 25×25×25    | 16 MB    | 6.4 vox |
+| **0.5 mm** (default) | **51×51×51** | **0.14 GB** | **12.7 vox** |
+| 0.25 mm  | 102×102×102 | 1.1 GB   | 25 vox |
+| 0.1 mm   | 254×254×254 | 17 GB    | 64 vox |
+
+→ **0.5 mm voxels** is a strong default — sub-mm fidelity on a 1″ cube at ~0.14 GB.
+Drop to **0.25 mm** (~1.1 GB) for fine detail, or **0.1 mm** (~17 GB) for very
+fine work; peak scales linearly with `--max_steps`. A *larger* stock at the same
+`--voxel_size_mm` costs more (VRAM ∝ stock volume): e.g. a **2 in cube** at
+0.5 mm is 102³ ≈ 1.1 GB. Pick `--voxel_size_mm` for the precision you need and
+size the grid from the stock — don't voxelize the whole machine.
 
 #### Units & speed limits
 
 The differentiable simulator enforces two machine-style **max speeds** by
 clipping each step, mirroring a real controller's feed/rapid override (cf. the
 LinuxCNC trajectory planner and CAMotics). A per-step displacement `delta`
-(normalized) spans `delta · L` mm on the per-axis envelope `L`, over `dt`
-seconds, so its speed is `|delta · L| / dt` (mm/s). All scale-related math is in
+(normalized) spans `delta · S` mm on the per-axis **stock box** `S`, over `dt`
+seconds, so its speed is `|delta · S| / dt` (mm/s). All scale-related math is in
 **millimetres** internally — inches appear only at the I/O boundary (inch inputs
 converted up front; G-code requested in inches converted just before emission),
 via the `cam.units` helper library.
@@ -145,7 +158,10 @@ the clipped magnitude into `tool_delta`.
 
 | flag | default | meaning |
 |------|---------|---------|
-| `--workspace_in X Y Z` | `16 12 10` | machine envelope (in), default Mini Mill |
+| `--stock_size_in X Y Z` | `1 1 1` | stock box (in) — the normalized cube, the only thing voxelized |
+| `--voxel_size_mm F` | `0.5` | physical voxel edge (mm) — the sub-mm precision knob |
+| `--stock_origin_in X Y Z` | none | work origin (G54) = stock top-centre in machine inches |
+| `--workspace_in X Y Z` | `16 12 10` | machine work volume (in), default Mini Mill (toolhead limits) |
 | `--dt F` | `0.01` | seconds per simulator step; sets the speed scale |
 | `--rapid_ipm F` | `500.0` | max traverse speed (inches/min) when clear of the stock |
 | `--feed_ipm F` | `10.0` | max cutting speed (inches/min) when near the stock |
@@ -158,27 +174,27 @@ the optimized result.
 
 > **Note on `dt`.** The speed caps become per-step displacement caps
 > (`speed · dt`). At the default `dt=0.01` the feed cap is ~0.042 mm/step — far
-> below any feasible voxel — so each feed step is sub-voxel *in time*. To advance
-> ~1 voxel per feed step pair `~2 mm` voxels with `--dt ≈ 0.3–0.5` (≈ voxel/feed),
-> or pass `--no-enforce_speed_limits` to disable the constraint.
+> below a 0.5 mm voxel — so each feed step is sub-voxel *in time*. To advance ~1
+> voxel per feed step set `--dt ≈ voxel_size_mm / feed_mm_per_s` (e.g. ≈ `0.12`
+> for 0.5 mm voxels at the default 10 ipm feed), or pass
+> `--no-enforce_speed_limits` to disable the constraint.
 
 ### Continuous — PPO baseline (Method 2)
 
-> **Resolution note.** The PPO examples stay at `--resolution 32` (not the 2 mm /
-> `--resolution 203` used for gradient descent). The PPO observation embeds the
-> **full `stock` and `target` voxel grids** (~7.8M floats, ~31 MB each at 2 mm),
-> so the `num_steps × num_envs` rollout buffer is the bottleneck: at 2 mm it is
-> ~16 GB for `--num_envs 1` (fits an 80 GB GPU, but heavy/slow) and ~64 GB for
-> `--num_envs 4`; at 1 mm it is ~129 GB (infeasible). The env also uses the
-> simulator's default `dt` (no `--dt` flag). The gradient-descent method
-> (`train_csg`) keeps no rollout buffer and runs at 2 mm in ~2 GB. So for PPO,
-> push `--resolution` up only with `--num_envs 1` and watch VRAM; the examples
-> stay at 32 for practicality.
+> **Precision note.** The PPO observation embeds the **full `stock` and `target`
+> voxel grids**, so the `num_steps × num_envs` rollout buffer — not the carve — is
+> the bottleneck. Buffer ≈ `num_steps × num_envs × 2·Nx·Ny·Nz × 4 B`. On the
+> default 1″ cube stock at `--voxel_size_mm 0.8` (≈ 32³) it is only ~0.5 GB at
+> `--num_envs 4, --num_steps 512`; at `--voxel_size_mm 0.5` (51³, the env default)
+> ~2.2 GB; at `--voxel_size_mm 0.25` (102³) ~17 GB. The examples use **0.8 mm**
+> (~32³) for fast iteration — drop it for finer parts and watch VRAM. The
+> gradient-descent method (`train_csg`) keeps no rollout buffer, so it carves at
+> 0.25–0.5 mm cheaply; prefer it when you need sub-mm fidelity.
 
 ```bash
 uv run python -m algorithms.csg_ppo \
-    --total_timesteps 10000000 --num_envs 1 --resolution 32 --max_steps 64 \
-    --num_steps 512 --num_minibatches 8 --update_epochs 4 \
+    --total_timesteps 10000000 --num_envs 1 --stock_size_in 1 1 1 --voxel_size_mm 0.8 \
+    --max_steps 64 --num_steps 512 --num_minibatches 8 --update_epochs 4 \
     --learning_rate 3e-4 --ent_coef 0.02 --save_model
 ```
 
@@ -193,8 +209,8 @@ Add `--record_video_freq N` to also record + upload a greedy policy-rollout vide
 
 ```bash
 uv run python -m algorithms.csg_ppo \
-    --total_timesteps 10000000 --num_envs 4 --resolution 32 --max_steps 64 \
-    --num_steps 512 --num_minibatches 8 --update_epochs 4 --save_model \
+    --total_timesteps 10000000 --num_envs 4 --stock_size_in 1 1 1 --voxel_size_mm 0.8 \
+    --max_steps 64 --num_steps 512 --num_minibatches 8 --update_epochs 4 --save_model \
     --record_video_freq 100 --video_fps 30
 ```
 
@@ -248,11 +264,11 @@ unit-cube frame. Furthermore, all training scripts output a structured summary t
 ```bash
 # Continuous PPO, no video (default):
 uv run python -m algorithms.csg_ppo --total_timesteps 10000000 --num_envs 4 \
-    --resolution 32 --max_steps 64 --save_model
+    --stock_size_in 1 1 1 --voxel_size_mm 0.8 --max_steps 64 --save_model
 
 # Continuous PPO for autoresearch / LLM harnesses (clean scrolling logs, no W&B sync):
 uv run python -m algorithms.csg_ppo --total_timesteps 10000000 --num_envs 4 \
-    --resolution 32 --max_steps 64 --eval --no-track
+    --stock_size_in 1 1 1 --voxel_size_mm 0.8 --max_steps 64 --eval --no-track
 ```
 
 The discrete voxel PPO (`ppo.py`) renders its 3D GGUI scene off-screen for the
@@ -281,7 +297,8 @@ Pass `--headless` to skip the live GUI (auto-disabled when no display is present
 
 ```bash
 # Headless gradient descent for autoresearch / LLM harnesses:
-uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4 \
+uv run python -m algorithms.train_csg --iters 128 --max_steps 64 \
+    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12 \
     --save_model --eval --no-track
 ```
 
@@ -298,6 +315,57 @@ sbatch train_hpc.bash      # continuous PPO inside the Apptainer image
 sbatch scripts/train.slurm # discrete PPO in a venv
 ```
 
+### Examples — stock sizes & part shapes
+
+The normalized cube is the **stock box**; choose its size with `--stock_size_in`
+(inches, X Y Z) and the precision with `--voxel_size_mm`. The target part is set
+by `--target_shape` (`sphere`, `cylinder`, `box`, `pyramid`) with
+`--target_radius_mm` (sphere/cylinder radius, or box/pyramid half-size) and
+`--target_height_mm` (cylinder/pyramid height). Tool/target sizes are millimetres
+(1 in = 25.4 mm), so size the part to fit *inside* the stock. Tune `--dt` to
+≈ `voxel_size_mm / feed_mm_per_s` so feed steps advance ≈ 1 voxel.
+
+```bash
+# 1" cube stock, 0.9" diameter SPHERE, 0.5 mm voxels (51³, ~0.14 GB)
+uv run python -m algorithms.train_csg --iters 128 --max_steps 64 \
+    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12 \
+    --target_shape sphere --target_radius_mm 11.43 \
+    --headless --save_model --eval --no-track
+
+# 1" cube stock, 0.9" diameter x 0.9" tall CYLINDER, 0.5 mm voxels
+uv run python -m algorithms.train_csg --iters 128 --max_steps 64 \
+    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12 \
+    --target_shape cylinder --target_radius_mm 11.43 --target_height_mm 22.86 \
+    --headless --save_model --eval --no-track
+
+# Larger 2" cube stock at the SAME 0.5 mm voxels (102³, ~1.1 GB) — a 1.6" sphere
+uv run python -m algorithms.train_csg --iters 128 --max_steps 96 \
+    --stock_size_in 2 2 2 --voxel_size_mm 0.5 --dt 0.12 \
+    --target_shape sphere --target_radius_mm 20.32 \
+    --headless --save_model --eval --no-track
+
+# Non-cubic 2 x 1 x 1" bar, fine 0.25 mm voxels (203×102×102, ~2.2 GB) — a box part
+uv run python -m algorithms.train_csg --iters 128 --max_steps 96 \
+    --stock_size_in 2 1 1 --voxel_size_mm 0.25 --dt 0.06 \
+    --target_shape box --target_radius_mm 9.0 \
+    --headless --save_model --eval --no-track
+```
+
+Each run writes `trajectory.npy` (with `--save_model`) and copies it to the repo
+root. Score and export it with the **matching** `--stock-size-in` /
+`--voxel-size-mm` / `--target-shape` (see [Evaluation](#evaluation) and
+[G-code based evaluation](#g-code-based-evaluation-and-the-haas-mini-mill)):
+
+```bash
+# Score the cylinder run
+uv run python -m eval.eval_csg --trajectory trajectory.npy \
+    --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape cylinder
+
+# Export the 2" cube run to a Haas program, fixturing the stock top-centre at machine (8,6,5)"
+uv run python scripts/export_gcode.py --post haas \
+    --stock-size-in 2 2 2 --stock-origin-in 8 6 5 -o part.nc
+```
+
 ## Evaluation
 
 All modes report the same geometric metrics of the final carved stock vs. the
@@ -306,13 +374,15 @@ Distance** (HD95).
 
 ### Continuous (`eval/eval_csg.py`)
 
-Evaluate a gradient-descent trajectory:
+Evaluate a gradient-descent trajectory (defaults to the 1″ cube stock; match the
+`--stock_size_in` / `--voxel_size_mm` you trained with):
 
 ```bash
-uv run python -m eval.eval_csg --trajectory trajectory.npy --resolution 203
+uv run python -m eval.eval_csg --trajectory trajectory.npy \
+    --stock-size-in 1 1 1 --voxel-size-mm 0.5
 ```
 
-(`--resolution 203` ≈ 2 mm voxels on the Mini Mill envelope, matching training;
+(`--voxel-size-mm 0.5` ≈ sub-mm carving on the 1″ cube, matching training;
 carving doesn't use `--dt`.)
 
 Evaluate continuous-PPO checkpoint(s) over paired random episodes:
@@ -346,6 +416,15 @@ G-code dialect is chosen by a **post-processor** (`cam/posts.py`):
 Add new machines by subclassing `PostProcessor` and registering them in
 `cam.posts.POSTS`.
 
+**Work coordinate system (G54).** Trajectories are normalized over the **stock
+box**, and the work origin (G54) is the stock's **top-centre**: exported X/Y are
+relative to the stock's XY centre and Z is relative to the stock's top face
+(`Z = 0` at the top, plunges negative). Set the stock with `--stock-size-in X Y Z`
+(inches). If you give `--stock-origin-in X Y Z` (the stock top-centre in machine
+coords), the Haas post also emits `G10 L2 P1 X.. Y.. Z..` so the program
+self-programs its G54 offset; otherwise it just declares `G54` and assumes the
+operator has set it.
+
 Internally the CAM layer (and the simulator) work in **millimetres**; pass
 `--units inch` to emit an inch program (`G20`) instead of mm (`G21`). Coordinates
 and feeds are converted mm→inch just before emission via `cam.units`, so the
@@ -353,18 +432,20 @@ program round-trips exactly through the inch-aware parser.
 
 **Generate G-code for the Haas:**
 
-The exporter defaults to the same Mini Mill envelope (`--workspace-in 16 12 10`,
-inches); pass `--workspace-mm <edge>` to fall back to an isotropic cube instead.
+The exporter defaults to a **1 in cube** stock (`--stock-size-in 1 1 1`) inside
+the Mini Mill work volume (`--workspace-in 16 12 10`, inches). Give
+`--stock-origin-in X Y Z` to fixture the stock at a known machine location.
 
 ```bash
-# Using the default root trajectory (Mini Mill envelope)
+# Default 1" cube stock, top-centre G54 declared
 uv run python scripts/export_gcode.py --post haas --tool 3 --rpm 6000 \
     --program-number 1234 -o part.nc
 
-# Using a trajectory from a specific run folder
-uv run python scripts/export_gcode.py \
+# Place a 1.5 x 1.5 x 1 in stock with its top-centre at machine (8, 6, 5) in
+# (emits G10 L2 P1 to program the G54 offset)
+uv run python scripts/export_gcode.py --post haas \
+    --stock-size-in 1.5 1.5 1.0 --stock-origin-in 8 6 5 \
     --trajectory runs/CamEnvDiff-v0__train_csg__1__1782599757/trajectory.npy \
-    --post haas \
     -o runs/CamEnvDiff-v0__train_csg__1__1782599757/gcode_haas.nc
 ```
 
@@ -374,12 +455,13 @@ program):
 
 ```bash
 # Using the default root trajectory
-uv run python -m eval.eval_csg --trajectory trajectory.npy --resolution 203 --gcode --post rs274
+uv run python -m eval.eval_csg --trajectory trajectory.npy \
+    --stock-size-in 1 1 1 --voxel-size-mm 0.5 --gcode --post rs274
 
 # Using a trajectory from a specific run folder
 uv run python -m eval.eval_csg \
     --trajectory runs/CamEnvDiff-v0__train_csg__1__1782599757/trajectory.npy \
-    --resolution 203 \
+    --stock-size-in 1 1 1 --voxel-size-mm 0.5 \
     --gcode \
     --post rs274
 ```
@@ -402,9 +484,10 @@ round-trip fidelity.
 ### CAM API
 
 - `cam.trajectory_to_gcode(positions, config, post="rs274")` — export an
-  `(T, 3)` unit-cube trajectory to G-code with the chosen post.
-- `cam.parse_gcode(text)` — parse G-code back to motion segments (G0/G1 plus
-  G2/G3 arcs, units, distance modes).
+  `(T, 3)` stock-normalized trajectory to G-code (work coordinate system,
+  top-centre G54) with the chosen post. `config` must carry a `stock_size_in`.
+- `cam.parse_gcode(text, config)` — parse G-code back to motion segments (G0/G1
+  plus G2/G3 arcs, units, distance modes), inverting the stock/G54 mapping.
 - `cam.plan_trajectory(segments)` / `cam.gcode_to_trajectory(text)` — re-plan
   ("execute") the G-code into a time-sampled trajectory using an
   acceleration-limited **trapezoidal** velocity profile in **exact-stop (G61)**

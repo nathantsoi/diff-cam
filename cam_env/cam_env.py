@@ -19,32 +19,53 @@ class CamEnvDiff(gym.Env):
         target_shape = "sphere",
         render_mode: Optional[str] = None,
         init_taichi: bool = True,
+        stock_size_in=(1.0, 1.0, 1.0),
+        voxel_size_mm=0.5,
+        work_volume_in=(16.0, 12.0, 10.0),
+        stock_origin_in=None,
+        target_radius_mm=None,
     ):
         """
         Args:
-            resolution: int, the resolution of the voxel grid (e.g. 32 means 32x32x32)
+            resolution: int, fallback voxel count along the stock's longest axis
+                (used only when ``voxel_size_mm`` is None).
             max_steps: int, maximum number of steps per episode
             k_init: float, initial value for reward shaping parameter K
             target_shape: str or None, if specified should be one of ["cylinder", "box", "sphere"].
             render_mode: str or None, if "human" will render with Taichi GUI. If "rgb_array", will return RGB arrays from render() instead. If None, no rendering.
+            stock_size_in: (x, y, z) stock box in inches -- the normalized cube.
+            voxel_size_mm: physical voxel edge (mm); the sub-mm precision knob.
+            work_volume_in: machine work volume in inches (toolhead limits).
+            stock_origin_in: work origin (G54) = stock top-centre in machine inches.
+            target_radius_mm: target sphere/cylinder radius (mm); defaults to a
+                0.9 in diameter feature inside the stock.
         """
 
         super().__init__()
 
-        self.resolution = resolution    # voxels along the longest envelope axis
+        self.resolution = resolution    # fallback voxels along the stock's longest axis
 
         self.max_steps = max_steps
         self.max_cuts = max_steps - 1
         self.target_shape = target_shape
-        # Sizes in MILLIMETRES (the simulator works on a physical envelope).
+        # Sizes in MILLIMETRES (the simulator works on a physical stock box).
+        from cam.units import inch_to_mm
         self.tool_radius = 3.175   # mm (1/4" end mill)
         self.tool_height = 25.0    # mm
-        self.target_radius = 100.0 # mm
+        # Default target: a 0.9 in diameter / 0.9 in tall feature inside the stock.
+        self.target_radius = (
+            float(target_radius_mm) if target_radius_mm is not None
+            else float(inch_to_mm(0.9 / 2.0))
+        )
+        self.target_height = float(inch_to_mm(0.9))  # cylinder/pyramid height (mm)
         self.tool_start = [0.5, 0.5, 1.0]   # normalized [0,1]
         self.render_mode = render_mode
 
-        # Machine envelope: default Haas Mini Mill cutting volume (16x12x10 in).
-        self.workspace_in = (16.0, 12.0, 10.0)
+        # Stock box (the normalized cube, voxelized) and machine work volume.
+        self.stock_size_in = stock_size_in
+        self.voxel_size_mm = voxel_size_mm
+        self.work_volume_in = work_volume_in
+        self.stock_origin_in = stock_origin_in
         # Tool holder: a 2.5 inch diameter cylinder riding above the cutter (mm).
         from cam.units import inch_to_mm
         self.holder_radius = float(inch_to_mm(2.5 / 2.0))
@@ -62,6 +83,9 @@ class CamEnvDiff(gym.Env):
         # Build the simulator first so observation/action spaces can use the
         # actual (possibly anisotropic) voxel grid dimensions.
         self._initialize_sim()
+        # Use the grid the simulator actually built (voxel_size_mm may override
+        # the requested resolution).
+        self.resolution = self.simulator.resolution
         self.Nx, self.Ny, self.Nz = (
             self.simulator.Nx, self.simulator.Ny, self.simulator.Nz
         )
@@ -114,7 +138,10 @@ class CamEnvDiff(gym.Env):
             target_shape=self.target_shape,
             tool_start=self.tool_start,
             init_taichi=self.init_taichi,
-            workspace_in=self.workspace_in,
+            stock_size_in=self.stock_size_in,
+            voxel_size_mm=self.voxel_size_mm,
+            work_volume_in=self.work_volume_in,
+            stock_origin_in=self.stock_origin_in,
         )
         self.simulator.tool_radius[None] = self.tool_radius
         self.simulator.tool_height[None] = self.tool_height
@@ -127,8 +154,9 @@ class CamEnvDiff(gym.Env):
 
         self.simulator.init_stock()
 
-        self.simulator.target_params["radius"][None] = self.target_radius  # mm
-        self.simulator.target_params["center"][None] = [0.5, 0.5, 0.5]
+        self.simulator.set_target_params(
+            radius_mm=self.target_radius, height_mm=self.target_height,
+            half_size_mm=self.target_radius, center=(0.5, 0.5, 0.5))
         self.simulator.tool_radius[None] = self.tool_radius   # mm
         self.simulator.tool_height[None] = self.tool_height   # mm
         self.simulator.holder_radius[None] = self.holder_radius

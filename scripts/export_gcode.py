@@ -37,9 +37,15 @@ def main():
                     help="post-processor / machine dialect")
     ap.add_argument("--workspace-in", type=float, nargs=3, default=[16.0, 12.0, 10.0],
                     metavar=("X", "Y", "Z"),
-                    help="machine envelope (x y z) in inches (default Haas Mini Mill)")
+                    help="machine work volume (x y z) in inches (default Haas Mini Mill)")
     ap.add_argument("--workspace-mm", type=float, default=None,
-                    help="cube edge length (mm); overrides --workspace-in with an isotropic cube")
+                    help="work-volume cube edge (mm); overrides --workspace-in with a cube")
+    ap.add_argument("--stock-size-in", type=float, nargs=3, default=[1.0, 1.0, 1.0],
+                    metavar=("X", "Y", "Z"),
+                    help="stock box (x y z) in inches -- the normalized cube (default 1 in cube)")
+    ap.add_argument("--stock-origin-in", type=float, nargs=3, default=None,
+                    metavar=("X", "Y", "Z"),
+                    help="work origin (G54) = stock top-centre in machine inches")
     ap.add_argument("--feed", type=float, default=600.0, help="cutting feed, mm/min")
     ap.add_argument("--plunge-feed", type=float, default=200.0, help="Z plunge feed, mm/min")
     ap.add_argument("--rpm", type=float, default=5000.0, help="spindle speed")
@@ -56,6 +62,8 @@ def main():
     cfg = MachineConfig(
         workspace_mm=args.workspace_mm if args.workspace_mm else 100.0,
         workspace_in=None if args.workspace_mm else tuple(args.workspace_in),
+        stock_size_in=tuple(args.stock_size_in),
+        stock_origin_in=tuple(args.stock_origin_in) if args.stock_origin_in else None,
         feed=args.feed,
         plunge_feed=args.plunge_feed,
         spindle_rpm=args.rpm,

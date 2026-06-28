@@ -100,8 +100,12 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
     # --- CamEnvDiff specific ---
+    stock_size_in: tuple[float, float, float] = (1.0, 1.0, 1.0)
+    """stock box (x, y, z up) in inches -- the normalized cube [0,1]^3 (only this is voxelized)"""
+    voxel_size_mm: float = 0.5
+    """physical voxel edge in mm -- the sub-mm precision knob (overrides --resolution)"""
     resolution: int = 32
-    """voxel grid resolution per axis"""
+    """fallback voxel count along the stock's longest axis (used only when --voxel_size_mm is 0)"""
     max_steps: int = 64
     """max episode steps (== max_cuts + 1 in CamEnvDiff)"""
     target_shape: str = "sphere"
@@ -111,13 +115,15 @@ class Args:
 
 
 def make_env(env_id, idx, capture_video, run_name, gamma,
-             resolution=32, max_steps=64, target_shape="sphere"):
+             resolution=32, max_steps=64, target_shape="sphere",
+             stock_size_in=(1.0, 1.0, 1.0), voxel_size_mm=0.5):
     def thunk():
         # Only the first env initializes Taichi. ti.init() resets the whole
         # runtime and would invalidate every other env's simulator fields, so
         # envs 1.. allocate on the runtime env 0 set up (init_taichi=False).
         env_kwargs = dict(resolution=resolution, max_steps=max_steps,
-                          target_shape=target_shape, init_taichi=(idx == 0))
+                          target_shape=target_shape, init_taichi=(idx == 0),
+                          stock_size_in=stock_size_in, voxel_size_mm=voxel_size_mm)
         if capture_video and idx == 0:
             env = gym.make(env_id, render_mode="rgb_array", **env_kwargs)
             env = gym.wrappers.RecordVideo(env, f"videos/{run_name}")
@@ -294,11 +300,17 @@ if __name__ == "__main__":
     envs = gym.vector.SyncVectorEnv(
         [make_env(args.env_id, i, args.capture_video, run_name, args.gamma,
                   resolution=args.resolution, max_steps=args.max_steps,
-                  target_shape=args.target_shape) for i in range(args.num_envs)]
+                  target_shape=args.target_shape,
+                  stock_size_in=args.stock_size_in, voxel_size_mm=args.voxel_size_mm)
+         for i in range(args.num_envs)]
     )
     assert isinstance(envs.single_action_space, gym.spaces.Box), "only continuous action space is supported"
 
-    agent = Agent(envs, resolution=args.resolution, initial_logstd=-1).to(device)
+    # The env may build a finer grid than --resolution (voxel_size_mm wins); use
+    # the grid it actually built for the agent encoder and the recorder.
+    grid_res = envs.envs[0].unwrapped.resolution
+
+    agent = Agent(envs, resolution=grid_res, initial_logstd=-1).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
 
     # Optional: greedy eval (metrics) and/or video recording during training.
@@ -307,9 +319,10 @@ if __name__ == "__main__":
         from algorithms.policy_video import make_continuous_recorder
 
         recorder = make_continuous_recorder(
-            run_name=run_name, resolution=args.resolution, max_steps=args.max_steps,
+            run_name=run_name, resolution=grid_res, max_steps=args.max_steps,
             target_shape=args.target_shape, env_id=args.env_id,
             fps=args.video_fps, track=args.track, device=device,
+            stock_size_in=args.stock_size_in, voxel_size_mm=args.voxel_size_mm,
         )
 
     # ALGO Logic: Storage setup

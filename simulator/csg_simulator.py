@@ -1,5 +1,6 @@
 import numpy as np
 import random
+import warnings
 import taichi as ti
 from simulator.simulator_utils import *
 from cam.units import inch_to_mm, ipm_to_mm_per_s
@@ -30,7 +31,12 @@ class CSGSimulatorDelta:
         target_shape=None,
         tool_start=(0.5, 0.5, 1.0),
         init_taichi=True,
-        workspace_in=(16.0, 12.0, 10.0),
+        stock_size_in=None,
+        stock_size_mm=None,
+        voxel_size_mm=None,
+        work_volume_in=(16.0, 12.0, 10.0),
+        stock_origin_in=None,
+        workspace_in=None,
         workspace_mm=None,
         dt=0.01,
         rapid_ipm=500.0,
@@ -38,22 +44,31 @@ class CSGSimulatorDelta:
         safe_distance_in=0.1,
         enforce_speed_limits=True,
     ):
-        """Differentiable CSG simulator over a configurable, possibly non-cubic
-        machine envelope.
+        """Differentiable CSG simulator over a small STOCK box placed inside a
+        larger machine work volume.
 
         The working/geometry coordinate is the normalized box ``[0, 1]^3`` (so
-        ``tool_pos`` / ``tool_delta`` / exported trajectories are scale-free),
-        but the physical envelope (``workspace``) may be anisotropic -- the
-        default is the **Haas Mini Mill** cutting volume, 16 x 12 x 10 inches
-        (x, y; z up). To keep geometry undistorted, the voxel grid uses per-axis
-        dimensions ``(Nx, Ny, Nz)`` chosen so every voxel is a physical CUBE of
-        side ``v`` mm, and all internal SDF distances are measured in **voxels**
-        (isotropic). ``resolution`` is the voxel count along the LONGEST axis;
-        the other axes get proportionally fewer voxels.
+        ``tool_pos`` / ``tool_delta`` / exported trajectories are scale-free).
+        That normalized cube is the **stock bounding box** -- only the stock is
+        voxelized, so RAM scales with the PART, not the machine. The machine
+        **work volume** (toolhead limits; default **Haas Mini Mill** 16 x 12 x 10
+        inches, x, y; z up) is separate metadata used for G-code export, the
+        holder collision barrier, and reachability validation.
 
-        workspace_in : (x, y, z) envelope in inches (default Mini Mill).
-        workspace_mm : (x, y, z) envelope in mm; overrides workspace_in if given.
-                       A scalar is accepted and treated as a cube.
+        To keep geometry undistorted, the voxel grid uses per-axis dimensions
+        ``(Nx, Ny, Nz)`` chosen so every voxel is a physical CUBE of side ``v``
+        mm; all internal SDF distances are measured in **voxels** (isotropic).
+
+        stock_size_in : (x, y, z) stock box in inches (REQUIRED; the normalized
+                        cube spans this box). ``stock_size_mm`` is the mm form
+                        (scalar accepted as a cube) and takes precedence.
+        voxel_size_mm : physical voxel edge (mm) -- the sub-mm precision knob.
+                        If omitted, ``resolution`` voxels span the stock's
+                        LONGEST axis instead.
+        work_volume_in: (x, y, z) machine envelope in inches (toolhead limits).
+        stock_origin_in: work origin (G54) = the stock's TOP-CENTRE in machine
+                        coords (inches). Used for export/validation only.
+        workspace_in / workspace_mm : back-compat aliases for the work volume.
         """
         # ti.init() RESETS the whole Taichi runtime, invalidating every field
         # allocated by any previously-created simulator. That is fine when each
@@ -74,24 +89,65 @@ class CSGSimulatorDelta:
 
         self.max_steps = max_steps
 
-        # ---- Physical envelope & cubic-voxel grid -----------------------------
-        # Resolve the envelope to a 3-vector in mm.
-        if workspace_mm is None:
-            wx, wy, wz = (float(inch_to_mm(c)) for c in workspace_in)
-        elif np.isscalar(workspace_mm):
-            wx = wy = wz = float(workspace_mm)
-        else:
-            wx, wy, wz = (float(c) for c in workspace_mm)
-        self.Lx, self.Ly, self.Lz = wx, wy, wz          # envelope mm (x, y, z up)
+        # ---- Stock box (the normalized cube) & machine work volume -----------
+        # ``workspace_in``/``workspace_mm`` are back-compat aliases for the
+        # machine work volume.
+        if workspace_in is not None:
+            work_volume_in = workspace_in
+        work_volume_mm = workspace_mm  # None unless an mm alias was passed
 
-        # Cubic voxels: ``resolution`` voxels span the longest axis, fixing the
-        # voxel side ``v`` (mm); the other axes get round(L / v) voxels.
-        longest = max(wx, wy, wz)
-        self.v = longest / float(resolution)            # mm per voxel (cube side)
-        self.Nx = max(1, int(round(wx / self.v)))
-        self.Ny = max(1, int(round(wy / self.v)))
-        self.Nz = max(1, int(round(wz / self.v)))
+        # Machine work volume -> mm (x, y, z up). Pure metadata: toolhead limits,
+        # export anchor, holder-barrier height. NOT voxelized.
+        if work_volume_mm is None:
+            self.work_volume_mm = np.asarray(
+                [float(inch_to_mm(c)) for c in work_volume_in], dtype=np.float64
+            )
+        elif np.isscalar(work_volume_mm):
+            self.work_volume_mm = np.asarray([float(work_volume_mm)] * 3, dtype=np.float64)
+        else:
+            self.work_volume_mm = np.asarray([float(c) for c in work_volume_mm], dtype=np.float64)
+
+        # Stock box -> mm (REQUIRED). The normalized box [0,1]^3 spans this box,
+        # and ONLY this box is voxelized.
+        if stock_size_mm is not None:
+            if np.isscalar(stock_size_mm):
+                sx = sy = sz = float(stock_size_mm)
+            else:
+                sx, sy, sz = (float(c) for c in stock_size_mm)
+        elif stock_size_in is not None:
+            sx, sy, sz = (float(inch_to_mm(c)) for c in stock_size_in)
+        else:
+            raise ValueError(
+                "stock_size_in (or stock_size_mm) is required; the normalized "
+                "cube [0,1]^3 is the stock bounding box, not the work volume"
+            )
+        self.Lx, self.Ly, self.Lz = sx, sy, sz          # stock box mm (x, y, z up)
+
+        # Work origin (G54 offset): the stock's TOP-CENTRE in machine coords.
+        if stock_origin_in is not None:
+            self.stock_origin_mm = np.asarray(
+                [float(inch_to_mm(c)) for c in stock_origin_in], dtype=np.float64
+            )
+        else:
+            self.stock_origin_mm = None
+
+        # Cubic voxels over the STOCK box. Prefer an explicit physical voxel
+        # size (the sub-mm precision knob); else fall back to ``resolution``
+        # voxels along the stock's longest axis. The other axes get round(L/v)
+        # voxels so every voxel is a physical cube of side ``v`` mm.
+        if voxel_size_mm is not None:
+            self.v = float(voxel_size_mm)               # mm per voxel (cube side)
+        else:
+            self.v = max(sx, sy, sz) / float(resolution)
+        self.Nx = max(1, int(round(sx / self.v)))
+        self.Ny = max(1, int(round(sy / self.v)))
+        self.Nz = max(1, int(round(sz / self.v)))
         self.resolution = max(self.Nx, self.Ny, self.Nz)  # voxels on longest axis
+
+        # Reachability: the stock (and, if its origin is known, its placement)
+        # must fit inside the machine work volume. Warn rather than fail so
+        # exploratory configs still run.
+        self._validate_fits(np.asarray([sx, sy, sz], dtype=np.float64))
 
         # Internal SDF distances are in VOXELS: a normalized [0,1] difference is
         # multiplied by the per-axis grid count to get a voxel-space coordinate
@@ -126,12 +182,12 @@ class CSGSimulatorDelta:
         # and which extends upward by holder_height.
         #
         # Sizes are in MILLIMETRES now (converted to voxels internally). Default
-        # holder is a 2.5 inch diameter spindle/collet; height spans the full Z
-        # envelope so it always clears above the cutter.
+        # holder is a 2.5 inch diameter spindle/collet; its height spans the full
+        # machine Z (not the small stock) so it always clears above the cutter.
         self.holder_radius = ti.field(dtype=ti.f32, shape=())
         self.holder_height = ti.field(dtype=ti.f32, shape=())
         self.holder_radius[None] = float(inch_to_mm(2.5 / 2.0))   # mm
-        self.holder_height[None] = float(self.Lz)                 # mm
+        self.holder_height[None] = float(self.work_volume_mm[2])  # mm
 
         # ---- Units & speed limits (constraint, enforced by clipping) ----
         # The geometry lives in the normalized box [0, 1]^3; axis ``a`` spans
@@ -227,6 +283,33 @@ class CSGSimulatorDelta:
 
         ti.root.lazy_grad()
 
+    def _validate_fits(self, stock_size_mm):
+        """Warn if the stock box can't fit inside the machine work volume.
+
+        Checks the box dimensions, and -- when the work origin (stock top-centre)
+        is known -- the placed box's extent against ``[0, work_volume]``.
+        """
+        wv = self.work_volume_mm
+        if np.any(stock_size_mm > wv + 1e-6):
+            warnings.warn(
+                f"stock box {stock_size_mm.tolist()} mm exceeds machine work "
+                f"volume {wv.tolist()} mm",
+                stacklevel=3,
+            )
+        if self.stock_origin_mm is not None:
+            ox, oy, oz = self.stock_origin_mm
+            sx, sy, sz = stock_size_mm
+            # Top-centre origin: box spans [o-sz/2, o+sz/2] in X/Y, [oz-sz, oz] in Z.
+            lo = np.asarray([ox - sx / 2.0, oy - sy / 2.0, oz - sz])
+            hi = np.asarray([ox + sx / 2.0, oy + sy / 2.0, oz])
+            if np.any(lo < -1e-6) or np.any(hi > wv + 1e-6):
+                warnings.warn(
+                    f"stock placed at top-centre origin {self.stock_origin_mm.tolist()} "
+                    f"mm extends outside the work volume {wv.tolist()} mm "
+                    f"(box {lo.tolist()}..{hi.tolist()})",
+                    stacklevel=3,
+                )
+
     def _init_target_fields(self):
         if self.target_shape == "box":
             self.target_params["half_size"] = ti.Vector.field(3, dtype=ti.f32, shape=())
@@ -245,6 +328,32 @@ class CSGSimulatorDelta:
             self.target_params["center"] = ti.Vector.field(3, dtype=ti.f32, shape=())
         else:
             raise ValueError(f"Unsupported target shape: {self.target_shape}")
+
+    def set_target_params(self, radius_mm=None, height_mm=None, half_size_mm=None,
+                          center=(0.5, 0.5, 0.5)):
+        """Set whichever target params exist for the current shape (in mm).
+
+        Shape-agnostic so callers don't need to branch: ``radius_mm`` feeds
+        sphere/cylinder radius, ``height_mm`` feeds cylinder/pyramid height,
+        ``half_size_mm`` feeds the box half-size / pyramid base half-size (scalar
+        broadcast to a cube), and ``center`` is the normalized [0,1] centre where
+        the shape defines one. Keys absent for the shape are skipped, so e.g. a
+        cylinder (no ``center``) won't raise.
+        """
+        tp = self.target_params
+        if "radius" in tp and radius_mm is not None:
+            tp["radius"][None] = float(radius_mm)
+        if "height" in tp and height_mm is not None:
+            tp["height"][None] = float(height_mm)
+        if half_size_mm is not None:
+            hs = half_size_mm if hasattr(half_size_mm, "__len__") else (half_size_mm,) * 3
+            hs = [float(c) for c in hs]
+            if "half_size" in tp:
+                tp["half_size"][None] = hs
+            if "base_half_size" in tp:
+                tp["base_half_size"][None] = hs
+        if "center" in tp:
+            tp["center"][None] = list(center)
 
     # ========================================================================
     # SDFs  (all distances in VOXELS; cubic voxels make this isotropic)

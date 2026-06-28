@@ -40,7 +40,11 @@ def main():
     ap.add_argument("--trajectory", default=os.path.join(repo, "trajectory.npy"))
     ap.add_argument("--out-dir", default=None,
                     help="output directory (default: runs/roundtrip_<timestamp>)")
-    ap.add_argument("--workspace-mm", type=float, default=100.0)
+    ap.add_argument("--workspace-mm", type=float, default=100.0,
+                    help="machine work-volume cube edge (mm)")
+    ap.add_argument("--stock-size-in", type=float, nargs=3, default=[1.0, 1.0, 1.0],
+                    metavar=("X", "Y", "Z"),
+                    help="stock box (x y z) in inches -- the normalized cube (default 1 in cube)")
     ap.add_argument("--feed", type=float, default=600.0)
     ap.add_argument("--dt", type=float, default=0.05)
     ap.add_argument("--resolution", type=int, default=24)
@@ -59,8 +63,10 @@ def main():
     gcode_path = os.path.join(out_dir, "trajectory.nc" if args.post == "haas" else "trajectory.ngc")
     print(f"[run] writing outputs to {out_dir}")
 
-    cfg = MachineConfig(workspace_mm=args.workspace_mm, feed=args.feed, dt=args.dt)
-    scale = cfg.workspace_mm
+    cfg = MachineConfig(workspace_mm=args.workspace_mm, feed=args.feed, dt=args.dt,
+                        stock_size_in=tuple(args.stock_size_in))
+    # Report metric distances in mm using a representative stock scale.
+    scale = float(np.mean(cfg.stock_size_vec))
 
     original = np.load(args.trajectory).astype(np.float64)
     print(f"Loaded original trajectory: {original.shape} points")
