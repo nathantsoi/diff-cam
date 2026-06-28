@@ -33,7 +33,6 @@ import numpy as np
 import torch
 import taichi as ti
 import tyro
-from matplotlib import pyplot as plt
 from torch.utils.tensorboard import SummaryWriter
 
 from simulator.csg_metrics import _gouge, _residual, sdf_to_mask
@@ -201,32 +200,6 @@ def export_stls(sim, T, dx, run_name, step, track):
             wandb.save(path, base_path=os.path.dirname(path), policy="now")
     return written
 
-
-def plot(run_name, iter_X, losses, eval_X, dices, asds, hs95s, gouges, residuals,
-         target_volume, gui):
-    fig, axs = plt.subplots(nrows=3, ncols=2, figsize=(16, 12))
-
-    axs[1][1].plot(iter_X, losses);  axs[1][1].set_title("Loss")
-    if eval_X:  # metric curves are only populated on eval iterations
-        axs[0][0].plot(eval_X, dices);  axs[0][0].set_title("Dice Score")
-        axs[0][1].plot(eval_X, asds);   axs[0][1].set_title("ASD");  axs[0][1].set_ylim(0, 1)
-        axs[1][0].plot(eval_X, hs95s);  axs[1][0].set_title("HD95"); axs[1][0].set_ylim(0, 1)
-        axs[2][0].plot(eval_X, gouges, label="Gouge Volume (-> 0)")
-        axs[2][0].axhline(target_volume, color="r", linestyle="--", label="Target Volume")
-        axs[2][0].legend(); axs[2][0].set_title("Gouge Volume"); axs[2][0].set_ylim(0, 1)
-        axs[2][1].plot(eval_X, residuals, label="Residual Volume (-> 0)")
-        axs[2][1].legend(); axs[2][1].set_title("Residual Volume"); axs[2][1].set_ylim(0, 1)
-    for ax in axs.ravel():
-        ax.set_xlabel("Iteration")
-
-    plt.tight_layout()
-    out_path = os.path.join("runs", run_name, "metrics.png")
-    plt.savefig(out_path, dpi=120)
-    print(f"[plot] saved metrics figure to {out_path}")
-    if gui is not None:
-        plt.show()
-
-
 def main():
     args = tyro.cli(Args)
 
@@ -296,12 +269,6 @@ def main():
     params = torch.tensor(init, requires_grad=True)
     opt = torch.optim.Adam([params], lr=args.learning_rate)
 
-    # Metric accumulators (for the final plot). Losses are per-iteration; the
-    # geometry metrics are only computed on eval iterations, so they carry their
-    # own x-axis (eval_X).
-    iter_X, losses = [], []
-    eval_X, dices, asds, hs95s, gouges, residuals = [], [], [], [], [], []
-
     from tqdm import tqdm
     last_video_iter, last_eval_iter = -1, -1
     start_time = time.time()
@@ -328,8 +295,6 @@ def main():
 
             loss = float(sim.loss[None])
             grad_norm = float(grad.norm().item())
-            losses.append(loss)
-            iter_X.append(it)
 
             # --- per-iter scalars (TensorBoard; synced to wandb via sync_tensorboard) ---
             writer.add_scalar("losses/loss", loss, it)
@@ -353,9 +318,6 @@ def main():
                 writer.add_scalar("loss/residual", m["loss_residual"], it)
                 writer.add_scalar("loss/gouge", m["loss_gouge"], it)
                 writer.add_scalar("loss/holder", m["loss_holder"], it)
-                eval_X.append(it)
-                dices.append(m["dice"]); asds.append(m["asd"]); hs95s.append(m["hd95"])
-                gouges.append(m["gouge"]); residuals.append(m["residual"])
                 last_eval_iter = it
                 pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['dice']:.3f}",
                                  resid=f"{m['loss_residual']:.3f}",
@@ -399,9 +361,6 @@ def main():
             writer.add_scalar("loss/residual", m["loss_residual"], it)
             writer.add_scalar("loss/gouge", m["loss_gouge"], it)
             writer.add_scalar("loss/holder", m["loss_holder"], it)
-            eval_X.append(it)
-            dices.append(m["dice"]); asds.append(m["asd"]); hs95s.append(m["hd95"])
-            gouges.append(m["gouge"]); residuals.append(m["residual"])
 
         final_overlap = float(sim.holder_overlap_total(T - 1))
         if final_overlap > 0.0:
@@ -432,9 +391,6 @@ def main():
             sim.forward(T)
             render_trajectory_live(sim, gui, T, label="final")
     finally:
-        if iter_X:
-            plot(run_name, iter_X, losses, eval_X, dices, asds, hs95s, gouges,
-                 residuals, float(sim.target_volume[None]), gui)
         writer.close()
         if args.track:
             import wandb
