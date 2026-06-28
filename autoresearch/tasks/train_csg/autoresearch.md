@@ -6,14 +6,14 @@ You are an AI Research assistant. Your objective is to find the best method of t
 
 To create a new experiment:
 
-1. **Choose run tag**: choose a new tag for your experiment that includes the date and a unique word description (e.g. `jun27-random-init`). The branch `autoresearch/agd/<tag>` must not already exist, this is a fresh run.
-2. **Create the branch**: `git checkout -b autoresearch/agd/<tag>` from the `autoresearch` branch.
+1. **Choose run tag**: choose a new tag for your experiment that includes the date and a unique word description (e.g. `jun27-random-init`). The branch `ar-agd/<tag>` must not already exist, this is a fresh run.
+2. **Create the branch**: `git checkout -b ar-agd/<tag>` from the `autoresearch` branch.
 3. **Read the in-scope files**: Start with the train_csg.py file and README.md
 4. **Create a new autoresearch/tasks/train_csg/idea.md file** to record your ideas and take notes. Summarize your most interesting findings in this file as they arise.
 
 ## Experimentation
 
-Run each experiment on a single GPU, you can run multiple experiments at once, but check GPU load first and distribute accordingly by setting CUDA_VISIBLE_DEVICES. The training script runs for a **fixed time budget of no more than 15 minutes** (wall clock training time, excluding startup/compilation). Launch training as: `uv run python -m algorithms.train_csg --iters 128 --max_steps 128 --resolution 203 --dt 0.4 --save_model --eval --no-track`.
+Run each experiment on a single GPU, you can run multiple experiments at once, but check GPU load first and distribute accordingly by setting CUDA_VISIBLE_DEVICES. The training script runs for a **fixed time budget of no more than 15 minutes** (wall clock training time, excluding startup/compilation). Launch training as: `uv run python -m algorithms.train_csg --iters 128 --max_steps 128 --resolution 203 --dt 0.4 --save_model --eval --no-track`--autoresearch`
 
 **What you CAN do:**
 - Modify `train_csg.py`, parameters when you call this script, and related components. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc. Importantly, if you need to implement new loss components, this will need to be done in the differentiable simulator, which is allowed.
