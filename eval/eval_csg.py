@@ -41,11 +41,14 @@ from simulator.csg_metrics import (
 )
 
 # Default target/tool geometry -- must match CamEnvDiff.reset() and train_csg.py.
+# Sizes are in MILLIMETRES (the simulator now works on a physical, possibly
+# non-cubic envelope -- default Haas Mini Mill 16x12x10 in). Center is a
+# normalized [0,1] position.
 TARGET_SHAPE = "sphere"
-TARGET_RADIUS = 0.4
+TARGET_RADIUS = 100.0   # mm
 TARGET_CENTER = [0.5, 0.5, 0.5]
-TOOL_RADIUS = 0.05
-TOOL_HEIGHT = 0.15
+TOOL_RADIUS = 3.175     # mm (1/4" end mill)
+TOOL_HEIGHT = 25.0      # mm
 
 
 # ---------------------------------------------------------------------------
@@ -99,13 +102,14 @@ def carve_trajectory_metrics(positions, resolution=32, target_shape=TARGET_SHAPE
 
     stock = sim.stock.to_numpy()[len(positions) - 1]
     target = sim.target.to_numpy()
-    return _metrics(stock, target, 1.0 / resolution), stock, target
+    # Surface distances reported in mm: one voxel == sim.v mm (cubic voxels).
+    return _metrics(stock, target, sim.v), stock, target
 
 
 # ---------------------------------------------------------------------------
 # Trajectory evaluation (gradient descent output, or any saved path)
 # ---------------------------------------------------------------------------
-def eval_trajectory(path, resolution, do_gcode, post, workspace_mm):
+def eval_trajectory(path, resolution, do_gcode, post, config):
     positions = np.load(path).astype(np.float64)
     if positions.ndim != 2 or positions.shape[1] != 3:
         raise ValueError(f"{path} must hold an (T, 3) array; got {positions.shape}")
@@ -125,7 +129,7 @@ def eval_trajectory(path, resolution, do_gcode, post, workspace_mm):
             "resolution": resolution,
             "do_gcode": do_gcode,
             "post": post,
-            "workspace_mm": workspace_mm,
+            "workspace_vec_mm": config.workspace_vec.tolist(),
         }
     )
 
@@ -146,25 +150,32 @@ def eval_trajectory(path, resolution, do_gcode, post, workspace_mm):
             return
 
         from cam import (
-            MachineConfig, trajectory_to_gcode, parse_gcode, segment_waypoints,
+            trajectory_to_gcode, parse_gcode, segment_waypoints,
             gcode_to_trajectory, discrete_frechet, dtw_distance, resampled_rmse,
             waypoint_roundtrip_error,
         )
 
-        cfg = MachineConfig(workspace_mm=workspace_mm)
-        scale = cfg.workspace_mm
+        cfg = config
+        ws = cfg.workspace_vec   # (3,) mm per-axis envelope
         gcode = trajectory_to_gcode(positions, cfg, post=post)
         segments = parse_gcode(gcode, cfg)
         recovered = segment_waypoints(segments)
         executed, times = gcode_to_trajectory(gcode, cfg)
 
+        # Pre-scale normalized coords to physical mm (per-axis) so the
+        # path-similarity metrics report true millimetres on the anisotropic
+        # envelope; pass scale=1.0 since the arrays are already in mm.
+        pos_mm = positions * ws
+        rec_mm = recovered * ws
+        exec_mm = executed * ws
+
         print(f"\n=== G-code round-trip (post='{post}') ===")
         print(f"  program blocks            : {len([l for l in gcode.splitlines() if l and not l.startswith('(')])}")
         print(f"  executed samples          : {executed.shape[0]} ({times[-1]:.2f}s of motion)")
-        print(f"  waypoint round-trip error : {waypoint_roundtrip_error(positions, recovered, scale):.3e} mm")
-        print(f"  discrete Frechet          : {discrete_frechet(positions, executed, scale):.3e} mm")
-        print(f"  DTW (mean matched dist)   : {dtw_distance(positions, executed, scale):.3e} mm")
-        print(f"  arc-length resampled RMSE : {resampled_rmse(positions, executed, scale=scale):.3e} mm")
+        print(f"  waypoint round-trip error : {waypoint_roundtrip_error(pos_mm, rec_mm, 1.0):.3e} mm")
+        print(f"  discrete Frechet          : {discrete_frechet(pos_mm, exec_mm, 1.0):.3e} mm")
+        print(f"  DTW (mean matched dist)   : {dtw_distance(pos_mm, exec_mm, 1.0):.3e} mm")
+        print(f"  arc-length resampled RMSE : {resampled_rmse(pos_mm, exec_mm, scale=1.0):.3e} mm")
 
         me, _, _ = carve_trajectory_metrics(executed, resolution=resolution)
         print("  --- carved stock of executed program vs target ---")
@@ -174,37 +185,16 @@ def eval_trajectory(path, resolution, do_gcode, post, workspace_mm):
             "gcode/blocks": len([l for l in gcode.splitlines() if l and not l.startswith('(')]),
             "gcode/executed_samples": executed.shape[0],
             "gcode/motion_time": times[-1],
-            "gcode/waypoint_roundtrip_error": waypoint_roundtrip_error(positions, recovered, scale),
-            "gcode/discrete_frechet": discrete_frechet(positions, executed, scale),
-            "gcode/dtw": dtw_distance(positions, executed, scale),
-            "gcode/rmse": resampled_rmse(positions, executed, scale=scale),
+            "gcode/waypoint_roundtrip_error": waypoint_roundtrip_error(pos_mm, rec_mm, 1.0),
+            "gcode/discrete_frechet": discrete_frechet(pos_mm, exec_mm, 1.0),
+            "gcode/dtw": dtw_distance(pos_mm, exec_mm, 1.0),
+            "gcode/rmse": resampled_rmse(pos_mm, exec_mm, scale=1.0),
             "gcode/executed_dice": me["dice"],
             "gcode/executed_asd": me["asd"],
             "gcode/executed_hd95": me["hd95"],
         })
     finally:
         run.finish()
-
-    from cam import (
-        MachineConfig, trajectory_to_gcode, parse_gcode, segment_waypoints,
-        gcode_to_trajectory, discrete_frechet, dtw_distance, resampled_rmse,
-        waypoint_roundtrip_error,
-    )
-
-    cfg = MachineConfig(workspace_mm=workspace_mm)
-    scale = cfg.workspace_mm
-    gcode = trajectory_to_gcode(positions, cfg, post=post)
-    segments = parse_gcode(gcode, cfg)
-    recovered = segment_waypoints(segments)
-    executed, times = gcode_to_trajectory(gcode, cfg)
-
-    print(f"\n=== G-code round-trip (post='{post}') ===")
-    print(f"  program blocks            : {len([l for l in gcode.splitlines() if l and not l.startswith('(')])}")
-    print(f"  executed samples          : {executed.shape[0]} ({times[-1]:.2f}s of motion)")
-    print(f"  waypoint round-trip error : {waypoint_roundtrip_error(positions, recovered, scale):.3e} mm")
-    print(f"  discrete Frechet          : {discrete_frechet(positions, executed, scale):.3e} mm")
-    print(f"  DTW (mean matched dist)   : {dtw_distance(positions, executed, scale):.3e} mm")
-    print(f"  arc-length resampled RMSE : {resampled_rmse(positions, executed, scale=scale):.3e} mm")
 
     me, _, _ = carve_trajectory_metrics(executed, resolution=resolution)
     print("  --- carved stock of executed program vs target ---")
@@ -358,13 +348,22 @@ def main():
                     help="also round-trip the trajectory through the CAM/G-code layer")
     ap.add_argument("--post", type=str, default="rs274",
                     help="post-processor for --gcode (rs274 | haas)")
-    ap.add_argument("--workspace-mm", type=float, default=100.0,
-                    help="physical edge length of the unit cube for G-code")
+    ap.add_argument("--workspace-in", type=float, nargs=3, default=[16.0, 12.0, 10.0],
+                    metavar=("X", "Y", "Z"),
+                    help="machine envelope (x y z) in inches for G-code (default Mini Mill)")
+    ap.add_argument("--workspace-mm", type=float, default=None,
+                    help="cube edge length (mm); overrides --workspace-in with a cube")
     args = ap.parse_args()
+
+    from cam import MachineConfig
+    cfg = MachineConfig(
+        workspace_mm=args.workspace_mm if args.workspace_mm else 100.0,
+        workspace_in=None if args.workspace_mm else tuple(args.workspace_in),
+    )
 
     if args.trajectory:
         eval_trajectory(args.trajectory, args.resolution, args.gcode,
-                        args.post, args.workspace_mm)
+                        args.post, cfg)
     else:
         eval_checkpoints(args.checkpoints, args.num_runs, args.seed)
 

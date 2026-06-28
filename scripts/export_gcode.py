@@ -35,8 +35,11 @@ def main():
                     help="output G-code path (default derives from --post)")
     ap.add_argument("--post", default="haas", choices=sorted(POSTS),
                     help="post-processor / machine dialect")
-    ap.add_argument("--workspace-mm", type=float, default=100.0,
-                    help="physical edge length of the unit cube [0,1]^3")
+    ap.add_argument("--workspace-in", type=float, nargs=3, default=[16.0, 12.0, 10.0],
+                    metavar=("X", "Y", "Z"),
+                    help="machine envelope (x y z) in inches (default Haas Mini Mill)")
+    ap.add_argument("--workspace-mm", type=float, default=None,
+                    help="cube edge length (mm); overrides --workspace-in with an isotropic cube")
     ap.add_argument("--feed", type=float, default=600.0, help="cutting feed, mm/min")
     ap.add_argument("--plunge-feed", type=float, default=200.0, help="Z plunge feed, mm/min")
     ap.add_argument("--rpm", type=float, default=5000.0, help="spindle speed")
@@ -51,7 +54,8 @@ def main():
         raise SystemExit(f"{args.trajectory} must hold an (T,3) array; got {positions.shape}")
 
     cfg = MachineConfig(
-        workspace_mm=args.workspace_mm,
+        workspace_mm=args.workspace_mm if args.workspace_mm else 100.0,
+        workspace_in=None if args.workspace_mm else tuple(args.workspace_in),
         feed=args.feed,
         plunge_feed=args.plunge_feed,
         spindle_rpm=args.rpm,

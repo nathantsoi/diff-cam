@@ -31,25 +31,23 @@ class CamEnvDiff(gym.Env):
 
         super().__init__()
 
-        self.resolution = resolution
-        self.dx = 1.0 / resolution
-        self.grid_norm = float(resolution ** 3)
+        self.resolution = resolution    # voxels along the longest envelope axis
 
         self.max_steps = max_steps
         self.max_cuts = max_steps - 1
         self.target_shape = target_shape
-        self.tool_radius = 0.05
-        self.tool_height = 0.15
-        self.tool_start = [0.5, 0.5, 1.0]
+        # Sizes in MILLIMETRES (the simulator works on a physical envelope).
+        self.tool_radius = 3.175   # mm (1/4" end mill)
+        self.tool_height = 25.0    # mm
+        self.target_radius = 100.0 # mm
+        self.tool_start = [0.5, 0.5, 1.0]   # normalized [0,1]
         self.render_mode = render_mode
 
-        # Tool holder: a 2.5 inch diameter cylinder riding above the cutter.
-        # Expressed in unit-cube coords via the shared machine scale so it
-        # matches the G-code round trip (unit cube = workspace_mm on a side).
-        from cam.config import MachineConfig
-        self.workspace_mm = MachineConfig().workspace_mm
-        workspace_mm = self.workspace_mm
-        self.holder_radius = (2.5 * 25.4 / 2.0) / workspace_mm
+        # Machine envelope: default Haas Mini Mill cutting volume (16x12x10 in).
+        self.workspace_in = (16.0, 12.0, 10.0)
+        # Tool holder: a 2.5 inch diameter cylinder riding above the cutter (mm).
+        from cam.units import inch_to_mm
+        self.holder_radius = float(inch_to_mm(2.5 / 2.0))
         # Large negative reward applied (once) when the holder hits the stock;
         # the episode terminates on that step.
         self.holder_collision_penalty = 10.0
@@ -61,18 +59,28 @@ class CamEnvDiff(gym.Env):
         self.k_init = k_init
         self.init_taichi = init_taichi
 
-        voxels_per_step = 3.0                       # design choice
-        self.max_delta = voxels_per_step * self.dx
+        # Build the simulator first so observation/action spaces can use the
+        # actual (possibly anisotropic) voxel grid dimensions.
+        self._initialize_sim()
+        self.Nx, self.Ny, self.Nz = (
+            self.simulator.Nx, self.simulator.Ny, self.simulator.Nz
+        )
+        self.n_vox = self.Nx * self.Ny * self.Nz
+        self.grid_norm = float(self.n_vox)
+
+        # Action bound: ~3 voxels (along the longest axis) per step, in
+        # normalized [0,1] coords. Speed clipping in the simulator further caps
+        # the actual move to the feed/rapid limit.
+        self.max_delta = 3.0 / self.resolution
         self.action_space = spaces.Box(
             low=-self.max_delta, high=self.max_delta, shape=(3,), dtype=np.float32
         )
 
-        self.obs_dims = 3 + 2 + (resolution**3) + (resolution**3) # tool_pos + radius + height + stock_grid + target_grid
+        # tool_pos (3) + radius + height + stock_grid + target_grid
+        self.obs_dims = 3 + 2 + self.n_vox + self.n_vox
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(self.obs_dims,), dtype=np.float32
         )
-
-        self._initialize_sim()
 
         # Rendering state
         # --- Rendering state (raymarch only) ---
@@ -106,7 +114,7 @@ class CamEnvDiff(gym.Env):
             target_shape=self.target_shape,
             tool_start=self.tool_start,
             init_taichi=self.init_taichi,
-            workspace_mm=self.workspace_mm,
+            workspace_in=self.workspace_in,
         )
         self.simulator.tool_radius[None] = self.tool_radius
         self.simulator.tool_height[None] = self.tool_height
@@ -119,10 +127,10 @@ class CamEnvDiff(gym.Env):
 
         self.simulator.init_stock()
 
-        self.simulator.target_params["radius"][None] = 0.4
+        self.simulator.target_params["radius"][None] = self.target_radius  # mm
         self.simulator.target_params["center"][None] = [0.5, 0.5, 0.5]
-        self.simulator.tool_radius[None] = 0.05
-        self.simulator.tool_height[None] = 0.15
+        self.simulator.tool_radius[None] = self.tool_radius   # mm
+        self.simulator.tool_height[None] = self.tool_height   # mm
         self.simulator.holder_radius[None] = self.holder_radius
         self.simulator.bake_target_grid()
         self.simulator.set_target_volume()

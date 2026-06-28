@@ -9,12 +9,19 @@ the scale in one place is what makes the round trip
 """
 
 from dataclasses import dataclass
+from typing import Optional, Tuple
 
 
 @dataclass(frozen=True)
 class MachineConfig:
     # --- Coordinate mapping ---------------------------------------------------
+    # The trajectory lives in the normalized box [0,1]^3. ``workspace_mm`` is the
+    # legacy scalar edge length (cube). For a non-cubic machine envelope (e.g.
+    # the Haas Mini Mill, 16x12x10 in) set ``workspace_in`` to a per-axis
+    # (x, y, z) tuple in inches, which overrides the scalar. ``workspace_vec``
+    # resolves either form to a (3,) mm vector used everywhere downstream.
     workspace_mm: float = 100.0   # physical edge length of the unit cube [0,1]^3
+    workspace_in: Optional[Tuple[float, float, float]] = None  # per-axis envelope, inches
 
     # --- Feeds & speeds -------------------------------------------------------
     feed: float = 600.0           # cutting feed rate, mm/min (G1)
@@ -42,14 +49,23 @@ class MachineConfig:
     plunge_feed: float = 200.0    # Z plunge feed rate, mm/min
 
     @property
+    def workspace_vec(self):
+        """Per-axis envelope as a (3,) mm vector (resolves scalar or inch form)."""
+        import numpy as np
+        from .units import inch_to_mm
+        if self.workspace_in is not None:
+            return np.asarray([inch_to_mm(c) for c in self.workspace_in], dtype=np.float64)
+        return np.asarray([self.workspace_mm] * 3, dtype=np.float64)
+
+    @property
     def units_code(self) -> str:
         """Modal G-code for the configured units."""
         return "G21" if self.units == "mm" else "G20"
 
     @property
     def safe_z_mm(self) -> float:
-        """Clearance Z (mm): ``retract_mm`` above the top of the unit cube."""
-        return self.workspace_mm + self.retract_mm
+        """Clearance Z (mm): ``retract_mm`` above the top of the envelope (Z axis)."""
+        return float(self.workspace_vec[2]) + self.retract_mm
 
     @property
     def h_register(self) -> int:
@@ -65,11 +81,11 @@ class MachineConfig:
         return self.rapid / 60.0
 
     def to_machine(self, p):
-        """unit-cube coords -> machine coords (mm)."""
+        """normalized [0,1] coords -> machine coords (mm), per-axis."""
         import numpy as np
-        return np.asarray(p, dtype=np.float64) * self.workspace_mm
+        return np.asarray(p, dtype=np.float64) * self.workspace_vec
 
     def to_unit(self, p):
-        """machine coords (mm) -> unit-cube coords."""
+        """machine coords (mm) -> normalized [0,1] coords, per-axis."""
         import numpy as np
-        return np.asarray(p, dtype=np.float64) / self.workspace_mm
+        return np.asarray(p, dtype=np.float64) / self.workspace_vec

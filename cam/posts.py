@@ -93,8 +93,8 @@ class RS274Post(PostProcessor):
 
     def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
         positions = self._validate(positions)
-        # Unit-cube -> mm, then mm -> output units (mm or inch) for emission.
-        pts_out = _len_out(positions * config.workspace_mm, config)
+        # Normalized [0,1] -> mm (per-axis envelope), then mm -> output units.
+        pts_out = _len_out(positions * config.workspace_vec, config)
         feed_out = _feed_out(config.feed, config)
         p = config.precision
 
@@ -148,8 +148,8 @@ class HaasPost(PostProcessor):
 
     def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
         positions = self._validate(positions)
-        # Unit-cube -> mm, then mm -> output units (mm or inch) for emission.
-        pts_out = _len_out(positions * config.workspace_mm, config)
+        # Normalized [0,1] -> mm (per-axis envelope), then mm -> output units.
+        pts_out = _len_out(positions * config.workspace_vec, config)
         feed_out = _feed_out(config.feed, config)
         plunge_out = _feed_out(config.plunge_feed, config)
         p = config.precision

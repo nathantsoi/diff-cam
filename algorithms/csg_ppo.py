@@ -38,6 +38,12 @@ class Args:
     """record + upload a greedy policy rollout video every N training iterations (0 = disabled)"""
     eval_freq: int = 0
     """run a greedy eval rollout + log Dice/ASD/HD95/reward every N iterations (0 = disabled); no video unless the video cadence also lands on this iteration"""
+    eval: bool = False
+    """if True, compute evaluation metrics (Dice/ASD/HD95/reward) during training and at the end"""
+    progress_bar: bool = False
+    """use tqdm progress bar instead of scrolling log lines (set False for clean log files and LLM harness compatibility)"""
+    log_freq: int = 1
+    """print scrolling log output every N iterations when progress_bar is disabled"""
     video_fps: int = 30
     """frames per second for recorded policy videos"""
     video_seed: int = 0
@@ -136,24 +142,26 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class VoxelEncoder(nn.Module):
-    """Small 3D CNN over a (2, R, R, R) stack of [stock, target] SDFs.
+    """Small 3D CNN over a (2, Nx, Ny, Nz) stack of [stock, target] SDFs.
     """
  
-    def __init__(self, resolution: int, out_dim: int = 256):
+    def __init__(self, grid_shape, out_dim: int = 256):
         super().__init__()
-        self.resolution = resolution
+        if isinstance(grid_shape, int):
+            grid_shape = (grid_shape, grid_shape, grid_shape)
+        self.grid_shape = grid_shape
         # stride-2 downsampling, ReLU. Orthogonal init with sqrt(2) gain.
         self.conv = nn.Sequential(
-            layer_init(nn.Conv3d(2, 16, kernel_size=3, stride=2, padding=1)),   # R   -> R/2
+            layer_init(nn.Conv3d(2, 16, kernel_size=3, stride=2, padding=1)),
             nn.ReLU(),
-            layer_init(nn.Conv3d(16, 32, kernel_size=3, stride=2, padding=1)),  # R/2 -> R/4
+            layer_init(nn.Conv3d(16, 32, kernel_size=3, stride=2, padding=1)),
             nn.ReLU(),
-            layer_init(nn.Conv3d(32, 64, kernel_size=3, stride=2, padding=1)),  # R/4 -> R/8
+            layer_init(nn.Conv3d(32, 64, kernel_size=3, stride=2, padding=1)),
             nn.ReLU(),
         )
         # Determine flat feature size with a dry run.
         with torch.no_grad():
-            dummy = torch.zeros(1, 2, resolution, resolution, resolution)
+            dummy = torch.zeros(1, 2, *grid_shape)
             feat = self.conv(dummy)
             self.flat_dim = int(np.prod(feat.shape[1:]))
         self.proj = nn.Sequential(
@@ -163,7 +171,7 @@ class VoxelEncoder(nn.Module):
         self.out_dim = out_dim
  
     def forward(self, voxels):
-        # voxels: (B, 2, R, R, R)
+        # voxels: (B, 2, Nx, Ny, Nz)
         h = self.conv(voxels)
         h = h.view(h.size(0), -1)
         return self.proj(h)
@@ -173,18 +181,24 @@ class Agent(nn.Module):
     """Actor-critic over CamEnvDiff's split observation.
  
     Observation layout (must match CamEnvDiff._get_obs):
-        [ tool_pos (3) | radius (1) | height (1) | stock_grid (R^3) | target_grid (R^3) ]
+        [ tool_pos (3) | radius (1) | height (1) | stock_grid (n_vox) | target_grid (n_vox) ]
     """
  
     def __init__(self, envs, resolution: int, initial_logstd: float = -1.0):
         super().__init__()
         self.resolution = resolution
-        self.R3 = resolution ** 3
+        base_env = envs.envs[0].unwrapped
+        if hasattr(base_env, "Nx"):
+            self.grid_shape = (base_env.Nx, base_env.Ny, base_env.Nz)
+            self.n_vox = base_env.n_vox
+        else:
+            self.grid_shape = (resolution, resolution, resolution)
+            self.n_vox = resolution ** 3
         # Layout offsets for splitting the flat obs.
         self.scalar_dim = 5  # 3 tool_pos + radius + height
         action_dim = int(np.prod(envs.single_action_space.shape))
  
-        self.encoder = VoxelEncoder(resolution, out_dim=256)
+        self.encoder = VoxelEncoder(self.grid_shape, out_dim=256)
  
         feature_dim = self.encoder.out_dim + self.scalar_dim
  
@@ -207,15 +221,14 @@ class Agent(nn.Module):
         )
  
     def _split_obs(self, x):
-        """Split flat obs into (scalar, voxels[B, 2, R, R, R])."""
+        """Split flat obs into (scalar, voxels[B, 2, Nx, Ny, Nz])."""
         B = x.size(0)
-        R = self.resolution
         scalar = x[:, : self.scalar_dim]                                    # (B, 5)
-        stock = x[:, self.scalar_dim : self.scalar_dim + self.R3]           # (B, R^3)
-        target = x[:, self.scalar_dim + self.R3 : self.scalar_dim + 2 * self.R3]
-        stock = stock.view(B, 1, R, R, R)
-        target = target.view(B, 1, R, R, R)
-        voxels = torch.cat([stock, target], dim=1)                          # (B, 2, R, R, R)
+        stock = x[:, self.scalar_dim : self.scalar_dim + self.n_vox]
+        target = x[:, self.scalar_dim + self.n_vox : self.scalar_dim + 2 * self.n_vox]
+        stock = stock.view(B, 1, *self.grid_shape)
+        target = target.view(B, 1, *self.grid_shape)
+        voxels = torch.cat([stock, target], dim=1)                          # (B, 2, Nx, Ny, Nz)
         return scalar, voxels
  
     def features(self, x):
@@ -290,7 +303,7 @@ if __name__ == "__main__":
 
     # Optional: greedy eval (metrics) and/or video recording during training.
     recorder = None
-    if args.record_video_freq > 0 or args.eval_freq > 0:
+    if args.record_video_freq > 0 or args.eval_freq > 0 or args.eval:
         from algorithms.policy_video import make_continuous_recorder
 
         recorder = make_continuous_recorder(
@@ -318,7 +331,9 @@ if __name__ == "__main__":
     iteration = 0           # bound even if the loop never runs
     last_video_iter = -1    # iteration whose model was last recorded as video
     last_eval_iter = -1     # iteration whose model was last evaluated (metrics)
-    pbar = tqdm(range(1, args.num_iterations + 1), desc=run_name)
+    last_m = None
+    eval_interval = args.eval_freq if args.eval_freq > 0 else (max(1, args.num_iterations // 10) if args.eval else 0)
+    pbar = tqdm(range(1, args.num_iterations + 1), desc=run_name) if args.progress_bar else range(1, args.num_iterations + 1)
     for iteration in pbar:
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -452,18 +467,35 @@ if __name__ == "__main__":
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         sps = int(global_step / (time.time() - start_time))
-        pbar.set_postfix(SPS=sps)
-        #tqdm.write(f"[{run_name}] SPS: {sps}")
         writer.add_scalar("charts/SPS", sps, global_step)
 
         if recorder is not None:
             do_video = args.record_video_freq > 0 and iteration % args.record_video_freq == 0
-            do_eval = args.eval_freq > 0 and iteration % args.eval_freq == 0
+            do_eval = eval_interval > 0 and (iteration % eval_interval == 0 or iteration == args.num_iterations)
             if do_video or do_eval:
-                recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=do_video)
+                m = recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=do_video)
+                if m is not None:
+                    last_m = m
                 last_eval_iter = iteration
                 if do_video:
                     last_video_iter = iteration
+
+        if args.progress_bar:
+            if last_m is not None:
+                pbar.set_postfix(SPS=sps, reward=f"{last_m.get('reward', 0.0):+.2f}", dice=f"{last_m.get('dice', 0.0):.3f}")
+            else:
+                pbar.set_postfix(SPS=sps)
+        elif iteration % args.log_freq == 0 or iteration == args.num_iterations:
+            lr_val = optimizer.param_groups[0]["lr"]
+            if last_m is not None:
+                line = (f"[iter {iteration:4d}/{args.num_iterations}] step: {global_step} | vloss: {v_loss.item():.4f} | "
+                        f"ploss: {pg_loss.item():.4f} | lr: {lr_val:.2e} | SPS: {sps} | "
+                        f"reward: {last_m.get('reward', 0.0):+.2f} | dice: {last_m.get('dice', 0.0):.4f} | "
+                        f"asd: {last_m.get('asd', 0.0):.2f} | hd95: {last_m.get('hd95', 0.0):.2f}")
+            else:
+                line = (f"[iter {iteration:4d}/{args.num_iterations}] step: {global_step} | vloss: {v_loss.item():.4f} | "
+                        f"ploss: {pg_loss.item():.4f} | lr: {lr_val:.2e} | SPS: {sps}")
+            print(line, flush=True)
 
     if args.save_model:
         model_path = f"runs/{run_name}/{args.exp_name}.cleanrl_model"
@@ -476,11 +508,58 @@ if __name__ == "__main__":
         # Capture the *final* model once: a video if recording is enabled, else a
         # metrics-only eval -- unless the last iteration already did it.
         if args.record_video_freq > 0 and iteration != last_video_iter:
-            recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=True)
-        elif args.eval_freq > 0 and iteration != last_eval_iter:
-            recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=False)
+            m = recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=True)
+            if m is not None:
+                last_m = m
+        elif (args.eval or args.eval_freq > 0) and iteration != last_eval_iter:
+            m = recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=False)
+            if m is not None:
+                last_m = m
+        if last_m is None and (args.eval or args.eval_freq > 0):
+            m = recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=False)
+            if m is not None:
+                last_m = m
         # Export the final model's geometry (initial stock, carved stock, target).
         recorder.export_stls(agent, global_step, seed=args.video_seed)
         recorder.close()
+
+    # Save summary metrics for automated agents and LLM harnesses.
+    import json
+    total_seconds = time.time() - start_time
+    peak_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
+    final_dice = float(last_m.get("dice", 0.0)) if last_m is not None else 0.0
+    final_asd = float(last_m.get("asd", 0.0)) if last_m is not None else 0.0
+    final_hd95 = float(last_m.get("hd95", 0.0)) if last_m is not None else 0.0
+    final_reward = float(last_m.get("reward", 0.0)) if last_m is not None else 0.0
+
+    summary_data = {
+        "dice": round(final_dice, 6),
+        "asd": round(final_asd, 6),
+        "hd95": round(final_hd95, 6),
+        "reward": round(final_reward, 6),
+        "training_seconds": round(total_seconds, 2),
+        "peak_vram_mb": round(peak_vram_mb, 2),
+        "num_steps": global_step,
+    }
+    run_dir = f"runs/{run_name}"
+    os.makedirs(run_dir, exist_ok=True)
+    metrics_path = os.path.join(run_dir, "metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(summary_data, f, indent=2)
+    latest_metrics_path = os.path.join("runs", "latest_metrics.json")
+    try:
+        with open(latest_metrics_path, "w") as f:
+            json.dump(summary_data, f, indent=2)
+    except Exception as e:
+        print(f"[metrics] failed to write {latest_metrics_path}: {e}")
+
+    print("\n---")
+    for k, v in summary_data.items():
+        if isinstance(v, float):
+            print(f"{k + ':':18s} {v:.6f}")
+        else:
+            print(f"{k + ':':18s} {v}")
+    print("---\n", flush=True)
+
     envs.close()
     writer.close()

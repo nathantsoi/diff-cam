@@ -64,8 +64,14 @@ class Args:
     """whether to save the learned trajectory into the `runs/{run_name}` folder"""
 
     # eval / video cadence -- measured in Adam iterations (same flags as csg_ppo)
+    eval: bool = False
+    """if True, compute evaluation metrics (Dice/ASD/HD95) during training and at the end"""
     eval_freq: int = 0
     """compute + log Dice/ASD/HD95 every N iterations (0 = disabled)"""
+    progress_bar: bool = False
+    """use tqdm progress bar instead of scrolling log lines (set False for clean log files and LLM harness compatibility)"""
+    log_freq: int = 1
+    """print scrolling log output every N iterations when progress_bar is disabled"""
     record_video_freq: int = 0
     """render + upload a trajectory rollout video every N iterations (0 = disabled)"""
     video_fps: int = 30
@@ -100,10 +106,16 @@ class Args:
     """required holder standoff in unit-cube length (>0 keeps a clearance gap before contact)"""
 
     # Units & speed limits (enforced by per-step clipping in the simulator)
-    workspace_mm: float = 100.0
-    """physical edge length (mm) of the unit cube [0,1]^3 -- the simulator's scale"""
+    workspace_in: tuple[float, float, float] = (16.0, 12.0, 10.0)
+    """machine envelope (x, y, z up) in inches -- default Haas Mini Mill cutting volume"""
+    target_radius_mm: float = 100.0
+    """target sphere/cylinder radius in mm"""
+    tool_radius_mm: float = 3.175
+    """cutter radius in mm (default 1/4" end mill)"""
+    tool_height_mm: float = 25.0
+    """cutter flute length in mm"""
     dt: float = 0.01
-    """seconds per simulator step; speed = |delta| * workspace_mm / dt"""
+    """seconds per simulator step; speed = |delta (.) envelope_mm| / dt"""
     rapid_ipm: float = 500.0
     """max traverse speed (inches/min) when clear of the stock"""
     feed_ipm: float = 10.0
@@ -260,20 +272,20 @@ def main():
             gui = None
 
     # --- Simulator setup (must match CamEnvDiff.reset / eval_csg defaults) ---
+    # The envelope defaults to the Haas Mini Mill (16x12x10 in); sizes are mm.
     sim = CSGSimulatorDelta(resolution=args.resolution, max_steps=T, k_init=args.k_init,
                             target_shape=args.target_shape, tool_start=(0.5, 0.5, 1.0),
-                            workspace_mm=args.workspace_mm, dt=args.dt,
+                            workspace_in=args.workspace_in, dt=args.dt,
                             rapid_ipm=args.rapid_ipm, feed_ipm=args.feed_ipm,
                             safe_distance_in=args.safe_distance_in,
                             enforce_speed_limits=args.enforce_speed_limits)
-    sim.target_params["radius"][None] = 0.4
+    sim.target_params["radius"][None] = args.target_radius_mm
     sim.target_params["center"][None] = [0.5, 0.5, 0.5]
-    sim.tool_radius[None] = 0.05
-    sim.tool_height[None] = 0.15
-    # Tool holder: 2.5 inch diameter cylinder above the cutter, in unit-cube
-    # coords via the shared machine scale (unit cube = workspace_mm on a side).
+    sim.tool_radius[None] = args.tool_radius_mm
+    sim.tool_height[None] = args.tool_height_mm
+    # Tool holder: 2.5 inch diameter cylinder above the cutter (mm; default).
     from cam.units import inch_to_mm
-    sim.holder_radius[None] = inch_to_mm(2.5 / 2.0) / args.workspace_mm
+    sim.holder_radius[None] = inch_to_mm(2.5 / 2.0)
     # Loss balancing: objective (residual) vs. safety barriers (gouge, holder).
     sim.w_residual[None] = args.w_residual
     sim.w_gouge[None] = args.w_gouge
@@ -282,6 +294,10 @@ def main():
     sim.bake_target_grid()
     sim.set_target_volume()
 
+    # Voxels are physical cubes of side sim.v mm: use that as the grid spacing
+    # for metric surface distances (mm) and STL mesh export.
+    dx = sim.v
+
     # --- Init parameters (T-1 per-step displacements) ---
     init = np.random.uniform(-0.05, 0.05, size=(T - 1, 3)).astype(np.float32)
     params = torch.tensor(init, requires_grad=True)
@@ -289,9 +305,12 @@ def main():
 
     from tqdm import tqdm
     last_video_iter, last_eval_iter = -1, -1
+    last_m = None
     start_time = time.time()
     it = 0
-    pbar = tqdm(range(args.iters), desc=run_name)
+
+    eval_interval = args.eval_freq if args.eval_freq > 0 else (max(1, args.iters // 10) if args.eval else 0)
+    pbar = tqdm(range(args.iters), desc=run_name) if args.progress_bar else range(args.iters)
     try:
         for it in pbar:
             if gui is not None and not gui.running:
@@ -321,12 +340,13 @@ def main():
             sps = it / max(1e-9, time.time() - start_time)
             writer.add_scalar("charts/SPS", sps, it)
 
-            do_eval = args.eval_freq > 0 and it % args.eval_freq == 0
+            do_eval = eval_interval > 0 and (it % eval_interval == 0 or it == args.iters - 1)
             do_video = args.record_video_freq > 0 and it % args.record_video_freq == 0
 
             # --- eval metrics (shared `_metrics` path; same keys as csg_ppo) ---
             if do_eval:
                 m = eval_metrics(sim, T, dx)
+                last_m = m
                 writer.add_scalar("eval/dice", m["dice"], it)
                 writer.add_scalar("eval/asd", m["asd"], it)
                 writer.add_scalar("eval/hd95", m["hd95"], it)
@@ -337,12 +357,23 @@ def main():
                 writer.add_scalar("loss/gouge", m["loss_gouge"], it)
                 writer.add_scalar("loss/holder", m["loss_holder"], it)
                 last_eval_iter = it
-                pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['dice']:.3f}",
-                                 resid=f"{m['loss_residual']:.3f}",
-                                 gouge=f"{m['loss_gouge']:.3f}",
-                                 hold=f"{m['loss_holder']:.2e}")
-            else:
+                if args.progress_bar:
+                    pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['dice']:.3f}",
+                                     resid=f"{m['loss_residual']:.3f}",
+                                     gouge=f"{m['loss_gouge']:.3f}",
+                                     hold=f"{m['loss_holder']:.2e}")
+            elif args.progress_bar:
                 pbar.set_postfix(loss=f"{loss:.4f}", grad=f"{grad_norm:.2e}")
+
+            if not args.progress_bar and (it % args.log_freq == 0 or it == args.iters - 1):
+                lr_val = opt.param_groups[0]["lr"]
+                if last_m is not None:
+                    line = (f"[iter {it:4d}/{args.iters}] loss: {loss:.4f} | grad: {grad_norm:.2e} | lr: {lr_val:.2e} | "
+                            f"dice: {last_m['dice']:.4f} | asd: {last_m['asd']:.2f} | hd95: {last_m['hd95']:.2f} | "
+                            f"resid: {last_m['loss_residual']:.4f} | gouge: {last_m['loss_gouge']:.4f} | hold: {last_m['loss_holder']:.2e}")
+                else:
+                    line = f"[iter {it:4d}/{args.iters}] loss: {loss:.4f} | grad: {grad_norm:.2e} | lr: {lr_val:.2e}"
+                print(line, flush=True)
 
             # --- video (raymarch -> ffmpeg; logged under media/policy_rollout) ---
             if do_video:
@@ -368,8 +399,9 @@ def main():
                     {"media/policy_rollout": wandb.Video(out_path, fps=args.video_fps, format="mp4")},
                     step=it,
                 )
-        if args.eval_freq > 0 and it != last_eval_iter:
+        if (args.eval or args.eval_freq > 0) and it != last_eval_iter:
             m = eval_metrics(sim, T, dx)
+            last_m = m
             writer.add_scalar("eval/dice", m["dice"], it)
             writer.add_scalar("eval/asd", m["asd"], it)
             writer.add_scalar("eval/hd95", m["hd95"], it)
@@ -380,12 +412,56 @@ def main():
             writer.add_scalar("loss/gouge", m["loss_gouge"], it)
             writer.add_scalar("loss/holder", m["loss_holder"], it)
 
+        if last_m is None and (args.eval or args.eval_freq > 0):
+            last_m = eval_metrics(sim, T, dx)
+
         final_overlap = float(sim.holder_overlap_total(T - 1))
         if final_overlap > 0.0:
             print(f"[holder] WARNING: final trajectory still collides the holder "
                   f"with the stock (overlap volume {final_overlap:.3e}).")
         else:
             print("[holder] final trajectory keeps the holder clear of the stock.")
+
+        # Save summary metrics for automated agents and LLM harnesses.
+        import json
+        total_seconds = time.time() - start_time
+        peak_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
+        final_dice = float(last_m["dice"]) if last_m is not None else 0.0
+        final_asd = float(last_m["asd"]) if last_m is not None else 0.0
+        final_hd95 = float(last_m["hd95"]) if last_m is not None else 0.0
+        final_gouge = float(last_m["gouge"]) if last_m is not None else 0.0
+        final_resid = float(last_m["residual"]) if last_m is not None else 0.0
+        final_hold = float(last_m["holder_overlap"]) if last_m is not None else final_overlap
+
+        summary_data = {
+            "dice": round(final_dice, 6),
+            "asd": round(final_asd, 6),
+            "hd95": round(final_hd95, 6),
+            "loss": round(float(sim.loss[None]), 6),
+            "residual": round(final_resid, 6),
+            "gouge": round(final_gouge, 6),
+            "holder_overlap": round(final_hold, 6),
+            "training_seconds": round(total_seconds, 2),
+            "peak_vram_mb": round(peak_vram_mb, 2),
+            "num_steps": args.iters,
+        }
+        metrics_path = os.path.join(run_dir, "metrics.json")
+        with open(metrics_path, "w") as f:
+            json.dump(summary_data, f, indent=2)
+        latest_metrics_path = os.path.join("runs", "latest_metrics.json")
+        try:
+            with open(latest_metrics_path, "w") as f:
+                json.dump(summary_data, f, indent=2)
+        except Exception as e:
+            print(f"[metrics] failed to write {latest_metrics_path}: {e}")
+
+        print("\n---")
+        for k, v in summary_data.items():
+            if isinstance(v, float):
+                print(f"{k + ':':18s} {v:.6f}")
+            else:
+                print(f"{k + ':':18s} {v}")
+        print("---\n", flush=True)
 
         # Export the final geometry (initial stock, carved stock, target).
         export_stls(sim, T, dx, run_name, it, args.track)

@@ -65,7 +65,7 @@ def _trapezoid_distances(length, vmax, accel, dt):
 def _sample_linear(seg, config):
     start = np.asarray(seg.start, dtype=np.float64)
     end = np.asarray(seg.end, dtype=np.float64)
-    length_mm = np.linalg.norm(end - start) * config.workspace_mm
+    length_mm = np.linalg.norm((end - start) * config.workspace_vec)
     vmax = config.rapid_mm_per_s if seg.kind == "rapid" else config.feed_mm_per_s
     s, times = _trapezoid_distances(length_mm, vmax, config.max_accel, config.dt)
     if length_mm <= 1e-12:
@@ -101,9 +101,15 @@ def _sample_arc(seg, config):
         if abs(sweep) < 1e-9:
             sweep = 2.0 * np.pi
 
+    # Arcs are circular in normalized coords; under an anisotropic envelope they
+    # warp to ellipses. Approximate the physical arc length with the in-plane
+    # axes' mean scale (exact for a cubic/near-cubic envelope).
+    a0i, a1i, _ = _plane_axes(seg.plane)
+    ws = config.workspace_vec
+    plane_scale = 0.5 * (ws[a0i] + ws[a1i])
     out_delta = end[ax] - start[ax]
-    plane_len = abs(radius * sweep) * config.workspace_mm
-    out_len = abs(out_delta) * config.workspace_mm
+    plane_len = abs(radius * sweep) * plane_scale
+    out_len = abs(out_delta) * ws[ax]
     length_mm = np.hypot(plane_len, out_len)
 
     vmax = config.feed_mm_per_s

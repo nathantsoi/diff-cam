@@ -109,6 +109,7 @@ class PolicyVideoRecorder:
                 import wandb
 
                 wandb.log(log, step=global_step)
+            metrics["reward"] = total_reward
             return metrics
         except Exception as e:  # never kill training over an eval/video
             print(f"[{'video' if record_video else 'eval'}] failed at step {global_step}: {e}")

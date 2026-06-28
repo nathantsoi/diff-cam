@@ -37,7 +37,7 @@ display is only needed for interactive visualization.
 
 ```
 simulator/
-  csg_simulator.py    # continuous, differentiable CSG simulator (PSDFs); feed/rapid speed clipping
+  csg_simulator.py    # continuous, differentiable CSG simulator (PSDFs); configurable (Mini Mill) envelope, cubic voxels, feed/rapid speed clipping
   voxel_simulator.py  # discrete voxel simulator (CNCSimulator)
   csg_metrics.py      # Dice / ASD / HD95 + gouge/residual on SDF grids
 cam_env/
@@ -71,26 +71,64 @@ shares the `--eval_freq` / `--record_video_freq` / `--video_fps` / `--track`
 flags with the PPO trainers — see
 [Recording policy videos](#recording-policy-videos-during-training).
 
+`--resolution 203` gives **2 mm cubic voxels** on the Mini Mill envelope, and
+`--dt 0.4` makes each feed step ≈ 1 voxel (see [Machine envelope & resolution](#machine-envelope--resolution)).
+
 ```bash
 # Headless (HPC / no display) — comparable to the csg_ppo baseline below:
-uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 32 \
+uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4 \
     --save_model --eval_freq 1 --record_video_freq 100 --video_fps 30
 
 # Interactive live GUI (needs a display):
-uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 32
+uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4
 ```
+
+#### Machine envelope & resolution
+
+The simulator runs on a configurable, possibly **non-cubic** machine envelope.
+The default is the **Haas Mini Mill** cutting volume — **16 × 12 × 10 in**
+(x, y; z up) = 406.4 × 304.8 × 254.0 mm. Geometry lives in the normalized box
+`[0,1]³` (so trajectories stay scale-free), but the voxel grid uses **per-axis
+dimensions** `(Nx, Ny, Nz)` chosen so every voxel is a physical **cube** of side
+`v` mm — keeping the cutter and cuts undistorted. `--resolution` is the voxel
+count along the **longest** axis; the others get proportionally fewer voxels.
+Set the envelope with `--workspace_in X Y Z` (inches); tool/target sizes are in
+millimetres (`--tool_radius_mm`, `--tool_height_mm`, `--target_radius_mm`).
+
+**Resolution for non-sub-voxel cuts.** A cut only registers if the cutter spans
+several voxels. The `stock[max_steps+1, Nx,Ny,Nz]` field dominates memory, and
+under autodiff it is allocated **twice** (value + gradient), so peak VRAM is
+≈ `2 × (max_steps+1) × Nx·Ny·Nz × 4 B`. Below: peak at the default
+`--max_steps 64` (65 slices, f32), and whether it fits an **80 GB** GPU:
+
+| voxel `v` | `--resolution` | grid `Nx×Ny×Nz` | peak VRAM (value+grad) | fits 80 GB | 1/4″ tool Ø |
+|-----------|----------------|------------------|------------------------|------------|-------------|
+| 4 mm   | 102 | 102×76×64   | 0.3 GB  | ✅ | 1.6 vox |
+| 3 mm   | 135 | 135×102×85  | 0.6 GB  | ✅ | 2.1 vox |
+| **2 mm** | **203** | **203×152×127** | **2.0 GB** | ✅ | **3.2 vox** |
+| 1.5 mm | 271 | 271×203×169 | 4.8 GB  | ✅ | 4.2 vox |
+| 1 mm   | 406 | 406×305×254 | 16.4 GB | ✅ | 6.3 vox |
+| 0.8 mm | 508 | 508×381×318 | 32.0 GB | ✅ | 7.9 vox |
+| 0.6 mm | 677 | 677×508×423 | 75.6 GB | ✅ (tight) | 10.6 vox |
+| 0.5 mm | 813 | 813×610×508 | 131 GB  | ❌ | 12.7 vox |
+
+→ **~2 mm voxels** (`--resolution 203`, the default in the examples) is a strong
+sweet spot — a 1/4″ cutter spans ~3 voxels at only ~2 GB peak. With **80 GB** of
+VRAM there is large headroom: go to **1 mm** (`--resolution 406`, ~16 GB, ~6
+voxels across the cutter) for finer cuts, or down to ~**0.6 mm** (~76 GB) if you
+also drop `--max_steps` (peak scales linearly with it). 0.5 mm needs ~131 GB —
+halve `--max_steps` to fit.
 
 #### Units & speed limits
 
-The differentiable simulator carries a **physical scale** and enforces two
-machine-style **max speeds** by clipping each step, mirroring a real controller's
-feed/rapid override (cf. the LinuxCNC trajectory planner and CAMotics). The
-geometry lives in the unit cube `[0,1]³`; `workspace_mm` is its physical edge
-length, and each step spans `dt` seconds, so a per-step displacement `delta`
-implies a speed of `|delta| · workspace_mm / dt` (mm/s). All scale-related math
-is done in **millimetres** internally — inches appear only at the I/O boundary
-(inch-valued inputs are converted up front; G-code requested in inches is
-converted just before emission), via the `cam.units` helper library.
+The differentiable simulator enforces two machine-style **max speeds** by
+clipping each step, mirroring a real controller's feed/rapid override (cf. the
+LinuxCNC trajectory planner and CAMotics). A per-step displacement `delta`
+(normalized) spans `delta · L` mm on the per-axis envelope `L`, over `dt`
+seconds, so its speed is `|delta · L| / dt` (mm/s). All scale-related math is in
+**millimetres** internally — inches appear only at the I/O boundary (inch inputs
+converted up front; G-code requested in inches converted just before emission),
+via the `cam.units` helper library.
 
 Two regimes are clipped per step:
 
@@ -107,7 +145,7 @@ the clipped magnitude into `tool_delta`.
 
 | flag | default | meaning |
 |------|---------|---------|
-| `--workspace_mm F` | `100.0` | physical edge length (mm) of the unit cube `[0,1]³` |
+| `--workspace_in X Y Z` | `16 12 10` | machine envelope (in), default Mini Mill |
 | `--dt F` | `0.01` | seconds per simulator step; sets the speed scale |
 | `--rapid_ipm F` | `500.0` | max traverse speed (inches/min) when clear of the stock |
 | `--feed_ipm F` | `10.0` | max cutting speed (inches/min) when near the stock |
@@ -119,12 +157,23 @@ The saved `trajectory.npy` is the **speed-clipped** path that was actually carve
 the optimized result.
 
 > **Note on `dt`.** The speed caps become per-step displacement caps
-> (`speed · dt`). With the defaults, the feed cap is ~0.042 mm/step — sub-voxel at
-> `--resolution 32` — so feed-dominated cutting advances slowly per step (faithful
-> to a 50:1 rapid:feed ratio, but it needs many steps). Raise `--dt` (and/or the
-> speeds) or pass `--no-enforce_speed_limits` if this is too restrictive.
+> (`speed · dt`). At the default `dt=0.01` the feed cap is ~0.042 mm/step — far
+> below any feasible voxel — so each feed step is sub-voxel *in time*. To advance
+> ~1 voxel per feed step pair `~2 mm` voxels with `--dt ≈ 0.3–0.5` (≈ voxel/feed),
+> or pass `--no-enforce_speed_limits` to disable the constraint.
 
 ### Continuous — PPO baseline (Method 2)
+
+> **Resolution note.** The PPO examples stay at `--resolution 32` (not the 2 mm /
+> `--resolution 203` used for gradient descent). The PPO observation embeds the
+> **full `stock` and `target` voxel grids** (~7.8M floats, ~31 MB each at 2 mm),
+> so the `num_steps × num_envs` rollout buffer is the bottleneck: at 2 mm it is
+> ~16 GB for `--num_envs 1` (fits an 80 GB GPU, but heavy/slow) and ~64 GB for
+> `--num_envs 4`; at 1 mm it is ~129 GB (infeasible). The env also uses the
+> simulator's default `dt` (no `--dt` flag). The gradient-descent method
+> (`train_csg`) keeps no rollout buffer and runs at 2 mm in ~2 GB. So for PPO,
+> push `--resolution` up only with `--num_envs 1` and watch VRAM; the examples
+> stay at 32 for practicality.
 
 ```bash
 uv run python -m algorithms.csg_ppo \
@@ -176,13 +225,16 @@ eval can run frequently, while the (more expensive) video is encoded only at
 
 | flag | default | meaning |
 |------|---------|---------|
+| `--eval` | `False` | compute evaluation metrics (Dice/ASD/HD95/reward) during training and at the end |
 | `--eval_freq N` | `0` | run a greedy eval rollout + log Dice/ASD/HD95/reward every `N` iterations (`0` disables). No video is encoded unless the video cadence also lands on that iteration. |
 | `--record_video_freq N` | `0` | additionally record + upload a greedy rollout **video** every `N` iterations (`0` disables) |
+| `--progress_bar` | `False` | use interactive `tqdm` progress bar instead of clean scrolling log lines (set `False` for clean log files and LLM harness compatibility) |
+| `--log_freq N` | `1` | print scrolling log output every `N` iterations when `--progress_bar` is disabled |
 | `--video_fps F` | `30` | frame rate of the encoded mp4 |
 | `--video_seed S` | `0` | seed for the rollout env, so the scenario is fixed across iterations and runs are comparable |
 | `--track` / `--no-track` | `--track` | upload to wandb; with `--no-track` the mp4s are still written locally |
 
-The recorder is built if **either** cadence is enabled. Metrics land in wandb
+The recorder is built if **either** cadence is enabled or `--eval` is passed. Metrics land in wandb
 under `eval/reward`, `eval/dice`, `eval/asd`, `eval/hd95` (logged on every eval
 *and* every video); videos appear under `media/policy_rollout`, with local copies
 at `runs/<run>/videos/policy_step_<global_step>.mp4`.
@@ -191,17 +243,16 @@ After training finishes (including on early stopping), the **final** model's
 geometry is also exported as STL meshes — the initial uncarved stock, the carved
 stock, and the target part — to `runs/<run>/meshes/` (and uploaded to wandb when
 `--track`). Meshes are the zero-level surface of each SDF (marching cubes) in the
-unit-cube frame.
+unit-cube frame. Furthermore, all training scripts output a structured summary table to console and save machine-readable evaluation results to `runs/<run>/metrics.json` and `runs/latest_metrics.json` (containing `dice`, `asd`, `hd95`, `reward`, `training_seconds`, `peak_vram_mb`, `num_steps`), making automated monitoring and LLM research harnesses (such as autoresearch agents) seamless.
 
 ```bash
 # Continuous PPO, no video (default):
 uv run python -m algorithms.csg_ppo --total_timesteps 10000000 --num_envs 4 \
     --resolution 32 --max_steps 64 --save_model
 
-# Continuous PPO, eval metrics every iteration, video only every 100 iterations:
+# Continuous PPO for autoresearch / LLM harnesses (clean scrolling logs, no W&B sync):
 uv run python -m algorithms.csg_ppo --total_timesteps 10000000 --num_envs 4 \
-    --resolution 32 --max_steps 64 --save_model \
-    --eval_freq 1 --record_video_freq 100 --video_fps 30
+    --resolution 32 --max_steps 64 --eval --no-track
 ```
 
 The discrete voxel PPO (`ppo.py`) renders its 3D GGUI scene off-screen for the
@@ -212,26 +263,26 @@ video:
 uv run python -m algorithms.ppo --total-timesteps 2000000 --num-envs 4 \
     --resolution 32 --max-steps 256
 
-# Discrete PPO, video + metrics to wandb every 25 iterations:
+# Discrete PPO for autoresearch / LLM harnesses:
 uv run python -m algorithms.ppo --total-timesteps 2000000 --num-envs 4 \
-    --resolution 32 --max-steps 256 --record_video_freq 100 --video_fps 30
+    --resolution 32 --max-steps 256 --eval --no-track
 ```
 
 **Gradient descent (`train_csg.py`).** Uses the **same** flags, encoder and
-metric/STL code paths as the PPO trainers above — `--eval_freq`,
+metric/STL code paths as the PPO trainers above — `--eval`, `--eval_freq`, `--progress_bar`, `--log_freq`,
 `--record_video_freq`, `--video_fps`, `--track` / `--no-track` — measured in Adam
 iterations. Each video raymarches the optimized toolpath and is encoded to mp4
 (ffmpeg) at `runs/<run>/videos/policy_step_<iter>.mp4`, uploaded to
 `media/policy_rollout`. Geometry metrics land under `eval/dice`, `eval/asd`,
 `eval/hd95` (the differentiable objective is logged as `losses/loss`; there is
 **no `eval/reward`**, since this method has no RL reward), with `gouge`/`residual`
-under `metrics/*`. The final STL meshes are exported just like the PPO trainers.
+under `metrics/*`. The final STL meshes and `metrics.json` files are exported just like the PPO trainers.
 Pass `--headless` to skip the live GUI (auto-disabled when no display is present).
 
 ```bash
-# Headless, eval every iteration + video every 100 iterations:
-uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 32 \
-    --save_model --eval_freq 1 --record_video_freq 25 --video_fps 30
+# Headless gradient descent for autoresearch / LLM harnesses:
+uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4 \
+    --save_model --eval --no-track
 ```
 
 > The continuous env renders by GPU raymarching; the discrete voxel env renders
@@ -258,8 +309,11 @@ Distance** (HD95).
 Evaluate a gradient-descent trajectory:
 
 ```bash
-uv run python -m eval.eval_csg --trajectory trajectory.npy --resolution 32
+uv run python -m eval.eval_csg --trajectory trajectory.npy --resolution 203
 ```
+
+(`--resolution 203` ≈ 2 mm voxels on the Mini Mill envelope, matching training;
+carving doesn't use `--dt`.)
 
 Evaluate continuous-PPO checkpoint(s) over paired random episodes:
 
@@ -299,10 +353,13 @@ program round-trips exactly through the inch-aware parser.
 
 **Generate G-code for the Haas:**
 
+The exporter defaults to the same Mini Mill envelope (`--workspace-in 16 12 10`,
+inches); pass `--workspace-mm <edge>` to fall back to an isotropic cube instead.
+
 ```bash
-# Using the default root trajectory
+# Using the default root trajectory (Mini Mill envelope)
 uv run python scripts/export_gcode.py --post haas --tool 3 --rpm 6000 \
-    --workspace-mm 100 --program-number 1234 -o part.nc
+    --program-number 1234 -o part.nc
 
 # Using a trajectory from a specific run folder
 uv run python scripts/export_gcode.py \
@@ -317,11 +374,12 @@ program):
 
 ```bash
 # Using the default root trajectory
-uv run python -m eval.eval_csg --trajectory trajectory.npy --gcode --post rs274
+uv run python -m eval.eval_csg --trajectory trajectory.npy --resolution 203 --gcode --post rs274
 
 # Using a trajectory from a specific run folder
 uv run python -m eval.eval_csg \
     --trajectory runs/CamEnvDiff-v0__train_csg__1__1782599757/trajectory.npy \
+    --resolution 203 \
     --gcode \
     --post rs274
 ```

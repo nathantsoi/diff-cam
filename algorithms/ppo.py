@@ -95,6 +95,12 @@ class Args:
     """record + upload a greedy policy rollout video every N training iterations (0 = disabled)"""
     eval_freq: int = 0
     """run a greedy eval rollout + log Dice/ASD/HD95/reward every N iterations (0 = disabled); no video unless the video cadence also lands on this iteration"""
+    eval: bool = False
+    """if True, compute evaluation metrics (Dice/ASD/HD95/reward) during training and at the end"""
+    progress_bar: bool = False
+    """use tqdm progress bar instead of scrolling log lines (set False for clean log files and LLM harness compatibility)"""
+    log_freq: int = 1
+    """print scrolling log output every N iterations when progress_bar is disabled"""
     video_fps: int = 30
     """frames per second for recorded policy videos"""
     video_seed: int = 0
@@ -333,7 +339,7 @@ if __name__ == "__main__":
 
     # Optional: greedy eval (metrics) and/or video recording during training.
     recorder = None
-    if args.record_video_freq > 0 or args.eval_freq > 0:
+    if args.record_video_freq > 0 or args.eval_freq > 0 or args.eval:
         from algorithms.policy_video import make_discrete_recorder
 
         recorder = make_discrete_recorder(
@@ -360,7 +366,9 @@ if __name__ == "__main__":
     iteration = 0           # bound even if the loop never runs
     last_video_iter = -1    # iteration whose model was last recorded as video
     last_eval_iter = -1     # iteration whose model was last evaluated (metrics)
-    pbar = tqdm(range(1, args.num_iterations + 1), desc=run_name)
+    last_m = None
+    eval_interval = args.eval_freq if args.eval_freq > 0 else (max(1, args.num_iterations // 10) if args.eval else 0)
+    pbar = tqdm(range(1, args.num_iterations + 1), desc=run_name) if args.progress_bar else range(1, args.num_iterations + 1)
     for iteration in pbar:
         # Annealing the rate if instructed to do so.
         if args.anneal_lr:
@@ -504,18 +512,35 @@ if __name__ == "__main__":
         writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
         writer.add_scalar("losses/explained_variance", explained_var, global_step)
         sps = int(global_step / (time.time() - start_time))
-        pbar.set_postfix(SPS=sps)
-        #tqdm.write(f"[{run_name}] SPS {iteration}: {sps}")
         writer.add_scalar("charts/SPS", sps, global_step)
 
         if recorder is not None:
             do_video = args.record_video_freq > 0 and iteration % args.record_video_freq == 0
-            do_eval = args.eval_freq > 0 and iteration % args.eval_freq == 0
+            do_eval = eval_interval > 0 and (iteration % eval_interval == 0 or iteration == args.num_iterations)
             if do_video or do_eval:
-                recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=do_video)
+                m = recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=do_video)
+                if m is not None:
+                    last_m = m
                 last_eval_iter = iteration
                 if do_video:
                     last_video_iter = iteration
+
+        if args.progress_bar:
+            if last_m is not None:
+                pbar.set_postfix(SPS=sps, reward=f"{last_m.get('reward', 0.0):+.2f}", dice=f"{last_m.get('dice', 0.0):.3f}")
+            else:
+                pbar.set_postfix(SPS=sps)
+        elif iteration % args.log_freq == 0 or iteration == args.num_iterations:
+            lr_val = optimizer.param_groups[0]["lr"]
+            if last_m is not None:
+                line = (f"[iter {iteration:4d}/{args.num_iterations}] step: {global_step} | vloss: {v_loss.item():.4f} | "
+                        f"ploss: {pg_loss.item():.4f} | lr: {lr_val:.2e} | SPS: {sps} | "
+                        f"reward: {last_m.get('reward', 0.0):+.2f} | dice: {last_m.get('dice', 0.0):.4f} | "
+                        f"asd: {last_m.get('asd', 0.0):.2f} | hd95: {last_m.get('hd95', 0.0):.2f}")
+            else:
+                line = (f"[iter {iteration:4d}/{args.num_iterations}] step: {global_step} | vloss: {v_loss.item():.4f} | "
+                        f"ploss: {pg_loss.item():.4f} | lr: {lr_val:.2e} | SPS: {sps}")
+            print(line, flush=True)
 
     # Final checkpoint after training is complete
     torch.save({
@@ -527,11 +552,58 @@ if __name__ == "__main__":
         # Capture the *final* model once: a video if recording is enabled, else a
         # metrics-only eval -- unless the last iteration already did it.
         if args.record_video_freq > 0 and iteration != last_video_iter:
-            recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=True)
-        elif args.eval_freq > 0 and iteration != last_eval_iter:
-            recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=False)
+            m = recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=True)
+            if m is not None:
+                last_m = m
+        elif (args.eval or args.eval_freq > 0) and iteration != last_eval_iter:
+            m = recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=False)
+            if m is not None:
+                last_m = m
+        if last_m is None and (args.eval or args.eval_freq > 0):
+            m = recorder.evaluate(agent, global_step, seed=args.video_seed, record_video=False)
+            if m is not None:
+                last_m = m
         # Export the final model's geometry (initial stock, carved stock, target).
         recorder.export_stls(agent, global_step, seed=args.video_seed)
         recorder.close()
+
+    # Save summary metrics for automated agents and LLM harnesses.
+    import json
+    total_seconds = time.time() - start_time
+    peak_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
+    final_dice = float(last_m.get("dice", 0.0)) if last_m is not None else 0.0
+    final_asd = float(last_m.get("asd", 0.0)) if last_m is not None else 0.0
+    final_hd95 = float(last_m.get("hd95", 0.0)) if last_m is not None else 0.0
+    final_reward = float(last_m.get("reward", 0.0)) if last_m is not None else 0.0
+
+    summary_data = {
+        "dice": round(final_dice, 6),
+        "asd": round(final_asd, 6),
+        "hd95": round(final_hd95, 6),
+        "reward": round(final_reward, 6),
+        "training_seconds": round(total_seconds, 2),
+        "peak_vram_mb": round(peak_vram_mb, 2),
+        "num_steps": global_step,
+    }
+    run_dir = f"runs/{run_name}"
+    os.makedirs(run_dir, exist_ok=True)
+    metrics_path = os.path.join(run_dir, "metrics.json")
+    with open(metrics_path, "w") as f:
+        json.dump(summary_data, f, indent=2)
+    latest_metrics_path = os.path.join("runs", "latest_metrics.json")
+    try:
+        with open(latest_metrics_path, "w") as f:
+            json.dump(summary_data, f, indent=2)
+    except Exception as e:
+        print(f"[metrics] failed to write {latest_metrics_path}: {e}")
+
+    print("\n---")
+    for k, v in summary_data.items():
+        if isinstance(v, float):
+            print(f"{k + ':':18s} {v:.6f}")
+        else:
+            print(f"{k + ':':18s} {v}")
+    print("---\n", flush=True)
+
     envs.close()
     writer.close()

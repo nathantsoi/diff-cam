@@ -31,9 +31,9 @@ class _HardCarveSimulator(CSGSimulatorDelta):
 
     @ti.kernel
     def apply_cut_hard(self, t: ti.i32):
-        for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             p = ti.Vector(
-                [(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx]
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             tool_d = self.tool_sdf_sharp(p, t)
             self.stock[t + 1, i, j, k] = ti.max(self.stock[t, i, j, k], -tool_d)
@@ -49,8 +49,8 @@ def carve_stock(
     positions,
     resolution=24,
     target_shape="sphere",
-    tool_radius=0.05,
-    tool_height=0.15,
+    tool_radius=3.175,   # mm (1/4" end mill)
+    tool_height=25.0,    # mm
 ):
     """Run ``positions`` through the simulator and return the final stock SDF grid.
 

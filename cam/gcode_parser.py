@@ -194,7 +194,7 @@ def parse_gcode(text: str, config: MachineConfig = MachineConfig()):
             have_pos = True
             continue
 
-        scale = config.workspace_mm
+        scale = config.workspace_vec   # (3,) per-axis mm
 
         if motion_mode in (0, 1):
             kind = "rapid" if motion_mode == 0 else "feed"
@@ -222,7 +222,7 @@ def parse_gcode(text: str, config: MachineConfig = MachineConfig()):
                 center=center_mm / scale,
                 cw=cw,
                 plane=plane,
-            )
+            )  # NOTE: arcs assume near-isotropic scale; anisotropic envelopes warp circles
             segments.append(seg)
 
         pos_mm = new_pos

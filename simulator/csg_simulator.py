@@ -30,13 +30,31 @@ class CSGSimulatorDelta:
         target_shape=None,
         tool_start=(0.5, 0.5, 1.0),
         init_taichi=True,
-        workspace_mm=100.0,
+        workspace_in=(16.0, 12.0, 10.0),
+        workspace_mm=None,
         dt=0.01,
         rapid_ipm=500.0,
         feed_ipm=10.0,
         safe_distance_in=0.1,
         enforce_speed_limits=True,
     ):
+        """Differentiable CSG simulator over a configurable, possibly non-cubic
+        machine envelope.
+
+        The working/geometry coordinate is the normalized box ``[0, 1]^3`` (so
+        ``tool_pos`` / ``tool_delta`` / exported trajectories are scale-free),
+        but the physical envelope (``workspace``) may be anisotropic -- the
+        default is the **Haas Mini Mill** cutting volume, 16 x 12 x 10 inches
+        (x, y; z up). To keep geometry undistorted, the voxel grid uses per-axis
+        dimensions ``(Nx, Ny, Nz)`` chosen so every voxel is a physical CUBE of
+        side ``v`` mm, and all internal SDF distances are measured in **voxels**
+        (isotropic). ``resolution`` is the voxel count along the LONGEST axis;
+        the other axes get proportionally fewer voxels.
+
+        workspace_in : (x, y, z) envelope in inches (default Mini Mill).
+        workspace_mm : (x, y, z) envelope in mm; overrides workspace_in if given.
+                       A scalar is accepted and treated as a cube.
+        """
         # ti.init() RESETS the whole Taichi runtime, invalidating every field
         # allocated by any previously-created simulator. That is fine when each
         # process uses one simulator at a time (training with a single env, or
@@ -54,10 +72,33 @@ class CSGSimulatorDelta:
                 pass  # taichi already initialized
             ti.set_logging_level(ti.WARN)
 
-        self.resolution = resolution
         self.max_steps = max_steps
-        self.dx = 1.0 / resolution
-        self.inv_dx = float(resolution)
+
+        # ---- Physical envelope & cubic-voxel grid -----------------------------
+        # Resolve the envelope to a 3-vector in mm.
+        if workspace_mm is None:
+            wx, wy, wz = (float(inch_to_mm(c)) for c in workspace_in)
+        elif np.isscalar(workspace_mm):
+            wx = wy = wz = float(workspace_mm)
+        else:
+            wx, wy, wz = (float(c) for c in workspace_mm)
+        self.Lx, self.Ly, self.Lz = wx, wy, wz          # envelope mm (x, y, z up)
+
+        # Cubic voxels: ``resolution`` voxels span the longest axis, fixing the
+        # voxel side ``v`` (mm); the other axes get round(L / v) voxels.
+        longest = max(wx, wy, wz)
+        self.v = longest / float(resolution)            # mm per voxel (cube side)
+        self.Nx = max(1, int(round(wx / self.v)))
+        self.Ny = max(1, int(round(wy / self.v)))
+        self.Nz = max(1, int(round(wz / self.v)))
+        self.resolution = max(self.Nx, self.Ny, self.Nz)  # voxels on longest axis
+
+        # Internal SDF distances are in VOXELS: a normalized [0,1] difference is
+        # multiplied by the per-axis grid count to get a voxel-space coordinate
+        # (isotropic because voxels are cubes). ``k_ref`` rescales the smooth-CSG
+        # ``k`` from the legacy unit-cube convention into voxel space so a cubic
+        # envelope at a given resolution reproduces the old behavior exactly.
+        self.k_ref = float(self.resolution)
 
         self.k = ti.field(dtype=ti.f32, shape=())  # anneal during training
         self.k[None] = k_init
@@ -84,36 +125,35 @@ class CSGSimulatorDelta:
         # whose bottom face is at the top of the tool (tool tip + tool_height)
         # and which extends upward by holder_height.
         #
-        # Default radius is a 2.5 inch diameter holder expressed in unit-cube
-        # coordinates. The unit cube is workspace_mm on a side (MachineConfig,
-        # default 100 mm), so r = (2.5 in * 25.4 mm/in / 2) / 100 mm = 0.3175.
-        # Call sites that know their own workspace scale should overwrite this.
+        # Sizes are in MILLIMETRES now (converted to voxels internally). Default
+        # holder is a 2.5 inch diameter spindle/collet; height spans the full Z
+        # envelope so it always clears above the cutter.
         self.holder_radius = ti.field(dtype=ti.f32, shape=())
         self.holder_height = ti.field(dtype=ti.f32, shape=())
-        self.holder_radius[None] = 0.3175
-        self.holder_height[None] = 1.0  # tall enough to clear the whole domain
+        self.holder_radius[None] = float(inch_to_mm(2.5 / 2.0))   # mm
+        self.holder_height[None] = float(self.Lz)                 # mm
 
         # ---- Units & speed limits (constraint, enforced by clipping) ----
-        # The geometry lives in the unit cube [0, 1]^3; ``workspace_mm`` is the
-        # physical edge length, so a unit-cube displacement of magnitude |d|
-        # spans |d| * workspace_mm millimetres. One simulator step advances the
-        # tool over ``dt`` seconds, so the commanded speed of a step is
+        # The geometry lives in the normalized box [0, 1]^3; axis ``a`` spans
+        # ``L_a`` mm, so a normalized displacement ``d`` spans ``d (.) L`` mm
+        # (component-wise). One step advances the tool over ``dt`` seconds, so
+        # the commanded speed of a step is
         #
-        #     speed_mm_per_s = |tool_delta[t]| * workspace_mm / dt
+        #     speed_mm_per_s = |tool_delta[t] (.) L| / dt
         #
         # Two physical max speeds are enforced (clipped) per step, like a real
         # controller's feed/rapid override (cf. LinuxCNC trajectory planner and
         # CAMotics): ``rapid_speed`` when the cutter has clearance from the
         # remaining stock, ``feed_speed`` when it is within ``safe_distance`` of
         # it (i.e. cutting). ALL scale-related math is done in millimetres;
-        # inch-valued inputs are converted up front via ``cam.units``.
-        self.workspace_mm = ti.field(dtype=ti.f32, shape=())
+        # inch-valued inputs are converted up front via ``cam.units``. The
+        # per-axis envelope ``(Lx, Ly, Lz)`` is fixed at construction and used
+        # directly as a kernel constant.
         self.dt = ti.field(dtype=ti.f32, shape=())               # seconds / step
         self.rapid_speed = ti.field(dtype=ti.f32, shape=())      # mm / s
         self.feed_speed = ti.field(dtype=ti.f32, shape=())       # mm / s
         self.safe_distance = ti.field(dtype=ti.f32, shape=())    # mm
         self.enforce_speed_limits = ti.field(dtype=ti.i32, shape=())
-        self.workspace_mm[None] = float(workspace_mm)
         self.dt[None] = float(dt)
         self.rapid_speed[None] = float(ipm_to_mm_per_s(rapid_ipm))
         self.feed_speed[None] = float(ipm_to_mm_per_s(feed_ipm))
@@ -159,7 +199,7 @@ class CSGSimulatorDelta:
         # ---- Stock ----
         self.stock = ti.field(
             dtype=ti.f32,
-            shape=(max_steps + 1, resolution, resolution, resolution),
+            shape=(max_steps + 1, self.Nx, self.Ny, self.Nz),
             needs_grad=True,
         )
         self.stock_volume = ti.field(dtype=ti.f32, shape=())
@@ -174,7 +214,7 @@ class CSGSimulatorDelta:
         self._init_target_fields()
 
         self.target = ti.field(
-            dtype=ti.f32, shape=(resolution, resolution, resolution)
+            dtype=ti.f32, shape=(self.Nx, self.Ny, self.Nz)
         )  # used for evaluation
 
         # ---- Loss ----
@@ -207,36 +247,48 @@ class CSGSimulatorDelta:
             raise ValueError(f"Unsupported target shape: {self.target_shape}")
 
     # ========================================================================
-    # SDFs
+    # SDFs  (all distances in VOXELS; cubic voxels make this isotropic)
     # ========================================================================
 
     @ti.func
+    def _vox(self, q):
+        """Normalized [0,1] point/vector -> voxel-space coordinate.
+
+        Multiplying each axis by its grid count maps the (possibly anisotropic)
+        normalized box to an isotropic voxel space where 1 unit = 1 cubic voxel
+        = ``v`` mm, so every SDF below measures physically-faithful distances.
+        """
+        return ti.Vector([q.x * self.Nx, q.y * self.Ny, q.z * self.Nz])
+
+    @ti.func
     def tool_sdf(self, p, t):
-        """Smoothed swept-cylinder SDF: tool sweeps from tool_pos[t] to tool_pos[t+1].
+        """Smoothed swept-cylinder SDF (voxel units): tool sweeps tool_pos[t]->[t+1].
 
         With the delta parametrization, tool_pos[t+1] == tool_pos[t] + tool_delta[t],
         so the swept segment for cut t is exactly the displacement tool_delta[t].
+        Radius/height are millimetres, converted to voxels via ``v``.
         """
-        r = self.tool_radius[None]
-        h = self.tool_height[None]
-        kv = self.k[None]
+        r = self.tool_radius[None] / self.v          # voxels
+        h = self.tool_height[None] / self.v          # voxels
+        kv = self.k[None] / self.k_ref               # smoothness in voxel space
 
-        a = self.tool_pos[t]
-        b = self.tool_pos[t + 1]
+        pv = self._vox(p)
+        a = self._vox(self.tool_pos[t])
+        b = self._vox(self.tool_pos[t + 1])
 
         # --- Distance in XY to the swept segment (a capsule axis) ---
-        pa_xy = ti.Vector([p.x - a.x, p.y - a.y])
+        pa_xy = ti.Vector([pv.x - a.x, pv.y - a.y])
         ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
         ba_len2 = ba_xy.dot(ba_xy) + 1e-12
         h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
         closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
-        d_xy = ti.sqrt((p.x - closest_xy.x) ** 2 + (p.y - closest_xy.y) ** 2 + 1e-8) - r
+        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
 
         # --- Z extent: tool z at the closest point along the segment ---
         # Linearly interpolate the tool's base z between a and b.
         z_base = a.z + (b.z - a.z) * h_param
         z_center = z_base + 0.5 * h
-        d_z = ti.sqrt((p.z - z_center) ** 2 + 1e-8) - 0.5 * h
+        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * h
 
         # --- Combine (same smooth-CSG combination as before) ---
         d_xy_pos = smooth_max(d_xy, 0.0, kv)
@@ -247,7 +299,7 @@ class CSGSimulatorDelta:
 
     @ti.func
     def holder_sdf(self, p, t):
-        """Smoothed swept-cylinder SDF for the tool holder over segment t.
+        """Smoothed swept-cylinder SDF for the tool holder over segment t (voxels).
 
         Geometry mirrors ``tool_sdf`` (a capsule axis in XY swept from
         tool_pos[t] to tool_pos[t+1]) but with the holder radius and a z-range
@@ -255,27 +307,28 @@ class CSGSimulatorDelta:
         tool laterally while riding above the cutting flutes. Differentiable in
         tool_pos (hence tool_delta), so the collision penalty has gradients.
         """
-        r = self.holder_radius[None]
-        h = self.holder_height[None]
-        tool_h = self.tool_height[None]
-        kv = self.k[None]
+        r = self.holder_radius[None] / self.v        # voxels
+        h = self.holder_height[None] / self.v        # voxels
+        tool_h = self.tool_height[None] / self.v     # voxels
+        kv = self.k[None] / self.k_ref
 
-        a = self.tool_pos[t]
-        b = self.tool_pos[t + 1]
+        pv = self._vox(p)
+        a = self._vox(self.tool_pos[t])
+        b = self._vox(self.tool_pos[t + 1])
 
-        pa_xy = ti.Vector([p.x - a.x, p.y - a.y])
+        pa_xy = ti.Vector([pv.x - a.x, pv.y - a.y])
         ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
         ba_len2 = ba_xy.dot(ba_xy) + 1e-12
         h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
         closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
-        d_xy = ti.sqrt((p.x - closest_xy.x) ** 2 + (p.y - closest_xy.y) ** 2 + 1e-8) - r
+        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
 
         # Holder bottom sits at (interpolated tool tip z) + tool_height; the
         # holder body spans [z_bottom, z_bottom + h].
         z_base = a.z + (b.z - a.z) * h_param
         z_bottom = z_base + tool_h
         z_center = z_bottom + 0.5 * h
-        d_z = ti.sqrt((p.z - z_center) ** 2 + 1e-8) - 0.5 * h
+        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * h
 
         d_xy_pos = smooth_max(d_xy, 0.0, kv)
         d_z_pos = smooth_max(d_z, 0.0, kv)
@@ -285,71 +338,68 @@ class CSGSimulatorDelta:
 
     @ti.func
     def target_sdf(self, p):
-        """Target shape SDF — branches resolved at compile time via ti.static."""
+        """Target shape SDF (voxels) — branches resolved at compile time.
+
+        Center is normalized [0,1]; radius/height/half-size are millimetres.
+        """
         d = 0.0
+        pv = self._vox(p)
 
         if ti.static(self.target_shape == "sphere"):
             d = sphere_sdf(
-                p,
-                self.target_params["center"][None],
-                self.target_params["radius"][None],
+                pv,
+                self._vox(self.target_params["center"][None]),
+                self.target_params["radius"][None] / self.v,
             )
         elif ti.static(self.target_shape == "box"):
             d = box_sdf(
-                p,
-                self.target_params["center"][None],
-                self.target_params["half_size"][None],
+                pv,
+                self._vox(self.target_params["center"][None]),
+                self.target_params["half_size"][None] / self.v,
             )
         elif ti.static(self.target_shape == "cylinder"):
-            d = cylinder_sdf(
-                p,
-                ti.Vector([0.5, 0.5, 0.5]),
-                self.target_params["radius"][None],
-                self.target_params["height"][None],
-            )
+            radius = self.target_params["radius"][None] / self.v
+            height = self.target_params["height"][None] / self.v
+            cv = self._vox(ti.Vector([0.5, 0.5, 0.5]))
+            d = cylinder_sdf(pv, cv.x, cv.y, cv.z - 0.5 * height, radius, height)
         elif ti.static(self.target_shape == "pyramid"):
-            d = pyramid_sdf(
-                p,
-                self.target_params["center"][None],
-                self.target_params["base_half_size"][None],
-                self.target_params["height"][None],
-            )
+            height = self.target_params["height"][None] / self.v
+            half_base = self.target_params["base_half_size"][None].x / self.v
+            cv = self._vox(self.target_params["center"][None])
+            d = pyramid_sdf(pv, cv.x, cv.y, cv.z - 0.5 * height, half_base, height)
         return d
 
     @ti.kernel
     def set_target_volume(self):
-        """have one function to compute the target volume based on parameters"""
+        """Target volume as a fraction of the envelope (occupied voxels / total)."""
         count = 0
-        for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             p = ti.Vector(
-                [(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx]
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             if self.target_sdf(p) < 0:
                 count += 1
-        self.target_volume[None] = count * (self.dx**3)
+        self.target_volume[None] = count / float(self.Nx * self.Ny * self.Nz)
 
     @ti.kernel
     def init_stock(self):
-        """Initial stock: unit cube SDF in stock[0]."""
-        for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
+        """Initial stock: the full envelope block, as a voxel-space SDF in stock[0]."""
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             p = ti.Vector(
-                [(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx]
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             self.stock[0, i, j, k] = box_sdf(
-                p, ti.Vector([0.5, 0.5, 0.5]), ti.Vector([0.5, 0.5, 0.5])
+                self._vox(p),
+                self._vox(ti.Vector([0.5, 0.5, 0.5])),
+                self._vox(ti.Vector([0.5, 0.5, 0.5])),
             )
 
     @ti.kernel
     def bake_target_grid(self):
-        for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             p = ti.Vector(
-                [
-                    (i + 0.5) * self.dx,
-                    (j + 0.5) * self.dx,
-                    (k + 0.5) * self.dx,
-                ]
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
-
             self.target[i, j, k] = self.target_sdf(p)
 
     # ========================================================================
@@ -382,22 +432,21 @@ class CSGSimulatorDelta:
         Same interpolation as ``interpolate_stock`` but reads an explicit step
         slot instead of ``current_step`` -- needed by ``advance_position`` to
         measure how close the cutter is to the *remaining* stock at the start of
-        a move. Returns a unit-cube signed distance (negative inside material).
+        a move. Returns a voxel-space signed distance (negative inside material).
         """
-        p_grid = p * self.resolution
+        p_grid = self._vox(p)
         x0 = ti.cast(ti.floor(p_grid.x), ti.i32)
         y0 = ti.cast(ti.floor(p_grid.y), ti.i32)
         z0 = ti.cast(ti.floor(p_grid.z), ti.i32)
         x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
         tx, ty, tz = p_grid.x - x0, p_grid.y - y0, p_grid.z - z0
 
-        R = self.resolution
-        x0 = ti.max(0, ti.min(R - 1, x0))
-        x1 = ti.max(0, ti.min(R - 1, x1))
-        y0 = ti.max(0, ti.min(R - 1, y0))
-        y1 = ti.max(0, ti.min(R - 1, y1))
-        z0 = ti.max(0, ti.min(R - 1, z0))
-        z1 = ti.max(0, ti.min(R - 1, z1))
+        x0 = ti.max(0, ti.min(self.Nx - 1, x0))
+        x1 = ti.max(0, ti.min(self.Nx - 1, x1))
+        y0 = ti.max(0, ti.min(self.Ny - 1, y0))
+        y1 = ti.max(0, ti.min(self.Ny - 1, y1))
+        z0 = ti.max(0, ti.min(self.Nz - 1, z0))
+        z1 = ti.max(0, ti.min(self.Nz - 1, z1))
 
         c000 = self.stock[t_idx, x0, y0, z0]
         c100 = self.stock[t_idx, x1, y0, z0]
@@ -422,10 +471,10 @@ class CSGSimulatorDelta:
 
         Reconstructs ``tool_pos[t+1] = tool_pos[t] + clipped(tool_delta[t])``.
         The commanded per-step displacement implies a speed
-        ``|delta| * workspace_mm / dt`` (mm/s); if that exceeds the regime's max
-        speed the displacement is scaled down so the *actual* move runs exactly
-        at the cap (direction preserved) -- a differentiable analogue of a
-        machine controller clamping the commanded feed.
+        ``|delta (.) L| / dt`` (mm/s), where ``L`` is the per-axis envelope; if
+        that exceeds the regime's max speed the displacement is scaled down so
+        the *actual* move runs exactly at the cap (direction preserved) -- a
+        differentiable analogue of a machine controller clamping the feed.
 
         Regime (all distances in mm): the move is treated as cutting ->
         ``feed_speed`` when the cutter would come within ``safe_distance`` of the
@@ -439,25 +488,28 @@ class CSGSimulatorDelta:
         """
         a = self.tool_pos[t]
         delta = self.tool_delta[t]
-        w = self.workspace_mm[None]
 
-        # Commanded step length, in mm.
-        dmm = delta * w
+        # Commanded step length, in mm (normalized delta scaled per-axis).
+        dmm = ti.Vector([delta.x * self.Lx, delta.y * self.Ly, delta.z * self.Lz])
         mag_mm = ti.sqrt(dmm.dot(dmm) + 1e-12)
 
         # Clearance from the cutter to the remaining stock at the commanded
         # destination, in mm (negative -> the cutter is inside material).
-        # The voxel grid only represents the unit cube; outside it the trilinear
+        # The voxel grid only represents the envelope; outside it the trilinear
         # lookup clamps to the boundary layer and is meaningless. Remaining stock
-        # is always a subset of the cube, so the distance to the cube itself is a
-        # valid clearance floor -- combine the two so a probe lifted into open
-        # air above the stock reads true clearance (rapid) instead of the top
-        # surface (feed).
+        # is always a subset of the envelope, so the distance to the envelope box
+        # is a valid clearance floor -- combine the two so a probe lifted into
+        # open air above the stock reads true clearance (rapid) instead of the
+        # top surface (feed). Both SDFs are in voxels; convert to mm via ``v``.
         probe = a + delta
         stock_d = self.stock_sdf_at(probe, t)
-        cube_d = box_sdf(probe, ti.Vector([0.5, 0.5, 0.5]), ti.Vector([0.5, 0.5, 0.5]))
+        cube_d = box_sdf(
+            self._vox(probe),
+            self._vox(ti.Vector([0.5, 0.5, 0.5])),
+            self._vox(ti.Vector([0.5, 0.5, 0.5])),
+        )
         clearance = ti.max(stock_d, cube_d)
-        clearance_mm = (clearance - self.tool_radius[None]) * w
+        clearance_mm = clearance * self.v - self.tool_radius[None]
         is_feed = ti.cast(clearance_mm <= self.safe_distance[None], ti.f32)
 
         # Max distance allowed this step for each regime: speed (mm/s) * dt (s).
@@ -480,10 +532,12 @@ class CSGSimulatorDelta:
     @ti.kernel
     def apply_cut(self, t: ti.i32):
         """stock[t+1] = smooth_max(stock[t], -tool_sdf at segment t)."""
-        for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
-            kv = self.k[None]  # moved inside loop for autodiff
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            # k is scaled by k_ref because SDFs are now in voxels (the carve
+            # smooth_max would otherwise overflow exp() and NaN the gradient).
+            kv = self.k[None] / self.k_ref  # moved inside loop for autodiff
             p = ti.Vector(
-                [(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx]
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             tool_d = self.tool_sdf(p, t)
             self.stock[t + 1, i, j, k] = smooth_max(self.stock[t, i, j, k], -tool_d, kv)
@@ -497,10 +551,10 @@ class CSGSimulatorDelta:
         safe to call outside a Tape (for RL reward / eval).
         """
         total = 0.0
-        for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
-            scale = self.inv_dx
-            inv_n = 1.0 / (self.resolution ** 3)
-            p = ti.Vector([(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx])
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
+            inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
+            p = ti.Vector([(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz])
             stock_d = self.stock[t, i, j, k]
             target_d = self.target_sdf(p)
 
@@ -520,12 +574,12 @@ class CSGSimulatorDelta:
     @ti.kernel
     def compute_loss(self, T: ti.i32):
         """Terminal occupancy loss: weighted gouge² + residual²."""
-        for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             # All scalar reads moved inside for autodiff compatibility.
-            scale = self.inv_dx
-            inv_n = 1.0 / (self.resolution**3)
+            scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
+            inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
             p = ti.Vector(
-                [(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx]
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             stock_d = self.stock[T, i, j, k]
             target_d = self.target_sdf(p)
@@ -565,13 +619,13 @@ class CSGSimulatorDelta:
         it a near-hard constraint that stays inactive until violated, instead of
         a force that shoves the tool away from the workpiece pre-emptively.
         """
-        for t, i, j, k in ti.ndrange(T, self.resolution, self.resolution, self.resolution):
-            scale = self.inv_dx
-            inv_n = 1.0 / (self.resolution ** 3)
+        for t, i, j, k in ti.ndrange(T, self.Nx, self.Ny, self.Nz):
+            scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
+            inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
             w = self.holder_penalty_weight[None]
             margin = self.holder_margin[None]
             p = ti.Vector(
-                [(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx]
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             stock_d = self.stock[t + 1, i, j, k]
             holder_d = self.holder_sdf(p, t)
@@ -594,15 +648,15 @@ class CSGSimulatorDelta:
         g = 0.0
         r = 0.0
         h = 0.0
-        scale = self.inv_dx
-        inv_n = 1.0 / (self.resolution ** 3)
+        scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
+        inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
         w_g = self.w_gouge[None]
         w_r = self.w_residual[None]
         w_h = self.holder_penalty_weight[None]
         margin = self.holder_margin[None]
         # Geometry terms on the final stock (stock[T]).
-        for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
-            p = ti.Vector([(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx])
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            p = ti.Vector([(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz])
             stock_d = self.stock[T, i, j, k]
             target_d = self.target_sdf(p)
             sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
@@ -614,8 +668,8 @@ class CSGSimulatorDelta:
             g += inv_n * w_g * gouge * gouge
             r += inv_n * w_r * residual * residual
         # Holder barrier summed over every segment.
-        for t, i, j, k in ti.ndrange(T, self.resolution, self.resolution, self.resolution):
-            p = ti.Vector([(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx])
+        for t, i, j, k in ti.ndrange(T, self.Nx, self.Ny, self.Nz):
+            p = ti.Vector([(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz])
             stock_d = self.stock[t + 1, i, j, k]
             holder_d = self.holder_sdf(p, t)
             sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
@@ -636,12 +690,12 @@ class CSGSimulatorDelta:
         RL env to terminate the episode. Safe to call outside a Tape.
         """
         vol = 0.0
-        for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             p = ti.Vector(
-                [(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx]
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             if self.stock[t + 1, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
-                vol += self.dx ** 3
+                vol += 1.0 / (self.Nx * self.Ny * self.Nz)
         return vol
 
     @ti.kernel
@@ -652,12 +706,12 @@ class CSGSimulatorDelta:
         the holder with the stock somewhere. Non-differentiable.
         """
         vol = 0.0
-        for t, i, j, k in ti.ndrange(T, self.resolution, self.resolution, self.resolution):
+        for t, i, j, k in ti.ndrange(T, self.Nx, self.Ny, self.Nz):
             p = ti.Vector(
-                [(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx]
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             if self.stock[t + 1, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
-                vol += self.dx ** 3
+                vol += 1.0 / (self.Nx * self.Ny * self.Nz)
         return vol
 
     def forward(self, num_active_steps):
@@ -689,7 +743,7 @@ class CSGSimulatorDelta:
     def interpolate_stock(self, p):
         """Trilinear lookup into stock[current_step, ...]."""
         t_idx = self.current_step[None]
-        p_grid = p * self.resolution
+        p_grid = self._vox(p)
 
         x0 = ti.cast(ti.floor(p_grid.x), ti.i32)
         y0 = ti.cast(ti.floor(p_grid.y), ti.i32)
@@ -697,13 +751,12 @@ class CSGSimulatorDelta:
         x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
         tx, ty, tz = p_grid.x - x0, p_grid.y - y0, p_grid.z - z0
 
-        R = self.resolution
-        x0 = ti.max(0, ti.min(R - 1, x0))
-        x1 = ti.max(0, ti.min(R - 1, x1))
-        y0 = ti.max(0, ti.min(R - 1, y0))
-        y1 = ti.max(0, ti.min(R - 1, y1))
-        z0 = ti.max(0, ti.min(R - 1, z0))
-        z1 = ti.max(0, ti.min(R - 1, z1))
+        x0 = ti.max(0, ti.min(self.Nx - 1, x0))
+        x1 = ti.max(0, ti.min(self.Nx - 1, x1))
+        y0 = ti.max(0, ti.min(self.Ny - 1, y0))
+        y1 = ti.max(0, ti.min(self.Ny - 1, y1))
+        z0 = ti.max(0, ti.min(self.Nz - 1, z0))
+        z1 = ti.max(0, ti.min(self.Nz - 1, z1))
 
         c000 = self.stock[t_idx, x0, y0, z0]
         c100 = self.stock[t_idx, x1, y0, z0]
@@ -725,7 +778,7 @@ class CSGSimulatorDelta:
     @ti.func
     def stock_normal(self, p):
         """Approximate surface normal of stock via central differences."""
-        eps = self.dx * 1.5
+        eps = 1.5 / self.resolution  # ~1.5 voxels in normalized coords
         dx = ti.Vector([eps, 0.0, 0.0])
         dy = ti.Vector([0.0, eps, 0.0])
         dz = ti.Vector([0.0, 0.0, eps])
@@ -737,7 +790,7 @@ class CSGSimulatorDelta:
     @ti.func
     def target_normal(self, p):
         """Analytic-ish normal of target via central differences on target_sdf."""
-        eps = self.dx * 1.5
+        eps = 1.5 / self.resolution  # ~1.5 voxels in normalized coords
         dx = ti.Vector([eps, 0.0, 0.0])
         dy = ti.Vector([0.0, eps, 0.0])
         dz = ti.Vector([0.0, 0.0, eps])
@@ -795,7 +848,13 @@ class CSGSimulatorDelta:
                 d_tool = 1e6
                 d_holder = 1e6
 
-                # Inside the unit cube — use interpolated voxel SDFs.
+                # The march runs in the normalized [0,1] box, but the SDFs now
+                # return VOXEL distances, so scale them back to normalized units
+                # (1 voxel ~= 1/resolution along the longest axis -- conservative
+                # for the others, which just means slightly smaller safe steps).
+                inv_R = 1.0 / self.resolution
+
+                # Inside the normalized box — use interpolated voxel SDFs.
                 # Outside — fall back to an AABB so rays from the camera
                 # can still hit something on their way in.
                 inside_cube = (
@@ -809,9 +868,9 @@ class CSGSimulatorDelta:
 
                 if inside_cube:
                     if show_stock == 1:
-                        d_stock = self.interpolate_stock(p)
+                        d_stock = self.interpolate_stock(p) * inv_R
                     if show_target == 1:
-                        d_target = self.target_sdf(p)
+                        d_target = self.target_sdf(p) * inv_R
                 else:
                     d_box = p - ti.Vector([0.5, 0.5, 0.5])
                     d_aabb = (
@@ -826,8 +885,8 @@ class CSGSimulatorDelta:
                         d_target = ti.max(d_aabb, 2e-3)
 
                 if show_tool == 1:
-                    d_tool = self.tool_sdf_sharp(p, t_idx)
-                    d_holder = self.holder_sdf_sharp(p, t_idx)
+                    d_tool = self.tool_sdf_sharp(p, t_idx) * inv_R
+                    d_holder = self.holder_sdf_sharp(p, t_idx) * inv_R
 
                 d = ti.min(d_stock, ti.min(d_target, ti.min(d_tool, d_holder)))
 
@@ -848,7 +907,7 @@ class CSGSimulatorDelta:
                         # Voxel-checker shading: darken every other voxel so
                         # the discrete grid is visible. This is what gives the
                         # "voxelized" look and makes individual cuts pop.
-                        grid_p = p * float(self.resolution)
+                        grid_p = self._vox(p)
                         cx = int(grid_p.x) % 2
                         cy = int(grid_p.y) % 2
                         cz = int(grid_p.z) % 2
@@ -918,26 +977,26 @@ class CSGSimulatorDelta:
         call this from a kernel that runs under ti.ad.Tape.
         """
 
-        r = self.tool_radius[None]
-        h = self.tool_height[None]
-        kv = self.k[None]
+        r = self.tool_radius[None] / self.v          # voxels
+        h = self.tool_height[None] / self.v          # voxels
 
-        a = self.tool_pos[t]
-        b = self.tool_pos[t + 1]
+        pv = self._vox(p)
+        a = self._vox(self.tool_pos[t])
+        b = self._vox(self.tool_pos[t + 1])
 
         # --- Distance in XY to the swept segment (a capsule axis) ---
-        pa_xy = ti.Vector([p.x - a.x, p.y - a.y])
+        pa_xy = ti.Vector([pv.x - a.x, pv.y - a.y])
         ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
         ba_len2 = ba_xy.dot(ba_xy) + 1e-12
         h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
         closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
-        d_xy = ti.sqrt((p.x - closest_xy.x) ** 2 + (p.y - closest_xy.y) ** 2 + 1e-8) - r
+        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
 
         # --- Z extent: tool z at the closest point along the segment ---
         # Linearly interpolate the tool's base z between a and b.
         z_base = a.z + (b.z - a.z) * h_param
         z_center = z_base + 0.5 * h
-        d_z = ti.sqrt((p.z - z_center) ** 2 + 1e-8) - 0.5 * h
+        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * h
 
         # --- Combine (hard max for crisp edges) ---
         d_xy_pos = ti.max(d_xy, 0.0)
@@ -953,24 +1012,25 @@ class CSGSimulatorDelta:
         Same geometry as ``holder_sdf`` but with hard ti.max. Not
         differentiable -- never call under ti.ad.Tape.
         """
-        r = self.holder_radius[None]
-        h = self.holder_height[None]
-        tool_h = self.tool_height[None]
+        r = self.holder_radius[None] / self.v        # voxels
+        h = self.holder_height[None] / self.v        # voxels
+        tool_h = self.tool_height[None] / self.v     # voxels
 
-        a = self.tool_pos[t]
-        b = self.tool_pos[t + 1]
+        pv = self._vox(p)
+        a = self._vox(self.tool_pos[t])
+        b = self._vox(self.tool_pos[t + 1])
 
-        pa_xy = ti.Vector([p.x - a.x, p.y - a.y])
+        pa_xy = ti.Vector([pv.x - a.x, pv.y - a.y])
         ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
         ba_len2 = ba_xy.dot(ba_xy) + 1e-12
         h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
         closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
-        d_xy = ti.sqrt((p.x - closest_xy.x) ** 2 + (p.y - closest_xy.y) ** 2 + 1e-8) - r
+        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
 
         z_base = a.z + (b.z - a.z) * h_param
         z_bottom = z_base + tool_h
         z_center = z_bottom + 0.5 * h
-        d_z = ti.sqrt((p.z - z_center) ** 2 + 1e-8) - 0.5 * h
+        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * h
 
         d_xy_pos = ti.max(d_xy, 0.0)
         d_z_pos = ti.max(d_z, 0.0)
