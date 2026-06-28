@@ -43,6 +43,16 @@ class CamEnvDiff(gym.Env):
         self.tool_start = [0.5, 0.5, 1.0]
         self.render_mode = render_mode
 
+        # Tool holder: a 2.5 inch diameter cylinder riding above the cutter.
+        # Expressed in unit-cube coords via the shared machine scale so it
+        # matches the G-code round trip (unit cube = workspace_mm on a side).
+        from cam.config import MachineConfig
+        workspace_mm = MachineConfig().workspace_mm
+        self.holder_radius = (2.5 * 25.4 / 2.0) / workspace_mm
+        # Large negative reward applied (once) when the holder hits the stock;
+        # the episode terminates on that step.
+        self.holder_collision_penalty = 10.0
+
         self.simulator = None
         self.global_step = 0
         self.current_step = 0
@@ -98,6 +108,7 @@ class CamEnvDiff(gym.Env):
         )
         self.simulator.tool_radius[None] = self.tool_radius
         self.simulator.tool_height[None] = self.tool_height
+        self.simulator.holder_radius[None] = self.holder_radius
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
         super().reset(seed=seed)
@@ -110,6 +121,7 @@ class CamEnvDiff(gym.Env):
         self.simulator.target_params["center"][None] = [0.5, 0.5, 0.5]
         self.simulator.tool_radius[None] = 0.05
         self.simulator.tool_height[None] = 0.15
+        self.simulator.holder_radius[None] = self.holder_radius
         self.simulator.bake_target_grid()
         self.simulator.set_target_volume()
 
@@ -156,9 +168,19 @@ class CamEnvDiff(gym.Env):
         truncated = (t + 1) >= self.max_cuts
         terminated = False
 
+        # Safety: if the tool holder crashed into the remaining stock on this
+        # move, end the episode and apply a large termination penalty so the
+        # policy learns to keep the holder clear of the workpiece.
+        holder_overlap = float(self.simulator.holder_overlap_at(t))
+        if holder_overlap > 0.0:
+            terminated = True
+            reward -= self.holder_collision_penalty
+
         info = {
             "step": t,
             "reward": reward,
+            "holder_overlap": holder_overlap,
+            "holder_collision": terminated,
         }
         return self._get_obs(), reward, terminated, truncated, info
     

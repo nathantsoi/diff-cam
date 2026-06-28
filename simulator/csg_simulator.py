@@ -69,6 +69,59 @@ class CSGSimulatorDelta:
         self.tool_radius = ti.field(dtype=ti.f32, shape=())
         self.tool_height = ti.field(dtype=ti.f32, shape=())
 
+        # ---- Tool holder (collision body, not learnable) ----
+        # The holder is the wide spindle/collet shaft that sits coaxially ABOVE
+        # the slender cutting flutes. It never removes material, but if it ever
+        # touches the remaining stock that is a crash: the spindle would slam
+        # into the workpiece. We model it as a cylinder of radius holder_radius
+        # whose bottom face is at the top of the tool (tool tip + tool_height)
+        # and which extends upward by holder_height.
+        #
+        # Default radius is a 2.5 inch diameter holder expressed in unit-cube
+        # coordinates. The unit cube is workspace_mm on a side (MachineConfig,
+        # default 100 mm), so r = (2.5 in * 25.4 mm/in / 2) / 100 mm = 0.3175.
+        # Call sites that know their own workspace scale should overwrite this.
+        self.holder_radius = ti.field(dtype=ti.f32, shape=())
+        self.holder_height = ti.field(dtype=ti.f32, shape=())
+        self.holder_radius[None] = 0.3175
+        self.holder_height[None] = 1.0  # tall enough to clear the whole domain
+
+        # ---- Loss balancing (constrained-optimization framing) ----
+        # The terminal loss is a SOFT OBJECTIVE plus two ONE-SIDED BARRIERS:
+        #
+        #   objective  : w_residual * residual   (material left outside the part)
+        #                -> minimizing this is what *rewards* cutting material away
+        #   barrier A  : w_gouge   * gouge       (material removed from inside part)
+        #                -> one-sided: only fires when the cutter eats into the part
+        #   barrier B  : holder penetration into the stock (see below)
+        #
+        # Keeping w_gouge >= w_residual puts the stock surface just OUTSIDE the
+        # part surface: as close as possible without cutting in. The barriers are
+        # heavy because they encode "do not violate", while residual is the light
+        # objective optimized up against them.
+        self.w_gouge = ti.field(dtype=ti.f32, shape=())
+        self.w_residual = ti.field(dtype=ti.f32, shape=())
+        self.w_gouge[None] = 2.0
+        self.w_residual[None] = 1.0
+
+        # Holder collision is a PENETRATION BARRIER, not a proximity field: it is
+        # exactly zero (zero gradient) while the holder has clearance, and grows
+        # with the squared depth the holder pushes into remaining stock. This is
+        # what lets the optimizer bring the holder right up to the surface (so the
+        # cutter removes the most material) and only resists actual contact.
+        # holder_margin (in unit-cube length) requests a standoff: the barrier
+        # starts engaging when stock comes within holder_margin of the holder.
+        self.holder_penalty_weight = ti.field(dtype=ti.f32, shape=())
+        self.holder_penalty_weight[None] = 50.0
+        self.holder_margin = ti.field(dtype=ti.f32, shape=())
+        self.holder_margin[None] = 0.0
+
+        # Diagnostics (non-differentiable read-outs of each loss component so the
+        # objective/barrier balance is observable during training).
+        self.diag_gouge = ti.field(dtype=ti.f32, shape=())
+        self.diag_residual = ti.field(dtype=ti.f32, shape=())
+        self.diag_holder = ti.field(dtype=ti.f32, shape=())
+
         # ---- Stock ----
         self.stock = ti.field(
             dtype=ti.f32,
@@ -152,6 +205,44 @@ class CSGSimulatorDelta:
         d_z = ti.sqrt((p.z - z_center) ** 2 + 1e-8) - 0.5 * h
 
         # --- Combine (same smooth-CSG combination as before) ---
+        d_xy_pos = smooth_max(d_xy, 0.0, kv)
+        d_z_pos = smooth_max(d_z, 0.0, kv)
+        outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
+        inside = -smooth_max(-smooth_max(d_xy, d_z, kv), 0.0, kv)
+        return outside + inside
+
+    @ti.func
+    def holder_sdf(self, p, t):
+        """Smoothed swept-cylinder SDF for the tool holder over segment t.
+
+        Geometry mirrors ``tool_sdf`` (a capsule axis in XY swept from
+        tool_pos[t] to tool_pos[t+1]) but with the holder radius and a z-range
+        that begins at the TOP of the tool. The holder therefore tracks the
+        tool laterally while riding above the cutting flutes. Differentiable in
+        tool_pos (hence tool_delta), so the collision penalty has gradients.
+        """
+        r = self.holder_radius[None]
+        h = self.holder_height[None]
+        tool_h = self.tool_height[None]
+        kv = self.k[None]
+
+        a = self.tool_pos[t]
+        b = self.tool_pos[t + 1]
+
+        pa_xy = ti.Vector([p.x - a.x, p.y - a.y])
+        ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
+        ba_len2 = ba_xy.dot(ba_xy) + 1e-12
+        h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
+        closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
+        d_xy = ti.sqrt((p.x - closest_xy.x) ** 2 + (p.y - closest_xy.y) ** 2 + 1e-8) - r
+
+        # Holder bottom sits at (interpolated tool tip z) + tool_height; the
+        # holder body spans [z_bottom, z_bottom + h].
+        z_base = a.z + (b.z - a.z) * h_param
+        z_bottom = z_base + tool_h
+        z_center = z_bottom + 0.5 * h
+        d_z = ti.sqrt((p.z - z_center) ** 2 + 1e-8) - 0.5 * h
+
         d_xy_pos = smooth_max(d_xy, 0.0, kv)
         d_z_pos = smooth_max(d_z, 0.0, kv)
         outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
@@ -290,8 +381,8 @@ class CSGSimulatorDelta:
             gouge = target_occ * (1.0 - stock_occ)
             residual = (1.0 - target_occ) * stock_occ
 
-            w_gouge = 2.0
-            w_residual = 1.0
+            w_gouge = self.w_gouge[None]
+            w_residual = self.w_residual[None]
             total += inv_n * (w_gouge * gouge * gouge + w_residual * residual * residual)
         return total
 
@@ -316,12 +407,127 @@ class CSGSimulatorDelta:
             gouge = target_occ * (1.0 - stock_occ)
             residual = (1.0 - target_occ) * stock_occ
 
-            w_gouge = 2.0
-            w_residual = 1.0
+            w_gouge = self.w_gouge[None]
+            w_residual = self.w_residual[None]
             ti.atomic_add(
                 self.loss[None],
                 inv_n * (w_gouge * gouge * gouge + w_residual * residual * residual),
             )
+
+    @ti.kernel
+    def compute_holder_penalty(self, T: ti.i32):
+        """Differentiable holder-collision PENETRATION BARRIER added to ``self.loss``.
+
+        For every cut t the holder rides above the tool along segment t. For each
+        remaining-material voxel we measure how far the holder pushes INTO it:
+
+            penetration = relu( (holder_margin - holder_sdf) * scale )
+
+        This is exactly zero -- with zero gradient -- whenever the holder has
+        clearance (holder_sdf >= holder_margin), so the optimizer is free to
+        bring the holder right down to the surface and remove the most material.
+        It only grows (quadratically) once the holder actually penetrates the
+        stock, pushing the holder back out. Gated by stock occupancy so only
+        contact with REMAINING material is penalized (empty space is free).
+
+        This is a one-sided barrier, not a proximity field: a high weight makes
+        it a near-hard constraint that stays inactive until violated, instead of
+        a force that shoves the tool away from the workpiece pre-emptively.
+        """
+        for t, i, j, k in ti.ndrange(T, self.resolution, self.resolution, self.resolution):
+            scale = self.inv_dx
+            inv_n = 1.0 / (self.resolution ** 3)
+            w = self.holder_penalty_weight[None]
+            margin = self.holder_margin[None]
+            p = ti.Vector(
+                [(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx]
+            )
+            stock_d = self.stock[t + 1, i, j, k]
+            holder_d = self.holder_sdf(p, t)
+
+            sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
+            stock_occ = 1.0 / (1.0 + ti.exp(sa))    # ~1 inside remaining stock
+            penetration = ti.max(0.0, (margin - holder_d) * scale)
+
+            ti.atomic_add(self.loss[None], inv_n * w * stock_occ * penetration * penetration)
+
+    @ti.kernel
+    def compute_diagnostics(self, T: ti.i32):
+        """Non-differentiable breakdown of the loss into its three components.
+
+        Fills diag_gouge / diag_residual / diag_holder with the SAME weighted
+        terms that compute_loss + compute_holder_penalty add to ``self.loss``,
+        so training can log how the objective (residual) trades off against the
+        two barriers (gouge, holder). Reads no grad; call outside a Tape.
+        """
+        g = 0.0
+        r = 0.0
+        h = 0.0
+        scale = self.inv_dx
+        inv_n = 1.0 / (self.resolution ** 3)
+        w_g = self.w_gouge[None]
+        w_r = self.w_residual[None]
+        w_h = self.holder_penalty_weight[None]
+        margin = self.holder_margin[None]
+        # Geometry terms on the final stock (stock[T]).
+        for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
+            p = ti.Vector([(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx])
+            stock_d = self.stock[T, i, j, k]
+            target_d = self.target_sdf(p)
+            sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
+            ta = ti.max(-50.0, ti.min(50.0, target_d * scale))
+            stock_occ = 1.0 / (1.0 + ti.exp(sa))
+            target_occ = 1.0 / (1.0 + ti.exp(ta))
+            gouge = target_occ * (1.0 - stock_occ)
+            residual = (1.0 - target_occ) * stock_occ
+            g += inv_n * w_g * gouge * gouge
+            r += inv_n * w_r * residual * residual
+        # Holder barrier summed over every segment.
+        for t, i, j, k in ti.ndrange(T, self.resolution, self.resolution, self.resolution):
+            p = ti.Vector([(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx])
+            stock_d = self.stock[t + 1, i, j, k]
+            holder_d = self.holder_sdf(p, t)
+            sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
+            stock_occ = 1.0 / (1.0 + ti.exp(sa))
+            penetration = ti.max(0.0, (margin - holder_d) * scale)
+            h += inv_n * w_h * stock_occ * penetration * penetration
+        self.diag_gouge[None] = g
+        self.diag_residual[None] = r
+        self.diag_holder[None] = h
+
+    @ti.kernel
+    def holder_overlap_at(self, t: ti.i32) -> ti.f32:
+        """Hard (non-diff) holder/stock overlap VOLUME for a single segment t.
+
+        Counts remaining-material voxels (stock[t+1] < 0) that lie inside the
+        holder (sharp SDF < 0) and returns their volume in unit-cube^3. A
+        positive value means the holder is contacting the stock -- used by the
+        RL env to terminate the episode. Safe to call outside a Tape.
+        """
+        vol = 0.0
+        for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
+            p = ti.Vector(
+                [(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx]
+            )
+            if self.stock[t + 1, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
+                vol += self.dx ** 3
+        return vol
+
+    @ti.kernel
+    def holder_overlap_total(self, T: ti.i32) -> ti.f32:
+        """Hard holder/stock overlap summed over all segments (diagnostics).
+
+        Sum of per-segment overlap volume; > 0 means the trajectory collides
+        the holder with the stock somewhere. Non-differentiable.
+        """
+        vol = 0.0
+        for t, i, j, k in ti.ndrange(T, self.resolution, self.resolution, self.resolution):
+            p = ti.Vector(
+                [(i + 0.5) * self.dx, (j + 0.5) * self.dx, (k + 0.5) * self.dx]
+            )
+            if self.stock[t + 1, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
+                vol += self.dx ** 3
+        return vol
 
     def forward(self, num_active_steps):
         """Pure forward pass. Wrap in ti.ad.Tape externally if you need gradients.
@@ -336,6 +542,7 @@ class CSGSimulatorDelta:
         for t in range(num_active_steps - 1):
             self.apply_cut(t)
         self.compute_loss(num_active_steps - 1)
+        self.compute_holder_penalty(num_active_steps - 1)
 
     # ========================================================================
     # Rendering
@@ -449,6 +656,7 @@ class CSGSimulatorDelta:
                 d_stock = 1e6
                 d_target = 1e6
                 d_tool = 1e6
+                d_holder = 1e6
 
                 # Inside the unit cube — use interpolated voxel SDFs.
                 # Outside — fall back to an AABB so rays from the camera
@@ -482,8 +690,9 @@ class CSGSimulatorDelta:
 
                 if show_tool == 1:
                     d_tool = self.tool_sdf_sharp(p, t_idx)
+                    d_holder = self.holder_sdf_sharp(p, t_idx)
 
-                d = ti.min(d_stock, ti.min(d_target, d_tool))
+                d = ti.min(d_stock, ti.min(d_target, ti.min(d_tool, d_holder)))
 
                 if d < 1e-3:
                     # Hit — shade with the material whose distance dominated.
@@ -493,6 +702,9 @@ class CSGSimulatorDelta:
                     if d == d_tool:
                         mat_color = ti.Vector([1.0, 0.2, 0.2])  # red tool
                         norm = self.tool_normal(p, t_idx)
+                    elif d == d_holder:
+                        mat_color = ti.Vector([0.55, 0.55, 0.6])  # gray holder
+                        norm = self.holder_normal(p, t_idx)
                     elif d == d_stock:
                         mat_color = ti.Vector([0.2, 0.8, 0.2])  # green stock
                         norm = self.stock_normal(p)
@@ -596,3 +808,47 @@ class CSGSimulatorDelta:
         outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
         inside = -ti.max(-ti.max(d_xy, d_z), 0.0)
         return outside + inside
+
+    @ti.func
+    def holder_sdf_sharp(self, p, t):
+        """Exact (non-smoothed) holder SDF for collision detection and rendering.
+
+        Same geometry as ``holder_sdf`` but with hard ti.max. Not
+        differentiable -- never call under ti.ad.Tape.
+        """
+        r = self.holder_radius[None]
+        h = self.holder_height[None]
+        tool_h = self.tool_height[None]
+
+        a = self.tool_pos[t]
+        b = self.tool_pos[t + 1]
+
+        pa_xy = ti.Vector([p.x - a.x, p.y - a.y])
+        ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
+        ba_len2 = ba_xy.dot(ba_xy) + 1e-12
+        h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
+        closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
+        d_xy = ti.sqrt((p.x - closest_xy.x) ** 2 + (p.y - closest_xy.y) ** 2 + 1e-8) - r
+
+        z_base = a.z + (b.z - a.z) * h_param
+        z_bottom = z_base + tool_h
+        z_center = z_bottom + 0.5 * h
+        d_z = ti.sqrt((p.z - z_center) ** 2 + 1e-8) - 0.5 * h
+
+        d_xy_pos = ti.max(d_xy, 0.0)
+        d_z_pos = ti.max(d_z, 0.0)
+        outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
+        inside = -ti.max(-ti.max(d_xy, d_z), 0.0)
+        return outside + inside
+
+    @ti.func
+    def holder_normal(self, p, t):
+        """Central-diff normal of the SHARP holder SDF (rendering only)."""
+        eps = 1e-3
+        dx = ti.Vector([eps, 0.0, 0.0])
+        dy = ti.Vector([0.0, eps, 0.0])
+        dz = ti.Vector([0.0, 0.0, eps])
+        nx = self.holder_sdf_sharp(p + dx, t) - self.holder_sdf_sharp(p - dx, t)
+        ny = self.holder_sdf_sharp(p + dy, t) - self.holder_sdf_sharp(p - dy, t)
+        nz = self.holder_sdf_sharp(p + dz, t) - self.holder_sdf_sharp(p - dz, t)
+        return ti.math.normalize(ti.Vector([nx, ny, nz]) + 1e-8)

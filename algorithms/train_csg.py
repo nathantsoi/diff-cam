@@ -90,6 +90,16 @@ class Args:
     k_init: float = 10.0
     """initial smoothness parameter for the smooth-min/max SDF ops"""
 
+    # Loss balancing (objective vs. safety barriers; see CSGSimulatorDelta)
+    w_residual: float = 1.0
+    """weight on leftover material outside the part -- the objective that REWARDS cutting"""
+    w_gouge: float = 4.0
+    """weight on cutting INTO the part -- barrier; > w_residual keeps the cutter just outside the surface"""
+    holder_penalty_weight: float = 50.0
+    """weight on the holder/stock penetration barrier (one-sided; inactive until the holder contacts stock)"""
+    holder_margin: float = 0.0
+    """required holder standoff in unit-cube length (>0 keeps a clearance gap before contact)"""
+
     # Local interactive view
     headless: bool = False
     """disable the live GUI (auto-disabled if no display is available)"""
@@ -153,6 +163,16 @@ def eval_metrics(sim, T, dx):
     target_mask = sdf_to_mask(target)
     m["gouge"] = float(_gouge(pred_mask, target_mask) * (dx ** 3))
     m["residual"] = float(_residual(pred_mask, target_mask) * (dx ** 3))
+    # Holder/stock collision volume across the trajectory (0 = holder stays
+    # clear of the remaining stock, which is what we want for safe deployment).
+    m["holder_overlap"] = float(sim.holder_overlap_total(T - 1))
+    # Weighted loss components, so the objective/barrier balance is observable:
+    # loss_residual is what cutting drives down; loss_gouge / loss_holder are the
+    # safety barriers that should sit near zero.
+    sim.compute_diagnostics(T - 1)
+    m["loss_residual"] = float(sim.diag_residual[None])
+    m["loss_gouge"] = float(sim.diag_gouge[None])
+    m["loss_holder"] = float(sim.diag_holder[None])
     return m
 
 
@@ -259,6 +279,15 @@ def main():
     sim.target_params["center"][None] = [0.5, 0.5, 0.5]
     sim.tool_radius[None] = 0.05
     sim.tool_height[None] = 0.15
+    # Tool holder: 2.5 inch diameter cylinder above the cutter, in unit-cube
+    # coords via the shared machine scale (unit cube = workspace_mm on a side).
+    from cam.config import MachineConfig
+    sim.holder_radius[None] = (2.5 * 25.4 / 2.0) / MachineConfig().workspace_mm
+    # Loss balancing: objective (residual) vs. safety barriers (gouge, holder).
+    sim.w_residual[None] = args.w_residual
+    sim.w_gouge[None] = args.w_gouge
+    sim.holder_penalty_weight[None] = args.holder_penalty_weight
+    sim.holder_margin[None] = args.holder_margin
     sim.bake_target_grid()
     sim.set_target_volume()
 
@@ -320,11 +349,18 @@ def main():
                 writer.add_scalar("eval/hd95", m["hd95"], it)
                 writer.add_scalar("metrics/gouge", m["gouge"], it)
                 writer.add_scalar("metrics/residual", m["residual"], it)
+                writer.add_scalar("metrics/holder_overlap", m["holder_overlap"], it)
+                writer.add_scalar("loss/residual", m["loss_residual"], it)
+                writer.add_scalar("loss/gouge", m["loss_gouge"], it)
+                writer.add_scalar("loss/holder", m["loss_holder"], it)
                 eval_X.append(it)
                 dices.append(m["dice"]); asds.append(m["asd"]); hs95s.append(m["hd95"])
                 gouges.append(m["gouge"]); residuals.append(m["residual"])
                 last_eval_iter = it
-                pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['dice']:.3f}")
+                pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['dice']:.3f}",
+                                 resid=f"{m['loss_residual']:.3f}",
+                                 gouge=f"{m['loss_gouge']:.3f}",
+                                 hold=f"{m['loss_holder']:.2e}")
             else:
                 pbar.set_postfix(loss=f"{loss:.4f}", grad=f"{grad_norm:.2e}")
 
@@ -359,9 +395,20 @@ def main():
             writer.add_scalar("eval/hd95", m["hd95"], it)
             writer.add_scalar("metrics/gouge", m["gouge"], it)
             writer.add_scalar("metrics/residual", m["residual"], it)
+            writer.add_scalar("metrics/holder_overlap", m["holder_overlap"], it)
+            writer.add_scalar("loss/residual", m["loss_residual"], it)
+            writer.add_scalar("loss/gouge", m["loss_gouge"], it)
+            writer.add_scalar("loss/holder", m["loss_holder"], it)
             eval_X.append(it)
             dices.append(m["dice"]); asds.append(m["asd"]); hs95s.append(m["hd95"])
             gouges.append(m["gouge"]); residuals.append(m["residual"])
+
+        final_overlap = float(sim.holder_overlap_total(T - 1))
+        if final_overlap > 0.0:
+            print(f"[holder] WARNING: final trajectory still collides the holder "
+                  f"with the stock (overlap volume {final_overlap:.3e}).")
+        else:
+            print("[holder] final trajectory keeps the holder clear of the stock.")
 
         # Export the final geometry (initial stock, carved stock, target).
         export_stls(sim, T, dx, run_name, it, args.track)
