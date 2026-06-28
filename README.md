@@ -77,7 +77,7 @@ flags with the PPO trainers — see
 ```bash
 # Headless (HPC / no display) — comparable to the csg_ppo baseline below:
 uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4 \
-    --save_model --eval_freq 1 --record_video_freq 100 --video_fps 30
+    --save_model --eval_freq 1 --record_video_freq 100 --video_fps 30 --progress_bar
 
 # Interactive live GUI (needs a display):
 uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4

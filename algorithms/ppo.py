@@ -532,13 +532,14 @@ if __name__ == "__main__":
                 pbar.set_postfix(SPS=sps)
         elif iteration % args.log_freq == 0 or iteration == args.num_iterations:
             lr_val = optimizer.param_groups[0]["lr"]
+            time_str = time.strftime("[%Y-%m-%d %H:%M:%S] ")
             if last_m is not None:
-                line = (f"[iter {iteration:4d}/{args.num_iterations}] step: {global_step} | vloss: {v_loss.item():.4f} | "
+                line = (f"{time_str}[iter {iteration:4d}/{args.num_iterations}] step: {global_step} | vloss: {v_loss.item():.4f} | "
                         f"ploss: {pg_loss.item():.4f} | lr: {lr_val:.2e} | SPS: {sps} | "
                         f"reward: {last_m.get('reward', 0.0):+.2f} | dice: {last_m.get('dice', 0.0):.4f} | "
                         f"asd: {last_m.get('asd', 0.0):.2f} | hd95: {last_m.get('hd95', 0.0):.2f}")
             else:
-                line = (f"[iter {iteration:4d}/{args.num_iterations}] step: {global_step} | vloss: {v_loss.item():.4f} | "
+                line = (f"{time_str}[iter {iteration:4d}/{args.num_iterations}] step: {global_step} | vloss: {v_loss.item():.4f} | "
                         f"ploss: {pg_loss.item():.4f} | lr: {lr_val:.2e} | SPS: {sps}")
             print(line, flush=True)
 

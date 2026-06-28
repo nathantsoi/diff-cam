@@ -367,12 +367,13 @@ def main():
 
             if not args.progress_bar and (it % args.log_freq == 0 or it == args.iters - 1):
                 lr_val = opt.param_groups[0]["lr"]
+                time_str = time.strftime("[%Y-%m-%d %H:%M:%S] ")
                 if last_m is not None:
-                    line = (f"[iter {it:4d}/{args.iters}] loss: {loss:.4f} | grad: {grad_norm:.2e} | lr: {lr_val:.2e} | "
+                    line = (f"{time_str}[iter {it:4d}/{args.iters}] loss: {loss:.4f} | grad: {grad_norm:.2e} | lr: {lr_val:.2e} | "
                             f"dice: {last_m['dice']:.4f} | asd: {last_m['asd']:.2f} | hd95: {last_m['hd95']:.2f} | "
                             f"resid: {last_m['loss_residual']:.4f} | gouge: {last_m['loss_gouge']:.4f} | hold: {last_m['loss_holder']:.2e}")
                 else:
-                    line = f"[iter {it:4d}/{args.iters}] loss: {loss:.4f} | grad: {grad_norm:.2e} | lr: {lr_val:.2e}"
+                    line = f"{time_str}[iter {it:4d}/{args.iters}] loss: {loss:.4f} | grad: {grad_norm:.2e} | lr: {lr_val:.2e}"
                 print(line, flush=True)
 
             # --- video (raymarch -> ffmpeg; logged under media/policy_rollout) ---
