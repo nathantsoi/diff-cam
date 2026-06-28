@@ -9,10 +9,11 @@ To create a new experiment:
 1. **Choose run tag**: choose a new tag for your experiment that includes the date and a unique word description (e.g. `jun27-random-init`). The branch `autoresearch/agd/<tag>` must not already exist, this is a fresh run.
 2. **Create the branch**: `git checkout -b autoresearch/agd/<tag>` from the `autoresearch` branch.
 3. **Read the in-scope files**: Start with the train_csg.py file and README.md
+4. **Create a new autoresearch/tasks/train_csg/idea.md file** to record your idea.
 
 ## Experimentation
 
-Each experiment runs on a single GPU, find one that is not in use using the command: `nvidia-smi --query-gpu=index,memory.free,memory.total --format=csv,noheader,nounits | awk -F', ' '$2/$3 > 0.95 {print $1}'` which gives the indicies of the free gpus on the machine. The training script runs for a **fixed time budget of no more than 15 minutes** (wall clock training time, excluding startup/compilation). Set CUDA_VISIBLE_DEVICES to a free gpu and launch training as: `uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4 --save_model --eval --no-track`.
+Each experiment runs on a single GPU, respect CUDA_VISIBLE_DEVICES set in the .env file. The training script runs for a **fixed time budget of no more than 15 minutes** (wall clock training time, excluding startup/compilation). Launch training as: `uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4 --save_model --eval --no-track`.
 
 **What you CAN do:**
 - Modify `train_csg.py`, parameters when you call this script, and related components. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc. Importantly, if you need to implement new loss components, this will need to be done in the differentiable simulator, which is allowed.
