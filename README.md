@@ -250,8 +250,15 @@ Add new machines by subclassing `PostProcessor` and registering them in
 **Generate G-code for the Haas:**
 
 ```bash
+# Using the default root trajectory
 uv run python scripts/export_gcode.py --post haas --tool 3 --rpm 6000 \
     --workspace-mm 100 --program-number 1234 -o part.nc
+
+# Using a trajectory from a specific run folder
+uv run python scripts/export_gcode.py \
+    --trajectory runs/CamEnvDiff-v0__train_csg__1__1782599757/trajectory.npy \
+    --post haas \
+    -o runs/CamEnvDiff-v0__train_csg__1__1782599757/gcode_haas.nc
 ```
 
 **Evaluate based on the G-code program** (round-trip the trajectory through the
@@ -259,7 +266,14 @@ CAM layer and score both path fidelity and the carved stock of the *executed*
 program):
 
 ```bash
+# Using the default root trajectory
 uv run python -m eval.eval_csg --trajectory trajectory.npy --gcode --post rs274
+
+# Using a trajectory from a specific run folder
+uv run python -m eval.eval_csg \
+    --trajectory runs/CamEnvDiff-v0__train_csg__1__1782599757/trajectory.npy \
+    --gcode \
+    --post rs274
 ```
 
 **End-to-end CAM round-trip demo** (`trajectory → G-code → executed trajectory`,
