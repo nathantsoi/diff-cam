@@ -62,6 +62,8 @@ class Args:
     """run-name prefix; same env/simulator as csg_ppo (exp_name distinguishes the method)"""
     save_model: bool = False
     """whether to save the learned trajectory into the `runs/{run_name}` folder"""
+    autoresearch: bool = False
+    """if True, prefix the run name with 'AR-' for tracking experiments"""
 
     # eval / video cadence -- measured in Adam iterations (same flags as csg_ppo)
     eval: bool = False
@@ -231,11 +233,36 @@ def main():
 
     T = args.max_steps
     dx = 1.0 / args.resolution
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    prefix = "AR-" if args.autoresearch else ""
+    run_name = f"{prefix}{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
     run_dir = os.path.join("runs", run_name)
     video_dir = os.path.join(run_dir, "videos")
     os.makedirs(video_dir, exist_ok=True)
     print(f"[run] writing outputs to {run_dir}")
+
+    # Save reproduction command and arguments
+    try:
+        import sys
+        import shlex
+        import json
+
+        # Save reproduction command
+        reproduce_cmd_path = os.path.join(run_dir, "reproduce_command.sh")
+        cmd_args = ["python", "-m", "algorithms.train_csg"] + sys.argv[1:]
+        cmd_str = "#!/bin/bash\n" + " ".join(shlex.quote(arg) for arg in cmd_args) + "\n"
+        with open(reproduce_cmd_path, "w") as f:
+            f.write(cmd_str)
+        try:
+            os.chmod(reproduce_cmd_path, 0o755)
+        except Exception as e:
+            print(f"[run] failed to make reproduce_command.sh executable: {e}")
+
+        # Save parsed parameters
+        args_path = os.path.join(run_dir, "args.json")
+        with open(args_path, "w") as f:
+            json.dump(vars(args), f, indent=2)
+    except Exception as e:
+        print(f"[run] failed to save reproduction files: {e}")
 
     if args.track:
         from cam_env.utils import load_env_or_abort

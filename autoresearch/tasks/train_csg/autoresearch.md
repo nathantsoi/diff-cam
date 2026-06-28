@@ -86,14 +86,14 @@ d4e5f6g	0.000000	0.0	crash	double model steps (OOM)
 
 ## The experiment loop
 
-The experiment runs on a dedicated branch (e.g. `autoresearch/mar5` or `autoresearch/mar5-gpu0`).
+The experiment runs on a dedicated branch (e.g. `ar/mar5` or `ar/mar5-gpu0`).
 
 LOOP FOREVER:
 
 1. Look at the git state: the current branch/commit we're on
 2. Tune `algorithms/train_csg.py` with an experimental idea by directly hacking the code.
 3. git commit
-4. Run the experiment: `uv run python -m algorithms.train_csg --iters 128 --max_steps 128 --resolution 203 --dt 0.4 --save_model --eval --no-track > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+4. Run the experiment: `uv run python -m algorithms.train_csg --iters 128 --max_steps 256 --resolution 203 --dt 0.4 --save_model --eval --no-track --autoresearch > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^dice:\|^peak_vram_mb:" run.log` or read `runs/latest_metrics.json`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
