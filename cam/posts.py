@@ -18,6 +18,24 @@ CLI ``--post`` flag) picks them up automatically.
 import numpy as np
 
 from .config import MachineConfig
+from .units import mm_to_inch, mm_per_min_to_ipm
+
+
+# ---------------------------------------------------------------------------
+# Output-unit helpers
+# ---------------------------------------------------------------------------
+# Internally everything is millimetres. The post declares G21 (mm) or G20
+# (inch); when inch is requested the coordinate and feed VALUES must be
+# converted too -- otherwise the program declares inches but emits mm numbers.
+# These convert just prior to G-code emission (cf. cam.units).
+def _len_out(value_mm, config: MachineConfig):
+    """Length in mm -> the configured output units (scalar or array)."""
+    return mm_to_inch(value_mm) if config.units == "inch" else value_mm
+
+
+def _feed_out(feed_mm_per_min: float, config: MachineConfig) -> float:
+    """Feed in mm/min -> the configured output units (mm/min or in/min)."""
+    return mm_per_min_to_ipm(feed_mm_per_min) if config.units == "inch" else feed_mm_per_min
 
 
 # ---------------------------------------------------------------------------
@@ -75,7 +93,9 @@ class RS274Post(PostProcessor):
 
     def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
         positions = self._validate(positions)
-        pts_mm = positions * config.workspace_mm
+        # Unit-cube -> mm, then mm -> output units (mm or inch) for emission.
+        pts_out = _len_out(positions * config.workspace_mm, config)
+        feed_out = _feed_out(config.feed, config)
         p = config.precision
 
         lines = [
@@ -86,11 +106,11 @@ class RS274Post(PostProcessor):
         ]
 
         # Rapid to the first waypoint.
-        lines.append(f"G0 {_axis_words(pts_mm[0], p)}")
+        lines.append(f"G0 {_axis_words(pts_out[0], p)}")
 
-        if len(pts_mm) > 1:
-            lines.append(f"F{_fmt(config.feed, p)}")
-            for pt in pts_mm[1:]:
+        if len(pts_out) > 1:
+            lines.append(f"F{_fmt(feed_out, p)}")
+            for pt in pts_out[1:]:
                 lines.append(f"G1 {_axis_words(pt, p)}")
 
         lines.append("M2")
@@ -128,9 +148,12 @@ class HaasPost(PostProcessor):
 
     def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
         positions = self._validate(positions)
-        pts_mm = positions * config.workspace_mm
+        # Unit-cube -> mm, then mm -> output units (mm or inch) for emission.
+        pts_out = _len_out(positions * config.workspace_mm, config)
+        feed_out = _feed_out(config.feed, config)
+        plunge_out = _feed_out(config.plunge_feed, config)
         p = config.precision
-        safe = _fmt(config.safe_z_mm, p)
+        safe = _fmt(_len_out(config.safe_z_mm, config), p)
 
         lines = [
             "%",
@@ -147,14 +170,14 @@ class HaasPost(PostProcessor):
             lines.append("M08")
 
         # Approach: rapid above the first XY, then plunge to the first depth.
-        x0, y0, z0 = pts_mm[0]
+        x0, y0, z0 = pts_out[0]
         lines.append(f"G00 X{_fmt(x0, p)} Y{_fmt(y0, p)}")
-        lines.append(f"G01 Z{_fmt(z0, p)} F{_fmt(config.plunge_feed, p)}")
+        lines.append(f"G01 Z{_fmt(z0, p)} F{_fmt(plunge_out, p)}")
 
         # Cutting moves through the rest of the trajectory.
-        if len(pts_mm) > 1:
-            lines.append(f"F{_fmt(config.feed, p)}")
-            for pt in pts_mm[1:]:
+        if len(pts_out) > 1:
+            lines.append(f"F{_fmt(feed_out, p)}")
+            for pt in pts_out[1:]:
                 lines.append(f"G01 {_axis_words(pt, p)}")
 
         # Retract / shutdown.

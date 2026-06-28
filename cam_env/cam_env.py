@@ -47,7 +47,8 @@ class CamEnvDiff(gym.Env):
         # Expressed in unit-cube coords via the shared machine scale so it
         # matches the G-code round trip (unit cube = workspace_mm on a side).
         from cam.config import MachineConfig
-        workspace_mm = MachineConfig().workspace_mm
+        self.workspace_mm = MachineConfig().workspace_mm
+        workspace_mm = self.workspace_mm
         self.holder_radius = (2.5 * 25.4 / 2.0) / workspace_mm
         # Large negative reward applied (once) when the holder hits the stock;
         # the episode terminates on that step.
@@ -105,6 +106,7 @@ class CamEnvDiff(gym.Env):
             target_shape=self.target_shape,
             tool_start=self.tool_start,
             init_taichi=self.init_taichi,
+            workspace_mm=self.workspace_mm,
         )
         self.simulator.tool_radius[None] = self.tool_radius
         self.simulator.tool_height[None] = self.tool_height
@@ -157,7 +159,10 @@ class CamEnvDiff(gym.Env):
         self.simulator.tool_delta[t] = ti.Vector([float(action[0]),
                                               float(action[1]),
                                               float(action[2])])
-        self.simulator.reconstruct_positions(t + 1)
+        # Clip the commanded move to the feed/rapid speed limit (using the
+        # remaining stock at the start of this step) and integrate it; mirrors
+        # the carving order in CSGSimulatorDelta.forward.
+        self.simulator.advance_position(t)
         self.simulator.apply_cut(t)
         self.simulator.set_current_step(t) # rendering
         loss_after = self.simulator.loss_at(t + 1)

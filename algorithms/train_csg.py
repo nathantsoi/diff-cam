@@ -99,6 +99,20 @@ class Args:
     holder_margin: float = 0.0
     """required holder standoff in unit-cube length (>0 keeps a clearance gap before contact)"""
 
+    # Units & speed limits (enforced by per-step clipping in the simulator)
+    workspace_mm: float = 100.0
+    """physical edge length (mm) of the unit cube [0,1]^3 -- the simulator's scale"""
+    dt: float = 0.01
+    """seconds per simulator step; speed = |delta| * workspace_mm / dt"""
+    rapid_ipm: float = 500.0
+    """max traverse speed (inches/min) when clear of the stock"""
+    feed_ipm: float = 10.0
+    """max cutting speed (inches/min) when within safe distance of the stock"""
+    safe_distance_in: float = 0.1
+    """clearance (inches) below which a move is limited to feed speed"""
+    enforce_speed_limits: bool = True
+    """clip each step to its feed/rapid speed cap (disable to run unconstrained)"""
+
     # Local interactive view
     headless: bool = False
     """disable the live GUI (auto-disabled if no display is available)"""
@@ -247,15 +261,19 @@ def main():
 
     # --- Simulator setup (must match CamEnvDiff.reset / eval_csg defaults) ---
     sim = CSGSimulatorDelta(resolution=args.resolution, max_steps=T, k_init=args.k_init,
-                            target_shape=args.target_shape, tool_start=(0.5, 0.5, 1.0))
+                            target_shape=args.target_shape, tool_start=(0.5, 0.5, 1.0),
+                            workspace_mm=args.workspace_mm, dt=args.dt,
+                            rapid_ipm=args.rapid_ipm, feed_ipm=args.feed_ipm,
+                            safe_distance_in=args.safe_distance_in,
+                            enforce_speed_limits=args.enforce_speed_limits)
     sim.target_params["radius"][None] = 0.4
     sim.target_params["center"][None] = [0.5, 0.5, 0.5]
     sim.tool_radius[None] = 0.05
     sim.tool_height[None] = 0.15
     # Tool holder: 2.5 inch diameter cylinder above the cutter, in unit-cube
     # coords via the shared machine scale (unit cube = workspace_mm on a side).
-    from cam.config import MachineConfig
-    sim.holder_radius[None] = (2.5 * 25.4 / 2.0) / MachineConfig().workspace_mm
+    from cam.units import inch_to_mm
+    sim.holder_radius[None] = inch_to_mm(2.5 / 2.0) / args.workspace_mm
     # Loss balancing: objective (residual) vs. safety barriers (gouge, holder).
     sim.w_residual[None] = args.w_residual
     sim.w_gouge[None] = args.w_gouge
@@ -375,7 +393,10 @@ def main():
         # --- Save the learned trajectory (this is GradMill's "model") ---
         deltas = params.detach().numpy()
         sim.tool_delta.from_torch(params.detach())
-        sim.reconstruct_positions(T - 1)
+        # forward() (not reconstruct_positions) so the saved positions are the
+        # speed-clipped trajectory that was actually carved/optimized, not the
+        # raw cumulative sum of the commanded deltas.
+        sim.forward(T)
         positions = sim.tool_pos.to_torch()[:T].numpy()
         if args.save_model:
             np.save(os.path.join(run_dir, "trajectory_deltas.npy"), deltas)

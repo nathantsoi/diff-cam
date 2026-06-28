@@ -2,6 +2,7 @@ import numpy as np
 import random
 import taichi as ti
 from simulator.simulator_utils import *
+from cam.units import inch_to_mm, ipm_to_mm_per_s
 
 
 @ti.data_oriented
@@ -29,6 +30,12 @@ class CSGSimulatorDelta:
         target_shape=None,
         tool_start=(0.5, 0.5, 1.0),
         init_taichi=True,
+        workspace_mm=100.0,
+        dt=0.01,
+        rapid_ipm=500.0,
+        feed_ipm=10.0,
+        safe_distance_in=0.1,
+        enforce_speed_limits=True,
     ):
         # ti.init() RESETS the whole Taichi runtime, invalidating every field
         # allocated by any previously-created simulator. That is fine when each
@@ -85,6 +92,33 @@ class CSGSimulatorDelta:
         self.holder_height = ti.field(dtype=ti.f32, shape=())
         self.holder_radius[None] = 0.3175
         self.holder_height[None] = 1.0  # tall enough to clear the whole domain
+
+        # ---- Units & speed limits (constraint, enforced by clipping) ----
+        # The geometry lives in the unit cube [0, 1]^3; ``workspace_mm`` is the
+        # physical edge length, so a unit-cube displacement of magnitude |d|
+        # spans |d| * workspace_mm millimetres. One simulator step advances the
+        # tool over ``dt`` seconds, so the commanded speed of a step is
+        #
+        #     speed_mm_per_s = |tool_delta[t]| * workspace_mm / dt
+        #
+        # Two physical max speeds are enforced (clipped) per step, like a real
+        # controller's feed/rapid override (cf. LinuxCNC trajectory planner and
+        # CAMotics): ``rapid_speed`` when the cutter has clearance from the
+        # remaining stock, ``feed_speed`` when it is within ``safe_distance`` of
+        # it (i.e. cutting). ALL scale-related math is done in millimetres;
+        # inch-valued inputs are converted up front via ``cam.units``.
+        self.workspace_mm = ti.field(dtype=ti.f32, shape=())
+        self.dt = ti.field(dtype=ti.f32, shape=())               # seconds / step
+        self.rapid_speed = ti.field(dtype=ti.f32, shape=())      # mm / s
+        self.feed_speed = ti.field(dtype=ti.f32, shape=())       # mm / s
+        self.safe_distance = ti.field(dtype=ti.f32, shape=())    # mm
+        self.enforce_speed_limits = ti.field(dtype=ti.i32, shape=())
+        self.workspace_mm[None] = float(workspace_mm)
+        self.dt[None] = float(dt)
+        self.rapid_speed[None] = float(ipm_to_mm_per_s(rapid_ipm))
+        self.feed_speed[None] = float(ipm_to_mm_per_s(feed_ipm))
+        self.safe_distance[None] = float(inch_to_mm(safe_distance_in))
+        self.enforce_speed_limits[None] = 1 if enforce_speed_limits else 0
 
         # ---- Loss balancing (constrained-optimization framing) ----
         # The terminal loss is a SOFT OBJECTIVE plus two ONE-SIDED BARRIERS:
@@ -341,6 +375,103 @@ class CSGSimulatorDelta:
             for t in range(T):
                 self.tool_pos[t + 1] = self.tool_pos[t] + self.tool_delta[t]
 
+    @ti.func
+    def stock_sdf_at(self, p, t_idx):
+        """Trilinear lookup of the stock SDF in slot ``t_idx`` at point ``p``.
+
+        Same interpolation as ``interpolate_stock`` but reads an explicit step
+        slot instead of ``current_step`` -- needed by ``advance_position`` to
+        measure how close the cutter is to the *remaining* stock at the start of
+        a move. Returns a unit-cube signed distance (negative inside material).
+        """
+        p_grid = p * self.resolution
+        x0 = ti.cast(ti.floor(p_grid.x), ti.i32)
+        y0 = ti.cast(ti.floor(p_grid.y), ti.i32)
+        z0 = ti.cast(ti.floor(p_grid.z), ti.i32)
+        x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+        tx, ty, tz = p_grid.x - x0, p_grid.y - y0, p_grid.z - z0
+
+        R = self.resolution
+        x0 = ti.max(0, ti.min(R - 1, x0))
+        x1 = ti.max(0, ti.min(R - 1, x1))
+        y0 = ti.max(0, ti.min(R - 1, y0))
+        y1 = ti.max(0, ti.min(R - 1, y1))
+        z0 = ti.max(0, ti.min(R - 1, z0))
+        z1 = ti.max(0, ti.min(R - 1, z1))
+
+        c000 = self.stock[t_idx, x0, y0, z0]
+        c100 = self.stock[t_idx, x1, y0, z0]
+        c010 = self.stock[t_idx, x0, y1, z0]
+        c110 = self.stock[t_idx, x1, y1, z0]
+        c001 = self.stock[t_idx, x0, y0, z1]
+        c101 = self.stock[t_idx, x1, y0, z1]
+        c011 = self.stock[t_idx, x0, y1, z1]
+        c111 = self.stock[t_idx, x1, y1, z1]
+
+        c00 = c000 * (1 - tx) + c100 * tx
+        c10 = c010 * (1 - tx) + c110 * tx
+        c01 = c001 * (1 - tx) + c101 * tx
+        c11 = c011 * (1 - tx) + c111 * tx
+        c0 = c00 * (1 - ty) + c10 * ty
+        c1 = c01 * (1 - ty) + c11 * ty
+        return c0 * (1 - tz) + c1 * tz
+
+    @ti.kernel
+    def advance_position(self, t: ti.i32):
+        """Integrate one step with feed/rapid speed clipping (the constraint).
+
+        Reconstructs ``tool_pos[t+1] = tool_pos[t] + clipped(tool_delta[t])``.
+        The commanded per-step displacement implies a speed
+        ``|delta| * workspace_mm / dt`` (mm/s); if that exceeds the regime's max
+        speed the displacement is scaled down so the *actual* move runs exactly
+        at the cap (direction preserved) -- a differentiable analogue of a
+        machine controller clamping the commanded feed.
+
+        Regime (all distances in mm): the move is treated as cutting ->
+        ``feed_speed`` when the cutter would come within ``safe_distance`` of the
+        REMAINING stock; otherwise it is a traverse with clearance ->
+        ``rapid_speed``. Engagement is probed at the COMMANDED destination
+        (``tool_pos[t] + tool_delta[t]``) against the stock at the start of the
+        step -- "am I moving into material?" -- rather than at the current
+        position, which sits in the hole the previous cut just made. The regime
+        is a comparison (a hard gate with zero gradient), so gradients still flow
+        cleanly through the clipped magnitude into ``tool_delta``.
+        """
+        a = self.tool_pos[t]
+        delta = self.tool_delta[t]
+        w = self.workspace_mm[None]
+
+        # Commanded step length, in mm.
+        dmm = delta * w
+        mag_mm = ti.sqrt(dmm.dot(dmm) + 1e-12)
+
+        # Clearance from the cutter to the remaining stock at the commanded
+        # destination, in mm (negative -> the cutter is inside material).
+        # The voxel grid only represents the unit cube; outside it the trilinear
+        # lookup clamps to the boundary layer and is meaningless. Remaining stock
+        # is always a subset of the cube, so the distance to the cube itself is a
+        # valid clearance floor -- combine the two so a probe lifted into open
+        # air above the stock reads true clearance (rapid) instead of the top
+        # surface (feed).
+        probe = a + delta
+        stock_d = self.stock_sdf_at(probe, t)
+        cube_d = box_sdf(probe, ti.Vector([0.5, 0.5, 0.5]), ti.Vector([0.5, 0.5, 0.5]))
+        clearance = ti.max(stock_d, cube_d)
+        clearance_mm = (clearance - self.tool_radius[None]) * w
+        is_feed = ti.cast(clearance_mm <= self.safe_distance[None], ti.f32)
+
+        # Max distance allowed this step for each regime: speed (mm/s) * dt (s).
+        rapid_step = self.rapid_speed[None] * self.dt[None]
+        feed_step = self.feed_speed[None] * self.dt[None]
+        cap_mm = rapid_step + (feed_step - rapid_step) * is_feed
+
+        # Clip: shrink the step to the cap if it is too fast (else leave it).
+        scale = ti.min(1.0, cap_mm / mag_mm)
+        enforced = ti.cast(self.enforce_speed_limits[None], ti.f32)
+        scale = scale * enforced + (1.0 - enforced)  # 1.0 when not enforcing
+
+        self.tool_pos[t + 1] = a + delta * scale
+
     @ti.kernel
     def zero_tool_deltas(self):
         for t in range(self.max_steps):
@@ -534,12 +665,18 @@ class CSGSimulatorDelta:
 
         num_active_steps is the number of tool positions in use; with
         num_active_steps positions there are num_active_steps-1 segments/cuts.
-        reconstruct_positions is part of the forward pass and must be inside
-        the same Tape as the carving for tool_delta.grad to be correct.
+
+        Position reconstruction is INTERLEAVED with carving: each step is clipped
+        to its feed/rapid speed limit by ``advance_position`` using the remaining
+        stock at the start of that step, then the cut is applied. This coupling
+        (regime depends on the evolving stock) is why we step rather than
+        reconstruct the whole path up front. The whole loop must run inside the
+        same Tape as the loss for ``tool_delta.grad`` to be correct.
         """
-        self.reconstruct_positions(num_active_steps - 1)
+        self.reconstruct_positions(0)  # set tool_pos[0] = tool_start
         self.init_stock()
         for t in range(num_active_steps - 1):
+            self.advance_position(t)
             self.apply_cut(t)
         self.compute_loss(num_active_steps - 1)
         self.compute_holder_penalty(num_active_steps - 1)

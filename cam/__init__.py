@@ -7,6 +7,16 @@ Round-trip fidelity is measured with the trajectory-similarity metrics.
 """
 
 from .config import MachineConfig
+from . import units
+from .units import (
+    MM_PER_INCH,
+    inch_to_mm,
+    mm_to_inch,
+    ipm_to_mm_per_min,
+    mm_per_min_to_ipm,
+    ipm_to_mm_per_s,
+    mm_per_s_to_ipm,
+)
 from .posts import PostProcessor, RS274Post, HaasPost, get_post, POSTS
 from .gcode_export import trajectory_to_gcode, save_gcode
 from .gcode_parser import parse_gcode, segment_waypoints, MotionSegment
@@ -21,6 +31,14 @@ from .trajectory_metrics import (
 
 __all__ = [
     "MachineConfig",
+    "units",
+    "MM_PER_INCH",
+    "inch_to_mm",
+    "mm_to_inch",
+    "ipm_to_mm_per_min",
+    "mm_per_min_to_ipm",
+    "ipm_to_mm_per_s",
+    "mm_per_s_to_ipm",
     "PostProcessor",
     "RS274Post",
     "HaasPost",

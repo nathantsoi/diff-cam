@@ -37,7 +37,7 @@ display is only needed for interactive visualization.
 
 ```
 simulator/
-  csg_simulator.py    # continuous, differentiable CSG simulator (PSDFs)
+  csg_simulator.py    # continuous, differentiable CSG simulator (PSDFs); feed/rapid speed clipping
   voxel_simulator.py  # discrete voxel simulator (CNCSimulator)
   csg_metrics.py      # Dice / ASD / HD95 + gouge/residual on SDF grids
 cam_env/
@@ -51,6 +51,7 @@ eval/
   eval_csg.py         # evaluate continuous trajectories / checkpoints
   eval.py             # evaluate discrete checkpoints
 cam/                  # trajectory -> G-code -> executed-trajectory (CAM layer)
+  units.py            # inch<->mm / feed-rate conversions (I/O boundary; internal is mm)
 scripts/              # launchers, SLURM jobs, round-trip + export demos
 ```
 
@@ -78,6 +79,50 @@ uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 32
 # Interactive live GUI (needs a display):
 uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 32
 ```
+
+#### Units & speed limits
+
+The differentiable simulator carries a **physical scale** and enforces two
+machine-style **max speeds** by clipping each step, mirroring a real controller's
+feed/rapid override (cf. the LinuxCNC trajectory planner and CAMotics). The
+geometry lives in the unit cube `[0,1]³`; `workspace_mm` is its physical edge
+length, and each step spans `dt` seconds, so a per-step displacement `delta`
+implies a speed of `|delta| · workspace_mm / dt` (mm/s). All scale-related math
+is done in **millimetres** internally — inches appear only at the I/O boundary
+(inch-valued inputs are converted up front; G-code requested in inches is
+converted just before emission), via the `cam.units` helper library.
+
+Two regimes are clipped per step:
+
+- **rapid** — when the cutter has clearance from the remaining stock (a
+  *traverse*);
+- **feed** — when the cutter is within `safe_distance` of the remaining stock (it
+  is *cutting*).
+
+The regime is decided by probing the **commanded destination** against the
+remaining stock at the start of the step ("am I moving into material?"). When a
+commanded move exceeds the regime's max speed, the step is scaled down so the
+*actual* move runs at the cap (direction preserved); gradients still flow through
+the clipped magnitude into `tool_delta`.
+
+| flag | default | meaning |
+|------|---------|---------|
+| `--workspace_mm F` | `100.0` | physical edge length (mm) of the unit cube `[0,1]³` |
+| `--dt F` | `0.01` | seconds per simulator step; sets the speed scale |
+| `--rapid_ipm F` | `500.0` | max traverse speed (inches/min) when clear of the stock |
+| `--feed_ipm F` | `10.0` | max cutting speed (inches/min) when near the stock |
+| `--safe_distance_in F` | `0.1` | clearance (inches) below which a move is limited to feed speed |
+| `--enforce_speed_limits` / `--no-enforce_speed_limits` | enabled | clip each step to its feed/rapid cap (disable to run unconstrained) |
+
+The saved `trajectory.npy` is the **speed-clipped** path that was actually carved
+(not the raw cumulative sum of commanded deltas), so the exported G-code matches
+the optimized result.
+
+> **Note on `dt`.** The speed caps become per-step displacement caps
+> (`speed · dt`). With the defaults, the feed cap is ~0.042 mm/step — sub-voxel at
+> `--resolution 32` — so feed-dominated cutting advances slowly per step (faithful
+> to a 50:1 rapid:feed ratio, but it needs many steps). Raise `--dt` (and/or the
+> speeds) or pass `--no-enforce_speed_limits` if this is too restrictive.
 
 ### Continuous — PPO baseline (Method 2)
 
@@ -247,6 +292,11 @@ G-code dialect is chosen by a **post-processor** (`cam/posts.py`):
 Add new machines by subclassing `PostProcessor` and registering them in
 `cam.posts.POSTS`.
 
+Internally the CAM layer (and the simulator) work in **millimetres**; pass
+`--units inch` to emit an inch program (`G20`) instead of mm (`G21`). Coordinates
+and feeds are converted mm→inch just before emission via `cam.units`, so the
+program round-trips exactly through the inch-aware parser.
+
 **Generate G-code for the Haas:**
 
 ```bash
@@ -305,6 +355,9 @@ round-trip fidelity.
   arc-length-resampled RMSE, waypoint round-trip error).
 - `cam.sim_exec.carve_stock(positions)` — execute a trajectory in the simulator
   with a hard (step-count-invariant) CSG carve, for carved-stock validation.
+- `cam.units` — unit conversions used at the I/O boundary (`inch_to_mm`,
+  `mm_to_inch`, `ipm_to_mm_per_s`, `mm_per_min_to_ipm`, …); everything internal
+  stays in millimetres.
 
 ## Testing
 
