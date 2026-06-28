@@ -13,7 +13,7 @@ To create a new experiment:
 
 ## Experimentation
 
-Each experiment runs on a single GPU, respect CUDA_VISIBLE_DEVICES set in the .env file. The training script runs for a **fixed time budget of no more than 15 minutes** (wall clock training time, excluding startup/compilation). Launch training as: `uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4 --save_model --eval --no-track`.
+Run each experiment on a single GPU, you can run multiple experiments at once, but check GPU load first and distribute accordingly by setting CUDA_VISIBLE_DEVICES. The training script runs for a **fixed time budget of no more than 15 minutes** (wall clock training time, excluding startup/compilation). Launch training as: `uv run python -m algorithms.train_csg --iters 128 --max_steps 128 --resolution 203 --dt 0.4 --save_model --eval --no-track`.
 
 **What you CAN do:**
 - Modify `train_csg.py`, parameters when you call this script, and related components. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc. Importantly, if you need to implement new loss components, this will need to be done in the differentiable simulator, which is allowed.
@@ -93,7 +93,7 @@ LOOP FOREVER:
 1. Look at the git state: the current branch/commit we're on
 2. Tune `algorithms/train_csg.py` with an experimental idea by directly hacking the code.
 3. git commit
-4. Run the experiment: `uv run python -m algorithms.train_csg --iters 128 --max_steps 64 --resolution 203 --dt 0.4 --save_model --eval --no-track > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+4. Run the experiment: `uv run python -m algorithms.train_csg --iters 128 --max_steps 128 --resolution 203 --dt 0.4 --save_model --eval --no-track > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^dice:\|^peak_vram_mb:" run.log` or read `runs/latest_metrics.json`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
