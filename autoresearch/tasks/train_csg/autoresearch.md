@@ -9,7 +9,7 @@ To create a new experiment:
 1. **Choose run tag**: choose a new tag for your experiment that includes the date and a unique word description (e.g. `jun27-random-init`). The branch `autoresearch/agd/<tag>` must not already exist, this is a fresh run.
 2. **Create the branch**: `git checkout -b autoresearch/agd/<tag>` from the `autoresearch` branch.
 3. **Read the in-scope files**: Start with the train_csg.py file and README.md
-4. **Create a new autoresearch/tasks/train_csg/idea.md file** to record your idea.
+4. **Create a new autoresearch/tasks/train_csg/idea.md file** to record your ideas and take notes. Summarize your most interesting findings in this file as they arise.
 
 ## Experimentation
 
