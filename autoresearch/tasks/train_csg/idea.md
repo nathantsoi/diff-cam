@@ -264,3 +264,20 @@ cylinder dt0.4 s2-3, sphere s10-11, sphere gc1 s2.
 - cylinder: 0.755715 (dt0.45 gc0.5 s8)
 - KEY: sphere & pyramid both rest on single lucky seeds; high variance is the
   remaining lever. Running large seed batches to chase a luckier basin.
+
+### iters=2000 + eval_freq=10 peak-capture (commit 87a3980)
+- sphere i2000 ef10 gc0.4 s20 = 0.848920 (best@530) — NEW sphere best. More iters
+  + finer eval catches a higher transient peak than i1000 ef20.
+- BUT high variance: same s20 i2000 rerun = 0.838643; s50=0.831, s33=0.767, others
+  0.65-0.72. The 0.849 is a lucky transient, not reproducible.
+- pyramid i2000 ef10: s10=0.865, s23=0.851 — no gain over i1000 s10=0.880.
+- cylinder i2000: s8=0.737, s3=0.741 — no gain; cylinder firmly capped ~0.756.
+
+### CONCLUSIONS (234 experiments)
+- Operating point: dt=0.45, m=128, lr=5e-3, init-scale=0.05, grad-clip=0.4-0.5,
+  eval-freq=10-20, best-checkpoint saving. This is the method.
+- Best per scenario (default stock 1.0, voxel 0.5mm):
+  pyramid 0.8801 (s10), sphere 0.8489 (s20 i2000), box 0.8311 (s2), cyl 0.7557 (s8).
+- Sphere & pyramid are high-variance; ceilings rest on lucky seeds. Cylinder/box
+  are low-variance, structurally capped. Pure seeding has hit diminishing returns.
+- Remaining lever: more i2000 seeds (occasional lucky transient peaks). Running.
