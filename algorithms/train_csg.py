@@ -251,7 +251,7 @@ def main():
     T = args.max_steps
     dx = 1.0 / args.resolution
     prefix = "AR-" if args.autoresearch else ""
-    run_name = f"{prefix}{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    run_name = f"{prefix}{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}_{os.getpid()}"
     run_dir = os.path.join("runs", run_name)
     video_dir = os.path.join(run_dir, "videos")
     os.makedirs(video_dir, exist_ok=True)
