@@ -119,6 +119,9 @@ def main():
                     help="loss weight on leftover material outside the part (objective)")
     ap.add_argument("--grad-clip", type=float, default=0.0,
                     help="clip per-iter gradient L2 norm (0 = disabled)")
+    ap.add_argument("--eval-freq", type=int, default=0,
+                    help="eval (dice) cadence in iters; 0 = auto (iters//10). "
+                         "Finer cadence captures transient dice peaks for best-checkpoint saving.")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--no-save-model", action="store_true",
                     help="don't pass --save_model (trajectory won't be written to the run dir)")
@@ -187,6 +190,7 @@ def main():
             "--w_gouge", str(args.w_gouge),
             "--w_residual", str(args.w_residual),
             "--grad_clip", str(args.grad_clip),
+            "--eval_freq", str(args.eval_freq),
             "--seed", str(args.seed),
             "--stock_size_in", *ssi,
             "--voxel_size_mm", str(args.voxel_size_mm),

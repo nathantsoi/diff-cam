@@ -472,6 +472,13 @@ def main():
     from tqdm import tqdm
     last_video_iter, last_eval_iter = -1, -1
     last_m = None
+    # Best-checkpoint tracking: dice can peak transiently mid-training (the
+    # optimizer over-carves past the optimum, so loss keeps dropping while dice
+    # falls). Capture the best-dice params and save THAT trajectory instead of
+    # the final one -- standard "save best validation, not final" practice.
+    best_dice = -1.0
+    best_params = None
+    best_it = -1
     start_time = time.time()
     it = 0
 
@@ -537,6 +544,10 @@ def main():
             if do_eval:
                 m = eval_metrics(sim, T, dx)
                 last_m = m
+                if m["dice"] > best_dice:
+                    best_dice = float(m["dice"])
+                    best_params = params.detach().clone().cpu()
+                    best_it = it
                 writer.add_scalar("eval/dice", m["dice"], it)
                 writer.add_scalar("eval/asd", m["asd"], it)
                 writer.add_scalar("eval/hd95", m["hd95"], it)
@@ -591,6 +602,16 @@ def main():
                     step=it,
                 )
         # --- Update simulator state to the final optimized model ---
+        # If a mid-training checkpoint had a better dice than the final iter
+        # (transient peak from over-carving), restore it so the saved trajectory
+        # and reported metrics reflect the best model, not the over-carved final.
+        used_best = False
+        if best_params is not None and best_dice > 0.0:
+            with torch.no_grad():
+                params.copy_(best_params.to(params.device))
+            used_best = True
+            print(f"[best] restoring best-dice checkpoint: dice={best_dice:.6f} @ iter {best_it} "
+                  f"(final-iter dice was {float(last_m['dice']) if last_m is not None else 0.0:.6f})", flush=True)
         deltas = params.detach().numpy()
         sim.tool_delta.from_torch(params.detach())
         # forward() (not reconstruct_positions) so the saved positions are the
@@ -613,6 +634,11 @@ def main():
             writer.add_scalar("loss/holder", m["loss_holder"], it)
 
         if last_m is None and (args.eval or args.eval_freq > 0):
+            last_m = eval_metrics(sim, T, dx)
+
+        # If we restored a best-checkpoint, re-evaluate the restored trajectory
+        # so metrics.json / summary reflect the best model (not the over-carved final).
+        if used_best and (args.eval or args.eval_freq > 0):
             last_m = eval_metrics(sim, T, dx)
 
         final_overlap = float(sim.holder_overlap_total(T - 1))
