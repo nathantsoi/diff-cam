@@ -242,3 +242,25 @@ cylinder dt0.4 s2-3, sphere s10-11, sphere gc1 s2.
 - sphere:   0.840223 (dt0.45 gc0.5 s20) — NEW, closing on pyramid
 - box:      0.828280 (dt0.45 s4)
 - cylinder: 0.748872 (dt0.4 s3)
+
+### grad_clip lever sweep (commit 87a3980) — gc0.4–0.5 is the sphere sweet spot
+- On the lucky seed20 basin: gc0.4=0.8424 (NEW best), gc0.5=0.8364, gc0.6=0.8385,
+  gc0.3=0.8345, gc0.7=0.8303, gc1.0=0.7928. Sweet spot gc0.4–0.5.
+- lr3e-3 with gc0.5 = 0.8405 (≈ gc0.5 baseline); gc0.4+lr3e-3 = 0.837. No gain.
+- init-scale 0.02=0.647, 0.1=0.711 — both HURT; keep default 0.05.
+- m144 = 0.823 (slightly worse than m128). Capacity m128 optimal at dt0.45.
+- CONCLUSION: grad_clip 0.4–0.5 is the lever; everything else is neutral or worse.
+
+### gc0.4 cross-scenario sweep (commit 87a3980) — no new bests
+- sphere gc0.4 s47-50: 0.724/0.651/0.752/0.841 — seed50 ≈ seed20, variance persists
+- pyramid gc0.4 s10/17/19/21: 0.860/0.852/0.866/0.842 — all below gc0.5 s10=0.880
+- gc0.5 remains marginally better than gc0.4 for pyramid; gc0.4 marginally better
+  for sphere. Both within noise. Ceilings: pyramid 0.8801, sphere 0.8424.
+
+### Updated best per scenario (commit 87a3980, 204 experiments)
+- pyramid:  0.880105 (dt0.45 gc0.5 s10) — OVERALL BEST
+- sphere:   0.842398 (dt0.45 gc0.4 s20)
+- box:      0.831147 (dt0.45 gc0.5 s2)
+- cylinder: 0.755715 (dt0.45 gc0.5 s8)
+- KEY: sphere & pyramid both rest on single lucky seeds; high variance is the
+  remaining lever. Running large seed batches to chase a luckier basin.
