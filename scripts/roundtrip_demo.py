@@ -55,10 +55,14 @@ def main():
     args = ap.parse_args()
 
     # All artifacts go under runs/ (matching algorithms/train_csg.py).
-    out_dir = args.out_dir or os.path.join(
-        repo, "runs",
-        "roundtrip_" + datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S"),
-    )
+    if args.out_dir:
+        out_dir = args.out_dir
+    else:
+        ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]
+        out_dir = os.path.join(repo, "runs", f"roundtrip_{ts}")
+        while os.path.exists(out_dir):
+            ts = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S_%f")[:-3]
+            out_dir = os.path.join(repo, "runs", f"roundtrip_{ts}")
     os.makedirs(out_dir, exist_ok=True)
     gcode_path = os.path.join(out_dir, "trajectory.nc" if args.post == "haas" else "trajectory.ngc")
     print(f"[run] writing outputs to {out_dir}")

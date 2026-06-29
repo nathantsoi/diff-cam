@@ -192,7 +192,7 @@ def evaluate_n_runs(models, num_runs=10, base_seed=42, render=False):
             project="diffcam",
             entity="diffcam",
             job_type="evaluation",
-            name=f"eval_checkpoint_{os.path.basename(name)}_{int(time.time())}",
+            name=f"eval_checkpoint_{os.path.basename(name)}_{int(time.time() * 1000)}",
             config={
                 "checkpoint_path": name,
                 "resolution": model_info["resolution"],

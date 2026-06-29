@@ -285,7 +285,11 @@ if __name__ == "__main__":
     args.num_iterations = args.total_timesteps // args.batch_size
     num_checkpoints = 4
     checkpoint_interval = max(1, args.num_iterations // num_checkpoints)
-    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{int(time.time())}"
+    ts = int(time.time() * 1000)
+    run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{ts}"
+    while os.path.exists(os.path.join("runs", run_name)):
+        ts += 1
+        run_name = f"{args.env_id}__{args.exp_name}__{args.seed}__{ts}"
     if args.track:
         import wandb
 
