@@ -317,3 +317,10 @@ cylinder dt0.4 s2-3, sphere s10-11, sphere gc1 s2.
 - box/cylinder: low-variance, capped (0.831 / 0.756).
 - Method is mature. Continued seeding chases rare lucky transient peaks.
 - Best per scenario: pyramid 0.8926, sphere 0.8499, box 0.8311, cylinder 0.7557.
+
+### Pyramid 0.90 breakthrough (commit 87a3980, 374 exp)
+- pyramid i5000 s115 = 0.900962 (best@1240) — NEW OVERALL BEST, first to break 0.90.
+- The seeding lever keeps producing marginal new bests (~every 10-30 seeds):
+  0.8926 (s41) → 0.8949 (s86) → 0.8950 (s101) → 0.9010 (s115). All lucky-seed
+  transient peaks captured by best-checkpoint saving at i5000.
+- Best per scenario: pyramid 0.9010, sphere 0.8499, box 0.8311, cylinder 0.7557.
