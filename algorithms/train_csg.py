@@ -87,6 +87,10 @@ class Args:
     """Adam learning rate"""
     anneal_lr: bool = False
     """linearly anneal the learning rate to 0 over training"""
+    lr_decay_frac: float = 0.0
+    """fraction of iters (at the end) over which LR linearly decays to 0; 0 = constant LR (preserves exploration, then settles)"""
+    init_scale: float = 0.05
+    """half-range of the uniform random init for per-step displacements"""
 
     # CamEnvDiff / CSG specific (mirrors csg_ppo)
     resolution: int = 32
@@ -343,7 +347,7 @@ def main():
     dx = sim.v
 
     # --- Init parameters (T-1 per-step displacements) ---
-    init = np.random.uniform(-0.05, 0.05, size=(T - 1, 3)).astype(np.float32)
+    init = np.random.uniform(-args.init_scale, args.init_scale, size=(T - 1, 3)).astype(np.float32)
     params = torch.tensor(init, requires_grad=True)
     opt = torch.optim.Adam([params], lr=args.learning_rate)
 
@@ -364,6 +368,16 @@ def main():
             if args.anneal_lr:
                 lrnow = (1.0 - it / max(1, args.iters)) * args.learning_rate
                 opt.param_groups[0]["lr"] = lrnow
+            elif args.lr_decay_frac > 0.0:
+                # Constant LR for the first (1 - lr_decay_frac) of iters, then
+                # linearly decay to 0 over the last lr_decay_frac. Keeps early
+                # exploration full-strength, then settles the trajectory so the
+                # final stock converges instead of oscillating under atomics.
+                decay_start = int(args.iters * (1.0 - args.lr_decay_frac))
+                if it >= decay_start:
+                    span = max(1, args.iters - decay_start)
+                    lrnow = args.learning_rate * (1.0 - (it - decay_start) / span)
+                    opt.param_groups[0]["lr"] = lrnow
 
             # Push current displacements into Taichi, then forward+backward.
             sim.tool_delta.from_torch(params.detach())

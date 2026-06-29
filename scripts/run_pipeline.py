@@ -107,6 +107,10 @@ def main():
     ap.add_argument("--max-steps", type=int, default=32,
                     help="trajectory length T (number of tool motions)")
     ap.add_argument("--learning-rate", type=float, default=5e-3)
+    ap.add_argument("--lr-decay-frac", type=float, default=0.0,
+                    help="fraction of iters (at the end) over which LR decays to 0")
+    ap.add_argument("--init-scale", type=float, default=0.05,
+                    help="half-range of the uniform random init for per-step displacements")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--no-save-model", action="store_true",
                     help="don't pass --save_model (trajectory won't be written to the run dir)")
@@ -169,6 +173,8 @@ def main():
             "--iters", str(args.iters),
             "--max_steps", str(args.max_steps),
             "--learning_rate", str(args.learning_rate),
+            "--lr_decay_frac", str(args.lr_decay_frac),
+            "--init_scale", str(args.init_scale),
             "--seed", str(args.seed),
             "--stock_size_in", *ssi,
             "--voxel_size_mm", str(args.voxel_size_mm),
