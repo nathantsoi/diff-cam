@@ -225,3 +225,20 @@ cylinder dt0.4 s2-3, sphere s10-11, sphere gc1 s2.
 - zlayer: correct geometry but tool can't descend (speed-limited). 0.38
 - All confirm: inits can't help until the tool can actually MOVE.
 
+
+### Sphere seed-batch + voxel-precision sweep (commit 87a3980)
+- sphere gc0.5 s14: 0.726856, s15: 0.652931, s16: 0.737213, s17: 0.605244,
+  s18: 0.725963, s19: 0.659286, **s20: 0.840223 (best@980)** — NEW SPHERE BEST
+- voxel-precision lever: voxel0.4 dt0.4 = 0.682843; voxel0.35 dt0.45 = 0.648210.
+  BOTH WORSE than voxel0.5 sphere best. Finer voxel did NOT help at these dt — the
+  tool-speed limit binds harder relative to voxel size, and the part fills less of
+  the grid. DISCARD the precision lever for now.
+- KEY: sphere variance is HUGE (0.605 to 0.840 across seeds 14-20). seed20's peak
+  @iter980 (near end) → that basin benefits from MORE iters. Running s20 i1500 +
+  fresh seeds s21-s30 to chase a higher sphere max.
+
+### Updated best per scenario (commit 87a3980)
+- pyramid:  0.851978 (dt0.45 s9)
+- sphere:   0.840223 (dt0.45 gc0.5 s20) — NEW, closing on pyramid
+- box:      0.828280 (dt0.45 s4)
+- cylinder: 0.748872 (dt0.4 s3)
