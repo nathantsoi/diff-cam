@@ -187,6 +187,37 @@ exploration / capacity:
 10 runs across all shapes to push each scenario's max: pyramid s3-5, box s3-4,
 cylinder dt0.4 s2-3, sphere s10-11, sphere gc1 s2.
 
+### grad_clip is the sphere lever (commit 6f78542)
+- sphere dt0.45 gc0.5 seed2: **0.675044** (best@700) — NEW sphere best (beats 0.670)
+- sphere dt0.45 gc1.0 seed2: 0.668670; gc1.0 s3: 0.645; gc1.0 s4: 0.664
+- sphere dt0.45 gc2.0 seed1: 0.657692
+- sphere dt0.45 gc0.5 seed1: 0.607 (NaN@159 — gc0.5 occasionally destabilizes)
+- grad_clip stabilizes the transient peak so best-checkpoint captures a higher
+  one. gc0.5–1.0 is the sphere sweet spot. Pyramid now at **0.849968** (s7).
+
+### Best per scenario (commit 6f78542)
+- pyramid:  0.849968 (dt0.45 s7) — OVERALL BEST
+- box:      0.828280 (dt0.45 s4)
+- cylinder: 0.748872 (dt0.4 s3)
+- sphere:   0.675044 (dt0.45 gc0.5 s2)
+
+## Stock-size generality (commit 6f78542)
+- sphere stock1.0 (default): 0.728271 (gc0.5 s7) — part 22.86mm dia, stock 25.4mm, valid
+- sphere stock1.5: 0.443958 — part small vs grid, harder (legitimate)
+- sphere stock0.75: 0.880686 — **ARTIFACT**: part 22.86mm > stock 19.05mm, target
+  clipped to grid; not a valid scenario. Excluded from bests.
+- KEY: stock must exceed the part. Smaller stock (part fills more of the 32^3
+  grid) → higher dice, but only valid down to stock ≈ part size. The default
+  stock 1.0 is the tightest valid sphere scenario.
+
+### Updated best per scenario (stock 1.0 default, commit 6f78542)
+- pyramid:  0.851978 (dt0.45 s9) — OVERALL BEST
+- box:      0.828280 (dt0.45 s4)
+- cylinder: 0.748872 (dt0.4 s3)
+- sphere:   0.728271 (dt0.45 gc0.5 s7) — grad_clip=0.5 is the sphere lever
+
+### Next: more gc0.5 sphere seeds, more pyramid seeds, cyl/box seeds.
+
 ### Structured-init attempts (all failed via speed-limit clipping) — DISCARD
 - raster: gouges sphere (passes through it), NaN@37. 0.56
 - spiral: gouges everything, dice 0.

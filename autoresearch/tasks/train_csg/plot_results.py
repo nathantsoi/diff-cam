@@ -47,6 +47,10 @@ def main():
                 continue
             cmd = r.get("command", "")
             desc = r.get("description", "")
+            # Skip artifact rows (e.g. stock smaller than the part -> target
+            # clipped to grid, dice inflated and not a valid scenario).
+            if "ARTIFACT" in desc:
+                continue
             rows.append({
                 "commit": r.get("commit", "?"),
                 "dice": dice,
@@ -70,9 +74,12 @@ def main():
         best = max(best, d)
         running_best.append(best)
 
-    # Best dice per scenario.
+    # Best dice per scenario (legitimate keep rows only; ARTIFACT rows are
+    # already filtered out above).
     per_shape = {}
     for r in rows:
+        if r["status"] != "keep":
+            continue
         per_shape[r["shape"]] = max(per_shape.get(r["shape"], -1.0), r["dice"])
     shape_order = sorted(per_shape, key=lambda k: -per_shape[k])
 
