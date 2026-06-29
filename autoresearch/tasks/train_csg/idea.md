@@ -309,3 +309,11 @@ cylinder dt0.4 s2-3, sphere s10-11, sphere gc1 s2.
 - sphere:   0.849860 (dt0.45 gc0.4 i5000 s20)
 - box:      0.831147 (dt0.45 gc0.5 s2)
 - cylinder: 0.755715 (dt0.45 gc0.5 s8)
+
+### Consolidation (334 experiments, commit 87a3980)
+- pyramid i5000: ~40 seeds run, distribution ~0.85-0.88, rare outliers to 0.8926
+  (s41). The 0.8926 is a lucky-seed transient peak, not reliably reproducible.
+- sphere i5000: ~25 seeds, distribution ~0.65-0.85, best 0.8499 (s20).
+- box/cylinder: low-variance, capped (0.831 / 0.756).
+- Method is mature. Continued seeding chases rare lucky transient peaks.
+- Best per scenario: pyramid 0.8926, sphere 0.8499, box 0.8311, cylinder 0.7557.
