@@ -91,6 +91,8 @@ class Args:
     """fraction of iters (at the end) over which LR linearly decays to 0; 0 = constant LR (preserves exploration, then settles)"""
     init_scale: float = 0.05
     """half-range of the uniform random init for per-step displacements"""
+    init_mode: str = "random"
+    """trajectory init: 'random' (uniform), 'raster' (boustrophedon sweep that pre-clears the cube exterior), or 'spiral' (descending growing-radius spiral)"""
     grad_clip: float = 0.0
     """clip per-iteration gradient L2 norm to this (0 = disabled); stabilizes long trajectories (large max_steps) that otherwise NaN"""
 
@@ -349,7 +351,55 @@ def main():
     dx = sim.v
 
     # --- Init parameters (T-1 per-step displacements) ---
-    init = np.random.uniform(-args.init_scale, args.init_scale, size=(T - 1, 3)).astype(np.float32)
+    # tool_pos[0] = tool_start (fixed); delta[t] = tool_pos[t+1] - tool_pos[t].
+    # For structured inits we generate the desired tool_pos[1..T-1] (T-1 points)
+    # then difference (with the first delta measured from tool_start).
+    tool_start = np.array([0.5, 0.5, 1.0], dtype=np.float32)
+    if args.init_mode == "raster":
+        # Boustrophedon (zigzag) sweep over the cube cross-section at descending
+        # z-levels. The tool carves a swept capsule along each segment, so this
+        # pre-clears the stock exterior (the region the random init never reaches)
+        # and gives the optimizer a trajectory that already covers the whole part.
+        n = T - 1
+        positions = []
+        z_levels = np.linspace(0.90, 0.10, 9)
+        rows = np.linspace(0.15, 0.85, 5)
+        for z in z_levels:
+            for i, y in enumerate(rows):
+                xs = np.linspace(0.15, 0.85, 4) if i % 2 == 0 else np.linspace(0.85, 0.15, 4)
+                for x in xs:
+                    positions.append([x, y, z])
+                    if len(positions) >= n:
+                        break
+                if len(positions) >= n:
+                    break
+            if len(positions) >= n:
+                break
+        positions = np.array(positions[:n], dtype=np.float32)
+        if len(positions) < n:  # pad with the last point (zero deltas)
+            positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "spiral":
+        # Descending spiral with radius growing 0 -> ~0.5 so the tool sweeps the
+        # cross-section while descending through the full stock height.
+        n = T - 1
+        r_max, revs = 0.5, 5.0
+        z_top, z_bot = 1.0, 0.05
+        positions = np.zeros((n, 3), dtype=np.float32)
+        for t in range(n):
+            frac = t / max(1, n - 1)
+            r = r_max * frac
+            phase = 2.0 * np.pi * revs * frac
+            positions[t, 0] = 0.5 + r * np.cos(phase)
+            positions[t, 1] = 0.5 + r * np.sin(phase)
+            positions[t, 2] = z_top + (z_bot - z_top) * frac
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
+    else:
+        init = np.random.uniform(-args.init_scale, args.init_scale, size=(T - 1, 3)).astype(np.float32)
     params = torch.tensor(init, requires_grad=True)
     opt = torch.optim.Adam([params], lr=args.learning_rate)
 
