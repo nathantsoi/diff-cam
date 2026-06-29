@@ -6,12 +6,12 @@ You are an AI Research assistant. Your objective is to find the best method of t
 
 The normalized geometry cube `[0,1]^3` is the **stock box** (the raw block, the only thing voxelized); the machine work volume (Haas Mini Mill, 16x12x10 in) is separate metadata. The **target** is the part to be carved inside the stock. Both are configurable from the CLI:
 
-- `--stock_size_in X Y Z` — stock box in inches (default `1 1 1`; can be non-cubic, e.g. `2 1 1`).
-- `--voxel_size_mm F` — physical voxel edge in mm, the sub-mm precision knob (default `0.5`). RAM scales with the stock volume, so finer voxels / larger stock cost more VRAM.
-- `--target_shape S` — `sphere` | `cylinder` | `box` | `pyramid`.
-- `--target_radius_mm F` — sphere/cylinder radius, or box/pyramid half-size (mm).
-- `--target_height_mm F` — cylinder/pyramid height (mm); ignored for sphere/box.
-- `--stock_origin_in X Y Z` — work origin (G54) = stock top-centre in machine inches (export/validation only; does not affect dice).
+- `--stock-size-in X Y Z` — stock box in inches (default `1 1 1`; can be non-cubic, e.g. `2 1 1`).
+- `--voxel-size-mm F` — physical voxel edge in mm, the sub-mm precision knob (default `0.5`). RAM scales with the stock volume, so finer voxels / larger stock cost more VRAM.
+- `--target-shape S` — `sphere` | `cylinder` | `box` | `pyramid`.
+- `--target-radius-mm F` — sphere/cylinder radius, or box/pyramid half-size (mm).
+- `--target-height-mm F` — cylinder/pyramid height (mm); ignored for sphere/box.
+- `--stock-origin-in X Y Z` — work origin (G54) = stock top-centre in machine inches (export/validation only; does not affect dice).
 
 Size the target to fit **inside** the stock (1 in = 25.4 mm). The dice score is the carved-stock-vs-target overlap, so the target choice defines the task — when you change the scenario, runs are only comparable to others with the **same** stock/target config. Use scenario changes to test generality and find hard cases, and validate any *method* improvement on the default scenario before claiming it as a win.
 
@@ -26,13 +26,13 @@ To create a new experiment:
 
 ## Experimentation
 
-Run each experiment on a single GPU, you can run multiple experiments at once, but check GPU load first and distribute accordingly by setting CUDA_VISIBLE_DEVICES. The training script runs for a **fixed time budget of no more than 15 minutes** (wall clock training time, excluding startup/compilation). Launch training as: `uv run python -m algorithms.train_csg --iters 128 --max_steps 128 --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12 --save_model --eval --no-track --autoresearch`
+Run each experiment on a single GPU, you can run multiple experiments at once, but check GPU load first and distribute accordingly by setting CUDA_VISIBLE_DEVICES. The training script runs for a **fixed time budget of no more than 15 minutes** (wall clock training time, excluding startup/compilation). Launch training as: `uv run python scripts/run_pipeline.py --iters 1000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas`
 
-`--voxel_size_mm` is the precision knob (a 1 in cube at `0.5` → 51³ grid, ~0.14 GB); set `--dt ≈ voxel_size_mm / feed_mm_per_s` (≈ `0.12` for 0.5 mm voxels at the default feed) so each feed step advances ≈ 1 voxel.
+`--voxel-size-mm` is the precision knob (a 1 in cube at `0.5` → 51³ grid, ~0.14 GB); set `--dt ≈ voxel-size-mm / feed_mm_per_s` (≈ `0.12` for 0.5 mm voxels at the default feed) so each feed step advances ≈ 1 voxel.
 
 **What you CAN do:**
 - Modify `train_csg.py`, parameters when you call this script, and related components. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc. Importantly, if you need to implement new loss components, this will need to be done in the differentiable simulator, which is allowed.
-- **Vary the machining scenario** via the CLI flags above: change the stock shape/size (`--stock_size_in`, including non-cubic blocks), the voxel precision (`--voxel_size_mm`), and the target shape/size (`--target_shape`, `--target_radius_mm`, `--target_height_mm`). Explore whether the method holds up across spheres, cylinders, boxes, pyramids, and different stock sizes — and tune the method to do well across them.
+- **Vary the machining scenario** via the CLI flags above: change the stock shape/size (`--stock-size-in`, including non-cubic blocks), the voxel precision (`--voxel-size-mm`), and the target shape/size (`--target-shape`, `--target-radius-mm`, `--target-height-mm`). Explore whether the method holds up across spheres, cylinders, boxes, pyramids, and different stock sizes — and tune the method to do well across them.
 
 **What you CANNOT do:**
 - Install new packages or add dependencies.
@@ -45,7 +45,7 @@ Run each experiment on a single GPU, you can run multiple experiments at once, b
 
 **Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 dice improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 dice improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
 
-**The first run**: Your very first run should always be to establish the baseline — run the training script with the default scenario (the baseline command in [Experimentation](#experimentation): default 1 in cube stock, sphere target, `--voxel_size_mm 0.5 --dt 0.12`) and no method changes. All later scenario or method variations are compared against this.
+**The first run**: Your very first run should always be to establish the baseline — run the pipeline script with the default scenario (the baseline command in [Experimentation](#experimentation): default 1 in cube stock, sphere target, `--voxel-size-mm 0.5`) and no method changes. All later scenario or method variations are compared against this.
 
 ## Output format
 
@@ -89,16 +89,16 @@ commit	dice	memory_gb	status	description	command
 3. peak memory in GB, round to .1f (e.g. 1.0 — divide peak_vram_mb by 1024) — use 0.0 for crashes
 4. status: `keep`, `discard`, or `crash`
 5. short text description of what this experiment tried
-6. the exact run command used (the full `uv run python -m algorithms.train_csg ...` invocation, WITHOUT the `> run.log 2>&1` redirect). This captures the scenario (stock/target/voxel flags) and hyperparameters so every row is reproducible and so the plot can group by config. It must contain no literal tab characters.
+6. the exact run command used (the full `uv run python scripts/run_pipeline.py ...` invocation, WITHOUT the `> run.log 2>&1` redirect). This captures the scenario (stock/target/voxel flags) and hyperparameters so every row is reproducible and so the plot can group by config. It must contain no literal tab characters.
 
 Example:
 
 ```
 commit	dice	memory_gb	status	description	command
-a1b2c3d	0.852300	0.1	keep	baseline	uv run python -m algorithms.train_csg --iters 128 --max_steps 128 --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12 --save_model --eval --no-track --autoresearch
-b2c3d4e	0.861200	0.1	keep	increase LR to 0.01	uv run python -m algorithms.train_csg --iters 128 --max_steps 128 --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12 --learning_rate 0.01 --save_model --eval --no-track --autoresearch
-c3d4e5f	0.812000	1.1	keep	0.9in cylinder on 1in cube	uv run python -m algorithms.train_csg --iters 128 --max_steps 128 --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12 --target_shape cylinder --target_radius_mm 11.43 --target_height_mm 22.86 --save_model --eval --no-track --autoresearch
-d4e5f6g	0.000000	0.0	crash	0.1mm voxels on 2in cube (OOM)	uv run python -m algorithms.train_csg --iters 128 --max_steps 128 --stock_size_in 2 2 2 --voxel_size_mm 0.1 --dt 0.024 --save_model --eval --no-track --autoresearch
+a1b2c3d	0.852300	0.1	keep	baseline	uv run python scripts/run_pipeline.py --iters 1000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas
+b2c3d4e	0.861200	0.1	keep	increase LR to 0.01	uv run python scripts/run_pipeline.py --iters 1000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --learning-rate 0.01
+c3d4e5f	0.812000	1.1	keep	0.9in cylinder on 1in cube	uv run python scripts/run_pipeline.py --iters 1000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape cylinder --target-radius-mm 11.43 --target-height-mm 22.86 --post haas
+d4e5f6g	0.000000	0.0	crash	0.1mm voxels on 2in cube (OOM)	uv run python scripts/run_pipeline.py --iters 1000 --max-steps 128 --stock-size-in 2 2 2 --voxel-size-mm 0.1 --target-shape sphere --target-radius-mm 11.43 --post haas
 ```
 
 ## The experiment loop
@@ -111,7 +111,7 @@ LOOP FOREVER:
 2. Tune `algorithms/train_csg.py` with an experimental idea by directly hacking the code.
 3. git commit
 4. Run the experiment, redirecting everything to `run.log` (do NOT use tee or let output flood your context). Record the exact command you ran (see "Logging results"). Example:
-   `uv run python -m algorithms.train_csg --iters 128 --max_steps 128 --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12 --save_model --eval --no-track --autoresearch > run.log 2>&1`
+   `uv run python scripts/run_pipeline.py --iters 1000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas > run.log 2>&1`
 5. Read out the results: `grep "^dice:\|^peak_vram_mb:" run.log` or read `runs/latest_metrics.json`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv, including the exact run command in the `command` column (NOTE: do not commit the results.tsv file, leave it untracked by git)
@@ -135,6 +135,6 @@ The loop is autonomous and never self-terminates — but whenever it *is* wound 
 Generate the plot from `results.tsv` (the source of truth — it has the per-experiment dice and the run command). Use `matplotlib` (already available; it is what the trainer uses for `metrics.png` — do NOT install anything). Write a small script to `autoresearch/tasks/train_csg/plot_results.py` and save the figure to `autoresearch/tasks/train_csg/results_plot.png`. The figure should make the research legible at a glance:
 
 - **Progress over experiments**: dice on the y-axis vs. experiment order on the x-axis, with kept vs. discarded vs. crashed points distinguished, and a "running best" line so the improvement trajectory is obvious.
-- **Generality across scenarios**: since you vary the stock/target, also show the **best dice per machining scenario** (parse the stock/target flags out of the `command` column — e.g. group by `target_shape` and `stock_size_in`). A grouped bar chart is fine. This is the payoff of varying the scenario: it shows where the method is strong and where it struggles.
+- **Generality across scenarios**: since you vary the stock/target, also show the **best dice per machining scenario** (parse the stock/target flags out of the `command` column — e.g. group by `--target-shape` and `--stock-size-in`). A grouped bar chart is fine. This is the payoff of varying the scenario: it shows where the method is strong and where it struggles.
 
 Keep the script simple and robust (skip `crash` rows / `0.000000` dice where appropriate, handle a commit appearing more than once by taking its best). Then summarize the plot's takeaways in `idea.md` and in your final message. After the plot exists and is saved, you may conclude.
