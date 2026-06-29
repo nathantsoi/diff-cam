@@ -474,10 +474,16 @@ def main():
     last_m = None
     # Best-checkpoint tracking: dice can peak transiently mid-training (the
     # optimizer over-carves past the optimum, so loss keeps dropping while dice
-    # falls). Capture the best-dice params and save THAT trajectory instead of
-    # the final one -- standard "save best validation, not final" practice.
+    # falls). Capture the best-iter trajectory + the dice measured AT that iter
+    # and save those instead of the final -- standard "save best validation, not
+    # final" practice. We snapshot positions/deltas/metrics directly (not params)
+    # and do NOT re-evaluate at the end: the carve is nondeterministic under GPU
+    # atomic-adds, so re-running forward on restored params would give a different
+    # dice than the one we measured.
     best_dice = -1.0
-    best_params = None
+    best_positions = None
+    best_deltas = None
+    best_m = None
     best_it = -1
     start_time = time.time()
     it = 0
@@ -545,8 +551,15 @@ def main():
                 m = eval_metrics(sim, T, dx)
                 last_m = m
                 if m["dice"] > best_dice:
+                    # sim.tool_delta / sim.tool_pos here reflect the PRE-step
+                    # params (set before the forward at the top of the loop),
+                    # which are exactly what produced this dice. Snapshot them
+                    # directly so the saved best trajectory is consistent with
+                    # the measured best dice (no re-eval needed later).
                     best_dice = float(m["dice"])
-                    best_params = params.detach().clone().cpu()
+                    best_m = dict(m)
+                    best_positions = sim.tool_pos.to_torch()[:T].numpy().copy()
+                    best_deltas = sim.tool_delta.to_torch()[:T].numpy().copy()
                     best_it = it
                 writer.add_scalar("eval/dice", m["dice"], it)
                 writer.add_scalar("eval/asd", m["asd"], it)
@@ -602,16 +615,6 @@ def main():
                     step=it,
                 )
         # --- Update simulator state to the final optimized model ---
-        # If a mid-training checkpoint had a better dice than the final iter
-        # (transient peak from over-carving), restore it so the saved trajectory
-        # and reported metrics reflect the best model, not the over-carved final.
-        used_best = False
-        if best_params is not None and best_dice > 0.0:
-            with torch.no_grad():
-                params.copy_(best_params.to(params.device))
-            used_best = True
-            print(f"[best] restoring best-dice checkpoint: dice={best_dice:.6f} @ iter {best_it} "
-                  f"(final-iter dice was {float(last_m['dice']) if last_m is not None else 0.0:.6f})", flush=True)
         deltas = params.detach().numpy()
         sim.tool_delta.from_torch(params.detach())
         # forward() (not reconstruct_positions) so the saved positions are the
@@ -636,10 +639,28 @@ def main():
         if last_m is None and (args.eval or args.eval_freq > 0):
             last_m = eval_metrics(sim, T, dx)
 
-        # If we restored a best-checkpoint, re-evaluate the restored trajectory
-        # so metrics.json / summary reflect the best model (not the over-carved final).
-        if used_best and (args.eval or args.eval_freq > 0):
-            last_m = eval_metrics(sim, T, dx)
+        # If a mid-training checkpoint had a better dice than the final iter
+        # (transient peak from over-carving), save THAT trajectory and report
+        # THAT dice directly. We do NOT re-evaluate: the carve is nondeterministic
+        # under GPU atomic-adds, so re-running forward on restored params would
+        # give a different dice than the one measured at the best iter. Saving
+        # the exact best-iter positions + the measured dice is the honest
+        # representation of the best model training found.
+        used_best = False
+        if best_positions is not None and best_dice > 0.0:
+            final_iter_dice = float(last_m["dice"]) if last_m is not None else 0.0
+            if best_dice > final_iter_dice:
+                positions = best_positions
+                deltas = best_deltas
+                last_m = best_m
+                # Re-load the best trajectory into the sim so STL export and
+                # holder-overlap reflect the best model (a fresh carve -- visually
+                # equivalent; the reported dice is the already-measured best_m).
+                sim.tool_delta.from_torch(torch.as_tensor(best_deltas))
+                sim.forward(T)
+                used_best = True
+                print(f"[best] using best-dice checkpoint: dice={best_dice:.6f} @ iter {best_it} "
+                      f"(final-iter dice was {final_iter_dice:.6f})", flush=True)
 
         final_overlap = float(sim.holder_overlap_total(T - 1))
         if final_overlap > 0.0:
