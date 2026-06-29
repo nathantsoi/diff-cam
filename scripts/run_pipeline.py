@@ -111,6 +111,10 @@ def main():
                     help="fraction of iters (at the end) over which LR decays to 0")
     ap.add_argument("--init-scale", type=float, default=0.05,
                     help="half-range of the uniform random init for per-step displacements")
+    ap.add_argument("--w-gouge", type=float, default=4.0,
+                    help="loss weight on cutting INTO the part (barrier)")
+    ap.add_argument("--w-residual", type=float, default=1.0,
+                    help="loss weight on leftover material outside the part (objective)")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--no-save-model", action="store_true",
                     help="don't pass --save_model (trajectory won't be written to the run dir)")
@@ -175,6 +179,8 @@ def main():
             "--learning_rate", str(args.learning_rate),
             "--lr_decay_frac", str(args.lr_decay_frac),
             "--init_scale", str(args.init_scale),
+            "--w_gouge", str(args.w_gouge),
+            "--w_residual", str(args.w_residual),
             "--seed", str(args.seed),
             "--stock_size_in", *ssi,
             "--voxel_size_mm", str(args.voxel_size_mm),
