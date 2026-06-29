@@ -187,7 +187,16 @@ def eval_trajectory(path, resolution, do_gcode, post, config, voxel_size_mm=VOXE
         print(f"\n=== G-code round-trip (post='{post}') ===")
         print(f"  program blocks            : {len([l for l in gcode.splitlines() if l and not l.startswith('(')])}")
         print(f"  executed samples          : {executed.shape[0]} ({times[-1]:.2f}s of motion)")
-        print(f"  waypoint round-trip error : {waypoint_roundtrip_error(pos_mm, rec_mm, 1.0):.3e} mm")
+        # The Haas post adds approach/plunge/retract moves, so the recovered
+        # waypoint count differs from the source path; the strict waypoint
+        # metric needs matching counts, so report n/a there (the path-similarity
+        # metrics below use the executed trajectory and remain valid).
+        if pos_mm.shape == rec_mm.shape:
+            wp_err = waypoint_roundtrip_error(pos_mm, rec_mm, 1.0)
+            print(f"  waypoint round-trip error : {wp_err:.3e} mm")
+        else:
+            print(f"  waypoint round-trip error : n/a ({rec_mm.shape[0]} waypoints "
+                  f"vs {pos_mm.shape[0]} source points; post adds approach moves)")
         print(f"  discrete Frechet          : {discrete_frechet(pos_mm, exec_mm, 1.0):.3e} mm")
         print(f"  DTW (mean matched dist)   : {dtw_distance(pos_mm, exec_mm, 1.0):.3e} mm")
         print(f"  arc-length resampled RMSE : {resampled_rmse(pos_mm, exec_mm, scale=1.0):.3e} mm")
@@ -198,11 +207,13 @@ def eval_trajectory(path, resolution, do_gcode, post, config, voxel_size_mm=VOXE
         print("  --- carved stock of executed program vs target ---")
         print(f"  Dice : {me['dice']:.4f}   ASD : {me['asd']:.4f}   HD95 : {me['hd95']:.4f}")
 
+        wp_err = (waypoint_roundtrip_error(pos_mm, rec_mm, 1.0)
+                  if pos_mm.shape == rec_mm.shape else float("nan"))
         wandb.log({
             "gcode/blocks": len([l for l in gcode.splitlines() if l and not l.startswith('(')]),
             "gcode/executed_samples": executed.shape[0],
             "gcode/motion_time": times[-1],
-            "gcode/waypoint_roundtrip_error": waypoint_roundtrip_error(pos_mm, rec_mm, 1.0),
+            "gcode/waypoint_roundtrip_error": wp_err,
             "gcode/discrete_frechet": discrete_frechet(pos_mm, exec_mm, 1.0),
             "gcode/dtw": dtw_distance(pos_mm, exec_mm, 1.0),
             "gcode/rmse": resampled_rmse(pos_mm, exec_mm, scale=1.0),
@@ -212,10 +223,6 @@ def eval_trajectory(path, resolution, do_gcode, post, config, voxel_size_mm=VOXE
         })
     finally:
         run.finish()
-
-    me, _, _ = carve_trajectory_metrics(executed, resolution=resolution)
-    print("  --- carved stock of executed program vs target ---")
-    print(f"  Dice : {me['dice']:.4f}   ASD : {me['asd']:.4f}   HD95 : {me['hd95']:.4f}")
 
 
 # ---------------------------------------------------------------------------

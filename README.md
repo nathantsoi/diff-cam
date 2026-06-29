@@ -53,6 +53,10 @@ eval/
 cam/                  # trajectory -> G-code -> executed-trajectory (CAM layer)
   units.py            # inch<->mm / feed-rate conversions (I/O boundary; internal is mm)
 scripts/              # launchers, SLURM jobs, round-trip + export demos
+  run_pipeline.py     # one-step train -> eval -> G-code -> visualize
+  export_gcode.py     # trajectory -> machine G-code (Haas / RS274)
+  visualize_trajectory.py  # 6-panel trajectory + G-code/sim diagnostic figure
+  roundtrip_demo.py   # trajectory -> G-code -> executed trajectory fidelity demo
 ```
 
 ## Training
@@ -366,6 +370,35 @@ uv run python scripts/export_gcode.py --post haas \
     --stock-size-in 2 2 2 --stock-origin-in 8 6 5 -o part.nc
 ```
 
+### One-step pipeline (train → eval → G-code → visualize)
+
+`scripts/run_pipeline.py` chains all four stages into a single command — from
+geometry to a machine-ready G-code program plus a diagnostic figure, no manual
+script-chaining required. It runs each stage as a subprocess (a fresh process
+per stage so Taichi re-initialises cleanly), threads the discovered run
+directory between them, and forwards the geometry flags consistently. The
+exporter and visualizer additionally auto-read the run's `args.json`.
+
+```bash
+# Fast end-to-end smoke test (small part, headless, no W&B):
+uv run python scripts/run_pipeline.py
+
+# A real 1" sphere at 0.5 mm voxels, Haas G-code + figure:
+uv run python scripts/run_pipeline.py --iters 128 --max-steps 64 \
+    --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere \
+    --target-radius-mm 11.43 --post haas
+
+# Fixture the stock top-centre at machine (8,6,5)" (emits G10 L2 in the Haas program):
+uv run python scripts/run_pipeline.py --stock-origin-in 8 6 5 --post haas
+```
+
+Outputs land in the training `runs/<run>/` dir: `trajectory.npy`,
+`metrics.json`, `gcode_<post>.nc`, and `trajectory_viz_<post>.png` (see
+[Visualizing a trained trajectory](#visualizing-a-trained-trajectory)). Run a
+subset with `--stages` (e.g. `--stages viz`) and `--run-dir` to re-run one stage
+on an existing run. The console ends with a pipeline summary listing every
+artifact path.
+
 ## Evaluation
 
 All modes report the same geometric metrics of the final carved stock vs. the
@@ -432,21 +465,26 @@ program round-trips exactly through the inch-aware parser.
 
 **Generate G-code for the Haas:**
 
-The exporter defaults to a **1 in cube** stock (`--stock-size-in 1 1 1`) inside
-the Mini Mill work volume (`--workspace-in 16 12 10`, inches). Give
-`--stock-origin-in X Y Z` to fixture the stock at a known machine location.
+**The exporter auto-matches the training run.** `train_csg.py` writes the full run
+config to `runs/<run>/args.json` next to `trajectory.npy`; when you point
+`--trajectory` at a run's trajectory, the exporter reads that file and uses the
+run's `stock_size_in`, `stock_origin_in`, and `workspace_in` so the program lines
+up with the part it was optimized for (it prints the resolved config and its
+source). Any flag you pass explicitly overrides the run config; `--no-run-config`
+ignores it. For the repo-root `trajectory.npy` copy (no adjacent `args.json`) it
+falls back to CLI flags / defaults (1 in cube stock, Mini Mill work volume).
 
 ```bash
-# Default 1" cube stock, top-centre G54 declared
+# Auto-match the run's stock/part/location from runs/<run>/args.json
 uv run python scripts/export_gcode.py --post haas --tool 3 --rpm 6000 \
-    --program-number 1234 -o part.nc
-
-# Place a 1.5 x 1.5 x 1 in stock with its top-centre at machine (8, 6, 5) in
-# (emits G10 L2 P1 to program the G54 offset)
-uv run python scripts/export_gcode.py --post haas \
-    --stock-size-in 1.5 1.5 1.0 --stock-origin-in 8 6 5 \
     --trajectory runs/CamEnvDiff-v0__train_csg__1__1782599757/trajectory.npy \
     -o runs/CamEnvDiff-v0__train_csg__1__1782599757/gcode_haas.nc
+
+# Override the stock placement explicitly (top-centre at machine (8, 6, 5) in;
+# emits G10 L2 P1 to program the G54 offset)
+uv run python scripts/export_gcode.py --post haas \
+    --stock-size-in 1.5 1.5 1.0 --stock-origin-in 8 6 5 \
+    --trajectory runs/CamEnvDiff-v0__train_csg__1__1782599757/trajectory.npy -o part.nc
 ```
 
 **Evaluate based on the G-code program** (round-trip the trajectory through the
@@ -480,6 +518,50 @@ adds clearance/plunge/retract moves for the real machine, so its waypoint count
 differs from the source path (the strict waypoint metric is reported as `n/a`);
 use it to sanity-check that the Haas program parses and plans, not for exact
 round-trip fidelity.
+
+## Visualizing a trained trajectory
+
+`scripts/visualize_trajectory.py` renders a **6-panel diagnostic figure** that
+makes the trajectory, its G-code, and the simulation carve legible at a glance.
+It auto-matches the training run's `args.json` (stock/part/location), so pointing
+it at a run dir is usually enough:
+
+  - **A. Normalized frame** — the path in the simulator's `[0,1]³` stock box, with
+    the speed-clipped path, the pre-clip commanded deltas, and start/end markers.
+  - **B. WCS / G-code frame** — the same path mapped to the machine's work
+    coordinate system (top-centre G54, `Z=0` at the stock top), with the stock
+    box, G54 origin, and safe-Z plane.
+  - **C. G-code round-trip** — the original path vs the executed G-code path, with
+    rapid approach/retract moves drawn faded so cutting moves are separable.
+  - **D. Sim carve vs target** — the hard-CSG result of the trajectory next to the
+    target part ("did it machine the part?").
+  - **E. G-code vs sim carve** — the carve of the exported G-code overlaid on the
+    carve of the original trajectory; the console reports their voxel **Dice**
+    (~1.0 proves the G-code reproduces the simulation).
+  - **F. Metrics** — a text summary of the round-trip, Z ranges, cut depth, and
+    the G-code-vs-sim and carved-vs-target Dice.
+
+The export→parse round trip is geometrically exact, so a perceived G-code/sim
+mismatch is **not** the export math — panel E's Dice is the definitive check (it
+has been `1.00000` in every run tested). Real causes of a visual mismatch are the
+Haas approach/retract moves (panel C) or an under-trained trajectory (panel F's
+cut-depth flag).
+
+```bash
+# Auto-match the repo-root trajectory.npy + args.json
+uv run python scripts/visualize_trajectory.py
+
+# Visualize a specific run (reads runs/<run>/trajectory.npy + args.json)
+uv run python scripts/visualize_trajectory.py \
+    --run runs/CamEnvDiff-v0__train_csg__1__1782599757
+
+# Haas post + skip the carved-stock panels (no Taichi, faster/headless)
+uv run python scripts/visualize_trajectory.py --post haas --no-carve
+```
+
+The figure is written next to the trajectory as
+`trajectory_viz_<post>.png` (or `--save`); add `--show` for the interactive
+matplotlib window.
 
 ### CAM API
 

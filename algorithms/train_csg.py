@@ -24,6 +24,7 @@ Example (mirrors the csg_ppo baseline command):
         --video_fps 30
 """
 
+import math
 import os
 import random
 import time
@@ -354,6 +355,7 @@ def main():
 
     eval_interval = args.eval_freq if args.eval_freq > 0 else (max(1, args.iters // 10) if args.eval else 0)
     pbar = tqdm(range(args.iters), desc=run_name) if args.progress_bar else range(args.iters)
+    prior_params = params.detach().clone()
     try:
         for it in pbar:
             if gui is not None and not gui.running:
@@ -369,12 +371,21 @@ def main():
                 sim.forward(T)
 
             grad = sim.tool_delta.grad.to_torch()[:T - 1]  # (T-1, 3)
+            loss = float(sim.loss[None])
+            grad_norm = float(grad.norm().item())
+
+            if math.isnan(loss) or math.isnan(grad_norm) or torch.isnan(grad).any():
+                prior_it = max(0, it - 1)
+                print(f"\n[WARNING] NaN detected at iteration {it} (loss={loss}, grad_norm={grad_norm}). Stopping training and ending on prior epoch {prior_it}.", flush=True)
+                with torch.no_grad():
+                    params.copy_(prior_params)
+                it = prior_it
+                break
+
             params.grad = grad
             opt.step()
             opt.zero_grad()
-
-            loss = float(sim.loss[None])
-            grad_norm = float(grad.norm().item())
+            prior_params = params.detach().clone()
 
             # --- per-iter scalars (TensorBoard; synced to wandb via sync_tensorboard) ---
             writer.add_scalar("losses/loss", loss, it)
@@ -443,6 +454,15 @@ def main():
                     {"media/policy_rollout": wandb.Video(out_path, fps=args.video_fps, format="mp4")},
                     step=it,
                 )
+        # --- Update simulator state to the final optimized model ---
+        deltas = params.detach().numpy()
+        sim.tool_delta.from_torch(params.detach())
+        # forward() (not reconstruct_positions) so the saved positions are the
+        # speed-clipped trajectory that was actually carved/optimized, not the
+        # raw cumulative sum of the commanded deltas.
+        sim.forward(T)
+        positions = sim.tool_pos.to_torch()[:T].numpy()
+
         if (args.eval or args.eval_freq > 0) and it != last_eval_iter:
             m = eval_metrics(sim, T, dx)
             last_m = m
@@ -511,20 +531,21 @@ def main():
         export_stls(sim, T, dx, run_name, it, args.track)
 
         # --- Save the learned trajectory (this is GradMill's "model") ---
-        deltas = params.detach().numpy()
-        sim.tool_delta.from_torch(params.detach())
-        # forward() (not reconstruct_positions) so the saved positions are the
-        # speed-clipped trajectory that was actually carved/optimized, not the
-        # raw cumulative sum of the commanded deltas.
-        sim.forward(T)
-        positions = sim.tool_pos.to_torch()[:T].numpy()
         if args.save_model:
             np.save(os.path.join(run_dir, "trajectory_deltas.npy"), deltas)
             np.save(os.path.join(run_dir, "trajectory.npy"), positions)
             print(f"[{run_name}] trajectory saved to {run_dir}/trajectory.npy")
         # Repo-root copy for the CAM round-trip demo / G-code export defaults.
+        # Also copy args.json next to it so the exporter can auto-match the
+        # stock/part/location config of this (most recent) run.
         np.save("trajectory_deltas.npy", deltas)
         np.save("trajectory.npy", positions)
+        try:
+            import json as _json
+            with open("args.json", "w") as _f:
+                _json.dump(vars(args), _f, indent=2)
+        except Exception as e:
+            print(f"[run] failed to write repo-root args.json: {e}")
 
         # Final interactive replay.
         if gui is not None and gui.running:
