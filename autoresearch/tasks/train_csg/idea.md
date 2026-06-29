@@ -281,3 +281,16 @@ cylinder dt0.4 s2-3, sphere s10-11, sphere gc1 s2.
 - Sphere & pyramid are high-variance; ceilings rest on lucky seeds. Cylinder/box
   are low-variance, structurally capped. Pure seeding has hit diminishing returns.
 - Remaining lever: more i2000 seeds (occasional lucky transient peaks). Running.
+
+### iters=3000 peak-capture (commit 87a3980) — pyramid 0.8915 NEW OVERALL BEST
+- pyramid i3000 ef10 s41 = 0.891537 (best@680) — NEW overall best. i3000 finds
+  higher transient peaks than i2000 (more spike chances over a longer run).
+- pyramid i3000 s45=0.8899, s44=0.864, s46=0.865, s47=0.868 — rich 0.86-0.89 basin.
+- sphere i3000: s71=0.835, s20=0.845, s50=0.815 — no gain over i2000 0.849.
+- i3000 is the productive lever for pyramid; sphere plateaus ~0.85.
+
+### Updated best per scenario (274 experiments)
+- pyramid:  0.891537 (dt0.45 gc0.5 i3000 s41) — OVERALL BEST
+- sphere:   0.848920 (dt0.45 gc0.4 i2000 s20)
+- box:      0.831147 (dt0.45 gc0.5 s2)
+- cylinder: 0.755715 (dt0.45 gc0.5 s8)
