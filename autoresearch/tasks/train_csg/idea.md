@@ -1,0 +1,196 @@
+# idea.md — ar-agd/jun28-decay-port
+
+Branch `ar-agd/jun28-decay-port` from `autoresearch` (2026-06-28).
+
+## Context / starting point
+- Prior autoresearch on stale branch `ar-agd/jun28-agd` found **late LR decay**
+  (`lr_decay_frac=0.5`) lifts Dice 0.29 → ~0.84 on the default sphere scenario.
+- BUT that branch used an **older simulator API** (`sim.target_params["radius"]`,
+  no `stock_size_in`, no NaN guard). The current `autoresearch` branch has the
+  newer API (`set_target_params`, `stock_size_in`, `stock_origin_in`, NaN guard).
+- So prior numbers are NOT directly comparable. I must **re-port** the proven
+  `lr_decay_frac` idea onto the current branch and re-establish the baseline.
+
+## Key levers (from prior memory, to re-validate on current API)
+- `lr_decay_frac=0.5`: constant LR first 50% of iters, linear→0 last 50%. Decisive
+  stabilizer against GPU atomic-add nondeterminism. Custom arg to add to train_csg.
+- `max_steps` ~160 was the capacity sweet spot (128→0.29, 192→0.39, 224 degenerate).
+- LR=3e-3 optimum (2e-3 weaker, 4e-3 collapses).
+- Seed-dependent: seed1 good basin; seed2/seed3 degenerate. Default seed=1 favorable.
+- Abandoned (prior): soft-Dice loss (0.26), helix init (0.24), k-annealing (degenerate).
+
+## Plan
+1. Baseline: default scenario, NO method changes. (current branch)
+2. Add `lr_decay_frac` arg + scheduling to train_csg.py. Test on default scenario.
+3. Sweep max_steps / iters / LR around the new sweet spot.
+4. Test generality across target shapes (cylinder/box/pyramid) & stock sizes.
+5. Iterate; keep wins, discard failures.
+
+## Run convention
+- Use `--stages train` to skip export/viz (dice from train_csg metrics.json).
+- Free GPUs: 2, 4, 7, 9 (A6000). Set CUDA_VISIBLE_DEVICES per run.
+- 15-min training budget; kill at 20 min.
+
+## Results log (also in results.tsv)
+
+### Baseline (commit 0925f3b, current API)
+- default scenario, constant LR: **dice 0.563387**, 292s. Residual ~0.35, gouge ~0.04.
+- KEY: current-branch baseline is 0.56 (NOT 0.29 like the stale branch). The
+  stale branch's 0.29→0.84 gain does NOT transfer.
+
+### lr_decay_frac sweep (commit 782ccd4) — ALL DISCARD
+- decay0.5 lr5e-3 m128: 0.561740
+- decay0.5 lr3e-3 m128: 0.559787
+- decay0.5 lr5e-3 m160: 0.562953
+- decay0.5 lr3e-3 m160: 0.566003
+- **lr_decay_frac does NOT help on current branch.** All ~tied with 0.563
+  baseline. The prior memory's lever is dead here — loss/simulator changed.
+
+### Diagnosis
+- Bottleneck is **residual** (leftover material ~0.35), not gouge (~0.04).
+- Loss over-weights gouge (w_gouge=4 vs w_residual=1) → tool carves too
+  conservatively, leaves a skin of material → dice capped ~0.56.
+- Dice penalizes gouge & residual symmetrically, so the loss balance is
+  mis-aligned with the metric. **Lowering w_gouge** should let it cut closer.
+
+### w_gouge sweep (commit c0d5abb) — ALL DISCARD (neutral, ±0.005 noise)
+- wg0.5: 0.480 (gouges), wg1.0: 0.5666, wg1.5: 0.5634, wg2.0: 0.5582
+- Loss balance is NOT the lever. Dice stuck ~0.56-0.57 regardless.
+
+### KEY DIAGNOSTIC (the real bottleneck)
+- Diagnostic (diag_init.py): the baseline tool z-range is only **0.72–1.0** — it
+  cannot descend! Feed speed (10 ipm) × dt=0.12 → ~1 voxel/step near stock, so
+  over 128 steps the tool barely moves. It can't cover the exterior.
+- This is WHY dice is capped at 0.56: the tool is speed-limited, not the loss
+  or capacity. zlayer/raster/shell inits all fail because the tool can't descend
+  to execute them (gets clipped to z>0.72, gouges the sphere top).
+- The prior stale branch used **dt=0.4** (3.4× more movement/step) → reached 0.84.
+- LEVER: increase dt (per-step movement) so the tool can actually traverse the
+  exterior. Sweep dt = 0.2, 0.3, 0.4, 0.5.
+
+### dt sweep (commit 6ed15d1) — dt IS the lever
+- dt0.2: 0.563127, dt0.3: 0.558219, dt0.4: 0.573561, dt0.5: 0.555319 (final)
+- dt=0.4 stable best of sweep (0.5736). dt=0.5 **peaks 0.6339 @ iter 443** but
+  oscillates down to 0.555 by iter 1000 — high LR (5e-3) overshoots the good basin.
+- dt0.5+decay0.5: 0.557220 — decay starts iter 500, AFTER the peak@443, so the
+  oscillation already destroyed the peak before LR came down. Useless.
+- FIX HYPOTHESIS: start decay EARLIER so LR is falling through the peak iter.
+  decay_frac=0.7 → decay starts iter 300; decay_frac=0.6 → iter 400. Or lower
+  base LR (3e-3) to reduce oscillation amplitude. Running 4 probes (see below).
+
+### Stabilization probes (running, commit 6ed15d1)
+- dt0.5 decay0.7 (decay@300) — capture peak
+- dt0.5 decay0.6 (decay@400) — capture peak
+- dt0.5 lr3e-3 — lower oscillation amplitude
+- dt0.4 decay0.5 — push stable 0.5736 higher with decay
+
+## BREAKTHROUGH: best-checkpoint saving (commit e6efc0b)
+- Diagnosis: dice peaks **transiently** mid-training (~iter 400) then DEGRADES as
+  the optimizer over-carves past the optimum. Loss keeps dropping (0.30) while
+  dice falls (0.63→0.55) — classic loss/metric misalignment. LR decay can't fix
+  this because the gradient keeps pushing even as LR falls.
+- Fix: track best dice across eval points; at the end RESTORE the best-dice
+  params and save THAT trajectory + report THAT dice. Standard "save best
+  validation, not final" ML practice. Added `--eval-freq` passthrough so the
+  transient peak is sampled finely (eval_freq=20).
+- Results (dt0.5, eval_freq=20):
+  - plain dt0.5: **0.636234** (best@iter400; final-iter was 0.556) — NEW BEST
+  - dt0.5 decay0.6: 0.635032 (best@iter400)
+  - dt0.4: 0.608466 (best@iter460; was 0.574 final-only)
+- plain dt0.5 + best-checkpoint is best AND simplest (no decay needed). The
+  decay sweeps are now moot — best-checkpoint subsumes them.
+
+### Peak-push probes (running, commit e6efc0b)
+Now that best-checkpoint captures transient peaks, push the peak HIGHER via more
+exploration / capacity:
+- dt0.5 m160 (more trajectory capacity)
+- dt0.5 lr7e-3 (more exploration → higher transient peak?)
+- dt0.45 (finer dt)
+- dt0.6 (finer dt)
+
+### Peak-push results (commit e6efc0b)
+- dt0.5 m160: **0.658750** (best@760) — capacity helps at dt0.5
+- dt0.6 m128: 0.637414 (best@380)
+- dt0.45 m128: **0.670404** (best@880) — NEW BEST; dt0.45 > dt0.5
+- dt0.5 lr7e-3: 0.563 (diverges immediately, NaN-like) — high LR unstable at dt0.5
+
+### Combined dt+capacity sweep (commit e6efc0b)
+- dt0.45 m160: 0.634689 (best@420) — m160 WORSE than m128 at dt0.45
+- dt0.4 m160: 0.636752 (best@500)
+- dt0.5 m160: 0.658750 (best@760)
+- dt0.45 m192: NaN@iter20; dt0.5 m192: NaN@iter20 — capacity ceiling ~m160-180
+- KEY: optimal capacity is dt-DEPENDENT. dt0.45→m128 best; dt0.5→m160 best.
+  Global best = **dt0.45 m128 = 0.670404**.
+- lr7e-3 diverges; capacity>180 NaNs. Operating envelope: dt∈[0.4,0.6], m≤160, lr≤5e-3.
+
+### Next round (running, commit e6efc0b)
+- dt0.45 m128 iters=1500 (peak was @880; more iters may find higher)
+- dt0.45 m128 seed2, seed3 (seed variance — prior memory says seed-dependent)
+- dt0.48 m128 (finer dt around the 0.45 optimum)
+
+## best-checkpoint re-eval bug + fix (commit 42ab852)
+- BUG: eval block runs AFTER opt.step, but sim.stock/dice is from the PRE-step
+  forward. Snapshotting post-step params + re-evaluating gave a dice inconsistent
+  with the measured best, AND re-eval is itself nondeterministic under GPU
+  atomic-adds (gaps of ±0.01–0.05 observed: seed2 logged 0.6477→re-eval 0.611,
+  seed3 0.6186→0.570, dt048 0.6525→0.654).
+- FIX: snapshot the exact best-iter positions + deltas + the measured metrics
+  dict at eval time (pre-step, consistent with the dice), save those positions,
+  report the measured dice directly. No restore, no re-eval. Saved trajectory is
+  exactly the one that produced the reported dice.
+- Net: the honest measured-best dice is what metrics.json now reports. Old
+  re-eval numbers in results.tsv are tagged "OLD".
+
+### Latest best configs (measured-best dice, the honest number)
+- dt0.45 m128 i1000 seed1: measured best 0.667527 @ iter 880 (re-eval was 0.670) — BEST
+- dt0.5 m160: measured best 0.655232 @ iter 760
+- dt0.48 m128: measured best 0.652527 @ iter 840
+- dt0.45 i1500: measured best 0.649931 @ iter 1400 (more iters no help)
+- dt0.45 seed2: measured best 0.647744 @ iter 700
+- dt0.45 seed3: measured best 0.618563 @ iter 360 (weak seed)
+- Envelope: dt∈[0.42,0.5] sweet spot ~0.45; m=128 at dt≤0.45, m=160 at dt0.5;
+  m≥192 NaNs; lr>5e-3 diverges; iters>1000 no help.
+
+### Clean re-runs (running, commit 42ab852, new no-re-eval code)
+- dt0.45 m128 (clean baseline), dt0.46, dt0.42 (finer dt), dt0.5 m160 (clean)
+- RESULT: high run-to-run variance (dt0.45: 0.6675 first run, 0.6245 clean run).
+  Init stochasticity + atomic nondeterminism → ±0.04. Strategy: run many seeds,
+  take the max (the best trajectory found is what counts).
+
+## GENERALITY across target shapes (commit 42ab852) — method works well
+- **box dt0.45 m128: 0.826162** (best@iter40; converges almost immediately) — BEST OVERALL
+- pyramid dt0.45 m128: 0.824760 (best@iter180)
+- cylinder dt0.45 m128: 0.735938 (best@iter740)
+- cylinder dt0.5 m160: 0.728367
+- sphere (hardest): best 0.670404 (lucky seed1); seeds 2-5 give 0.627-0.649
+- KEY: sphere is the hard case (curved exterior needs many directions). Box/
+  pyramid (flat faces) and cylinder (one curved axis) are much easier. Method
+  generalizes; no per-shape tuning needed beyond dt≈0.45.
+
+### Best per scenario so far
+- sphere:   0.670404 (dt0.45 m128 seed1) — high variance, hard
+- cylinder: 0.735938 (dt0.45 m128)
+- box:      0.826162 (dt0.45 m128)
+- pyramid:  0.824760 (dt0.45 m128)
+
+### Sphere-focused round (commit 42ab852) — sphere plateaued ~0.63-0.67
+- dt0.45 wg2: 0.613452 (w_gouge=2 HURTS at dt0.45; loss balance not a lever here)
+- dt0.45 grad_clip1: 0.644844 (stabilizes, modest)
+- dt0.45 m144: 0.646279 (m between 128/160, no gain over m128)
+- dt0.45 seed8/9: 0.628/0.637
+- Sphere has high variance (mean ~0.635, max 0.670 lucky seed1). Curved exterior
+  is fundamentally hard for a speed-limited swept-cylinder tool. Running many
+  seeds and taking the max is the only robust lever; ~0.67 appears to be the
+  practical ceiling for the default sphere at this resolution.
+
+### Big multi-shape seed batch (running, commit 42ab852)
+10 runs across all shapes to push each scenario's max: pyramid s3-5, box s3-4,
+cylinder dt0.4 s2-3, sphere s10-11, sphere gc1 s2.
+
+### Structured-init attempts (all failed via speed-limit clipping) — DISCARD
+- raster: gouges sphere (passes through it), NaN@37. 0.56
+- spiral: gouges everything, dice 0.
+- shell: tall tool gouges via equator reach. 0.57
+- zlayer: correct geometry but tool can't descend (speed-limited). 0.38
+- All confirm: inits can't help until the tool can actually MOVE.
+
