@@ -324,3 +324,10 @@ cylinder dt0.4 s2-3, sphere s10-11, sphere gc1 s2.
   0.8926 (s41) → 0.8949 (s86) → 0.8950 (s101) → 0.9010 (s115). All lucky-seed
   transient peaks captured by best-checkpoint saving at i5000.
 - Best per scenario: pyramid 0.9010, sphere 0.8499, box 0.8311, cylinder 0.7557.
+
+### 404-experiment milestone (commit 87a3980)
+- pyramid 0.9010 (s115) holds across ~80 pyramid i5000 seeds. New bests appear
+  roughly every 20-30 seeds (0.8926→0.8949→0.8950→0.9010). High-variance lucky
+  transient peaks; best-checkpoint + i5000 captures them.
+- sphere 0.8499 (s20) holds across ~40 sphere i5000 seeds.
+- Best per scenario: pyramid 0.9010, sphere 0.8499, box 0.8311, cylinder 0.7557.
