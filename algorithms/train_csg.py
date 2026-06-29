@@ -91,6 +91,8 @@ class Args:
     """fraction of iters (at the end) over which LR linearly decays to 0; 0 = constant LR (preserves exploration, then settles)"""
     init_scale: float = 0.05
     """half-range of the uniform random init for per-step displacements"""
+    grad_clip: float = 0.0
+    """clip per-iteration gradient L2 norm to this (0 = disabled); stabilizes long trajectories (large max_steps) that otherwise NaN"""
 
     # CamEnvDiff / CSG specific (mirrors csg_ppo)
     resolution: int = 32
@@ -397,6 +399,10 @@ def main():
                 break
 
             params.grad = grad
+            if args.grad_clip > 0.0:
+                gn = params.grad.norm()
+                if gn > args.grad_clip:
+                    params.grad.mul_(args.grad_clip / (gn + 1e-12))
             opt.step()
             opt.zero_grad()
             prior_params = params.detach().clone()
