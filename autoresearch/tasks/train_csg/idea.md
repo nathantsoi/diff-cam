@@ -294,3 +294,18 @@ cylinder dt0.4 s2-3, sphere s10-11, sphere gc1 s2.
 - sphere:   0.848920 (dt0.45 gc0.4 i2000 s20)
 - box:      0.831147 (dt0.45 gc0.5 s2)
 - cylinder: 0.755715 (dt0.45 gc0.5 s8)
+
+### iters=5000 peak-capture (commit 87a3980) — TWO new bests
+- pyramid i5000 s41 = 0.892553 (best@1590) — NEW overall best. Peak LATER than
+  i3000's @680 → longer training surfaces higher transient peaks.
+- sphere i5000 s20 = 0.849860 (best@2450) — NEW sphere best. Peak @2450, far later
+  than i2000's @530.
+- i5000 pyramid s32=0.876, s58=0.874, s45=0.862 — basin still rich 0.86-0.89.
+- KEY: peaks keep appearing LATER as iters grow (sphere @530→@2450; pyramid
+  @680→@1590). The transient-peak ceiling rises with more iters. Pushing to i8000.
+
+### Updated best per scenario (294 experiments)
+- pyramid:  0.892553 (dt0.45 gc0.5 i5000 s41) — OVERALL BEST
+- sphere:   0.849860 (dt0.45 gc0.4 i5000 s20)
+- box:      0.831147 (dt0.45 gc0.5 s2)
+- cylinder: 0.755715 (dt0.45 gc0.5 s8)
