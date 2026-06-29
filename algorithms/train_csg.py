@@ -92,7 +92,7 @@ class Args:
     init_scale: float = 0.05
     """half-range of the uniform random init for per-step displacements"""
     init_mode: str = "random"
-    """trajectory init: 'random' (uniform), 'raster' (boustrophedon sweep that pre-clears the cube exterior), or 'spiral' (descending growing-radius spiral)"""
+    """trajectory init: 'random' (uniform), 'raster' (boustrophedon sweep that pre-clears the cube exterior), 'spiral' (descending growing-radius spiral), or 'shell' (helix orbiting just outside the target sphere surface)"""
     grad_clip: float = 0.0
     """clip per-iteration gradient L2 norm to this (0 = disabled); stabilizes long trajectories (large max_steps) that otherwise NaN"""
 
@@ -395,6 +395,32 @@ def main():
             positions[t, 0] = 0.5 + r * np.cos(phase)
             positions[t, 1] = 0.5 + r * np.sin(phase)
             positions[t, 2] = z_top + (z_bot - z_top) * frac
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "shell":
+        # Helix that orbits JUST OUTSIDE the target sphere surface while
+        # descending through the stock. The tool center rides at
+        # r_sphere(z) + tool_radius + margin, so its inner edge clears the
+        # exterior annulus without gouging the part (a full-cross-section raster
+        # passes through the sphere and gouges it). Sphere-specific.
+        n = T - 1
+        stock_mm = args.stock_size_in[0] * 25.4
+        r_sp = args.target_radius_mm / stock_mm          # normalized sphere radius
+        r_tool = args.tool_radius_mm / stock_mm          # normalized tool radius
+        margin = 0.02
+        revs = 8.0
+        z_top, z_bot = 0.95, 0.05
+        positions = np.zeros((n, 3), dtype=np.float32)
+        for t in range(n):
+            frac = t / max(1, n - 1)
+            z = z_top + (z_bot - z_top) * frac
+            rs = math.sqrt(max(0.0, r_sp * r_sp - (z - 0.5) * (z - 0.5)))
+            r_orbit = rs + r_tool + margin
+            phase = 2.0 * np.pi * revs * frac
+            positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
+            positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
+            positions[t, 2] = z
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)

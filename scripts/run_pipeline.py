@@ -111,7 +111,7 @@ def main():
                     help="fraction of iters (at the end) over which LR decays to 0")
     ap.add_argument("--init-scale", type=float, default=0.05,
                     help="half-range of the uniform random init for per-step displacements")
-    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "spiral"),
+    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "spiral", "shell"),
                     help="trajectory init mode")
     ap.add_argument("--w-gouge", type=float, default=4.0,
                     help="loss weight on cutting INTO the part (barrier)")
