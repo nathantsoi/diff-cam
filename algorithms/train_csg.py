@@ -92,7 +92,7 @@ class Args:
     init_scale: float = 0.05
     """half-range of the uniform random init for per-step displacements"""
     init_mode: str = "random"
-    """trajectory init: 'random' (uniform), 'raster' (boustrophedon sweep that pre-clears the cube exterior), 'spiral' (descending growing-radius spiral), or 'shell' (helix orbiting just outside the target sphere surface)"""
+    """trajectory init: 'random', 'raster', 'spiral', 'shell', or 'zlayer' (z-level descent that pre-clears the sphere exterior layer by layer, using the tall tool's vertical extent)"""
     grad_clip: float = 0.0
     """clip per-iteration gradient L2 norm to this (0 = disabled); stabilizes long trajectories (large max_steps) that otherwise NaN"""
 
@@ -421,6 +421,46 @@ def main():
             positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
             positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
             positions[t, 2] = z
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "zlayer":
+        # Z-level descent: the tool is a tall vertical cylinder (height ~= stock)
+        # whose tool_pos.z is its BASE, extending upward by h. By descending the
+        # base from above the stock down past the bottom, each layer's tool only
+        # reaches DOWN to its base, so a high base never touches the equator and
+        # can safely carve the top interior exterior at small radius. The safe
+        # orbit radius at each base is set by the sphere radius at the
+        # equator-closest z the tool reaches, plus the tool radius. A radius
+        # oscillation sweeps the annulus out to the cube wall. Sphere-specific.
+        n = T - 1
+        stock_mm = args.stock_size_in[0] * 25.4
+        r_sp = args.target_radius_mm / stock_mm
+        r_tool = args.tool_radius_mm / stock_mm
+        margin = 0.03
+        revs = 12.0
+        z_top, z_bot = 0.95, -0.95
+        r_outer = 0.5 + r_tool
+        positions = np.zeros((n, 3), dtype=np.float32)
+        for t in range(n):
+            frac = t / max(1, n - 1)
+            zb = z_top + (z_bot - z_top) * frac          # base descends through stock
+            # equator-closest in-stock z the tool reaches (in [zb, zb+h])
+            zhi = zb + 1.0
+            if zb > 0.5:
+                z_eq = zb
+            elif zhi < 0.5:
+                z_eq = zhi
+            else:
+                z_eq = 0.5
+            rs = math.sqrt(max(0.0, r_sp * r_sp - (z_eq - 0.5) * (z_eq - 0.5)))
+            r_safe = rs + r_tool + margin
+            # oscillate orbit radius to cover the annulus out to the cube wall
+            r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * 3.0 * frac))
+            phase = 2.0 * np.pi * revs * frac
+            positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
+            positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
+            positions[t, 2] = zb
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
