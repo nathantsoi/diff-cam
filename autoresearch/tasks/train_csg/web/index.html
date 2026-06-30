@@ -34,14 +34,13 @@
   #bars { width:100%; height:200px; }
   #detail { display:none; }
   #detail .grid { display:grid; grid-template-columns:1.1fr 1fr; gap:18px; }
-  #traj { width:100%; height:380px; background:var(--bg); border-radius:8px; }
   .meta dt { color:var(--muted); font-size:12px; margin-top:8px; }
   .meta dd { margin:2px 0 0 0; font-family:"SFMono-Regular",Consolas,monospace; font-size:12px;
     word-break:break-all; }
   .metrics { display:grid; grid-template-columns:repeat(2,1fr); gap:6px 18px; font-size:13px; }
   .metrics div { display:flex; justify-content:space-between; border-bottom:1px solid var(--grid); padding:3px 0; }
   .metrics span:first-child { color:var(--muted); }
-  .downloads { margin-top:8px; }
+  .downloads { margin-top:12px; }
   .downloads a { display:inline-block; margin:4px 8px 4px 0; padding:6px 12px; border-radius:6px;
     background:var(--panel2); color:var(--accent); text-decoration:none; font-size:13px;
     border:1px solid var(--grid); }
@@ -54,8 +53,64 @@
   #tooltip .t-title { font-weight:600; color:var(--accent); margin-bottom:3px; }
   #tooltip .t-cmd { color:var(--muted); font-family:monospace; font-size:11px; margin-top:4px; }
   .hint { color:var(--muted); font-size:12px; }
-  .sel-tag { font-size:12px; color:var(--muted); }
-  .traj-tip { font-size:11px; color:var(--muted); }
+  .traj-tip { font-size:11px; color:var(--muted); margin-top:6px; }
+
+  /* ---- 3D viewport (controls ported from aim3d) ---- */
+  .viewport-wrap { position:relative; }
+  #traj { width:100%; height:420px; background:#11161b; border-radius:8px; display:block; }
+  .vp-toolbar { position:absolute; top:10px; right:10px; display:flex; gap:8px; align-items:flex-start; z-index:5; }
+  .glass { background:hsla(220,20%,15%,.78); backdrop-filter:blur(8px);
+    border:1px solid hsla(220,20%,35%,.5); border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,.4); }
+  .tool-btn { width:34px; height:34px; display:flex; align-items:center; justify-content:center;
+    font-size:16px; color:hsl(220,10%,80%); cursor:pointer; padding:0; }
+  .tool-btn:hover { color:#fff; border-color:var(--accent); }
+  .vp-settings { position:relative; }
+  .settings-menu { position:absolute; top:40px; right:0; padding:8px 10px; display:none;
+    flex-direction:column; gap:6px; font-size:12px; z-index:6; min-width:170px; }
+  .settings-menu.open { display:flex; }
+  .settings-row { display:flex; justify-content:space-between; align-items:center; gap:12px; color:var(--ink); }
+  .settings-row input { accent-color:var(--accent); }
+
+  /* nav-cube (CSS 3D, mirrors camera orientation; click faces to snap) */
+  .nav-cube { width:54px; height:54px; perspective:200px; cursor:pointer; }
+  .nav-cube-scene { width:100%; height:100%; transform-style:preserve-3d; }
+  .nav-cube-body { width:100%; height:100%; position:relative; transform-style:preserve-3d;
+    transition:transform .12s; }
+  .cube-face { position:absolute; width:54px; height:54px; display:flex; align-items:center;
+    justify-content:center; font-size:8px; font-weight:600; letter-spacing:.03em; color:#cfe3ff;
+    background:hsla(210,40%,30%,.55); border:1px solid hsla(210,40%,60%,.4); }
+  .cube-face:hover { background:hsla(200,90%,50%,.6); }
+  .cube-face.front  { transform: translateZ(27px); }
+  .cube-face.back   { transform: rotateY(180deg) translateZ(27px); }
+  .cube-face.right  { transform: rotateY(90deg)  translateZ(27px); }
+  .cube-face.left   { transform: rotateY(-90deg) translateZ(27px); }
+  .cube-face.top    { transform: rotateX(90deg)  translateZ(27px); }
+  .cube-face.bottom { transform: rotateX(-90deg) translateZ(27px); }
+
+  /* playback panel (ported from aim3d SimulationPlaybackPanel) */
+  .playback-panel { position:absolute; bottom:12px; left:50%; transform:translateX(-50%);
+    background:hsla(220,20%,15%,.85); backdrop-filter:blur(8px);
+    border:1px solid hsla(220,20%,35%,.5); border-radius:8px; padding:10px 16px;
+    display:flex; flex-direction:column; gap:8px; box-shadow:0 4px 12px rgba(0,0,0,.4);
+    z-index:5; width:min(420px, 86%); }
+  .playback-controls { display:flex; align-items:center; gap:10px; justify-content:center; }
+  .control-btn { background:transparent; border:none; color:hsl(220,10%,80%); cursor:pointer;
+    display:flex; align-items:center; justify-content:center; padding:5px; border-radius:4px; }
+  .control-btn:hover { background:hsla(220,20%,30%,.6); color:#fff; }
+  .control-btn:disabled { opacity:.35; cursor:default; }
+  .control-btn.play-btn { color:hsl(200,90%,65%); }
+  .control-btn.play-btn:hover { color:hsl(200,90%,78%); }
+  .speed-control { display:flex; align-items:center; gap:8px; margin-left:14px; }
+  .speed-label { font-size:.78rem; color:hsl(220,10%,70%); min-width:34px; font-variant-numeric:tabular-nums; }
+  .scrubber-container { display:flex; align-items:center; gap:10px; }
+  .step-label { font-size:.78rem; color:hsl(220,10%,70%); min-width:62px; text-align:right;
+    font-variant-numeric:tabular-nums; }
+  .scrubber { flex:1; }
+  input[type=range] { -webkit-appearance:none; background:transparent; height:18px; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; height:12px; width:12px;
+    border-radius:50%; background:hsl(200,90%,65%); cursor:pointer; margin-top:-4px; }
+  input[type=range]::-webkit-slider-runnable-track { width:100%; height:4px; cursor:pointer;
+    background:hsla(220,15%,35%,.8); border-radius:2px; }
   @media (max-width:900px){ #detail .grid{ grid-template-columns:1fr; } }
 </style>
 </head>
@@ -93,10 +148,50 @@
   <div class="card" id="detail">
     <h2 id="detail-title">Experiment detail</h2>
     <div class="grid">
-      <div>
+      <div class="viewport-wrap">
         <svg id="traj"></svg>
-        <div class="traj-tip">drag to rotate · solid line = actual (speed-clipped) tool path ·
-          dashed = commanded (pre-clip) · ●green = start · ●red = end</div>
+        <div class="vp-toolbar">
+          <button class="tool-btn glass" id="vp-home" title="Home: re-center the view">&#8962;</button>
+          <div class="vp-settings">
+            <button class="tool-btn glass" id="vp-settings-btn" title="View settings">&#9881;</button>
+            <div class="settings-menu glass" id="vp-settings-menu">
+              <label class="settings-row"><span>Show stock cube</span>
+                <input type="checkbox" id="opt-cube" checked></label>
+              <label class="settings-row"><span>Show axes</span>
+                <input type="checkbox" id="opt-axes" checked></label>
+              <label class="settings-row"><span>Commanded (pre-clip) path</span>
+                <input type="checkbox" id="opt-cmd"></label>
+            </div>
+          </div>
+          <div class="nav-cube glass" id="nav-cube" title="Click a face for a standard view">
+            <div class="nav-cube-scene"><div class="nav-cube-body" id="nav-cube-body">
+              <span class="cube-face front"  data-view="front">FRONT</span>
+              <span class="cube-face back"   data-view="back">BACK</span>
+              <span class="cube-face right"  data-view="right">RIGHT</span>
+              <span class="cube-face left"   data-view="left">LEFT</span>
+              <span class="cube-face top"    data-view="top">TOP</span>
+              <span class="cube-face bottom" data-view="bottom">BOT</span>
+            </div></div>
+          </div>
+        </div>
+        <div class="playback-panel" id="playback">
+          <div class="playback-controls">
+            <button class="control-btn" id="pb-stop" title="Stop">&#9632;</button>
+            <button class="control-btn" id="pb-reset" title="Reset">&#8634;</button>
+            <button class="control-btn" id="pb-back" title="Step backward">&#9198;</button>
+            <button class="control-btn play-btn" id="pb-play" title="Play / Pause">&#9654;</button>
+            <button class="control-btn" id="pb-fwd" title="Step forward">&#9197;</button>
+            <div class="speed-control">
+              <span class="speed-label" id="pb-speed-label">1.0x</span>
+              <input type="range" class="speed-slider" id="pb-speed" min="0.1" max="5" step="0.1" value="1">
+            </div>
+          </div>
+          <div class="scrubber-container">
+            <span class="step-label" id="pb-step-label">0 / 0</span>
+            <input type="range" class="scrubber" id="pb-scrub" min="0" max="0" value="0">
+          </div>
+        </div>
+        <div class="traj-tip">drag = orbit · shift-drag = pan · wheel = zoom · click the nav-cube for standard views · use the playback bar to animate the tool path</div>
         <div class="downloads" id="downloads"></div>
       </div>
       <div>
@@ -117,15 +212,6 @@ const SHAPE_COLOR = {sphere:"#1f77b4", cylinder:"#ff7f0e", box:"#2ca02c", pyrami
 const STATUS_OPACITY = {keep:0.92, discard:0.45, crash:0.6};
 let DATA = null, selected = null;
 
-// ---------- 3D projection (yaw/pitch orbit) ----------
-function rot(p, yaw, pitch) {
-  const [x,y,z] = p;
-  const cy=Math.cos(yaw), sy=Math.sin(yaw);
-  const x1=x*cy - y*sy, y1=x*sy + y*cy, z1=z;
-  const cp=Math.cos(pitch), sp=Math.sin(pitch);
-  return [x1, y1*cp - z1*sp, y1*sp + z1*cp];
-}
-
 d3.json("data.json").then(raw => {
   DATA = raw;
   document.getElementById("stats").innerHTML =
@@ -135,6 +221,7 @@ d3.json("data.json").then(raw => {
   buildFilters();
   renderScatter();
   renderBars();
+  initViewport();
 });
 
 function buildLegend() {
@@ -178,14 +265,12 @@ function renderScatter() {
   const x = d3.scaleLinear().domain([d3.min(xs)-1, d3.max(xs)+1]).range([m.l, W-m.r]);
   const y = d3.scaleLinear().domain([0, d3.max(data,d=>d.dice)*1.15]).range([H-m.b, m.t]);
 
-  // running best line
   let best=-1, run=[];
   data.forEach(d=>{ best=Math.max(best,d.dice); run.push(best); });
   const line = d3.line().x((d,i)=>x(d.idx)).y((d,i)=>y(run[i]));
   svg.append("path").datum(data).attr("d", line).attr("fill","none")
     .attr("stroke","#e5534b").attr("stroke-width",1.6).attr("stroke-dasharray","5 4").attr("opacity",.85);
 
-  // axes
   svg.append("g").attr("transform",`translate(0,${H-m.b})`)
     .call(d3.axisBottom(x).ticks(10)).selectAll("text").attr("fill","var(--muted)");
   svg.append("g").attr("transform",`translate(${m.l},0)`)
@@ -197,7 +282,6 @@ function renderScatter() {
   svg.append("text").attr("transform",`translate(14,${H/2}) rotate(-90)`)
     .attr("text-anchor","middle").attr("fill","var(--muted)").attr("font-size",12).text("dice");
 
-  // points
   const tip = document.getElementById("tooltip");
   svg.append("g").selectAll("circle").data(data).join("circle")
     .attr("cx", d=>x(d.idx)).attr("cy", d=>y(d.dice)).attr("r", d=>d.status==="keep"?4.5:3.2)
@@ -219,7 +303,6 @@ function renderScatter() {
     .on("mouseout",()=>tip.style.display="none")
     .on("click",(ev,d)=>selectExperiment(d));
 
-  // best annotation
   const bi = data[d3.scan(data, (a,b)=>b.dice-a.dice)];
   if (bi) {
     svg.append("text").attr("x", x(bi.idx)).attr("y", y(bi.dice)-9)
@@ -298,102 +381,294 @@ function selectExperiment(d) {
     dl.innerHTML = html || `<div class="hint">No downloadable artifacts found.</div>`;
   }
 
-  renderTrajectory(d);
+  loadTrajectory(d);
   card.scrollIntoView({behavior:"smooth", block:"start"});
 }
 
-// ---------- rotatable 3D trajectory ----------
-// Persistent rotation state so dragging accumulates across re-renders.
-const trajState = { yaw: 0.6, pitch: -0.5 };
-let trajInited = false, currentTrajD = null;
+// ===========================================================================
+// 3D viewport — orbit camera, nav-cube and playback bar
+// (control model ported from aim3d ui/frontend/src/services/viewportControls.js
+//  and components/SimulationPlaybackPanel.vue). Z-up, right-handed.
+// ===========================================================================
+const TAN_HALF_FOV = Math.tan(Math.PI / 8);
+const MAX_PITCH = 1.45;
+const ORBIT_SENS = 0.01;
+const clamp = (v,a,b)=>Math.min(b,Math.max(a,v));
+const vsub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+const vadd=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]];
+const vscale=(v,s)=>[v[0]*s,v[1]*s,v[2]*s];
+const vdot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const vlen=(v)=>Math.hypot(v[0],v[1],v[2]);
+// forward = into-screen; at yaw=0,pitch=0 eye sits on +Y looking toward -Y.
+const camFwd=(y,p)=>{const cp=Math.cos(p);return [-cp*Math.sin(y),-cp*Math.cos(y),-Math.sin(p)];};
+const camUp =(y,p)=>{const sp=Math.sin(p);return [-sp*Math.sin(y),-sp*Math.cos(y),Math.cos(p)];};
+const camRight=(y)=>[-Math.cos(y),Math.sin(y),0];
+const camEye=(c)=>{const f=camFwd(c.yaw,c.pitch);return vsub(c.target, vscale(f,c.distance));};
 
-function drawTraj(d) {
-  const content = d3.select("#traj").select(".traj-content");
+// Perspective projection of a world point to canvas pixels (+ depth), or null.
+function project(p, c, W, H){
+  const e=camEye(c); const f=camFwd(c.yaw,c.pitch); const r=camRight(c.yaw); const u=camUp(c.yaw,c.pitch);
+  const rel=vsub(p,e);
+  const depth=vdot(rel,f);
+  if (depth <= 1e-4) return null;
+  const aspect = W / Math.max(1,H);
+  const ndcX = vdot(rel,r) / depth / (aspect * TAN_HALF_FOV);
+  const ndcY = vdot(rel,u) / depth / TAN_HALF_FOV;
+  return [((ndcX+1)/2)*W, ((1-ndcY)/2)*H, depth];
+}
+
+// Re-center on the trajectory's bounding sphere at the default isometric view.
+function homeCamera(pts){
+  let mn=[Infinity,Infinity,Infinity], mx=[-Infinity,-Infinity,-Infinity];
+  pts.forEach(p=>{for(let i=0;i<3;i++){mn[i]=Math.min(mn[i],p[i]);mx[i]=Math.max(mx[i],p[i]);}});
+  const center=[(mn[0]+mx[0])/2,(mn[1]+mx[1])/2,(mn[2]+mx[2])/2];
+  const radius = 0.5*Math.hypot(mx[0]-mn[0],mx[1]-mn[1],mx[2]-mn[2]) || 0.7;
+  return { target:center, distance: clamp((radius/TAN_HALF_FOV)*1.25, 0.8, 30), yaw:0.72, pitch:0.62 };
+}
+
+// Standard ortho views (Z up). yaw/pitch chosen so the eye looks at that face.
+const VIEWS = {
+  iso:   {yaw:0.72,         pitch:0.62},
+  front: {yaw:0,            pitch:0},
+  back:  {yaw:Math.PI,      pitch:0},
+  right: {yaw:Math.PI/2,    pitch:0},
+  left:  {yaw:-Math.PI/2,   pitch:0},
+  top:   {yaw:0,            pitch:MAX_PITCH},
+  bottom:{yaw:0,            pitch:-MAX_PITCH},
+};
+
+const CUBE_EDGES = [
+  [[0,0,0],[1,0,0]],[[1,0,0],[1,1,0]],[[1,1,0],[0,1,0]],[[0,1,0],[0,0,0]],
+  [[0,0,1],[1,0,1]],[[1,0,1],[1,1,1]],[[1,1,1],[0,1,1]],[[0,1,1],[0,0,1]],
+  [[0,0,0],[0,0,1]],[[1,0,0],[1,0,1]],[[1,1,0],[1,1,1]],[[0,1,0],[0,1,1]],
+];
+
+// Viewport state.
+let cam = {target:[0.5,0.5,0.5], distance:2.6, yaw:0.72, pitch:0.62};
+let curD = null;            // currently selected experiment
+let pbStep = 0, pbPlaying = false, pbSpeed = 1, pbLastT = 0, pbRAF = 0;
+let opt = {cube:true, axes:true, cmd:false};
+let vpInited = false;
+
+function initViewport(){
+  if (vpInited) return;
+  vpInited = true;
+  const svg = d3.select("#traj");
+
+  // One persistent content group; geometry rebuilds inside it on every frame.
+  svg.append("rect").attr("class","drag-bg").attr("x",0).attr("y",0)
+    .attr("width","100%").attr("height","100%").attr("fill","transparent").style("cursor","grab");
+  svg.append("g").attr("class","traj-content");
+
+  // Orbit (drag) / pan (shift-drag) via pointer; zoom via wheel.
+  let lx=0, ly=0, panning=false;
+  svg.call(d3.drag()
+    .on("start", ev=>{
+      lx=ev.x; ly=ev.y; panning=ev.sourceEvent && ev.sourceEvent.shiftKey;
+      svg.select(".drag-bg").style("cursor", panning?"grabbing":"grabbing");
+    })
+    .on("drag", ev=>{
+      const dx=ev.x-lx, dy=ev.y-ly; lx=ev.x; ly=ev.y;
+      if (panning){
+        const W=svg.node().clientWidth, H=svg.node().clientHeight;
+        const factor = cam.distance / Math.max(1, Math.min(W,H));
+        const r=camRight(cam.yaw), u=camUp(cam.yaw,cam.pitch);
+        cam.target = vadd(cam.target, vsub(vscale(r, dx*factor), vscale(u, dy*factor)));
+      } else {
+        cam.yaw   += dx * ORBIT_SENS;
+        cam.pitch  = clamp(cam.pitch - dy*ORBIT_SENS, -MAX_PITCH, MAX_PITCH);
+      }
+      renderViewport();
+    })
+    .on("end", ()=>svg.select(".drag-bg").style("cursor","grab")));
+
+  svg.node().addEventListener("wheel", ev=>{
+    ev.preventDefault();
+    cam.distance = clamp(cam.distance * Math.exp(ev.deltaY * 0.01), 0.5, 30);
+    renderViewport();
+  }, {passive:false});
+
+  // Toolbar: home + settings.
+  document.getElementById("vp-home").onclick = ()=>{ if (curD && curD.trajectory) Object.assign(cam, homeCamera(curD.trajectory.traj)); renderViewport(); };
+  const menu = document.getElementById("vp-settings-menu");
+  document.getElementById("vp-settings-btn").onclick = ()=>menu.classList.toggle("open");
+  document.getElementById("opt-cube").onchange = e=>{opt.cube=e.target.checked; renderViewport();};
+  document.getElementById("opt-axes").onchange  = e=>{opt.axes =e.target.checked; renderViewport();};
+  document.getElementById("opt-cmd").onchange   = e=>{opt.cmd  =e.target.checked; renderViewport();};
+
+  // Nav-cube: mirror orientation; click faces to snap.
+  document.querySelectorAll("#nav-cube .cube-face").forEach(face=>{
+    face.addEventListener("click", ()=>{
+      const v = VIEWS[face.dataset.view]; if (!v) return;
+      cam.yaw=v.yaw; cam.pitch=v.pitch; renderViewport();
+    });
+  });
+
+  // Playback controls.
+  document.getElementById("pb-play").onclick = togglePlay;
+  document.getElementById("pb-stop").onclick = ()=>{ pbPlaying=false; updatePlayBtn(); stopRAF(); setStep(curD ? (curD.trajectory?curD.trajectory.traj.length-1:0):0); };
+  document.getElementById("pb-reset").onclick = ()=>{ pbPlaying=false; updatePlayBtn(); stopRAF(); setStep(0); };
+  document.getElementById("pb-back").onclick = ()=>{ if(curD) setStep(Math.max(0, Math.floor(pbStep)-1)); };
+  document.getElementById("pb-fwd").onclick  = ()=>{ if(curD) setStep(Math.min((curD.trajectory?curD.trajectory.traj.length-1:0), Math.floor(pbStep)+1)); };
+  const speed = document.getElementById("pb-speed");
+  speed.oninput = ()=>{ pbSpeed = parseFloat(speed.value); document.getElementById("pb-speed-label").textContent = pbSpeed.toFixed(1)+"x"; };
+  const scrub = document.getElementById("pb-scrub");
+  scrub.oninput = ()=>{ if(curD) setStep(parseInt(scrub.value)); };
+}
+
+function loadTrajectory(d){
+  curD = d;
+  const T = d.trajectory ? d.trajectory.traj.length : 0;
+  const scrub = document.getElementById("pb-scrub");
+  scrub.min = 0; scrub.max = Math.max(0, T-1);
+  // Show the fully-carved path initially; playback restarts from step 0 on play.
+  setStep(T-1);
+  if (d.trajectory) Object.assign(cam, homeCamera(d.trajectory.traj));
+  renderViewport();
+}
+
+function setStep(s){
+  pbStep = s;
+  const T = curD && curD.trajectory ? curD.trajectory.traj.length : 0;
+  document.getElementById("pb-step-label").textContent = `${Math.round(s)} / ${Math.max(0,T-1)}`;
+  document.getElementById("pb-scrub").value = s;
+  renderViewport();
+}
+
+function updatePlayBtn(){ document.getElementById("pb-play").textContent = pbPlaying ? "⏸" : "▶"; }
+
+function stopRAF(){ if (pbRAF){ cancelAnimationFrame(pbRAF); pbRAF=0; } }
+
+function togglePlay(){
+  if (!curD || !curD.trajectory) return;
+  pbPlaying = !pbPlaying;
+  updatePlayBtn();
+  if (pbPlaying){
+    const T = curD.trajectory.traj.length;
+    if (pbStep >= T-1) setStep(0);      // restart from the beginning if at the end
+    pbLastT = performance.now();
+    pbRAF = requestAnimationFrame(playFrame);
+  } else { stopRAF(); }
+}
+
+function playFrame(now){
+  if (!pbPlaying || !curD || !curD.trajectory) return;
+  const T = curD.trajectory.traj.length;
+  const dt = (now - pbLastT) / 1000; pbLastT = now;
+  // ~24 base steps/sec, scaled by speed.
+  pbStep += dt * 24 * pbSpeed;
+  if (pbStep >= T-1){ pbStep = T-1; setStep(pbStep); pbPlaying=false; updatePlayBtn(); stopRAF(); return; }
+  setStep(pbStep);
+  pbRAF = requestAnimationFrame(playFrame);
+}
+
+// Render the whole 3D scene with painter's-algorithm depth sort.
+function renderViewport(){
+  const svg = d3.select("#traj");
+  const content = svg.select(".traj-content");
   content.selectAll("*").remove();
-  if (!d.trajectory) {
+  updateNavCube();
+
+  if (!curD || !curD.trajectory){
     content.append("text").attr("x","50%").attr("y","50%").attr("text-anchor","middle")
       .attr("fill","var(--muted)").text("No trajectory data for this experiment.");
     return;
   }
-  const W = d3.select("#traj").node().clientWidth, H=380;
-  const pts = d.trajectory.traj;
-  const cmd = d.trajectory.cmd;
-  const cx=W/2, cy=H/2;
-  const s = Math.min((W-70),(H-70)) / 1.6;
-  const {yaw, pitch} = trajState;
+  const W = svg.node().clientWidth, H = svg.node().clientHeight;
+  const pts = curD.trajectory.traj;
+  const cmd = opt.cmd ? curD.trajectory.cmd : null;
+  const cstep = Math.max(0, Math.min(pts.length-1, Math.round(pbStep)));
 
-  const proj = p => {
-    const [x,y,z] = rot(p, yaw, pitch);
-    return [cx + x*s - s/2, cy - (y*s - s/2)];
-  };
+  // Pre-project everything (with depth) for sorting.
+  const P = p => project(p, cam, W, H);
+  const projPts = pts.map(P);
+  const projCmd = cmd ? cmd.map(P) : null;
 
-  const g = content;
+  // Collect drawables as {depth, draw:(g)=>node} and sort far→near.
+  const draws = [];
+  const add = (depth, fn)=>{ if (depth!=null && !Number.isNaN(depth)) draws.push({depth, fn}); };
 
-  // unit cube wireframe (stock context, normalized [0,1]^3)
-  const cube = [[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0,0,0],[0,0,1],[1,0,1],[1,1,1],[0,1,1],[0,0,1],
-                [1,0,1],[1,0,0],[1,1,0],[1,1,1],[0,1,1],[0,1,0]];
-  g.append("path").attr("d", d3.line()(cube.map(proj)))
-    .attr("fill","none").attr("stroke","var(--grid)").attr("stroke-width",1).attr("opacity",.6);
-
-  // axis triad
-  [["#e5534b",[0,0,0],[1,0,0],"X"],["#56d364",[0,0,0],[0,1,0],"Y"],["#58a6ff",[0,0,0],[0,0,1],"Z"]]
-    .forEach(([col,a,b,lbl])=>{
-      const [ax0,ay0]=proj(a),[bx,by]=proj(b);
-      g.append("line").attr("x1",ax0).attr("y1",ay0).attr("x2",bx).attr("y2",by)
-        .attr("stroke",col).attr("stroke-width",1.5).attr("opacity",.8);
-      g.append("text").attr("x",bx+3).attr("y",by+3).attr("fill",col).attr("font-size",11).text(lbl);
+  // Stock cube wireframe.
+  if (opt.cube){
+    CUBE_EDGES.forEach(([a,b])=>{
+      const pa=P(a), pb=P(b);
+      if (!pa||!pb) return;
+      add((pa[2]+pb[2])/2, g=>g.append("line")
+        .attr("x1",pa[0]).attr("y1",pa[1]).attr("x2",pb[0]).attr("y2",pb[1])
+        .attr("stroke","var(--grid)").attr("stroke-width",1).attr("opacity",.55));
     });
-
-  // commanded (pre-clip) dashed
-  if (cmd) g.append("path").attr("d", d3.line()(cmd.map(proj)))
-    .attr("fill","none").attr("stroke","#9aa7b3").attr("stroke-width",1.2)
-    .attr("stroke-dasharray","4 4").attr("opacity",.5);
-
-  // actual tool path, depth-colored
-  const zproj = pts.map(p=>rot(p,yaw,pitch)[2]);
-  const zscale = d3.scaleLinear().domain(d3.extent(zproj)).range([0.45,1]);
-  for (let i=1;i<pts.length;i++){
-    const [x0,y0]=proj(pts[i-1]),[x1,y1]=proj(pts[i]);
-    g.append("line").attr("x1",x0).attr("y1",y0).attr("x2",x1).attr("y2",y1)
-      .attr("stroke", d3.interpolateRgb("#1f6feb","#58a6ff")(zscale(zproj[i])))
-      .attr("stroke-width",2).attr("opacity",.95);
   }
 
-  // start / end markers
-  const [sx,sy]=proj(pts[0]),[ex,ey]=proj(pts[pts.length-1]);
-  g.append("circle").attr("cx",sx).attr("cy",sy).attr("r",5).attr("fill","#56d364").attr("stroke","#000").attr("stroke-width",1);
-  g.append("circle").attr("cx",ex).attr("cy",ey).attr("r",5).attr("fill","#e5534b").attr("stroke","#000").attr("stroke-width",1);
-  g.append("text").attr("x",sx+7).attr("y",sy+4).attr("fill","#56d364").attr("font-size",10).text("start");
-  g.append("text").attr("x",ex+7).attr("y",ey+4).attr("fill","#e5534b").attr("font-size",10).text("end");
-}
-
-function renderTrajectory(d) {
-  // reset rotation when switching to a different experiment
-  if (!selected || selected.idx !== d.idx) { trajState.yaw = 0.6; trajState.pitch = -0.5; }
-  currentTrajD = d;
-  const svg = d3.select("#traj");
-
-  // One-time setup: a persistent drag background + content group so that
-  // rebuilding geometry during drag never drops pointer capture.
-  if (!trajInited) {
-    svg.selectAll("*").remove();
-    svg.append("rect").attr("class","drag-bg").attr("x",0).attr("y",0)
-      .attr("width","100%").attr("height","100%").attr("fill","transparent").style("cursor","grab");
-    svg.append("g").attr("class","traj-content");
-    svg.call(d3.drag()
-      .on("start", ev=>{ trajState._lx=ev.x; trajState._ly=ev.y; svg.select(".drag-bg").style("cursor","grabbing"); })
-      .on("drag", ev=>{
-        trajState.yaw += (ev.x - trajState._lx) * 0.01;
-        trajState.pitch = Math.max(-1.5, Math.min(1.5, trajState.pitch - (ev.y - trajState._ly) * 0.01));
-        trajState._lx = ev.x; trajState._ly = ev.y;
-        drawTraj(currentTrajD);
-      })
-      .on("end", ()=>svg.select(".drag-bg").style("cursor","grab")));
-    trajInited = true;
+  // Axis triad at the stock origin corner.
+  if (opt.axes){
+    [["#e5534b",[1,0,0],"X"],["#56d364",[0,1,0],"Y"],["#58a6ff",[0,0,1],"Z"]].forEach(([col,end,lbl])=>{
+      const o=P([0,0,0]), e=P(end); if(!o||!e) return;
+      add((o[2]+e[2])/2, g=>{
+        g.append("line").attr("x1",o[0]).attr("y1",o[1]).attr("x2",e[0]).attr("y2",e[1])
+          .attr("stroke",col).attr("stroke-width",1.5).attr("opacity",.85);
+        g.append("text").attr("x",e[0]+4).attr("y",e[1]+4).attr("fill",col).attr("font-size",11).attr("font-weight","bold").text(lbl);
+      });
+    });
   }
-  drawTraj(d);
+
+  // Commanded (pre-clip) path, dashed.
+  if (projCmd){
+    for (let i=1;i<projCmd.length;i++){
+      const a=projCmd[i-1], b=projCmd[i]; if(!a||!b) continue;
+      add((a[2]+b[2])/2, g=>g.append("line")
+        .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
+        .attr("stroke","#9aa7b3").attr("stroke-width",1.1).attr("stroke-dasharray","4 4").attr("opacity",.45));
+    }
+  }
+
+  // Actual tool path, depth-colored. Reached prefix is bright; the not-yet-carved
+  // suffix is dim so playback progress is visible.
+  const zdepths = projPts.map(p=>p?p[2]:0);
+  const zscale = d3.scaleLinear().domain(d3.extent(zdepths).map(v=>v||0)).range([0.4,1]).clamp(true);
+  for (let i=1;i<projPts.length;i++){
+    const a=projPts[i-1], b=projPts[i]; if(!a||!b) continue;
+    const reached = i <= cstep;
+    add((a[2]+b[2])/2, g=>g.append("line")
+      .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
+      .attr("stroke", d3.interpolateRgb("#1f6feb","#7cc0ff")(zscale(b[2])))
+      .attr("stroke-width", reached?2.2:1.4)
+      .attr("opacity", reached?0.95:0.22));
+  }
+
+  // Start marker.
+  const sp = projPts[0];
+  if (sp) add(sp[2], g=>{
+    g.append("circle").attr("cx",sp[0]).attr("cy",sp[1]).attr("r",5).attr("fill","#56d364").attr("stroke","#000").attr("stroke-width",1);
+    g.append("text").attr("x",sp[0]+7).attr("y",sp[1]+4).attr("fill","#56d364").attr("font-size",10).text("start");
+  });
+
+  // End marker (only when fully reached).
+  const ep = projPts[pts.length-1];
+  if (ep && cstep >= pts.length-1) add(ep[2], g=>{
+    g.append("circle").attr("cx",ep[0]).attr("cy",ep[1]).attr("r",5).attr("fill","#e5534b").attr("stroke","#000").attr("stroke-width",1);
+    g.append("text").attr("x",ep[0]+7).attr("y",ep[1]+4).attr("fill","#e5534b").attr("font-size",10).text("end");
+  });
+
+  // Moving tool marker at the current step.
+  const tp = projPts[cstep];
+  if (tp) add(tp[2]-1e-6, g=>{
+    g.append("circle").attr("cx",tp[0]).attr("cy",tp[1]).attr("r",8).attr("fill","none")
+      .attr("stroke","#ffd166").attr("stroke-width",1.5).attr("opacity",.9);
+    g.append("circle").attr("cx",tp[0]).attr("cy",tp[1]).attr("r",4).attr("fill","#ffd166").attr("stroke","#000").attr("stroke-width",1);
+  });
+
+  // Painter's algorithm: far first.
+  draws.sort((a,b)=>b.depth - a.depth);
+  const g = content;
+  draws.forEach(d=>d.fn(g));
 }
 
+function updateNavCube(){
+  const yawDeg = (cam.yaw * 180/Math.PI);
+  const pitchDeg = (cam.pitch * 180/Math.PI);
+  const body = document.getElementById("nav-cube-body");
+  if (body) body.style.transform = `rotateX(${-pitchDeg}deg) rotateY(${yawDeg}deg)`;
+}
 </script>
 </body>
 </html>
