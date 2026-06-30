@@ -305,16 +305,17 @@ function selectExperiment(d) {
 // ---------- rotatable 3D trajectory ----------
 // Persistent rotation state so dragging accumulates across re-renders.
 const trajState = { yaw: 0.6, pitch: -0.5 };
+let trajInited = false, currentTrajD = null;
 
 function drawTraj(d) {
-  const svg = d3.select("#traj");
-  svg.selectAll("*").remove();
+  const content = d3.select("#traj").select(".traj-content");
+  content.selectAll("*").remove();
   if (!d.trajectory) {
-    svg.append("text").attr("x","50%").attr("y","50%").attr("text-anchor","middle")
+    content.append("text").attr("x","50%").attr("y","50%").attr("text-anchor","middle")
       .attr("fill","var(--muted)").text("No trajectory data for this experiment.");
     return;
   }
-  const W = svg.node().clientWidth, H=380;
+  const W = d3.select("#traj").node().clientWidth, H=380;
   const pts = d.trajectory.traj;
   const cmd = d.trajectory.cmd;
   const cx=W/2, cy=H/2;
@@ -326,7 +327,7 @@ function drawTraj(d) {
     return [cx + x*s - s/2, cy - (y*s - s/2)];
   };
 
-  const g = svg.append("g");
+  const g = content;
 
   // unit cube wireframe (stock context, normalized [0,1]^3)
   const cube = [[0,0,0],[1,0,0],[1,1,0],[0,1,0],[0,0,0],[0,0,1],[1,0,1],[1,1,1],[0,1,1],[0,0,1],
@@ -369,18 +370,28 @@ function drawTraj(d) {
 function renderTrajectory(d) {
   // reset rotation when switching to a different experiment
   if (!selected || selected.idx !== d.idx) { trajState.yaw = 0.6; trajState.pitch = -0.5; }
-  drawTraj(d);
-
-  // drag to rotate — updates persistent state and re-draws without resetting rotation
+  currentTrajD = d;
   const svg = d3.select("#traj");
-  svg.call(d3.drag()
-    .on("start", ev=>{ trajState._lx = ev.x; trajState._ly = ev.y; })
-    .on("drag", ev=>{
-      trajState.yaw += (ev.x - trajState._lx) * 0.01;
-      trajState.pitch = Math.max(-1.5, Math.min(1.5, trajState.pitch - (ev.y - trajState._ly) * 0.01));
-      trajState._lx = ev.x; trajState._ly = ev.y;
-      drawTraj(d);
-    }));
+
+  // One-time setup: a persistent drag background + content group so that
+  // rebuilding geometry during drag never drops pointer capture.
+  if (!trajInited) {
+    svg.selectAll("*").remove();
+    svg.append("rect").attr("class","drag-bg").attr("x",0).attr("y",0)
+      .attr("width","100%").attr("height","100%").attr("fill","transparent").style("cursor","grab");
+    svg.append("g").attr("class","traj-content");
+    svg.call(d3.drag()
+      .on("start", ev=>{ trajState._lx=ev.x; trajState._ly=ev.y; svg.select(".drag-bg").style("cursor","grabbing"); })
+      .on("drag", ev=>{
+        trajState.yaw += (ev.x - trajState._lx) * 0.01;
+        trajState.pitch = Math.max(-1.5, Math.min(1.5, trajState.pitch - (ev.y - trajState._ly) * 0.01));
+        trajState._lx = ev.x; trajState._ly = ev.y;
+        drawTraj(currentTrajD);
+      })
+      .on("end", ()=>svg.select(".drag-bg").style("cursor","grab")));
+    trajInited = true;
+  }
+  drawTraj(d);
 }
 
 </script>
