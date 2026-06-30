@@ -47,6 +47,9 @@
   .downloads a:hover { border-color:var(--accent); }
   .downloads a.stl { color:#56d364; }
   .downloads a.nc { color:#f0883e; }
+  .downloads button.vid { color:#d2a8ff; margin:4px 0; }
+  .downloads button.vid:disabled { opacity:.55; cursor:default; }
+  .vid-status { margin-top:6px; min-height:1em; }
   #tooltip { position:absolute; pointer-events:none; background:#000d; color:var(--ink);
     border:1px solid var(--grid); border-radius:6px; padding:8px 10px; font-size:12px;
     max-width:360px; display:none; z-index:50; line-height:1.45; }
@@ -56,8 +59,11 @@
   .traj-tip { font-size:11px; color:var(--muted); margin-top:6px; }
 
   /* ---- 3D viewport (controls ported from aim3d) ---- */
-  .viewport-wrap { position:relative; }
-  #traj { width:100%; height:420px; background:#11161b; border-radius:8px; display:block; }
+  .viewport-wrap { position:relative; height:420px; }
+  #traj { position:absolute; inset:0; width:100%; height:100%;
+    background:#11161b; border-radius:8px; display:block; }
+  #voxel-canvas { position:absolute; inset:0; width:100%; height:100%;
+    background:#11161b; border-radius:8px; display:none; cursor:grab; }
   .vp-toolbar { position:absolute; top:10px; right:10px; display:flex; gap:8px; align-items:flex-start; z-index:5; }
   .glass { background:hsla(220,20%,15%,.78); backdrop-filter:blur(8px);
     border:1px solid hsla(220,20%,35%,.5); border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,.4); }
@@ -112,6 +118,37 @@
   input[type=range]::-webkit-slider-runnable-track { width:100%; height:4px; cursor:pointer;
     background:hsla(220,15%,35%,.8); border-radius:2px; }
   @media (max-width:900px){ #detail .grid{ grid-template-columns:1fr; } }
+
+  /* ---- tab bar + markdown views ---- */
+  .tabs { display:flex; gap:2px; padding:0 22px; background:var(--panel); border-bottom:1px solid #000; }
+  .tab { background:transparent; border:none; border-bottom:2px solid transparent; border-radius:0;
+    color:var(--muted); padding:10px 16px; font-size:14px; cursor:pointer; }
+  .tab:hover { color:var(--ink); }
+  .tab.active { color:var(--ink); border-bottom-color:var(--accent); font-weight:600; }
+  .tab-view[hidden] { display:none; }
+  .md-card { max-width:980px; margin:16px 22px; padding:22px 30px; line-height:1.6; font-size:14px; }
+  .md-body h1 { font-size:22px; margin:0 0 12px; }
+  .md-body h2 { font-size:18px; margin:22px 0 8px; padding-bottom:4px; border-bottom:1px solid var(--grid); }
+  .md-body h3 { font-size:15px; margin:18px 0 6px; color:var(--accent); }
+  .md-body h4 { font-size:14px; margin:14px 0 4px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+  .md-body p { margin:8px 0; }
+  .md-body ul, .md-body ol { margin:8px 0; padding-left:24px; }
+  .md-body li { margin:3px 0; }
+  .md-body li > ul, .md-body li > ol { margin:3px 0; }
+  .md-body code { background:var(--panel2); padding:1px 5px; border-radius:4px;
+    font-family:"SFMono-Regular",Consolas,monospace; font-size:12px; }
+  .md-body pre { background:#11161b; border:1px solid var(--grid); border-radius:8px; padding:12px 14px;
+    overflow:auto; margin:10px 0; }
+  .md-body pre code { background:none; padding:0; font-size:12px; color:#c9d6e0; }
+  .md-body a { color:var(--accent); }
+  .md-body blockquote { border-left:3px solid var(--grid); margin:8px 0; padding:2px 12px; color:var(--muted); }
+  .md-body hr { border:none; border-top:1px solid var(--grid); margin:14px 0; }
+  .md-table-wrap { overflow-x:auto; margin:10px 0; }
+  .md-body table { border-collapse:collapse; font-size:13px; }
+  .md-body th, .md-body td { border:1px solid var(--grid); padding:4px 10px; text-align:left; }
+  .md-body th { background:var(--panel2); }
+  .report-img { width:100%; max-width:920px; border:1px solid #000; border-radius:8px;
+    margin:0 0 16px; display:block; }
 </style>
 </head>
 <body>
@@ -132,6 +169,13 @@
   </div>
 </header>
 
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="dashboard">&#128202; Dashboard</button>
+  <button class="tab" data-tab="idea">&#128161; Idea</button>
+  <button class="tab" data-tab="report">&#128196; Report</button>
+</nav>
+
+<section id="view-dashboard" class="tab-view">
 <div class="legend" style="padding:8px 22px;" id="legend"></div>
 
 <main>
@@ -149,6 +193,7 @@
     <h2 id="detail-title">Experiment detail</h2>
     <div class="grid">
       <div class="viewport-wrap">
+        <canvas id="voxel-canvas"></canvas>
         <svg id="traj"></svg>
         <div class="vp-toolbar">
           <button class="tool-btn glass" id="vp-home" title="Home: re-center the view">&#8962;</button>
@@ -192,7 +237,6 @@
           </div>
         </div>
         <div class="traj-tip">drag = orbit · shift-drag = pan · wheel = zoom · click the nav-cube for standard views · use the playback bar to animate the tool path</div>
-        <div class="downloads" id="downloads"></div>
       </div>
       <div>
         <dl class="meta" id="meta"></dl>
@@ -201,7 +245,27 @@
       </div>
     </div>
   </div>
+
+  <div class="card" id="downloads-card">
+    <h2 id="dl-title">Downloads</h2>
+    <div class="downloads" id="downloads"></div>
+  </div>
 </main>
+</section>
+
+<section id="view-idea" class="tab-view" hidden>
+  <div class="card md-card">
+    <article id="md-idea" class="md-body"><p class="hint">Loading idea.md…</p></article>
+  </div>
+</section>
+
+<section id="view-report" class="tab-view" hidden>
+  <div class="card md-card">
+    <h2 style="margin-top:0;">Summary plot</h2>
+    <img id="report-img" class="report-img" alt="results summary plot">
+    <article id="md-report" class="md-body"><p class="hint">Loading report.md…</p></article>
+  </div>
+</section>
 
 <div id="tooltip"></div>
 
@@ -222,7 +286,213 @@ d3.json("data.json").then(raw => {
   renderScatter();
   renderBars();
   initViewport();
+  renderDownloads(null);
 });
+
+// ---------- tabs + markdown rendering ----------
+// idea.md / report.md / results_plot.png live one dir up from the page (the
+// train_csg task dir). The page is served from the repo root, so these static
+// paths resolve without any build step.
+const MD = { idea: "../idea.md", report: "../report.md" };
+const REPORT_IMG = "../results_plot.png";
+const mdCache = {};
+
+document.getElementById("report-img").src = REPORT_IMG;
+document.querySelectorAll(".tab").forEach(b =>
+  b.addEventListener("click", () => showTab(b.dataset.tab)));
+
+function showTab(name){
+  ["dashboard","idea","report"].forEach(t=>{
+    document.getElementById("view-"+t).hidden = (t!==name);
+    document.querySelector(`.tab[data-tab="${t}"]`).classList.toggle("active", t===name);
+  });
+  if (name === "idea")  loadMd("idea",  "#md-idea");
+  if (name === "report") loadMd("report", "#md-report");
+  window.scrollTo(0, 0);
+}
+
+async function loadMd(key, sel){
+  if (mdCache[key]) { document.querySelector(sel).innerHTML = mdCache[key]; return; }
+  try {
+    const r = await fetch(MD[key]);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const html = renderMarkdown(await r.text());
+    mdCache[key] = html;
+    document.querySelector(sel).innerHTML = html;
+  } catch (e) {
+    document.querySelector(sel).innerHTML =
+      `<p class="hint">Could not load ${MD[key]}: ${e.message}. ` +
+      `Serve the page from the repo root (see web/README.md).</p>`;
+  }
+}
+
+// Minimal, dependency-free markdown renderer covering the constructs used in
+// idea.md / report.md: headings, paragraphs, fenced code, tables, ordered /
+// unordered lists (one level of nesting + wrapped continuation lines),
+// blockquotes, hr, and inline **bold**, *italic*, `code`, [links](url).
+function escapeHtml(s){
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+function inlineMd(s){
+  s = escapeHtml(s);
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (m,c)=>{ codes.push(c); return `\u0000${codes.length-1}\u0000`; });
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/\u0000(\d+)\u0000/g, (m,n)=>`<code>${codes[n]}</code>`);
+  return s;
+}
+function renderMarkdown(src){
+  const lines = src.replace(/\r\n/g,"\n").split("\n");
+  const blocks = [];
+  let para = null, list = null;
+  const closePara = ()=>{ if(para){ blocks.push("<p>"+inlineMd(para)+"</p>"); para=null; } };
+  const closeList = ()=>{ if(list){ blocks.push(renderList(list)); list=null; } };
+  let i = 0;
+  while (i < lines.length){
+    const line = lines[i], t = line.trim();
+    if (/^\s*```/.test(line)){                       // fenced code
+      closePara(); closeList();
+      const buf = []; i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])){ buf.push(lines[i]); i++; }
+      if (i < lines.length) i++;
+      blocks.push(`<pre><code>${escapeHtml(buf.join("\n"))}</code></pre>`);
+      continue;
+    }
+    const hm = /^(#{1,6})\s+(.*)$/.exec(t);          // heading
+    if (hm){ closePara(); closeList(); blocks.push(`<h${hm[1].length}>${inlineMd(hm[2])}</h${hm[1].length}>`); i++; continue; }
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)){           // hr
+      closePara(); closeList(); blocks.push("<hr>"); i++; continue;
+    }
+    if (/^\|/.test(t) && i+1 < lines.length &&       // table
+        /^\|[\s:|-]+\|$/.test(lines[i+1].trim()) && lines[i+1].includes("-")){
+      closePara(); closeList();
+      const parseRow = l => l.trim().replace(/^\|/,"").replace(/\|$/,"").split("|").map(c=>c.trim());
+      const header = parseRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && /^\|/.test(lines[i].trim())){ rows.push(parseRow(lines[i])); i++; }
+      let tab = "<div class='md-table-wrap'><table><thead><tr>" +
+        header.map(c=>`<th>${inlineMd(c)}</th>`).join("") + "</tr></thead><tbody>";
+      rows.forEach(r=>{
+        while (r.length < header.length) r.push("");
+        tab += "<tr>" + r.map(c=>`<td>${inlineMd(c)}</td>`).join("") + "</tr>";
+      });
+      blocks.push(tab + "</tbody></table></div>");
+      continue;
+    }
+    if (t === ""){ closePara(); closeList(); i++; continue; }  // blank line
+    const ulm = /^([-*+])\s+(.*)$/.exec(t);
+    const olm = /^(\d+)\.\s+(.*)$/.exec(t);
+    if (ulm || olm){                                 // list item
+      closePara();
+      const type = ulm ? "ul" : "ol";
+      const content = ulm ? ulm[2] : olm[2];
+      const indent = line.match(/^\s*/)[0].length;
+      if (!list || list.type !== type) { closeList(); list = {type, items:[{text:content, subs:[], indent}]}; }
+      else if (indent > list.items[list.items.length-1].indent)
+        list.items[list.items.length-1].subs.push({text:content, subs:[], indent});
+      else list.items.push({text:content, subs:[], indent});
+      i++; continue;
+    }
+    if (list){                                       // wrapped continuation of last item
+      const top = list.items[list.items.length-1];
+      const tgt = top.subs.length ? top.subs[top.subs.length-1] : top;
+      tgt.text += " " + t; i++; continue;
+    }
+    para = para ? para + " " + t : t;                // paragraph (lazy continuation)
+    i++;
+  }
+  closePara(); closeList();
+  return blocks.join("\n");
+}
+function renderList(list){
+  const html = list.items.map(it =>
+    `<li>${inlineMd(it.text)}` +
+    (it.subs.length ? `<${list.type}>${it.subs.map(s=>`<li>${inlineMd(s.text)}</li>`).join("")}</${list.type}>` : "") +
+    `</li>`).join("");
+  return `<${list.type}>${html}</${list.type}>`;
+}
+
+// ---------- downloads (per-run artifacts at the bottom of the dashboard) ----------
+// On-demand video generation: the dashboard's "Generate video" button calls the
+// HTTPS server's /__api/video endpoint (scripts/serve_web_https.py), which runs
+// the Taichi CSG simulator (scripts/render_run_video.py) to render the run's
+// carve to an mp4 under runs/<run>/videos/run.mp4, then returns its path. The
+// mp4 is served statically thereafter, so re-viewing is instant. Requires the
+// HTTPS server (scripts/serve_web_https.py); plain `python3 -m http.server`
+// has no API endpoint and the button will report that.
+function renderDownloads(d){
+  const dl = document.getElementById("downloads");
+  const title = document.getElementById("dl-title");
+  const card = document.getElementById("downloads-card");
+  let html = "";
+  if (d && d.run_dir){
+    title.textContent = `Downloads — experiment #${d.idx} (${d.shape||"?"})`;
+    if (d.gcode) html += `<a class="nc" href="${BASE}${d.gcode}" download>⬇ G-code (${d.gcode.split('/').pop()})</a>`;
+    for (const [label,p] of Object.entries(d.stl||{}))
+      html += `<a class="stl" href="${BASE}${p}" download>⬇ ${label} STL</a>`;
+    html += `<a href="${BASE}${d.run_dir}/" target="_blank">📂 open run dir</a>`;
+    html += `<button id="gen-video-btn" class="vid">🎬 Generate run video</button>`;
+  } else {
+    title.textContent = d ? `Downloads — experiment #${d.idx} (no run artifacts)`
+                         : "Downloads";
+    html += `<span class="hint">Select an experiment above for its G-code &amp; STL files.</span> `;
+  }
+  dl.innerHTML = html;
+  // (Re)build the video region: a status line + a <video> that stays hidden
+  // until an mp4 is ready. Re-creating it each render drops any stale stream
+  // from a previously selected run.
+  let region = document.getElementById("video-region");
+  if (region) region.remove();
+  videoState.cached = false;
+  if (d && d.run_dir){
+    region = document.createElement("div");
+    region.id = "video-region";
+    region.innerHTML = `<div class="vid-status hint"></div>` +
+      `<video id="run-video" controls playsinline style="display:none;max-width:100%;border-radius:8px;border:1px solid var(--grid);margin-top:8px;"></video>`;
+    card.appendChild(region);
+    const btn = document.getElementById("gen-video-btn");
+    if (btn) btn.onclick = ()=>generateVideo(d, !!videoState.cached);
+  }
+}
+
+// Track whether the currently-selected run already has a cached mp4, so the
+// button can offer a force re-render on the second click.
+const videoState = { cached: false };
+
+async function generateVideo(d, force){
+  const btn = document.getElementById("gen-video-btn");
+  const status = document.querySelector(".vid-status");
+  const video = document.getElementById("run-video");
+  if (!d || !d.run_dir || !btn) return;
+  btn.disabled = true;
+  const setStat = (msg, ok=true)=>{
+    if (status){ status.textContent = msg; status.style.color = ok ? "var(--muted)" : "#f0883e"; }
+  };
+  setStat(force ? "Re-rendering run video (force) — running the Taichi simulator, ~30–60s …"
+                : "Generating run video — running the Taichi simulator, ~30–60s …");
+  video.style.display = "none";
+  try {
+    const url = `${BASE}__api/video?run=${encodeURIComponent(d.run_dir)}` + (force ? "&force=1" : "");
+    const r = await fetch(url);
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.detail || data.error || "render failed");
+    // Cache-bust so a re-render of the same path actually reloads.
+    video.src = `${BASE}${data.path}?v=${Date.now()}`;
+    video.style.display = "block";
+    videoState.cached = true;
+    btn.textContent = "🎬 Re-render video";
+    setStat("Ready — press play. Click the button again to re-render from scratch.");
+    video.play().catch(()=>{});
+  } catch (e) {
+    setStat(`Could not generate video: ${e.message}. ` +
+            `Make sure the page is served by scripts/serve_web_https.py (the API endpoint is not available under plain http.server).`, false);
+  } finally {
+    btn.disabled = false;
+  }
+}
 
 function buildLegend() {
   const el = document.getElementById("legend");
@@ -370,16 +640,7 @@ function selectExperiment(d) {
       typeof v==="number" ? (v>=100?v.toFixed(1):v.toFixed(4)) : v}</span></div>`).join("");
   } else { mb.innerHTML = `<div><span>—</span><span>no metrics (unmatched)</span></div>`; }
 
-  const dl = document.getElementById("downloads");
-  if (!d.run_dir) { dl.innerHTML = `<div class="hint">No run artifacts for this experiment.</div>`; }
-  else {
-    let html = "";
-    if (d.gcode) html += `<a class="nc" href="${BASE}${d.gcode}" download>⬇ G-code (${d.gcode.split('/').pop()})</a>`;
-    for (const [label,p] of Object.entries(d.stl||{}))
-      html += `<a class="stl" href="${BASE}${p}" download>⬇ ${label} STL</a>`;
-    if (d.run_dir) html += `<a href="${BASE}${d.run_dir}/" target="_blank">📂 open run dir</a>`;
-    dl.innerHTML = html || `<div class="hint">No downloadable artifacts found.</div>`;
-  }
+  renderDownloads(d);
 
   loadTrajectory(d);
   card.scrollIntoView({behavior:"smooth", block:"start"});
@@ -450,6 +711,98 @@ let pbStep = 0, pbPlaying = false, pbSpeed = 1, pbLastT = 0, pbRAF = 0;
 let opt = {cube:true, axes:true, cmd:false};
 let vpInited = false;
 
+// WebGPU voxel viewer state. When `ready` is true the carved-stock mesh is rendered
+// on #voxel-canvas (ported from aim3d webgpuVoxelizer.js); otherwise the SVG
+// painter's-algorithm viewer is used as a fallback.
+let voxel = { viewer:null, ready:false, lastStep:-1, lastVc:-1, raf:0 };
+let voxelBadge = null;
+
+// Tool + holder geometry for the currently selected run, in stock-normalized
+// [0,1]^3 units. The Taichi CSGSimulatorDelta (simulator/csg_simulator.py) that
+// renders each run's run.mp4 measures SDFs in voxel space (radius_mm / voxel_mm)
+// over Nx = stock_mm / voxel_mm cells, so a normalized radius = radius_mm /
+// stock_mm. build_results_web.py embeds that conversion per-run as `tool_geom`
+// (so non-default stock/tool sizes match their video too); we fall back to the
+// sim's own defaults (tool_radius_mm 3.175, tool_height_mm 25.0, 2.5"-diameter
+// holder, 10"-Z work volume, 1" stock) when the field is absent.
+const DEFAULT_TOOL_GEOM = { toolRadius: 0.125, toolHeight: 0.984, holderRadius: 1.25, holderHeight: 10.0 };
+let curToolGeom = { ...DEFAULT_TOOL_GEOM };
+function toolGeomForRun(d){
+  if (d && d.tool_geom) return { ...DEFAULT_TOOL_GEOM, ...d.tool_geom };
+  return { ...DEFAULT_TOOL_GEOM };
+}
+
+function setVoxelBadge(text, ok){
+  if (!voxelBadge){
+    voxelBadge = document.createElement("div");
+    voxelBadge.style.cssText = "position:absolute;top:10px;left:10px;z-index:5;font-size:11px;" +
+      "padding:3px 8px;border-radius:6px;font-variant-numeric:tabular-nums;pointer-events:none;" +
+      "background:hsla(220,20%,15%,.78);backdrop-filter:blur(8px);border:1px solid hsla(220,20%,35%,.5)";
+    document.querySelector(".viewport-wrap").appendChild(voxelBadge);
+  }
+  voxelBadge.textContent = text;
+  voxelBadge.style.color = ok ? "#7ee787" : "#f0883e";
+}
+
+// Continuous render loop for the GPU canvas. Mesh extraction is async (mapAsync), so a
+// one-shot render would draw before the carved stock is ready; this loop keeps the
+// canvas fresh until the mesh lands and also drives playback animation on the GPU path.
+function startVoxelLoop(){
+  if (voxel.raf) return;
+  const frame = ()=>{
+    voxel.raf = 0;
+    if (!voxel.ready || !curD || !curD.trajectory){ return; }
+    const pts = curD.trajectory.traj;
+    const cstep = Math.max(0, Math.min(pts.length-1, Math.round(pbStep)));
+    if (cstep !== voxel.lastStep){ voxel.viewer.carveToStep(cstep); voxel.lastStep = cstep; }
+    const cmd = opt.cmd && curD.trajectory.cmd ? curD.trajectory.cmd : null;
+    try {
+      voxel.viewer.render(cam, cstep, { showCube: opt.cube, showAxes: opt.axes, cmdPts: cmd });
+    } catch (e) {
+      // A validation error in one frame (e.g. a bad bind group) must not kill the
+      // render loop — log once and keep the canvas alive.
+      if (!voxel._renderErr) { voxel._renderErr = true; console.error("[voxel] render error:", e); }
+    }
+    // Live triangle count so it's visible that the carved stock has geometry.
+    const vc = voxel.viewer.vertexCount;
+    if (vc !== voxel.lastVc){
+      voxel.lastVc = vc;
+      setVoxelBadge(`WebGPU · 96³ · ${Math.round(vc/3).toLocaleString()} tris`, true);
+    }
+    voxel.raf = requestAnimationFrame(frame);
+  };
+  voxel.raf = requestAnimationFrame(frame);
+}
+function stopVoxelLoop(){ if (voxel.raf){ cancelAnimationFrame(voxel.raf); voxel.raf=0; } }
+
+async function initVoxelViewer(){
+  if (voxel.viewer) return;
+  const canvas = document.getElementById("voxel-canvas");
+  setVoxelBadge("WebGPU…", false);
+  try {
+    const mod = await import("./voxel.js");
+    const viewer = await mod.createVoxelViewer(canvas, {
+      gridResolution: 96,
+      toolRadius: curToolGeom.toolRadius, toolHeight: curToolGeom.toolHeight,
+      holderRadius: curToolGeom.holderRadius, holderHeight: curToolGeom.holderHeight,
+      onStatus: (s)=>{ if (!s.available) console.warn("[voxel]", s.reason); },
+    });
+    if (viewer && viewer.available) {
+      voxel.viewer = viewer;
+      voxel.ready = true;
+      setVoxelBadge("WebGPU · 96³", true);
+      // If an experiment is already shown, switch it onto the GPU viewer now.
+      if (curD && curD.trajectory) loadTrajectory(curD);
+      else renderViewport();
+    } else {
+      setVoxelBadge("SVG fallback (no WebGPU)", false);
+    }
+  } catch (e) {
+    console.warn("[voxel] init failed, using SVG fallback:", e);
+    setVoxelBadge("SVG fallback (init error)", false);
+  }
+}
+
 function initViewport(){
   if (vpInited) return;
   vpInited = true;
@@ -475,7 +828,7 @@ function initViewport(){
         const r=camRight(cam.yaw), u=camUp(cam.yaw,cam.pitch);
         cam.target = vadd(cam.target, vsub(vscale(r, dx*factor), vscale(u, dy*factor)));
       } else {
-        cam.yaw   += dx * ORBIT_SENS;
+        cam.yaw   -= dx * ORBIT_SENS;
         cam.pitch  = clamp(cam.pitch - dy*ORBIT_SENS, -MAX_PITCH, MAX_PITCH);
       }
       renderViewport();
@@ -487,6 +840,40 @@ function initViewport(){
     cam.distance = clamp(cam.distance * Math.exp(ev.deltaY * 0.01), 0.5, 30);
     renderViewport();
   }, {passive:false});
+
+  // Same orbit/pan/zoom controls bound to the WebGPU canvas (active when the voxel
+  // viewer is ready). Native pointer events mirror the d3.drag logic on the SVG.
+  const vc = document.getElementById("voxel-canvas");
+  let vlx=0, vly=0, vdrag=false, vpan=false;
+  vc.addEventListener("pointerdown", ev=>{
+    vc.setPointerCapture(ev.pointerId); vlx=ev.clientX; vly=ev.clientY;
+    vpan=ev.shiftKey; vdrag=true; vc.style.cursor="grabbing";
+  });
+  vc.addEventListener("pointermove", ev=>{
+    if (!vdrag) return;
+    const dx=ev.clientX-vlx, dy=ev.clientY-vly; vlx=ev.clientX; vly=ev.clientY;
+    if (vpan){
+      const W=vc.clientWidth, H=vc.clientHeight;
+      const factor = cam.distance / Math.max(1, Math.min(W,H));
+      const r=camRight(cam.yaw), u=camUp(cam.yaw,cam.pitch);
+      cam.target = vadd(cam.target, vsub(vscale(r, dx*factor), vscale(u, dy*factor)));
+    } else {
+      cam.yaw   -= dx * ORBIT_SENS;
+      cam.pitch  = clamp(cam.pitch - dy*ORBIT_SENS, -MAX_PITCH, MAX_PITCH);
+    }
+    renderViewport();
+  });
+  const vcEnd = ()=>{ if(!vdrag) return; vdrag=false; vc.style.cursor="grab"; };
+  vc.addEventListener("pointerup", vcEnd);
+  vc.addEventListener("pointercancel", vcEnd);
+  vc.addEventListener("wheel", ev=>{
+    ev.preventDefault();
+    cam.distance = clamp(cam.distance * Math.exp(ev.deltaY * 0.01), 0.5, 30);
+    renderViewport();
+  }, {passive:false});
+
+  // Kick off the async WebGPU viewer init (falls back to SVG if unavailable).
+  initVoxelViewer();
 
   // Toolbar: home + settings.
   document.getElementById("vp-home").onclick = ()=>{ if (curD && curD.trajectory) Object.assign(cam, homeCamera(curD.trajectory.traj)); renderViewport(); };
@@ -521,6 +908,19 @@ function loadTrajectory(d){
   const T = d.trajectory ? d.trajectory.traj.length : 0;
   const scrub = document.getElementById("pb-scrub");
   scrub.min = 0; scrub.max = Math.max(0, T-1);
+
+  // Use the WebGPU carved-stock viewer when available; otherwise the SVG fallback.
+  const useVoxel = voxel.ready && d.trajectory;
+  document.getElementById("voxel-canvas").style.display = useVoxel ? "block" : "none";
+  document.getElementById("traj").style.display = useVoxel ? "none" : "block";
+  // Size the tool + holder to this run's args (matches the Taichi run.mp4 video).
+  curToolGeom = toolGeomForRun(d);
+  if (useVoxel) {
+    voxel.viewer.setToolGeometry(curToolGeom);
+    voxel.viewer.setTrajectory(d.trajectory.traj);
+    voxel.lastStep = T-1;            // setTrajectory already carves the full path
+  }
+
   // Show the fully-carved path initially; playback restarts from step 0 on play.
   setStep(T-1);
   if (d.trajectory) Object.assign(cam, homeCamera(d.trajectory.traj));
@@ -564,10 +964,19 @@ function playFrame(now){
 
 // Render the whole 3D scene with painter's-algorithm depth sort.
 function renderViewport(){
+  updateNavCube();
+
+  // WebGPU path: carved voxel stock + overlays on the canvas. Handled by the
+  // continuous render loop (mesh extraction is async, so a one-shot render would
+  // draw before the carved stock is ready). Just ensure the loop is running.
+  if (voxel.ready && curD && curD.trajectory) {
+    startVoxelLoop();
+    return;
+  }
+
   const svg = d3.select("#traj");
   const content = svg.select(".traj-content");
   content.selectAll("*").remove();
-  updateNavCube();
 
   if (!curD || !curD.trajectory){
     content.append("text").attr("x","50%").attr("y","50%").attr("text-anchor","middle")
@@ -648,6 +1057,44 @@ function renderViewport(){
     g.append("circle").attr("cx",ep[0]).attr("cy",ep[1]).attr("r",5).attr("fill","#e5534b").attr("stroke","#000").attr("stroke-width",1);
     g.append("text").attr("x",ep[0]+7).attr("y",ep[1]+4).attr("fill","#e5534b").attr("font-size",10).text("end");
   });
+
+  // Cutting tool + toolholder at the current tip, sized to this run's args (matches
+  // the Taichi sim: a flat-end Z-axis tool cylinder rising +Z by curToolGeom.toolHeight,
+  // with a wider holder cylinder stacked on top — holder radius/height are the 2.5"-
+  // diameter spindle and machine-Z travel). Drawn as 50%-opaque faces so they read
+  // over the stock on the SVG path (the WebGPU path draws its own in voxel.js).
+  const tipPt = pts[cstep];
+  if (tipPt) {
+    const N = 24;
+    // Draw a vertical Z cylinder from bottomZ..topZ on the tip axis in `fill` color.
+    const drawCyl = (bottomZ, topZ, R, fill) => {
+      const ring = (zz) => {
+        const out = [];
+        for (let i=0;i<N;i++){ const a=(i/N)*Math.PI*2; out.push([tipPt[0]+R*Math.cos(a), tipPt[1]+R*Math.sin(a), zz]); }
+        return out;
+      };
+      const Pb = ring(bottomZ).map(P), Pt = ring(topZ).map(P);
+      for (let i=0;i<N;i++){
+        const j=(i+1)%N;
+        const a=Pb[i], b=Pb[j], c=Pt[j], d=Pt[i];
+        if (!a||!b||!c||!d) continue;
+        add((a[2]+b[2]+c[2]+d[2])/4, g=>g.append("polygon")
+          .attr("points",`${a[0]},${a[1]} ${b[0]},${b[1]} ${c[0]},${c[1]} ${d[0]},${d[1]}`)
+          .attr("fill",fill).attr("fill-opacity",0.5)
+          .attr("stroke",fill).attr("stroke-width",0.5).attr("opacity",1.0));
+      }
+      if (Pt.every(p=>p)){
+        const depth = Pt.reduce((s,p)=>s+p[2],0)/N;
+        add(depth, g=>g.append("polygon")
+          .attr("points", Pt.map(p=>`${p[0]},${p[1]}`).join(" "))
+          .attr("fill",fill).attr("fill-opacity",0.5)
+          .attr("stroke",fill).attr("stroke-width",0.5));
+      }
+    };
+    const toolTop = tipPt[2] + curToolGeom.toolHeight;
+    drawCyl(tipPt[2], toolTop, curToolGeom.toolRadius, "#e63333");
+    drawCyl(toolTop, toolTop + curToolGeom.holderHeight, curToolGeom.holderRadius, "#8c939c");
+  }
 
   // Moving tool marker at the current step.
   const tp = projPts[cstep];

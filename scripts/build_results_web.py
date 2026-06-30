@@ -48,6 +48,39 @@ def parse_cmd(cmd):
     }
 
 
+# 1 inch in mm. Matches cam.units.IN_TO_MM / inch_to_mm without importing cam
+# (which pulls scipy, not installed in the lightweight web-build env).
+IN_TO_MM = 25.4
+
+
+def tool_geom_from_args(args):
+    """Tool + holder geometry in stock-normalized [0,1]^3 units, matching the
+    Taichi CSGSimulatorDelta (simulator/csg_simulator.py) that renders each run's
+    run.mp4 via record_video.
+
+    The sim measures SDFs in voxel space (radius_mm / voxel_mm) over a grid of
+    Nx = stock_mm / voxel_mm cells, so a normalized radius = radius_mm / stock_mm
+    (the voxel size cancels). Defaults are the sim's own defaults: tool_radius_mm
+    3.175, tool_height_mm 25.0, 2.5"-diameter holder, 10"-Z work volume, 1" stock.
+    """
+    sin = args.get("stock_size_in") if args else None
+    sin = list(sin) if sin else [1.0, 1.0, 1.0]
+    lx = (sin[0] if len(sin) > 0 and sin[0] else 1.0) * IN_TO_MM
+    lz = (sin[2] if len(sin) > 2 and sin[2] else (sin[0] if sin else 1.0)) * IN_TO_MM
+    win = None
+    if args:
+        win = args.get("workspace_in") or args.get("work_volume_in")
+    win = list(win) if win else [16.0, 12.0, 10.0]
+    wz = (win[2] if len(win) > 2 and win[2] else 10.0) * IN_TO_MM
+    a = args or {}
+    return {
+        "toolRadius": float(a.get("tool_radius_mm", 3.175)) / lx,
+        "toolHeight": float(a.get("tool_height_mm", 25.0)) / lz,
+        "holderRadius": (IN_TO_MM * 2.5 / 2.0) / lx,   # 2.5"-diameter spindle
+        "holderHeight": wz / lz,                       # machine Z travel
+    }
+
+
 def load_run(run_dir):
     """Read one run dir's args/metrics/trajectory. Returns a record or None."""
     name = os.path.basename(run_dir)
@@ -253,6 +286,7 @@ def main():
             "stl": stl_paths(run) if run else {},
             "gcode": ensure_gcode(run) if run else None,
             "trajectory": trajectory_json(run) if run else None,
+            "tool_geom": tool_geom_from_args(run["args"]) if run else None,
         }
         if run:
             n_matched += 1
