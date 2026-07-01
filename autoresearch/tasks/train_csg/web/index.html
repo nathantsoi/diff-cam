@@ -4,6 +4,8 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GradMill (train_csg) autoresearch — interactive results</title>
+<!-- Inline empty favicon so browsers don't request /favicon.ico (404). -->
+<link rel="icon" href="data:,">
 <script src="d3.v7.min.js"></script>
 <style>
   :root {
@@ -162,6 +164,8 @@
     <button id="view-latest" title="Open the most recent train_csg run">&#128193; latest run</button>
     <label>shape</label>
     <select id="shape-filter"></select>
+    <label>batch</label>
+    <select id="batch-selector" title="Auto-populated from runs/<branch>/ directories"></select>
     <label>status</label>
     <select id="status-filter">
       <option value="all">all</option>
@@ -279,18 +283,41 @@ const BASE = "../../../../";
 const SHAPE_COLOR = {sphere:"#1f77b4", cylinder:"#ff7f0e", box:"#2ca02c", pyramid:"#d62728"};
 const STATUS_OPACITY = {keep:0.92, discard:0.45, crash:0.6};
 let DATA = null, selected = null;
+// Discovered experiment batch directories under runs/<name>/ — populated from
+// /__api/batches so new branches appear without code changes.
+let BATCHES = [];
+// All viewable runs for the currently-active batch (fetched from API when a
+// batch is selected). Empty array means no batch filter → use DATA.experiments.
+let CURRENT_BATCH_RUNS = [];
 
 // Track whether the page is viewing a single arbitrary run (loaded via the
 // run-picker / ?run= URL param) rather than an autoresearch experiment row.
 let RUN_VIEW = false;
 
+// Update the stats bar to reflect current view mode: shows batch name + count
+// when a batch is active, otherwise the full dataset summary from data.json.
+function updateStats() {
+  const el = document.getElementById("stats");
+  if (!el) return;
+  const qp = new URLSearchParams(location.search);
+  const batch = qp.get("batch") || "";
+  if (batch && CURRENT_BATCH_RUNS.length > 0) {
+    const bestDice = d3.max(CURRENT_BATCH_RUNS, d => d.dice || 0);
+    el.innerHTML = `<b>${CURRENT_BATCH_RUNS.length}</b> runs in <b>${batch}</b> · best dice <b>${bestDice.toFixed(4)}</b>`;
+  } else if (DATA && DATA.experiments) {
+    el.innerHTML =
+      `<b>${DATA.n_experiments}</b> experiments · <b>${DATA.n_matched}</b> with artifacts · ` +
+      `overall best <b>${d3.max(DATA.experiments, d => d.dice).toFixed(4)}</b>`;
+  } else {
+    el.innerHTML = `<span class="hint">Loading…</span>`;
+  }
+}
+
 d3.json("data.json").then(raw => {
   DATA = raw;
-  document.getElementById("stats").innerHTML =
-    `<b>${raw.n_experiments}</b> experiments · <b>${raw.n_matched}</b> with artifacts · ` +
-    `overall best <b>${d3.max(raw.experiments, d=>d.dice).toFixed(4)}</b>`;
   buildLegend();
   buildFilters();
+  updateStats();
   renderScatter();
   renderBars();
 }).catch(err => {
@@ -308,18 +335,102 @@ d3.json("data.json").then(raw => {
 }).finally(() => {
   initViewport();
   renderDownloads(null);
-  initRunPicker();
+  // Populate the batch selector from the API (auto-discovers runs/<branch>/),
+  // then if there's a ?batch= in URL, fetch that branch's runs and render.
+  fetchBatches().then(async () => {
+    await initRunPicker();
+    const qp = new URLSearchParams(location.search);
+    const batch = qp.get("batch");
+    if (batch) {
+      // Set the selector to match so filtered() reads it correctly.
+      const sel = document.getElementById("batch-selector");
+      if (sel && [...sel.options].some(o => o.value === batch)) {
+        sel.value = batch;
+      }
+      await fetchBatchRuns(batch);
+      updateStats();
+      renderScatter();
+      renderBars();
+    }
+  });
 });
+
+// Fetch discovered experiment batches from the server and populate the batch
+// selector dropdown. Falls back to a single "(no batches)" option if the API is
+// unavailable — the run-picker still works regardless.
+async function fetchBatches() {
+  const sel = document.getElementById("batch-selector");
+  try {
+    const r = await fetch(`${BASE}__api/batches`);
+    const data = await r.json();
+    BATCHES = (data && data.batches) || [];
+    if (!sel) return;
+    const qp = new URLSearchParams(location.search).get("batch") || "";
+    sel.innerHTML = `<option value="">all branches</option>` +
+      BATCHES.map(b =>
+        `<option value="${b.name}" ${b.name === qp ? "selected" : ""}>${b.name} (${b.count})</option>`
+      ).join("");
+  } catch (e) {
+    if (sel) sel.innerHTML = `<option value="">(batch API unavailable)</option>`;
+  }
+}
+
+// Fetch all viewable runs for the currently-active batch. When a batch is
+// selected, the scatter plot shows ALL runs from that branch (not just the
+// matched experiments in data.json), so users can browse any branch's full
+// experiment history. Merges status/metrics from DATA.experiments where
+// available so keep/discard markers still apply.
+async function fetchBatchRuns(batch) {
+  if (!batch) { CURRENT_BATCH_RUNS = []; return; }
+  try {
+    const r = await fetch(`${BASE}__api/runs?batch=${encodeURIComponent(batch)}`);
+    const data = await r.json();
+    const runs = (data && data.runs) || [];
+    // Merge in status/metrics from DATA.experiments where the run_dir matches.
+    const expByRunDir = {};
+    if (DATA && DATA.experiments) {
+      for (const e of DATA.experiments) {
+        if (e.run_dir) expByRunDir[e.run_dir] = e;
+      }
+    }
+    // Build run records, merging status/metrics from matched experiments. idx is
+    // assigned AFTER sorting (below) as a uniform 0..n-1 positional index in
+    // chronological (oldest-first) order — never null — so the scatter's x-scale
+    // (d.idx) always produces finite coordinates. Mixing DATA.experiments' idx
+    // (a results.tsv row number) with nulls here previously yielded NaN paths.
+    CURRENT_BATCH_RUNS = runs.map(run => {
+      const matched = expByRunDir[run.run_dir];
+      return {
+        ...run,
+        status: matched ? matched.status : "arbitrary",
+        description: matched ? matched.description : run.name,
+        metrics: matched ? matched.metrics : null,
+        stl: matched ? matched.stl : {},
+        gcode: matched ? matched.gcode : null,
+        command: matched ? matched.command : "",
+      };
+    });
+    // API returns runs newest-first by mtime; reverse to oldest-first so the
+    // scatter's "chronological run order" x-axis reads left→right.
+    CURRENT_BATCH_RUNS.sort((a, b) => (a.mtime || 0) - (b.mtime || 0));
+    CURRENT_BATCH_RUNS.forEach((d, i) => { d.idx = i; });
+  } catch (e) {
+    CURRENT_BATCH_RUNS = [];
+  }
+}
 
 // ---- arbitrary-run viewer ----
 // Populates the run picker from /__api/runs (every viewable runs/<name> dir,
 // newest first) and supports ?run=runs/<name> or ?run=latest to open a run
-// directly. Requires scripts/serve_web_https.py (plain http.server has no API).
+// directly. Honors the active batch filter via ?batch=. Requires
+// scripts/serve_web_https.py (plain http.server has no API).
 function initRunPicker(){
   const sel = document.getElementById("run-picker");
   const searchInput = document.getElementById("run-search");
   sel.innerHTML = `<option value="">(arbitrary run…)</option>`;
-  fetch(`${BASE}__api/runs`).then(r => r.json()).then(data => {
+  // Pick up the active batch filter so the run picker matches.
+  const batchQp = new URLSearchParams(location.search).get("batch") || "";
+  fetch(`${BASE}__api/runs?${batchQp ? "batch=" + encodeURIComponent(batchQp) + "&" : ""}`).then(r => r.json()).then(data => {
     const runs = (data && data.runs) || [];
     if (!runs.length){
       sel.innerHTML = `<option value="">(no runs found)</option>`;
@@ -633,12 +744,30 @@ function buildFilters() {
     Object.keys(SHAPE_COLOR).map(s=>`<option value="${s}">${s}</option>`).join("");
   sel.onchange = ()=>{ renderScatter(); renderBars(); };
   document.getElementById("status-filter").onchange = renderScatter;
+  // Batch selector: re-render on change, propagate to URL so it's shareable,
+  // and fetch the full run list for that batch.
+  const batchSel = document.getElementById("batch-selector");
+  if (batchSel) {
+    batchSel.onchange = async () => {
+      const qp = new URLSearchParams(location.search);
+      if (batchSel.value) qp.set("batch", batchSel.value);
+      else qp.delete("batch");
+      history.replaceState(null, "", "?" + qp.toString() + location.hash);
+      // Fetch all runs for the selected batch so scatter shows every experiment.
+      await fetchBatchRuns(batchSel.value);
+      updateStats();
+      renderScatter();
+      renderBars();
+    };
+  }
   document.getElementById("reset-zoom").onclick = ()=>{
     selected = null;
     RUN_VIEW = false;
     document.getElementById("detail").style.display = "none";
     const rp = document.getElementById("run-picker");
     if (rp) rp.value = "";
+    // Also clear batch selector to restore the full view.
+    if (batchSel) { batchSel.value = ""; }
     renderScatter();
   };
 }
@@ -646,8 +775,24 @@ function buildFilters() {
 function filtered() {
   const sh = document.getElementById("shape-filter").value;
   const st = document.getElementById("status-filter").value;
-  return DATA.experiments.filter(d =>
-    (sh==="all"||d.shape===sh) && (st==="all"||d.status===st));
+  // When a batch is active, use CURRENT_BATCH_RUNS (all runs from that branch).
+  // Otherwise fall back to DATA.experiments (matched experiments only).
+  let source;
+  const qp = new URLSearchParams(location.search);
+  const batch = qp.get("batch") || document.getElementById("batch-selector").value;
+  if (batch && CURRENT_BATCH_RUNS.length > 0) {
+    source = CURRENT_BATCH_RUNS;
+  } else {
+    source = DATA.experiments;
+  }
+  return source.filter(d => {
+    if (sh !== "all" && d.shape !== sh) return false;
+    if (st !== "all" && d.status !== st) return false;
+    // When using CURRENT_BATCH_RUNS, no further batch filter needed (already
+    // scoped to one branch by fetchBatchRuns). For DATA.experiments without a
+    // batch, include everything.
+    return true;
+  });
 }
 
 // ---------- scatter ----------
@@ -697,7 +842,29 @@ function renderScatter() {
       tip.style.left=(ev.pageX+14)+"px"; tip.style.top=(ev.pageY+14)+"px";
     })
     .on("mouseout",()=>tip.style.display="none")
-    .on("click",(ev,d)=>selectExperiment(d));
+    .on("click", async (ev,d) => {
+      // Batch runs (selected via the batch dropdown) come from /__api/runs and
+      // carry only run_dir + dice — no trajectory/stl/gcode/metrics, because
+      // they're not embedded in data.json. Fetch the full record via /__api/run
+      // and merge the artifacts onto d so the detail view, downloads, and 3D
+      // viewport populate. Matched data.json experiments already have these, so
+      // this only fires for batch runs and is a no-op otherwise.
+      if (!d.trajectory && d.run_dir) {
+        try {
+          const r = await fetch(`${BASE}__api/run?run=${encodeURIComponent(d.run_dir)}`);
+          const rec = await r.json();
+          if (rec && rec.ok !== false && rec.run_dir) {
+            d.trajectory = rec.trajectory || null;
+            d.stl = rec.stl || {};
+            d.gcode = rec.gcode || null;
+            d.metrics = rec.metrics || null;
+            d.tool_geom = rec.tool_geom || null;
+            d.args = rec.args || d.args;
+          }
+        } catch (e) { /* fall through; selectExperiment shows "no trajectory" */ }
+      }
+      selectExperiment(d);
+    });
 
   const bi = data[d3.scan(data, (a,b)=>b.dice-a.dice)];
   if (bi) {

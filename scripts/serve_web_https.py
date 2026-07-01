@@ -249,14 +249,27 @@ def main() -> None:
                     return self._json({"ok": False, "error": "missing run param"}, 400)
                 return self._json(generate_run_video(root, run, force=force))
             # List all viewable run dirs (newest first) for the dashboard's
-            # arbitrary-run picker.
+            # arbitrary-run picker. Accepts ?batch=old|current|all to filter by
+            # batch folder; no param returns every runs/<name>.
             if parsed.path == "/__api/runs":
                 import sys
                 scripts_dir = str(Path(__file__).resolve().parent)
                 if scripts_dir not in sys.path:
                     sys.path.insert(0, scripts_dir)
                 from build_results_web import list_runs
-                return self._json({"runs": list_runs()})
+                qs = urllib.parse.parse_qs(parsed.query)
+                batch = (qs.get("batch", [""])[0] or "").strip() or None
+                return self._json({"runs": list_runs(batch=batch)})
+            # Discover experiment batch directories under runs/ — auto-populates
+            # the dashboard's batch selector. New branches added to runs/ show up
+            # here without code changes.
+            if parsed.path == "/__api/batches":
+                import sys
+                scripts_dir = str(Path(__file__).resolve().parent)
+                if scripts_dir not in sys.path:
+                    sys.path.insert(0, scripts_dir)
+                from build_results_web import discover_batches
+                return self._json({"batches": discover_batches()})
             # Fetch one arbitrary run's full record (args/metrics/trajectory/stl/
             # gcode/tool_geom). `run=latest` resolves to the newest run dir, so a
             # fresh train_csg run can be inspected without knowing its name.
