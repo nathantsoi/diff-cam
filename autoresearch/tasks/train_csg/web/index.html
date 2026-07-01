@@ -156,6 +156,10 @@
   <h1>GradMill (train_csg) autoresearch</h1>
   <div class="stats" id="stats"></div>
   <div class="ctrls">
+    <label>run</label>
+    <select id="run-picker" title="View any run dir under runs/, not just autoresearch experiments"></select>
+    <input type="text" id="run-search" placeholder="Filter runs..." title="Type to filter runs, or paste a custom run path and press Enter" style="background:var(--panel2); color:var(--ink); border:1px solid var(--grid); border-radius:6px; padding:4px 8px; font-size:13px; width: 140px; margin-left: -5px;">
+    <button id="view-latest" title="Open the most recent train_csg run">&#128193; latest run</button>
     <label>shape</label>
     <select id="shape-filter"></select>
     <label>status</label>
@@ -276,6 +280,10 @@ const SHAPE_COLOR = {sphere:"#1f77b4", cylinder:"#ff7f0e", box:"#2ca02c", pyrami
 const STATUS_OPACITY = {keep:0.92, discard:0.45, crash:0.6};
 let DATA = null, selected = null;
 
+// Track whether the page is viewing a single arbitrary run (loaded via the
+// run-picker / ?run= URL param) rather than an autoresearch experiment row.
+let RUN_VIEW = false;
+
 d3.json("data.json").then(raw => {
   DATA = raw;
   document.getElementById("stats").innerHTML =
@@ -285,9 +293,122 @@ d3.json("data.json").then(raw => {
   buildFilters();
   renderScatter();
   renderBars();
+}).catch(err => {
+  // data.json is the autoresearch experiment index; it may be absent or stale
+  // when the page is used just to inspect an arbitrary run. Fall back to an
+  // empty dashboard so the run-picker + ?run= path still work.
+  DATA = {experiments: [], n_experiments: 0, n_matched: 0};
+  document.getElementById("stats").innerHTML =
+    `<span class="hint">autoresearch data.json unavailable (${err.message || err}); ` +
+    `use the <b>run</b> picker or <b>latest run</b> to view any run dir.</span>`;
+  buildLegend();
+  buildFilters();
+  renderScatter();
+  renderBars();
+}).finally(() => {
   initViewport();
   renderDownloads(null);
+  initRunPicker();
 });
+
+// ---- arbitrary-run viewer ----
+// Populates the run picker from /__api/runs (every viewable runs/<name> dir,
+// newest first) and supports ?run=runs/<name> or ?run=latest to open a run
+// directly. Requires scripts/serve_web_https.py (plain http.server has no API).
+function initRunPicker(){
+  const sel = document.getElementById("run-picker");
+  const searchInput = document.getElementById("run-search");
+  sel.innerHTML = `<option value="">(arbitrary run…)</option>`;
+  fetch(`${BASE}__api/runs`).then(r => r.json()).then(data => {
+    const runs = (data && data.runs) || [];
+    if (!runs.length){
+      sel.innerHTML = `<option value="">(no runs found)</option>`;
+      return;
+    }
+    
+    const populateOptions = (list) => {
+      sel.innerHTML = `<option value="">(arbitrary run…)</option>` + list.map(r =>
+        `<option value="${r.run_dir}">${r.name} · ${r.shape||"?"} · dice ${(r.dice||0).toFixed(4)}</option>`
+      ).join("");
+    };
+
+    populateOptions(runs);
+
+    if (searchInput) {
+      searchInput.oninput = () => {
+        const term = searchInput.value.toLowerCase().trim();
+        const filtered = runs.filter(r => 
+          r.name.toLowerCase().includes(term) || 
+          (r.shape && r.shape.toLowerCase().includes(term)) ||
+          r.run_dir.toLowerCase().includes(term)
+        );
+        populateOptions(filtered);
+      };
+      
+      searchInput.onkeydown = (ev) => {
+        if (ev.key === "Enter") {
+          const val = searchInput.value.trim();
+          if (val) {
+            const opt = [...sel.options].find(o => o.value === val || o.text.toLowerCase().includes(val.toLowerCase()));
+            if (opt && opt.value) {
+              sel.value = opt.value;
+              openRun(opt.value);
+            } else {
+              let path = val;
+              if (!path.startsWith("runs/")) path = "runs/" + path;
+              openRun(path);
+            }
+          }
+        }
+      };
+    }
+
+    // Honor ?run=runs/<name> (or ?run=latest) from the URL on first load.
+    const qp = new URLSearchParams(location.search);
+    const want = qp.get("run");
+    if (want){
+      const resolved = (want === "latest") ? (runs[0] && runs[0].run_dir) : want;
+      if (resolved && [...sel.options].some(o => o.value === resolved)){
+        sel.value = resolved;
+        openRun(resolved);
+      } else if (want === "latest"){
+        openRun("latest");
+      } else {
+        // Unknown name: try the API anyway (it may resolve latest, or 404).
+        openRun(want);
+      }
+    }
+  }).catch(() => {
+    sel.innerHTML = `<option value="">(run API unavailable — serve via serve_web_https.py)</option>`;
+  });
+  sel.onchange = () => { if (sel.value) openRun(sel.value); };
+  document.getElementById("view-latest").onclick = () => openRun("latest");
+}
+
+async function openRun(run){
+  if (!run) return;
+  const sel = document.getElementById("run-picker");
+  const status = document.getElementById("stats");
+  const prev = status.innerHTML;
+  status.innerHTML = `<span class="hint">Loading run ${run}…</span>`;
+  try {
+    const r = await fetch(`${BASE}__api/run?run=${encodeURIComponent(run)}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const rec = await r.json();
+    if (rec.ok === false) throw new Error(rec.error || "run not found");
+    RUN_VIEW = true;
+    selectExperiment(rec);
+    // Reflect the resolved run in the picker + URL so it's shareable.
+    if (rec.run_dir && [...sel.options].some(o => o.value === rec.run_dir)) sel.value = rec.run_dir;
+    const qp = new URLSearchParams(location.search);
+    qp.set("run", rec.run_dir || run);
+    history.replaceState(null, "", "?" + qp.toString() + location.hash);
+    status.innerHTML = prev;
+  } catch (e) {
+    status.innerHTML = `<span class="hint" style="color:#f0883e">Could not load run ${run}: ${e.message}. ` +
+      `Serve via scripts/serve_web_https.py (the /__api/run endpoint is not available under plain http.server).</span>`;
+  }
+}
 
 // ---------- tabs + markdown rendering ----------
 // idea.md / report.md / results_plot.png live one dir up from the page (the
@@ -429,7 +550,9 @@ function renderDownloads(d){
   const card = document.getElementById("downloads-card");
   let html = "";
   if (d && d.run_dir){
-    title.textContent = `Downloads — experiment #${d.idx} (${d.shape||"?"})`;
+    title.textContent = d.idx == null
+      ? `Downloads — ${d.name||"run"}`
+      : `Downloads — experiment #${d.idx} (${d.shape||"?"})`;
     if (d.gcode) html += `<a class="nc" href="${BASE}${d.gcode}" download>⬇ G-code (${d.gcode.split('/').pop()})</a>`;
     for (const [label,p] of Object.entries(d.stl||{}))
       html += `<a class="stl" href="${BASE}${p}" download>⬇ ${label} STL</a>`;
@@ -512,7 +635,10 @@ function buildFilters() {
   document.getElementById("status-filter").onchange = renderScatter;
   document.getElementById("reset-zoom").onclick = ()=>{
     selected = null;
+    RUN_VIEW = false;
     document.getElementById("detail").style.display = "none";
+    const rp = document.getElementById("run-picker");
+    if (rp) rp.value = "";
     renderScatter();
   };
 }
@@ -557,7 +683,7 @@ function renderScatter() {
     .attr("cx", d=>x(d.idx)).attr("cy", d=>y(d.dice)).attr("r", d=>d.status==="keep"?4.5:3.2)
     .attr("fill", d=>SHAPE_COLOR[d.shape]||"#888")
     .attr("opacity", d=>STATUS_OPACITY[d.status]??0.5)
-    .attr("stroke", d=>selected && d.idx===selected.idx ? "#fff" : "none")
+    .attr("stroke", d=>selected && (d.idx===selected.idx || (d.run_dir && d.run_dir===selected.run_dir)) ? "#fff" : "none")
     .attr("stroke-width", 1.6)
     .style("cursor","pointer")
     .on("mouseover",(ev,d)=>{
@@ -578,6 +704,28 @@ function renderScatter() {
     svg.append("text").attr("x", x(bi.idx)).attr("y", y(bi.dice)-9)
       .attr("text-anchor","middle").attr("fill","#e5534b").attr("font-size",11).attr("font-weight","bold")
       .text(`best ${bi.dice.toFixed(4)}`);
+  }
+
+  // Draw comparison dashed reference line for arbitrary runs
+  if (selected && selected.idx === null && !Number.isNaN(selected.dice)) {
+    svg.append("line")
+      .attr("x1", m.l)
+      .attr("x2", W - m.r)
+      .attr("y1", y(selected.dice))
+      .attr("y2", y(selected.dice))
+      .attr("stroke", "#ffd166")
+      .attr("stroke-dasharray", "4 4")
+      .attr("stroke-width", 1.5)
+      .attr("opacity", 0.85);
+
+    svg.append("text")
+      .attr("x", W - m.r - 6)
+      .attr("y", y(selected.dice) - 6)
+      .attr("text-anchor", "end")
+      .attr("fill", "#ffd166")
+      .attr("font-size", 11)
+      .attr("font-weight", "bold")
+      .text(`selected run: ${selected.dice.toFixed(4)}`);
   }
 }
 
@@ -620,13 +768,15 @@ function selectExperiment(d) {
   renderScatter();
   const card = document.getElementById("detail");
   card.style.display = "block";
-  document.getElementById("detail-title").textContent =
-    `Experiment #${d.idx} — ${d.shape||"?"} · dice ${d.dice.toFixed(4)} · ${d.status}`;
+  const isRun = d.idx == null;
+  document.getElementById("detail-title").textContent = isRun
+    ? `Run — ${d.name||d.shape||"?"} · dice ${d.dice.toFixed(4)}`
+    : `Experiment #${d.idx} — ${d.shape||"?"} · dice ${d.dice.toFixed(4)} · ${d.status}`;
 
   const meta = document.getElementById("meta");
   meta.innerHTML = `
     <dt>description</dt><dd>${d.description||"(none)"}</dd>
-    <dt>commit</dt><dd>${d.commit||"?"}</dd>
+    ${isRun ? "" : `<dt>commit</dt><dd>${d.commit||"?"}</dd>`}
     <dt>shape · seed · iters</dt><dd>${d.shape||"?"} · ${d.seed?? "?"} · ${d.iters?? "?"}</dd>
     <dt>run dir</dt><dd>${d.run_dir||"(unmatched — no artifacts)"}</dd>
     <dt>command</dt><dd>${d.command||""}</dd>`;

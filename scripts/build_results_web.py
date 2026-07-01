@@ -111,6 +111,82 @@ def load_run(run_dir):
     }
 
 
+def list_runs():
+    """Flat list of all viewable run dirs under runs/, newest first.
+
+    A run is viewable when it has args.json + metrics.json + trajectory.npy (the
+    same gate ``load_run`` applies). Used by the dashboard's arbitrary-run picker
+    and the ``?run=latest`` URL, so any train_csg run -- not just autoresearch
+    experiments matched in results.tsv -- can be inspected in the browser.
+    """
+    out = []
+    if not os.path.isdir(RUNS):
+        return out
+    for name in os.listdir(RUNS):
+        full = os.path.join(RUNS, name)
+        if not os.path.isdir(full):
+            continue
+        rec = load_run(full)
+        if rec is None:
+            continue
+        out.append({
+            "run_dir": rec["run_dir"],
+            "name": rec["name"],
+            "shape": rec["shape"],
+            "iters": rec["iters"],
+            "seed": rec["seed"],
+            "dice": rec["dice"],
+            "mtime": rec["mtime"],
+        })
+    out.sort(key=lambda r: r["mtime"], reverse=True)
+    return out
+
+
+def run_record(run_dir, generate_gcode=True):
+    """Full experiment-shaped record for one arbitrary run dir, or None.
+
+    Mirrors the per-experiment record ``main()`` emits into data.json (same keys:
+    run_dir, metrics, stl, gcode, trajectory, tool_geom, ...), so the dashboard's
+    existing detail renderer can consume it directly. ``idx``/``commit``/``command``
+    are nulled since an arbitrary run has no results.tsv row. Generates Haas G-code
+    on demand (unless ``generate_gcode=False``) so the download link works.
+    """
+    rec = load_run(run_dir)
+    if rec is None:
+        return None
+
+    repro_cmd = ""
+    repro_path = os.path.join(run_dir, "reproduce_command.sh")
+    if os.path.exists(repro_path):
+        try:
+            with open(repro_path) as f:
+                repro_cmd = f.read().strip()
+        except OSError:
+            pass
+
+    return {
+        "idx": None,
+        "commit": "",
+        "dice": rec["dice"],
+        "memory_gb": 0.0,
+        "status": "arbitrary",
+        "description": rec["name"],
+        "command": repro_cmd,
+        "shape": rec["shape"],
+        "iters": rec["iters"],
+        "seed": rec["seed"],
+        "run_dir": rec["run_dir"],
+        "name": rec["name"],
+        "metrics": rec["metrics"],
+        "args": rec["args"],
+        "stl": stl_paths(rec),
+        "gcode": ensure_gcode(rec, generate=generate_gcode),
+        "trajectory": trajectory_json(rec),
+        "tool_geom": tool_geom_from_args(rec["args"]),
+        "mtime": rec["mtime"],
+    }
+
+
 def build_run_index():
     """Index runs by (shape, iters, seed) -> list of run records."""
     index = {}
@@ -118,7 +194,7 @@ def build_run_index():
         return index, 0
     for name in os.listdir(RUNS):
         full = os.path.join(RUNS, name)
-        if not os.path.isdir(full) or not name.startswith("CamEnv"):
+        if not os.path.isdir(full):
             continue
         rec = load_run(full)
         if rec is None:

@@ -142,6 +142,30 @@ def _safe_run_path(root: Path, run_rel: str) -> Path | None:
     return candidate if candidate.is_dir() else None
 
 
+def _resolve_run_arg(root: Path, run: str) -> Path | None:
+    """Resolve a `run` query value to a runs/<name> dir under root.
+
+    Accepts either an explicit ``runs/<name>`` path or the sentinel ``latest``,
+    which resolves to the newest viewable run dir (so the dashboard can offer a
+    one-click "view the last train_csg run" without knowing its name).
+    """
+    if not run:
+        return None
+    if run == "latest":
+        # Import here so the server starts even if numpy is absent; list_runs
+        # reads runs/ on demand and reuses build_results_web's per-run loader.
+        import sys
+        scripts_dir = str(Path(__file__).resolve().parent)
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        from build_results_web import list_runs
+        runs = list_runs()
+        if not runs:
+            return None
+        return _safe_run_path(root, runs[0]["run_dir"])
+    return _safe_run_path(root, run)
+
+
 def generate_run_video(root: Path, run_rel: str, force: bool = False) -> dict:
     """Ensure runs/<run>/videos/run.mp4 exists; generate it if missing.
 
@@ -224,6 +248,33 @@ def main() -> None:
                 if not run:
                     return self._json({"ok": False, "error": "missing run param"}, 400)
                 return self._json(generate_run_video(root, run, force=force))
+            # List all viewable run dirs (newest first) for the dashboard's
+            # arbitrary-run picker.
+            if parsed.path == "/__api/runs":
+                import sys
+                scripts_dir = str(Path(__file__).resolve().parent)
+                if scripts_dir not in sys.path:
+                    sys.path.insert(0, scripts_dir)
+                from build_results_web import list_runs
+                return self._json({"runs": list_runs()})
+            # Fetch one arbitrary run's full record (args/metrics/trajectory/stl/
+            # gcode/tool_geom). `run=latest` resolves to the newest run dir, so a
+            # fresh train_csg run can be inspected without knowing its name.
+            if parsed.path == "/__api/run":
+                qs = urllib.parse.parse_qs(parsed.query)
+                run = (qs.get("run", [""])[0] or "").strip()
+                run_dir = _resolve_run_arg(root, run)
+                if run_dir is None:
+                    return self._json({"ok": False, "error": f"invalid or unknown run: {run}"}, 404)
+                import sys
+                scripts_dir = str(Path(__file__).resolve().parent)
+                if scripts_dir not in sys.path:
+                    sys.path.insert(0, scripts_dir)
+                from build_results_web import run_record
+                rec = run_record(run_dir)
+                if rec is None:
+                    return self._json({"ok": False, "error": f"no viewable artifacts in {run}"}, 404)
+                return self._json(rec)
             return super().do_GET()
 
     handler = NoCacheHandler
