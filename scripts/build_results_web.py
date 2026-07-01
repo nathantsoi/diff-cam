@@ -111,33 +111,86 @@ def load_run(run_dir):
     }
 
 
-def list_runs():
+def discover_batches():
+    """Discover experiment batch directories under runs/.
+
+    Returns a list of dicts ``{name, count}`` for every direct child directory
+    of ``runs/`` that contains at least one viewable run. Files (like
+    ``latest_metrics.json``) and empty dirs are skipped. New branches / batches
+    added to ``runs/`` show up automatically — no code changes needed.
+    """
+    if not os.path.isdir(RUNS):
+        return []
+    out = []
+    for name in sorted(os.listdir(RUNS)):
+        full = os.path.join(RUNS, name)
+        if not os.path.isdir(full):
+            continue
+        # Count viewable runs inside this container without building the full list.
+        count = 0
+
+        def _count(base):
+            nonlocal count
+            if not os.path.isdir(base):
+                return
+            for n in os.listdir(base):
+                p = os.path.join(base, n)
+                if os.path.isfile(p):
+                    continue
+                rec = load_run(p)
+                if rec is None:
+                    _count(p)
+                else:
+                    count += 1
+
+        _count(full)
+        if count > 0:
+            out.append({"name": name, "count": count})
+    return out
+
+
+def list_runs(batch=None):
     """Flat list of all viewable run dirs under runs/, newest first.
 
     A run is viewable when it has args.json + metrics.json + trajectory.npy (the
     same gate ``load_run`` applies). Used by the dashboard's arbitrary-run picker
     and the ``?run=latest`` URL, so any train_csg run -- not just autoresearch
     experiments matched in results.tsv -- can be inspected in the browser.
+
+    When ``batch`` matches a discovered subdirectory of ``runs/``, only runs
+    under that container are returned. Pass ``None`` or ``"all"`` to recurse
+    every child (the legacy behavior). New batch directories appear here
+    automatically — no code changes needed.
     """
     out = []
-    if not os.path.isdir(RUNS):
-        return out
-    for name in os.listdir(RUNS):
-        full = os.path.join(RUNS, name)
-        if not os.path.isdir(full):
-            continue
-        rec = load_run(full)
-        if rec is None:
-            continue
-        out.append({
-            "run_dir": rec["run_dir"],
-            "name": rec["name"],
-            "shape": rec["shape"],
-            "iters": rec["iters"],
-            "seed": rec["seed"],
-            "dice": rec["dice"],
-            "mtime": rec["mtime"],
-        })
+
+    def walk(base):
+        if not os.path.isdir(base):
+            return
+        for name in sorted(os.listdir(base)):
+            full = os.path.join(base, name)
+            if os.path.isfile(full):
+                continue
+            rec = load_run(full)
+            if rec is None:
+                # Not a run dir — recurse deeper (e.g. branch-*/ containers).
+                walk(full)
+                continue
+            out.append({
+                "run_dir": rec["run_dir"],
+                "name": rec["name"],
+                "shape": rec["shape"],
+                "iters": rec["iters"],
+                "seed": rec["seed"],
+                "dice": rec["dice"],
+                "mtime": rec["mtime"],
+            })
+
+    if batch and batch != "all":
+        walk(os.path.join(RUNS, batch))
+    else:
+        walk(RUNS)
+
     out.sort(key=lambda r: r["mtime"], reverse=True)
     return out
 
@@ -190,20 +243,26 @@ def run_record(run_dir, generate_gcode=True):
 def build_run_index():
     """Index runs by (shape, iters, seed) -> list of run records."""
     index = {}
-    if not os.path.isdir(RUNS):
-        return index, 0
-    for name in os.listdir(RUNS):
-        full = os.path.join(RUNS, name)
-        if not os.path.isdir(full):
-            continue
-        rec = load_run(full)
-        if rec is None:
-            continue
-        for key in (
-            (rec["shape"], rec["iters"], rec["seed"]),
-            (rec["shape"], rec["iters"], None),  # seedless fallback
-        ):
-            index.setdefault(key, []).append(rec)
+
+    def walk(base):
+        if not os.path.isdir(base):
+            return
+        for name in sorted(os.listdir(base)):
+            full = os.path.join(base, name)
+            if os.path.isfile(full):
+                continue
+            rec = load_run(full)
+            if rec is None:
+                # Not a run dir — recurse deeper (e.g. batch-*/ containers).
+                walk(full)
+                continue
+            for key in (
+                (rec["shape"], rec["iters"], rec["seed"]),
+                (rec["shape"], rec["iters"], None),  # seedless fallback
+            ):
+                index.setdefault(key, []).append(rec)
+
+    walk(RUNS)
     return index, len(index)
 
 
