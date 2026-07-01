@@ -31,7 +31,8 @@ Run each experiment on a single GPU, you can run multiple experiments at once, b
 `--voxel-size-mm` is the precision knob (a 1 in cube at `0.5` → 51³ grid, ~0.14 GB). **`--dt 0.45` is the decisive lever** (do NOT use the old `≈ 0.12` advice): at low dt the swept-cylinder tool is speed-limited and cannot descend/traverse the part exterior, capping dice at ~0.56 regardless of the loss or trajectory capacity. dt=0.45 advances ≈ 1 voxel/step so the tool covers the part (sphere 0.56 → 0.85, pyramid → 0.90). The sweet spot is `dt ∈ [0.42, 0.5]`. `--grad-clip 0.5` (0.4 for sphere) + `--eval-freq 10` + best-checkpoint saving capture the transient dice peak.
 
 **What you CAN do:**
-- Modify `train_csg.py`, parameters when you call this script, and related components. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, etc. Importantly, if you need to implement new loss components, this will need to be done in the differentiable simulator, which is allowed.
+- Modify `train_csg.py`, parameters when you call this script, and related components. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, max steps, etc. Importantly, if you need to implement new loss components, this will need to be done in the differentiable simulator, which is allowed.
+- Fix bugs and improve model training overall.
 - **Vary the machining scenario** via the CLI flags above: change the stock shape/size (`--stock-size-in`, including non-cubic blocks), the voxel precision (`--voxel-size-mm`), and the target shape/size (`--target-shape`, `--target-radius-mm`, `--target-height-mm`). Explore whether the method holds up across spheres, cylinders, boxes, pyramids, and different stock sizes — and tune the method to do well across them.
 
 **What you CANNOT do:**

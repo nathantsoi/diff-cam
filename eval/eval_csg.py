@@ -134,7 +134,7 @@ def eval_trajectory(path, resolution, do_gcode, post, config, voxel_size_mm=VOXE
         project="diffcam",
         entity="diffcam",
         job_type="evaluation",
-        name=f"eval_trajectory_{os.path.basename(path)}_{int(time.time())}",
+        name=f"eval_trajectory_{os.path.basename(path)}_{int(time.time() * 1000)}",
         config={
             "trajectory_path": path,
             "resolution": resolution,
@@ -290,7 +290,7 @@ def eval_checkpoints(paths, num_runs, base_seed):
             project="diffcam",
             entity="diffcam",
             job_type="evaluation",
-            name=f"eval_checkpoint_{os.path.basename(path)}_{int(time.time())}",
+            name=f"eval_checkpoint_{os.path.basename(path)}_{int(time.time() * 1000)}",
             config={
                 "checkpoint_path": path,
                 "resolution": res,
