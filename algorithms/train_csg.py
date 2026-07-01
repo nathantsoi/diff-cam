@@ -18,10 +18,14 @@ comparable:
 Run outputs are written under ``runs/CamEnvDiff-v0__train_csg__<seed>__<ts>/``
 -- the same env/simulator as ``csg_ppo`` (``exp_name`` distinguishes the method).
 
-Example (mirrors the csg_ppo baseline command):
-    uv run python -m algorithms.train_csg --iters 128 --resolution 32 \
-        --max_steps 64 --save_model --eval_freq 1 --record_video_freq 100 \
-        --video_fps 30
+Example (mirrors the csg_ppo baseline command). The defaults below are the
+proven operating point from the autoresearch sweep (514 experiments): dt=0.45
+unlocks tool traversal (the real bottleneck, not the loss), grad_clip=0.5 +
+eval_freq=10 + best-checkpoint saving capture the transient dice peak:
+    uv run python -m algorithms.train_csg --iters 5000 --max_steps 128 \
+        --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.45 \
+        --grad_clip 0.5 --eval_freq 10 --save_model \
+        --record_video_freq 100 --video_fps 30
 """
 
 import math
@@ -69,8 +73,10 @@ class Args:
     # eval / video cadence -- measured in Adam iterations (same flags as csg_ppo)
     eval: bool = False
     """if True, compute evaluation metrics (Dice/ASD/HD95) during training and at the end"""
-    eval_freq: int = 0
-    """compute + log Dice/ASD/HD95 every N iterations (0 = disabled)"""
+    eval_freq: int = 10
+    """compute + log Dice/ASD/HD95 every N iterations (0 = disabled). Fine cadence
+    (10) samples the transient dice peak for best-checkpoint saving; the iters//10
+    auto-cadence is far too coarse at i5000 and misses the peak."""
     progress_bar: bool = False
     """use tqdm progress bar instead of scrolling log lines (set False for clean log files and LLM harness compatibility)"""
     log_freq: int = 1
@@ -81,26 +87,39 @@ class Args:
     """frames per second for recorded videos"""
 
     # Optimization
-    iters: int = 128
-    """number of Adam iterations"""
+    iters: int = 5000
+    """number of Adam iterations. i5000 is the sweet spot within the 15-min budget:
+    transient dice peaks appear LATER as iters grow (sphere @530->@2450; pyramid
+    @680->@1590), so longer runs surface higher peaks. i8000 gives no further gain
+    and breaks the budget; i1000 under-samples the peak."""
     learning_rate: float = 5e-3
-    """Adam learning rate"""
+    """Adam learning rate (optimum: 5e-3; 3e-3 neutral, 7e-3 diverges at dt0.5)"""
     anneal_lr: bool = False
     """linearly anneal the learning rate to 0 over training"""
     lr_decay_frac: float = 0.0
-    """fraction of iters (at the end) over which LR linearly decays to 0; 0 = constant LR (preserves exploration, then settles)"""
+    """fraction of iters (at the end) over which LR linearly decays to 0; 0 = constant
+    LR (preserves exploration, then settles). Dead lever on the current API: the
+    stale branch's 0.29->0.84 gain did NOT transfer (loss/simulator changed); all
+    decay settings tied the baseline. Best-checkpoint saving subsumes it."""
     init_scale: float = 0.05
-    """half-range of the uniform random init for per-step displacements"""
+    """half-range of the uniform random init for per-step displacements (0.02 and 0.1 both hurt)"""
     init_mode: str = "random"
-    """trajectory init: 'random', 'raster', 'spiral', 'shell', or 'zlayer' (z-level descent that pre-clears the sphere exterior layer by layer, using the tall tool's vertical extent)"""
-    grad_clip: float = 0.0
-    """clip per-iteration gradient L2 norm to this (0 = disabled); stabilizes long trajectories (large max_steps) that otherwise NaN"""
+    """trajectory init: 'random', 'raster', 'spiral', 'shell', or 'zlayer' (z-level
+    descent that pre-clears the sphere exterior layer by layer, using the tall tool's
+    vertical extent). Structured inits are dead levers: raster/spiral/shell/zlayer all
+    fail via speed-limit clipping -- inits can't help until the tool can move (dt=0.45)."""
+    grad_clip: float = 0.5
+    """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
+    transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5 is
+    the sweet spot (0.5 default for pyramid/box/cylinder, 0.4 marginally better for
+    sphere). 0.0 caps dice ~0.56 via the unstable peak."""
 
     # CamEnvDiff / CSG specific (mirrors csg_ppo)
     resolution: int = 32
     """voxel grid resolution per axis"""
-    max_steps: int = 64
-    """trajectory length T (number of tool motions)"""
+    max_steps: int = 128
+    """trajectory length T (number of tool motions). m=128 optimal at dt<=0.45;
+    m=160 optimal at dt=0.5; m>=192 NaNs (SDF overflow); m=144 slightly worse than 128."""
     target_shape: str = "sphere"
     """target shape: 'box', 'cylinder', 'sphere', 'pyramid'"""
     k_init: float = 10.0
@@ -135,8 +154,12 @@ class Args:
     """cutter radius in mm (default 1/4" end mill)"""
     tool_height_mm: float = 25.0
     """cutter flute length in mm"""
-    dt: float = 0.01
-    """seconds per simulator step; speed = |delta (.) envelope_mm| / dt"""
+    dt: float = 0.45
+    """seconds per simulator step; speed = |delta (.) envelope_mm| / dt. THE decisive
+    lever: at low dt (0.12/0.01) the swept-cylinder tool is speed-limited -- its
+    z-range clips to 0.72-1.0 and it cannot descend/traverse the exterior, capping dice
+    at ~0.56 regardless of loss or capacity. dt=0.45 advances ~1 voxel/step so the tool
+    covers the part (sphere 0.56->0.85, pyramid ->0.90). Sweet spot dt in [0.42,0.5]."""
     rapid_ipm: float = 500.0
     """max traverse speed (inches/min) when clear of the stock"""
     feed_ipm: float = 10.0
