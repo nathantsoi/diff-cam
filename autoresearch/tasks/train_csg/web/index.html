@@ -1145,7 +1145,7 @@ function initViewport(){
         const r=camRight(cam.yaw), u=camUp(cam.yaw,cam.pitch);
         cam.target = vadd(cam.target, vsub(vscale(r, dx*factor), vscale(u, dy*factor)));
       } else {
-        cam.yaw   -= dx * ORBIT_SENS;
+        cam.yaw   += dx * ORBIT_SENS;
         cam.pitch  = clamp(cam.pitch - dy*ORBIT_SENS, -MAX_PITCH, MAX_PITCH);
       }
       renderViewport();
