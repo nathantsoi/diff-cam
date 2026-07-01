@@ -21,9 +21,15 @@ To create a new experiment:
 
 1. **Choose run tag**: choose a new tag for your experiment that includes the date and a unique word description (e.g. `jun27-random-init`). The branch `ar-agd/<tag>` must not already exist, this is a fresh run.
 2. **Create the branch**: `git checkout -b ar-agd/<tag>` from the `autoresearch` branch.
-3. **Create the run-output folder**: `mkdir -p runs/<tag>` (e.g. `runs/jun27-random-init`). Every experiment on this branch must land **inside** `runs/<tag>/` — the results dashboard groups runs by these direct child folders of `runs/` (see `discover_batches` in `scripts/build_results_web.py`), so a branch's experiments only appear together as one batch if they share the folder. The trainer writes to `runs/<run_name>` at the top level by default, so after each run you must move it into `runs/<tag>/` (done in the experiment loop below).
-4. **Read the in-scope files**: Start with the train_csg.py file and README.md
-5. **Create a new autoresearch/tasks/train_csg/idea.md file** to record your ideas and take notes. Summarize your most interesting findings in this file as they arise.
+3. **Clear the previous run's results**: the result artifacts from the last run still sit in `autoresearch/tasks/train_csg/` and will contaminate the new branch if not cleared — a new branch must start from a clean slate, with results recorded only for *this* run. Once you are on the new branch, reset/truncate them:
+   - `results.tsv` → truncate to just the header row (`commit\tdice\tmemory_gb\tstatus\tdescription\tcommand`). Do NOT carry over any prior experiment rows.
+   - `idea.md` → overwrite with a fresh file (step 6 below) noting the new branch/tag, starting point, and plan. The old chronological findings log does not apply to this run.
+   - `report.md` → `rm` it. It is the *final* report from the previous run and is regenerated only when this run concludes; leaving it around would report stale numbers as if they were this run's.
+   - `rm -f results_plot.png run.log` (both untracked) so the plot/log don't mix runs.
+   These are committed-on-the-new-branch changes (or untracked deletions); do not push them back to the prior branch. The prior run's results remain preserved on its own branch in git history.
+4. **Create the run-output folder**: `mkdir -p runs/<tag>` (e.g. `runs/jun27-random-init`). Every experiment on this branch must land **inside** `runs/<tag>/` — the results dashboard groups runs by these direct child folders of `runs/` (see `discover_batches` in `scripts/build_results_web.py`), so a branch's experiments only appear together as one batch if they share the folder. The trainer writes to `runs/<run_name>` at the top level by default, so after each run you must move it into `runs/<tag>/` (done in the experiment loop below).
+5. **Read the in-scope files**: Start with the train_csg.py file and README.md
+6. **Create a new autoresearch/tasks/train_csg/idea.md file** to record your ideas and take notes. Summarize your most interesting findings in this file as they arise.
 
 ## Experimentation
 
