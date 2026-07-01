@@ -24,13 +24,17 @@ the exporter and visualizer additionally auto-read the run's ``args.json``.
 
 Examples
 --------
-    # Fast end-to-end run (small part, headless, no W&B):
-    uv run python scripts/run_pipeline.py
+    # Fast end-to-end run (the proven default of 5000 iters is a ~15-min run;
+    # pass --iters 50 for a quick wiring check, small part, headless, no W&B):
+    uv run python scripts/run_pipeline.py --iters 50
 
-    # A real 1" sphere at 0.5 mm voxels, Haas G-code + figure:
-    uv run python scripts/run_pipeline.py --iters 128 --max_steps 64 \
+    # A real 1" sphere at 0.5 mm voxels, Haas G-code + figure (proven operating
+    # point from the autoresearch sweep: dt=0.45 unlocks tool traversal,
+    # grad-clip + eval-freq + best-checkpoint saving capture the dice peak):
+    uv run python scripts/run_pipeline.py --iters 5000 --max-steps 128 \
         --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere \
-        --target-radius-mm 11.43 --post haas
+        --target-radius-mm 11.43 --post haas --dt 0.45 --grad-clip 0.5 \
+        --eval-freq 10
 
     # Fixture the stock top-centre at machine (8,6,5)" (emits G10 L2 in the Haas program):
     uv run python scripts/run_pipeline.py --stock-origin-in 8 6 5 --post haas
@@ -101,12 +105,59 @@ def main():
     ap.add_argument("--run-dir", default=None,
                     help="existing run dir to use (skips discovering one from "
                          "training; required when 'train' is not in --stages)")
-    # --- Training (forwarded to train_csg) ---
-    ap.add_argument("--iters", type=int, default=32,
-                    help="Adam iterations (keep small for a quick end-to-end test)")
-    ap.add_argument("--max-steps", type=int, default=32,
-                    help="trajectory length T (number of tool motions)")
+    # --- Training (forwarded to train_csg). Defaults are the proven operating
+    #     point from the autoresearch sweep (514 experiments): dt=0.45 unlocks
+    #     tool traversal (the real bottleneck), grad-clip + eval-freq +
+    #     best-checkpoint saving capture the transient dice peak. ---
+    ap.add_argument("--iters", type=int, default=5000,
+                    help="Adam iterations (i5000 is the sweet spot within the "
+                         "15-min budget; peaks appear later as iters grow; "
+                         "i8000 gives no further gain and breaks the budget)")
+    ap.add_argument("--max-steps", type=int, default=128,
+                    help="trajectory length T (number of tool motions; m=128 at "
+                         "dt<=0.45, m=160 at dt0.5; m>=192 NaNs)")
     ap.add_argument("--learning-rate", type=float, default=5e-3)
+    ap.add_argument("--lr-decay-frac", type=float, default=0.0,
+                    help="fraction of iters (at the end) over which LR decays to 0 "
+                         "(dead lever on current API; best-checkpoint saving subsumes it)")
+    ap.add_argument("--init-scale", type=float, default=0.05,
+                    help="half-range of the uniform random init for per-step displacements")
+    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "spiral", "shell", "zlayer"),
+                    help="trajectory init mode")
+    ap.add_argument("--w-gouge", type=float, default=4.0,
+                    help="loss weight on cutting INTO the part (barrier)")
+    ap.add_argument("--w-residual", type=float, default=1.0,
+                    help="loss weight on leftover material outside the part (objective)")
+    ap.add_argument("--grad-clip", type=float, default=0.5,
+                    help="clip per-iter gradient L2 norm (0 = disabled); 0.4-0.5 "
+                         "stabilizes the transient dice peak so best-checkpoint "
+                         "saving captures a higher one")
+    ap.add_argument("--w-air", type=float, default=0.0,
+                    help="weight on the per-step air-cut penalty (0 = disabled; ~0.5-1.0)")
+    ap.add_argument("--w-jerk", type=float, default=0.0,
+                    help="weight on the jerk/smoothness penalty (0 = disabled; ~1e-2)")
+    ap.add_argument("--random-tool-start", action="store_true",
+                    help="randomize the cutter start each fresh start (XY in the stock "
+                         "footprint, Z >= stock top + --tool-start-clearance-in)")
+    ap.add_argument("--tool-start-clearance-in", type=float, default=0.2,
+                    help="min cutter height above the stock top (inches) for a random start")
+    ap.add_argument("--tool-start-xy-margin", type=float, default=0.1,
+                    help="normalized XY margin inside the stock footprint for a random start")
+    ap.add_argument("--tool-start-z-jitter-in", type=float, default=0.1,
+                    help="extra random height (inches) above the clearance floor for a random start")
+    ap.add_argument("--restart-from-state", action="store_true",
+                    help="save mid-cut simulator states and restart training from them "
+                         "(robustness to initial conditions)")
+    ap.add_argument("--p-restart", type=float, default=0.25,
+                    help="per-iter probability of restarting from a saved state")
+    ap.add_argument("--state-bank-size", type=int, default=32,
+                    help="max saved simulator states (FIFO)")
+    ap.add_argument("--save-state-prob", type=float, default=0.05,
+                    help="per-iter probability of snapshotting a mid-cut state")
+    ap.add_argument("--eval-freq", type=int, default=10,
+                    help="eval (dice) cadence in iters; 0 = auto (iters//10). "
+                         "Fine cadence (10) samples the transient dice peak for "
+                         "best-checkpoint saving.")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--no-save-model", action="store_true",
                     help="don't pass --save_model (trajectory won't be written to the run dir)")
@@ -127,8 +178,11 @@ def main():
                     help="sphere/cylinder radius, or box/pyramid half-size (mm)")
     ap.add_argument("--target-height-mm", type=float, default=22.86,
                     help="cylinder/pyramid height (mm; ignored for sphere/box)")
-    ap.add_argument("--dt", type=float, default=0.12,
-                    help="seconds per simulator step (tune so feed steps advance ~1 voxel)")
+    ap.add_argument("--dt", type=float, default=0.45,
+                    help="seconds per simulator step. THE decisive lever: at low dt "
+                         "(0.12/0.01) the tool is speed-limited and cannot traverse "
+                         "the exterior (dice caps ~0.56); 0.45 advances ~1 voxel/step. "
+                         "Sweet spot dt in [0.42, 0.5].")
     # --- G-code / viz ---
     ap.add_argument("--post", default="haas", choices=("rs274", "haas"),
                     help="post-processor for export/eval/viz")
@@ -169,6 +223,15 @@ def main():
             "--iters", str(args.iters),
             "--max_steps", str(args.max_steps),
             "--learning_rate", str(args.learning_rate),
+            "--lr_decay_frac", str(args.lr_decay_frac),
+            "--init_scale", str(args.init_scale),
+            "--init_mode", args.init_mode,
+            "--w_gouge", str(args.w_gouge),
+            "--w_residual", str(args.w_residual),
+            "--grad_clip", str(args.grad_clip),
+            "--w_air", str(args.w_air),
+            "--w_jerk", str(args.w_jerk),
+            "--eval_freq", str(args.eval_freq),
             "--seed", str(args.seed),
             "--stock_size_in", *ssi,
             "--voxel_size_mm", str(args.voxel_size_mm),
@@ -183,6 +246,17 @@ def main():
             cmd.append("--save_model")
         cmd.append("--track" if args.track else "--no-track")
         cmd.append("--eval")
+        # Trajectory regularizers + robustness-to-initial-conditions options.
+        if args.random_tool_start:
+            cmd += ["--random_tool_start",
+                    "--tool_start_clearance_in", str(args.tool_start_clearance_in),
+                    "--tool_start_xy_margin", str(args.tool_start_xy_margin),
+                    "--tool_start_z_jitter_in", str(args.tool_start_z_jitter_in)]
+        if args.restart_from_state:
+            cmd += ["--restart_from_state",
+                    "--p_restart", str(args.p_restart),
+                    "--state_bank_size", str(args.state_bank_size),
+                    "--save_state_prob", str(args.save_state_prob)]
         rc, out = _run(cmd, "train")
         if rc != 0:
             raise SystemExit(f"training failed (exit {rc})")

@@ -234,6 +234,19 @@ class CSGSimulatorDelta:
         self.w_gouge[None] = 2.0
         self.w_residual[None] = 1.0
 
+        # Air-cut penalty: a per-step term that fires when the swept tool occupies
+        # EMPTY stock (tool inside, no remaining material). This is what "cutting
+        # air" costs -- the optimizer is charged for every step the cutter spends
+        # traversing or hovering in open space instead of removing material. Zero
+        # (with zero gradient) when the tool is actually cutting (stock_occ ~ 1).
+        self.w_air = ti.field(dtype=ti.f32, shape=())
+        self.w_air[None] = 0.0
+        # Jerk / smoothness penalty: squared difference of consecutive deltas, so
+        # the trajectory is penalized for abrupt changes in direction/speed (the
+        # "jerky" artefact). Acts directly on tool_delta (needs_grad=True).
+        self.w_jerk = ti.field(dtype=ti.f32, shape=())
+        self.w_jerk[None] = 0.0
+
         # Holder collision is a PENETRATION BARRIER, not a proximity field: it is
         # exactly zero (zero gradient) while the holder has clearance, and grows
         # with the squared depth the holder pushes into remaining stock. This is
@@ -251,6 +264,8 @@ class CSGSimulatorDelta:
         self.diag_gouge = ti.field(dtype=ti.f32, shape=())
         self.diag_residual = ti.field(dtype=ti.f32, shape=())
         self.diag_holder = ti.field(dtype=ti.f32, shape=())
+        self.diag_air = ti.field(dtype=ti.f32, shape=())
+        self.diag_jerk = ti.field(dtype=ti.f32, shape=())
 
         # ---- Stock ----
         self.stock = ti.field(
@@ -519,8 +534,8 @@ class CSGSimulatorDelta:
     def reconstruct_positions(self, T: ti.i32):
         """Cumulative-sum scan: tool_pos[t+1] = tool_pos[t] + tool_delta[t].
 
-        TIt MUST run serially — each iteration depends on the previous one's result — 
-        so ti.loop_config(serialize=True) is mandatory. 
+        TIt MUST run serially — each iteration depends on the previous one's result —
+        so ti.loop_config(serialize=True) is mandatory.
         Without it, Taichi would parallelize the top-level loop
         and the scan would be wrong (and so would its gradient).
 
@@ -532,6 +547,22 @@ class CSGSimulatorDelta:
         for _ in range(1):
             self.tool_pos[0] = self.tool_start[None]
             for t in range(T):
+                self.tool_pos[t + 1] = self.tool_pos[t] + self.tool_delta[t]
+
+    @ti.kernel
+    def reconstruct_positions_from(self, t0: ti.i32, T: ti.i32):
+        """Cumulative-sum scan starting from a RESTORED mid-cut state.
+
+        Assumes ``tool_pos[t0]`` has already been populated (e.g. by
+        ``restore_state``) and scans ``tool_pos[t+1] = tool_pos[t] +
+        tool_delta[t]`` for ``t in [t0, T)``. Used by ``forward_from`` to
+        restart a forward pass from a saved state without re-running the
+        prefix ``[0, t0)``. Serial for the same reason as
+        ``reconstruct_positions``; gradient-tracked for ``t >= t0``.
+        """
+        ti.loop_config(serialize=True)
+        for _ in range(1):
+            for t in range(t0, T):
                 self.tool_pos[t + 1] = self.tool_pos[t] + self.tool_delta[t]
 
     @ti.func
@@ -709,7 +740,7 @@ class CSGSimulatorDelta:
             )
 
     @ti.kernel
-    def compute_holder_penalty(self, T: ti.i32):
+    def compute_holder_penalty(self, t_start: ti.i32, T: ti.i32):
         """Differentiable holder-collision PENETRATION BARRIER added to ``self.loss``.
 
         For every cut t the holder rides above the tool along segment t. For each
@@ -727,8 +758,12 @@ class CSGSimulatorDelta:
         This is a one-sided barrier, not a proximity field: a high weight makes
         it a near-hard constraint that stays inactive until violated, instead of
         a force that shoves the tool away from the workpiece pre-emptively.
+
+        ``t_start`` restricts the sum to ``[t_start, T)`` so a restart-from-state
+        forward pass only charges for the segments it actually carved (the slots
+        below ``t_start`` are stale/restored constants and carry no gradient).
         """
-        for t, i, j, k in ti.ndrange(T, self.Nx, self.Ny, self.Nz):
+        for t, i, j, k in ti.ndrange((t_start, T), self.Nx, self.Ny, self.Nz):
             scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
             inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
             w = self.holder_penalty_weight[None]
@@ -746,6 +781,64 @@ class CSGSimulatorDelta:
             ti.atomic_add(self.loss[None], inv_n * w * stock_occ * penetration * penetration)
 
     @ti.kernel
+    def compute_air_penalty(self, t_start: ti.i32, T: ti.i32):
+        """Differentiable AIR-CUT penalty added to ``self.loss``.
+
+        For every cut ``t`` in ``[t_start, T)`` the swept cylinder (``tool_sdf``)
+        occupies some volume; the fraction of that volume lying in EMPTY stock
+        (no remaining material) is "cutting air". We charge for it:
+
+            air = tool_occ * (1 - stock_occ)
+
+        where ``tool_occ = sigmoid(-tool_sdf)`` (~1 inside the swept tool for
+        segment t) and ``stock_occ = sigmoid(stock[t+1])`` (~1 inside remaining
+        material after the cut). Their product is ~1 only where the tool swept
+        through open space, and ~0 where it actually removed material. Quadratic
+        so small engagements are cheap and long air traverses dominate. Gated by
+        ``w_air`` (0 -> exactly zero, zero gradient -> disabled).
+
+        Differentiable in ``tool_pos``/``tool_delta`` (via ``tool_sdf``) and in
+        ``stock`` (via ``stock_occ``); safe under ``ti.ad.Tape``.
+        """
+        for t, i, j, k in ti.ndrange((t_start, T), self.Nx, self.Ny, self.Nz):
+            scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
+            inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
+            w = self.w_air[None]
+            p = ti.Vector(
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+            )
+            stock_d = self.stock[t + 1, i, j, k]
+            tool_d = self.tool_sdf(p, t)
+
+            sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
+            stock_occ = 1.0 / (1.0 + ti.exp(sa))            # ~1 inside material
+            ta = ti.max(-50.0, ti.min(50.0, -tool_d * scale))
+            tool_occ = 1.0 / (1.0 + ti.exp(ta))             # ~1 inside the swept tool
+            air = tool_occ * (1.0 - stock_occ)
+
+            ti.atomic_add(self.loss[None], inv_n * w * air * air)
+
+    @ti.kernel
+    def compute_jerk_penalty(self, t_start: ti.i32, T: ti.i32):
+        """Differentiable JERK / smoothness penalty added to ``self.loss``.
+
+        Penalizes abrupt changes in the commanded per-step displacement:
+
+            jerk = |tool_delta[t] - tool_delta[t-1]|^2
+
+        summed over ``t in [max(t_start,1), T-1)`` and normalized by the segment
+        count so the magnitude is comparable across restart lengths. Acts
+        directly on ``tool_delta`` (``needs_grad=True``), so the gradient is a
+        simple finite-difference of the deltas. Gated by ``w_jerk``
+        (0 -> disabled).
+        """
+        for t in range(ti.max(t_start, 1), T - 1):
+            w = self.w_jerk[None]
+            n = ti.max(1, T - 1 - ti.max(t_start, 1))
+            diff = self.tool_delta[t] - self.tool_delta[t - 1]
+            ti.atomic_add(self.loss[None], w * diff.dot(diff) / n)
+
+    @ti.kernel
     def compute_diagnostics(self, T: ti.i32):
         """Non-differentiable breakdown of the loss into its three components.
 
@@ -757,11 +850,15 @@ class CSGSimulatorDelta:
         g = 0.0
         r = 0.0
         h = 0.0
+        a = 0.0
+        jk = 0.0
         scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
         inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
         w_g = self.w_gouge[None]
         w_r = self.w_residual[None]
         w_h = self.holder_penalty_weight[None]
+        w_a = self.w_air[None]
+        w_j = self.w_jerk[None]
         margin = self.holder_margin[None]
         # Geometry terms on the final stock (stock[T]).
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
@@ -776,7 +873,7 @@ class CSGSimulatorDelta:
             residual = (1.0 - target_occ) * stock_occ
             g += inv_n * w_g * gouge * gouge
             r += inv_n * w_r * residual * residual
-        # Holder barrier summed over every segment.
+        # Holder barrier + air-cut penalty summed over every segment.
         for t, i, j, k in ti.ndrange(T, self.Nx, self.Ny, self.Nz):
             p = ti.Vector([(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz])
             stock_d = self.stock[t + 1, i, j, k]
@@ -785,9 +882,22 @@ class CSGSimulatorDelta:
             stock_occ = 1.0 / (1.0 + ti.exp(sa))
             penetration = ti.max(0.0, (margin - holder_d) * scale)
             h += inv_n * w_h * stock_occ * penetration * penetration
+            # Air-cut: tool swept volume in empty stock.
+            tool_d = self.tool_sdf(p, t)
+            ta = ti.max(-50.0, ti.min(50.0, -tool_d * scale))
+            tool_occ = 1.0 / (1.0 + ti.exp(ta))
+            air = tool_occ * (1.0 - stock_occ)
+            a += inv_n * w_a * air * air
+        # Jerk / smoothness over consecutive deltas.
+        nj = ti.max(1, T - 2)
+        for t in range(1, T - 1):
+            diff = self.tool_delta[t] - self.tool_delta[t - 1]
+            jk += w_j * diff.dot(diff) / nj
         self.diag_gouge[None] = g
         self.diag_residual[None] = r
         self.diag_holder[None] = h
+        self.diag_air[None] = a
+        self.diag_jerk[None] = jk
 
     @ti.kernel
     def holder_overlap_at(self, t: ti.i32) -> ti.f32:
@@ -842,7 +952,66 @@ class CSGSimulatorDelta:
             self.advance_position(t)
             self.apply_cut(t)
         self.compute_loss(num_active_steps - 1)
-        self.compute_holder_penalty(num_active_steps - 1)
+        self.compute_holder_penalty(0, num_active_steps - 1)
+        self.compute_air_penalty(0, num_active_steps - 1)
+        self.compute_jerk_penalty(0, num_active_steps - 1)
+
+    def forward_from(self, t0, num_active_steps):
+        """Forward pass RESTARTED from a restored mid-cut state at step ``t0``.
+
+        Unlike ``forward``, this does NOT call ``init_stock`` or
+        ``reconstruct_positions(0)``: the caller must have already populated
+        ``stock[t0]`` and ``tool_pos[t0]`` (via ``restore_state``). It then
+        reconstructs positions from ``t0``, carves ``[t0, num_active_steps-1)``,
+        and computes the loss + all barriers/penalties restricted to
+        ``[t0, num_active_steps-1)`` so only the segments actually carved this
+        pass carry gradient (the restored prefix is a detached constant).
+
+        Wrap in ti.ad.Tape externally. ``num_active_steps`` is the total number
+        of tool positions (the loss is still measured on the final stock at
+        ``num_active_steps-1``), so the tail segment count is
+        ``num_active_steps-1 - t0``.
+        """
+        self.reconstruct_positions_from(t0, num_active_steps)
+        for t in range(t0, num_active_steps - 1):
+            self.advance_position(t)
+            self.apply_cut(t)
+        self.compute_loss(num_active_steps - 1)
+        self.compute_holder_penalty(t0, num_active_steps - 1)
+        self.compute_air_penalty(t0, num_active_steps - 1)
+        self.compute_jerk_penalty(t0, num_active_steps - 1)
+
+    # ------------------------------------------------------------------
+    # State save / restore (for restart-from-state training)
+    # ------------------------------------------------------------------
+    # The bank holds snapshots of (stock SDF at step t, tool_pos at step t, t).
+    # These are detached numpy copies: restoring them writes CONSTANTS back into
+    # the field slots, so a forward_from(t0) pass only accumulates gradient on
+    # tool_delta[t0..T-2] (the prefix is fixed). Nondeterministic carve under
+    # GPU atomics is irrelevant here -- we only ever READ stock[t]/tool_pos[t]
+    # to snapshot, and WRITE them as fixed starts.
+
+    def save_state(self, t):
+        """Snapshot the stock SDF + tool position at step ``t`` (numpy copies)."""
+        return {
+            "stock": self.stock.to_numpy()[t].copy(),
+            "tool_pos": self.tool_pos.to_numpy()[t].copy(),
+            "t": int(t),
+        }
+
+    def restore_state(self, state, t0):
+        """Write a saved snapshot back into slots ``t0`` (stock + tool_pos).
+
+        ``t0`` may differ from ``state["t"]``; we place the snapshot at whichever
+        slot the caller wants to restart from. Caller then runs
+        ``forward_from(t0, T)``.
+        """
+        stock_np = self.stock.to_numpy()
+        pos_np = self.tool_pos.to_numpy()
+        stock_np[t0] = state["stock"]
+        pos_np[t0] = state["tool_pos"]
+        self.stock.from_numpy(stock_np)
+        self.tool_pos.from_numpy(pos_np)
 
     # ========================================================================
     # Rendering

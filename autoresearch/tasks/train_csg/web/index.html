@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GradMill (train_csg) autoresearch — interactive results</title>
+<script src="d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg:#1b1f23; --panel:#252b32; --panel2:#2d343c; --ink:#e6edf3;
+    --muted:#9aa7b3; --accent:#58a6ff; --grid:#3a434d;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  header { padding:14px 22px; background:var(--panel); border-bottom:1px solid #000;
+    display:flex; flex-wrap:wrap; gap:16px; align-items:center; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  header .stats { color:var(--muted); font-size:13px; }
+  header .stats b { color:var(--ink); }
+  .ctrls { margin-left:auto; display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:13px; }
+  .ctrls label { color:var(--muted); }
+  select, button { background:var(--panel2); color:var(--ink); border:1px solid var(--grid);
+    border-radius:6px; padding:4px 8px; font-size:13px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  .legend { display:flex; gap:14px; font-size:12px; color:var(--muted); }
+  .legend span { display:inline-flex; align-items:center; gap:5px; }
+  .legend i { width:11px; height:11px; border-radius:50%; display:inline-block; }
+  main { display:grid; grid-template-columns:1fr; padding:16px 22px; gap:16px; }
+  .card { background:var(--panel); border:1px solid #000; border-radius:10px; padding:14px; }
+  .card h2 { margin:0 0 10px 0; font-size:14px; color:var(--muted); font-weight:600;
+    text-transform:uppercase; letter-spacing:.04em; }
+  #scatter { width:100%; height:380px; }
+  #bars { width:100%; height:200px; }
+  #detail { display:none; }
+  #detail .grid { display:grid; grid-template-columns:1.1fr 1fr; gap:18px; }
+  .meta dt { color:var(--muted); font-size:12px; margin-top:8px; }
+  .meta dd { margin:2px 0 0 0; font-family:"SFMono-Regular",Consolas,monospace; font-size:12px;
+    word-break:break-all; }
+  .metrics { display:grid; grid-template-columns:repeat(2,1fr); gap:6px 18px; font-size:13px; }
+  .metrics div { display:flex; justify-content:space-between; border-bottom:1px solid var(--grid); padding:3px 0; }
+  .metrics span:first-child { color:var(--muted); }
+  .downloads { margin-top:12px; }
+  .downloads a { display:inline-block; margin:4px 8px 4px 0; padding:6px 12px; border-radius:6px;
+    background:var(--panel2); color:var(--accent); text-decoration:none; font-size:13px;
+    border:1px solid var(--grid); }
+  .downloads a:hover { border-color:var(--accent); }
+  .downloads a.stl { color:#56d364; }
+  .downloads a.nc { color:#f0883e; }
+  .downloads button.vid { color:#d2a8ff; margin:4px 0; }
+  .downloads button.vid:disabled { opacity:.55; cursor:default; }
+  .vid-status { margin-top:6px; min-height:1em; }
+  #tooltip { position:absolute; pointer-events:none; background:#000d; color:var(--ink);
+    border:1px solid var(--grid); border-radius:6px; padding:8px 10px; font-size:12px;
+    max-width:360px; display:none; z-index:50; line-height:1.45; }
+  #tooltip .t-title { font-weight:600; color:var(--accent); margin-bottom:3px; }
+  #tooltip .t-cmd { color:var(--muted); font-family:monospace; font-size:11px; margin-top:4px; }
+  .hint { color:var(--muted); font-size:12px; }
+  .traj-tip { font-size:11px; color:var(--muted); margin-top:6px; }
+
+  /* ---- 3D viewport (controls ported from aim3d) ---- */
+  .viewport-wrap { position:relative; height:420px; }
+  #traj { position:absolute; inset:0; width:100%; height:100%;
+    background:#11161b; border-radius:8px; display:block; }
+  #voxel-canvas { position:absolute; inset:0; width:100%; height:100%;
+    background:#11161b; border-radius:8px; display:none; cursor:grab; }
+  .vp-toolbar { position:absolute; top:10px; right:10px; display:flex; gap:8px; align-items:flex-start; z-index:5; }
+  .glass { background:hsla(220,20%,15%,.78); backdrop-filter:blur(8px);
+    border:1px solid hsla(220,20%,35%,.5); border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,.4); }
+  .tool-btn { width:34px; height:34px; display:flex; align-items:center; justify-content:center;
+    font-size:16px; color:hsl(220,10%,80%); cursor:pointer; padding:0; }
+  .tool-btn:hover { color:#fff; border-color:var(--accent); }
+  .vp-settings { position:relative; }
+  .settings-menu { position:absolute; top:40px; right:0; padding:8px 10px; display:none;
+    flex-direction:column; gap:6px; font-size:12px; z-index:6; min-width:170px; }
+  .settings-menu.open { display:flex; }
+  .settings-row { display:flex; justify-content:space-between; align-items:center; gap:12px; color:var(--ink); }
+  .settings-row input { accent-color:var(--accent); }
+
+  /* nav-cube (CSS 3D, mirrors camera orientation; click faces to snap) */
+  .nav-cube { width:54px; height:54px; perspective:200px; cursor:pointer; }
+  .nav-cube-scene { width:100%; height:100%; transform-style:preserve-3d; }
+  .nav-cube-body { width:100%; height:100%; position:relative; transform-style:preserve-3d;
+    transition:transform .12s; }
+  .cube-face { position:absolute; width:54px; height:54px; display:flex; align-items:center;
+    justify-content:center; font-size:8px; font-weight:600; letter-spacing:.03em; color:#cfe3ff;
+    background:hsla(210,40%,30%,.55); border:1px solid hsla(210,40%,60%,.4); }
+  .cube-face:hover { background:hsla(200,90%,50%,.6); }
+  .cube-face.front  { transform: translateZ(27px); }
+  .cube-face.back   { transform: rotateY(180deg) translateZ(27px); }
+  .cube-face.right  { transform: rotateY(90deg)  translateZ(27px); }
+  .cube-face.left   { transform: rotateY(-90deg) translateZ(27px); }
+  .cube-face.top    { transform: rotateX(90deg)  translateZ(27px); }
+  .cube-face.bottom { transform: rotateX(-90deg) translateZ(27px); }
+
+  /* playback panel (ported from aim3d SimulationPlaybackPanel) */
+  .playback-panel { position:absolute; bottom:12px; left:50%; transform:translateX(-50%);
+    background:hsla(220,20%,15%,.85); backdrop-filter:blur(8px);
+    border:1px solid hsla(220,20%,35%,.5); border-radius:8px; padding:10px 16px;
+    display:flex; flex-direction:column; gap:8px; box-shadow:0 4px 12px rgba(0,0,0,.4);
+    z-index:5; width:min(420px, 86%); }
+  .playback-controls { display:flex; align-items:center; gap:10px; justify-content:center; }
+  .control-btn { background:transparent; border:none; color:hsl(220,10%,80%); cursor:pointer;
+    display:flex; align-items:center; justify-content:center; padding:5px; border-radius:4px; }
+  .control-btn:hover { background:hsla(220,20%,30%,.6); color:#fff; }
+  .control-btn:disabled { opacity:.35; cursor:default; }
+  .control-btn.play-btn { color:hsl(200,90%,65%); }
+  .control-btn.play-btn:hover { color:hsl(200,90%,78%); }
+  .speed-control { display:flex; align-items:center; gap:8px; margin-left:14px; }
+  .speed-label { font-size:.78rem; color:hsl(220,10%,70%); min-width:34px; font-variant-numeric:tabular-nums; }
+  .scrubber-container { display:flex; align-items:center; gap:10px; }
+  .step-label { font-size:.78rem; color:hsl(220,10%,70%); min-width:62px; text-align:right;
+    font-variant-numeric:tabular-nums; }
+  .scrubber { flex:1; }
+  input[type=range] { -webkit-appearance:none; background:transparent; height:18px; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; height:12px; width:12px;
+    border-radius:50%; background:hsl(200,90%,65%); cursor:pointer; margin-top:-4px; }
+  input[type=range]::-webkit-slider-runnable-track { width:100%; height:4px; cursor:pointer;
+    background:hsla(220,15%,35%,.8); border-radius:2px; }
+  @media (max-width:900px){ #detail .grid{ grid-template-columns:1fr; } }
+
+  /* ---- tab bar + markdown views ---- */
+  .tabs { display:flex; gap:2px; padding:0 22px; background:var(--panel); border-bottom:1px solid #000; }
+  .tab { background:transparent; border:none; border-bottom:2px solid transparent; border-radius:0;
+    color:var(--muted); padding:10px 16px; font-size:14px; cursor:pointer; }
+  .tab:hover { color:var(--ink); }
+  .tab.active { color:var(--ink); border-bottom-color:var(--accent); font-weight:600; }
+  .tab-view[hidden] { display:none; }
+  .md-card { max-width:980px; margin:16px 22px; padding:22px 30px; line-height:1.6; font-size:14px; }
+  .md-body h1 { font-size:22px; margin:0 0 12px; }
+  .md-body h2 { font-size:18px; margin:22px 0 8px; padding-bottom:4px; border-bottom:1px solid var(--grid); }
+  .md-body h3 { font-size:15px; margin:18px 0 6px; color:var(--accent); }
+  .md-body h4 { font-size:14px; margin:14px 0 4px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+  .md-body p { margin:8px 0; }
+  .md-body ul, .md-body ol { margin:8px 0; padding-left:24px; }
+  .md-body li { margin:3px 0; }
+  .md-body li > ul, .md-body li > ol { margin:3px 0; }
+  .md-body code { background:var(--panel2); padding:1px 5px; border-radius:4px;
+    font-family:"SFMono-Regular",Consolas,monospace; font-size:12px; }
+  .md-body pre { background:#11161b; border:1px solid var(--grid); border-radius:8px; padding:12px 14px;
+    overflow:auto; margin:10px 0; }
+  .md-body pre code { background:none; padding:0; font-size:12px; color:#c9d6e0; }
+  .md-body a { color:var(--accent); }
+  .md-body blockquote { border-left:3px solid var(--grid); margin:8px 0; padding:2px 12px; color:var(--muted); }
+  .md-body hr { border:none; border-top:1px solid var(--grid); margin:14px 0; }
+  .md-table-wrap { overflow-x:auto; margin:10px 0; }
+  .md-body table { border-collapse:collapse; font-size:13px; }
+  .md-body th, .md-body td { border:1px solid var(--grid); padding:4px 10px; text-align:left; }
+  .md-body th { background:var(--panel2); }
+  .report-img { width:100%; max-width:920px; border:1px solid #000; border-radius:8px;
+    margin:0 0 16px; display:block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>GradMill (train_csg) autoresearch</h1>
+  <div class="stats" id="stats"></div>
+  <div class="ctrls">
+    <label>shape</label>
+    <select id="shape-filter"></select>
+    <label>status</label>
+    <select id="status-filter">
+      <option value="all">all</option>
+      <option value="keep">keep</option>
+      <option value="discard">discard</option>
+      <option value="crash">crash</option>
+    </select>
+    <button id="reset-zoom">reset selection</button>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="dashboard">&#128202; Dashboard</button>
+  <button class="tab" data-tab="idea">&#128161; Idea</button>
+  <button class="tab" data-tab="report">&#128196; Report</button>
+</nav>
+
+<section id="view-dashboard" class="tab-view">
+<div class="legend" style="padding:8px 22px;" id="legend"></div>
+
+<main>
+  <div class="card">
+    <h2>Dice over experiments — click a point to inspect its trajectory &amp; artifacts</h2>
+    <svg id="scatter"></svg>
+  </div>
+
+  <div class="card">
+    <h2>Best dice per target shape</h2>
+    <svg id="bars"></svg>
+  </div>
+
+  <div class="card" id="detail">
+    <h2 id="detail-title">Experiment detail</h2>
+    <div class="grid">
+      <div class="viewport-wrap">
+        <canvas id="voxel-canvas"></canvas>
+        <svg id="traj"></svg>
+        <div class="vp-toolbar">
+          <button class="tool-btn glass" id="vp-home" title="Home: re-center the view">&#8962;</button>
+          <div class="vp-settings">
+            <button class="tool-btn glass" id="vp-settings-btn" title="View settings">&#9881;</button>
+            <div class="settings-menu glass" id="vp-settings-menu">
+              <label class="settings-row"><span>Show stock cube</span>
+                <input type="checkbox" id="opt-cube" checked></label>
+              <label class="settings-row"><span>Show axes</span>
+                <input type="checkbox" id="opt-axes" checked></label>
+              <label class="settings-row"><span>Commanded (pre-clip) path</span>
+                <input type="checkbox" id="opt-cmd"></label>
+            </div>
+          </div>
+          <div class="nav-cube glass" id="nav-cube" title="Click a face for a standard view">
+            <div class="nav-cube-scene"><div class="nav-cube-body" id="nav-cube-body">
+              <span class="cube-face front"  data-view="front">FRONT</span>
+              <span class="cube-face back"   data-view="back">BACK</span>
+              <span class="cube-face right"  data-view="right">RIGHT</span>
+              <span class="cube-face left"   data-view="left">LEFT</span>
+              <span class="cube-face top"    data-view="top">TOP</span>
+              <span class="cube-face bottom" data-view="bottom">BOT</span>
+            </div></div>
+          </div>
+        </div>
+        <div class="playback-panel" id="playback">
+          <div class="playback-controls">
+            <button class="control-btn" id="pb-stop" title="Stop">&#9632;</button>
+            <button class="control-btn" id="pb-reset" title="Reset">&#8634;</button>
+            <button class="control-btn" id="pb-back" title="Step backward">&#9198;</button>
+            <button class="control-btn play-btn" id="pb-play" title="Play / Pause">&#9654;</button>
+            <button class="control-btn" id="pb-fwd" title="Step forward">&#9197;</button>
+            <div class="speed-control">
+              <span class="speed-label" id="pb-speed-label">1.0x</span>
+              <input type="range" class="speed-slider" id="pb-speed" min="0.1" max="5" step="0.1" value="1">
+            </div>
+          </div>
+          <div class="scrubber-container">
+            <span class="step-label" id="pb-step-label">0 / 0</span>
+            <input type="range" class="scrubber" id="pb-scrub" min="0" max="0" value="0">
+          </div>
+        </div>
+        <div class="traj-tip">drag = orbit · shift-drag = pan · wheel = zoom · click the nav-cube for standard views · use the playback bar to animate the tool path</div>
+      </div>
+      <div>
+        <dl class="meta" id="meta"></dl>
+        <h2 style="margin-top:14px;">metrics</h2>
+        <div class="metrics" id="metrics-box"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="downloads-card">
+    <h2 id="dl-title">Downloads</h2>
+    <div class="downloads" id="downloads"></div>
+  </div>
+</main>
+</section>
+
+<section id="view-idea" class="tab-view" hidden>
+  <div class="card md-card">
+    <article id="md-idea" class="md-body"><p class="hint">Loading idea.md…</p></article>
+  </div>
+</section>
+
+<section id="view-report" class="tab-view" hidden>
+  <div class="card md-card">
+    <h2 style="margin-top:0;">Summary plot</h2>
+    <img id="report-img" class="report-img" alt="results summary plot">
+    <article id="md-report" class="md-body"><p class="hint">Loading report.md…</p></article>
+  </div>
+</section>
+
+<div id="tooltip"></div>
+
+<script>
+// Paths in data.json are relative to the repo root; the page lives 4 dirs deep.
+const BASE = "../../../../";
+const SHAPE_COLOR = {sphere:"#1f77b4", cylinder:"#ff7f0e", box:"#2ca02c", pyramid:"#d62728"};
+const STATUS_OPACITY = {keep:0.92, discard:0.45, crash:0.6};
+let DATA = null, selected = null;
+
+d3.json("data.json").then(raw => {
+  DATA = raw;
+  document.getElementById("stats").innerHTML =
+    `<b>${raw.n_experiments}</b> experiments · <b>${raw.n_matched}</b> with artifacts · ` +
+    `overall best <b>${d3.max(raw.experiments, d=>d.dice).toFixed(4)}</b>`;
+  buildLegend();
+  buildFilters();
+  renderScatter();
+  renderBars();
+  initViewport();
+  renderDownloads(null);
+});
+
+// ---------- tabs + markdown rendering ----------
+// idea.md / report.md / results_plot.png live one dir up from the page (the
+// train_csg task dir). The page is served from the repo root, so these static
+// paths resolve without any build step.
+const MD = { idea: "../idea.md", report: "../report.md" };
+const REPORT_IMG = "../results_plot.png";
+const mdCache = {};
+
+document.getElementById("report-img").src = REPORT_IMG;
+document.querySelectorAll(".tab").forEach(b =>
+  b.addEventListener("click", () => showTab(b.dataset.tab)));
+
+function showTab(name){
+  ["dashboard","idea","report"].forEach(t=>{
+    document.getElementById("view-"+t).hidden = (t!==name);
+    document.querySelector(`.tab[data-tab="${t}"]`).classList.toggle("active", t===name);
+  });
+  if (name === "idea")  loadMd("idea",  "#md-idea");
+  if (name === "report") loadMd("report", "#md-report");
+  window.scrollTo(0, 0);
+}
+
+async function loadMd(key, sel){
+  if (mdCache[key]) { document.querySelector(sel).innerHTML = mdCache[key]; return; }
+  try {
+    const r = await fetch(MD[key]);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const html = renderMarkdown(await r.text());
+    mdCache[key] = html;
+    document.querySelector(sel).innerHTML = html;
+  } catch (e) {
+    document.querySelector(sel).innerHTML =
+      `<p class="hint">Could not load ${MD[key]}: ${e.message}. ` +
+      `Serve the page from the repo root (see web/README.md).</p>`;
+  }
+}
+
+// Minimal, dependency-free markdown renderer covering the constructs used in
+// idea.md / report.md: headings, paragraphs, fenced code, tables, ordered /
+// unordered lists (one level of nesting + wrapped continuation lines),
+// blockquotes, hr, and inline **bold**, *italic*, `code`, [links](url).
+function escapeHtml(s){
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+function inlineMd(s){
+  s = escapeHtml(s);
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (m,c)=>{ codes.push(c); return `\u0000${codes.length-1}\u0000`; });
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/\u0000(\d+)\u0000/g, (m,n)=>`<code>${codes[n]}</code>`);
+  return s;
+}
+function renderMarkdown(src){
+  const lines = src.replace(/\r\n/g,"\n").split("\n");
+  const blocks = [];
+  let para = null, list = null;
+  const closePara = ()=>{ if(para){ blocks.push("<p>"+inlineMd(para)+"</p>"); para=null; } };
+  const closeList = ()=>{ if(list){ blocks.push(renderList(list)); list=null; } };
+  let i = 0;
+  while (i < lines.length){
+    const line = lines[i], t = line.trim();
+    if (/^\s*```/.test(line)){                       // fenced code
+      closePara(); closeList();
+      const buf = []; i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])){ buf.push(lines[i]); i++; }
+      if (i < lines.length) i++;
+      blocks.push(`<pre><code>${escapeHtml(buf.join("\n"))}</code></pre>`);
+      continue;
+    }
+    const hm = /^(#{1,6})\s+(.*)$/.exec(t);          // heading
+    if (hm){ closePara(); closeList(); blocks.push(`<h${hm[1].length}>${inlineMd(hm[2])}</h${hm[1].length}>`); i++; continue; }
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)){           // hr
+      closePara(); closeList(); blocks.push("<hr>"); i++; continue;
+    }
+    if (/^\|/.test(t) && i+1 < lines.length &&       // table
+        /^\|[\s:|-]+\|$/.test(lines[i+1].trim()) && lines[i+1].includes("-")){
+      closePara(); closeList();
+      const parseRow = l => l.trim().replace(/^\|/,"").replace(/\|$/,"").split("|").map(c=>c.trim());
+      const header = parseRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && /^\|/.test(lines[i].trim())){ rows.push(parseRow(lines[i])); i++; }
+      let tab = "<div class='md-table-wrap'><table><thead><tr>" +
+        header.map(c=>`<th>${inlineMd(c)}</th>`).join("") + "</tr></thead><tbody>";
+      rows.forEach(r=>{
+        while (r.length < header.length) r.push("");
+        tab += "<tr>" + r.map(c=>`<td>${inlineMd(c)}</td>`).join("") + "</tr>";
+      });
+      blocks.push(tab + "</tbody></table></div>");
+      continue;
+    }
+    if (t === ""){ closePara(); closeList(); i++; continue; }  // blank line
+    const ulm = /^([-*+])\s+(.*)$/.exec(t);
+    const olm = /^(\d+)\.\s+(.*)$/.exec(t);
+    if (ulm || olm){                                 // list item
+      closePara();
+      const type = ulm ? "ul" : "ol";
+      const content = ulm ? ulm[2] : olm[2];
+      const indent = line.match(/^\s*/)[0].length;
+      if (!list || list.type !== type) { closeList(); list = {type, items:[{text:content, subs:[], indent}]}; }
+      else if (indent > list.items[list.items.length-1].indent)
+        list.items[list.items.length-1].subs.push({text:content, subs:[], indent});
+      else list.items.push({text:content, subs:[], indent});
+      i++; continue;
+    }
+    if (list){                                       // wrapped continuation of last item
+      const top = list.items[list.items.length-1];
+      const tgt = top.subs.length ? top.subs[top.subs.length-1] : top;
+      tgt.text += " " + t; i++; continue;
+    }
+    para = para ? para + " " + t : t;                // paragraph (lazy continuation)
+    i++;
+  }
+  closePara(); closeList();
+  return blocks.join("\n");
+}
+function renderList(list){
+  const html = list.items.map(it =>
+    `<li>${inlineMd(it.text)}` +
+    (it.subs.length ? `<${list.type}>${it.subs.map(s=>`<li>${inlineMd(s.text)}</li>`).join("")}</${list.type}>` : "") +
+    `</li>`).join("");
+  return `<${list.type}>${html}</${list.type}>`;
+}
+
+// ---------- downloads (per-run artifacts at the bottom of the dashboard) ----------
+// On-demand video generation: the dashboard's "Generate video" button calls the
+// HTTPS server's /__api/video endpoint (scripts/serve_web_https.py), which runs
+// the Taichi CSG simulator (scripts/render_run_video.py) to render the run's
+// carve to an mp4 under runs/<run>/videos/run.mp4, then returns its path. The
+// mp4 is served statically thereafter, so re-viewing is instant. Requires the
+// HTTPS server (scripts/serve_web_https.py); plain `python3 -m http.server`
+// has no API endpoint and the button will report that.
+function renderDownloads(d){
+  const dl = document.getElementById("downloads");
+  const title = document.getElementById("dl-title");
+  const card = document.getElementById("downloads-card");
+  let html = "";
+  if (d && d.run_dir){
+    title.textContent = `Downloads — experiment #${d.idx} (${d.shape||"?"})`;
+    if (d.gcode) html += `<a class="nc" href="${BASE}${d.gcode}" download>⬇ G-code (${d.gcode.split('/').pop()})</a>`;
+    for (const [label,p] of Object.entries(d.stl||{}))
+      html += `<a class="stl" href="${BASE}${p}" download>⬇ ${label} STL</a>`;
+    html += `<a href="${BASE}${d.run_dir}/" target="_blank">📂 open run dir</a>`;
+    html += `<button id="gen-video-btn" class="vid">🎬 Generate run video</button>`;
+  } else {
+    title.textContent = d ? `Downloads — experiment #${d.idx} (no run artifacts)`
+                         : "Downloads";
+    html += `<span class="hint">Select an experiment above for its G-code &amp; STL files.</span> `;
+  }
+  dl.innerHTML = html;
+  // (Re)build the video region: a status line + a <video> that stays hidden
+  // until an mp4 is ready. Re-creating it each render drops any stale stream
+  // from a previously selected run.
+  let region = document.getElementById("video-region");
+  if (region) region.remove();
+  videoState.cached = false;
+  if (d && d.run_dir){
+    region = document.createElement("div");
+    region.id = "video-region";
+    region.innerHTML = `<div class="vid-status hint"></div>` +
+      `<video id="run-video" controls playsinline style="display:none;max-width:100%;border-radius:8px;border:1px solid var(--grid);margin-top:8px;"></video>`;
+    card.appendChild(region);
+    const btn = document.getElementById("gen-video-btn");
+    if (btn) btn.onclick = ()=>generateVideo(d, !!videoState.cached);
+  }
+}
+
+// Track whether the currently-selected run already has a cached mp4, so the
+// button can offer a force re-render on the second click.
+const videoState = { cached: false };
+
+async function generateVideo(d, force){
+  const btn = document.getElementById("gen-video-btn");
+  const status = document.querySelector(".vid-status");
+  const video = document.getElementById("run-video");
+  if (!d || !d.run_dir || !btn) return;
+  btn.disabled = true;
+  const setStat = (msg, ok=true)=>{
+    if (status){ status.textContent = msg; status.style.color = ok ? "var(--muted)" : "#f0883e"; }
+  };
+  setStat(force ? "Re-rendering run video (force) — running the Taichi simulator, ~30–60s …"
+                : "Generating run video — running the Taichi simulator, ~30–60s …");
+  video.style.display = "none";
+  try {
+    const url = `${BASE}__api/video?run=${encodeURIComponent(d.run_dir)}` + (force ? "&force=1" : "");
+    const r = await fetch(url);
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.detail || data.error || "render failed");
+    // Cache-bust so a re-render of the same path actually reloads.
+    video.src = `${BASE}${data.path}?v=${Date.now()}`;
+    video.style.display = "block";
+    videoState.cached = true;
+    btn.textContent = "🎬 Re-render video";
+    setStat("Ready — press play. Click the button again to re-render from scratch.");
+    video.play().catch(()=>{});
+  } catch (e) {
+    setStat(`Could not generate video: ${e.message}. ` +
+            `Make sure the page is served by scripts/serve_web_https.py (the API endpoint is not available under plain http.server).`, false);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function buildLegend() {
+  const el = document.getElementById("legend");
+  const items = [
+    ...Object.entries(SHAPE_COLOR).map(([s,c])=>[`<i style="background:${c}"></i>${s}`, c]),
+    ['<i style="background:#9aa7b3;opacity:.9"></i>keep', null],
+    ['<i style="background:#9aa7b3;opacity:.45"></i>discard', null],
+  ];
+  el.innerHTML = items.map(([t])=>`<span>${t}</span>`).join("");
+}
+
+function buildFilters() {
+  const sel = document.getElementById("shape-filter");
+  sel.innerHTML = `<option value="all">all</option>` +
+    Object.keys(SHAPE_COLOR).map(s=>`<option value="${s}">${s}</option>`).join("");
+  sel.onchange = ()=>{ renderScatter(); renderBars(); };
+  document.getElementById("status-filter").onchange = renderScatter;
+  document.getElementById("reset-zoom").onclick = ()=>{
+    selected = null;
+    document.getElementById("detail").style.display = "none";
+    renderScatter();
+  };
+}
+
+function filtered() {
+  const sh = document.getElementById("shape-filter").value;
+  const st = document.getElementById("status-filter").value;
+  return DATA.experiments.filter(d =>
+    (sh==="all"||d.shape===sh) && (st==="all"||d.status===st));
+}
+
+// ---------- scatter ----------
+function renderScatter() {
+  const svg = d3.select("#scatter");
+  svg.selectAll("*").remove();
+  const W = svg.node().clientWidth, H = 380;
+  const m = {t:18,r:18,b:38,l:48};
+  const data = filtered();
+  const xs = data.map(d=>d.idx);
+  const x = d3.scaleLinear().domain([d3.min(xs)-1, d3.max(xs)+1]).range([m.l, W-m.r]);
+  const y = d3.scaleLinear().domain([0, d3.max(data,d=>d.dice)*1.15]).range([H-m.b, m.t]);
+
+  let best=-1, run=[];
+  data.forEach(d=>{ best=Math.max(best,d.dice); run.push(best); });
+  const line = d3.line().x((d,i)=>x(d.idx)).y((d,i)=>y(run[i]));
+  svg.append("path").datum(data).attr("d", line).attr("fill","none")
+    .attr("stroke","#e5534b").attr("stroke-width",1.6).attr("stroke-dasharray","5 4").attr("opacity",.85);
+
+  svg.append("g").attr("transform",`translate(0,${H-m.b})`)
+    .call(d3.axisBottom(x).ticks(10)).selectAll("text").attr("fill","var(--muted)");
+  svg.append("g").attr("transform",`translate(${m.l},0)`)
+    .call(d3.axisLeft(y).ticks(7)).selectAll("text").attr("fill","var(--muted)");
+  svg.selectAll(".domain,line,path").attr("stroke","var(--grid)");
+  svg.selectAll("text").attr("fill","var(--muted)");
+  svg.append("text").attr("x",W/2).attr("y",H-4).attr("text-anchor","middle")
+    .attr("fill","var(--muted)").attr("font-size",12).text("experiment # (chronological run order)");
+  svg.append("text").attr("transform",`translate(14,${H/2}) rotate(-90)`)
+    .attr("text-anchor","middle").attr("fill","var(--muted)").attr("font-size",12).text("dice");
+
+  const tip = document.getElementById("tooltip");
+  svg.append("g").selectAll("circle").data(data).join("circle")
+    .attr("cx", d=>x(d.idx)).attr("cy", d=>y(d.dice)).attr("r", d=>d.status==="keep"?4.5:3.2)
+    .attr("fill", d=>SHAPE_COLOR[d.shape]||"#888")
+    .attr("opacity", d=>STATUS_OPACITY[d.status]??0.5)
+    .attr("stroke", d=>selected && d.idx===selected.idx ? "#fff" : "none")
+    .attr("stroke-width", 1.6)
+    .style("cursor","pointer")
+    .on("mouseover",(ev,d)=>{
+      tip.style.display="block";
+      tip.innerHTML = `<div class="t-title">#${d.idx} · ${d.shape||"?"} · dice ${d.dice.toFixed(4)} · ${d.status}</div>` +
+        `<div>${d.description||"(no description)"}</div>` +
+        (d.run_dir ? `<div class="t-cmd">▶ click to view trajectory &amp; downloads</div>` :
+                     `<div class="t-cmd">no run artifacts (unmatched)</div>`);
+    })
+    .on("mousemove",(ev)=>{
+      tip.style.left=(ev.pageX+14)+"px"; tip.style.top=(ev.pageY+14)+"px";
+    })
+    .on("mouseout",()=>tip.style.display="none")
+    .on("click",(ev,d)=>selectExperiment(d));
+
+  const bi = data[d3.scan(data, (a,b)=>b.dice-a.dice)];
+  if (bi) {
+    svg.append("text").attr("x", x(bi.idx)).attr("y", y(bi.dice)-9)
+      .attr("text-anchor","middle").attr("fill","#e5534b").attr("font-size",11).attr("font-weight","bold")
+      .text(`best ${bi.dice.toFixed(4)}`);
+  }
+}
+
+// ---------- per-shape bars ----------
+function renderBars() {
+  const svg = d3.select("#bars");
+  svg.selectAll("*").remove();
+  const W = svg.node().clientWidth, H=200, m={t:14,r:14,b:34,l:44};
+  const sh = document.getElementById("shape-filter").value;
+  const data = DATA.experiments.filter(d=>d.status==="keep" && (sh==="all"||d.shape===sh));
+  const best = {};
+  data.forEach(d=>{ best[d.shape]=Math.max(best[d.shape]??0, d.dice); });
+  const rows = Object.entries(best).sort((a,b)=>b[1]-a[1]);
+  if (!rows.length) return;
+  const x = d3.scaleLinear().domain([0, d3.max(rows,r=>r[1])*1.18]).range([m.l, W-m.r]);
+  const y = d3.scaleBand().domain(rows.map(r=>r[0])).range([m.t, H-m.b]).padding(.4);
+  svg.append("g").attr("transform",`translate(${m.l},0)`)
+    .call(d3.axisLeft(y)).selectAll("text").attr("fill","var(--muted)");
+  svg.append("g").attr("transform",`translate(0,${H-m.b})`)
+    .call(d3.axisBottom(x).ticks(5,".2f")).selectAll("text").attr("fill","var(--muted)");
+  svg.selectAll(".domain,line,path").attr("stroke","var(--grid)");
+  rows.forEach(([s,v])=>{
+    svg.append("rect").attr("x",m.l).attr("y",y(s)).attr("width",x(v)-m.l).attr("height",y.bandwidth())
+      .attr("fill",SHAPE_COLOR[s]).attr("opacity",.85).attr("rx",3)
+      .style("cursor","pointer").on("click",()=>{ selectBestFor(s); });
+    svg.append("text").attr("x",x(v)+6).attr("y",y(s)+y.bandwidth()/2+4)
+      .attr("fill","var(--ink)").attr("font-size",12).attr("font-weight","bold").text(v.toFixed(4));
+  });
+}
+
+function selectBestFor(shape) {
+  const cand = DATA.experiments.filter(d=>d.shape===shape && d.status==="keep" && d.run_dir);
+  if (!cand.length) return;
+  selectExperiment(cand[d3.scan(cand,(a,b)=>b.dice-a.dice)]);
+}
+
+// ---------- selection / detail ----------
+function selectExperiment(d) {
+  selected = d;
+  renderScatter();
+  const card = document.getElementById("detail");
+  card.style.display = "block";
+  document.getElementById("detail-title").textContent =
+    `Experiment #${d.idx} — ${d.shape||"?"} · dice ${d.dice.toFixed(4)} · ${d.status}`;
+
+  const meta = document.getElementById("meta");
+  meta.innerHTML = `
+    <dt>description</dt><dd>${d.description||"(none)"}</dd>
+    <dt>commit</dt><dd>${d.commit||"?"}</dd>
+    <dt>shape · seed · iters</dt><dd>${d.shape||"?"} · ${d.seed?? "?"} · ${d.iters?? "?"}</dd>
+    <dt>run dir</dt><dd>${d.run_dir||"(unmatched — no artifacts)"}</dd>
+    <dt>command</dt><dd>${d.command||""}</dd>`;
+
+  const mb = document.getElementById("metrics-box");
+  if (d.metrics) {
+    const rows = [["dice",d.dice],["asd",d.metrics.asd],["hd95",d.metrics.hd95],
+      ["loss",d.metrics.loss],["residual",d.metrics.residual],["gouge",d.metrics.gouge],
+      ["holder_overlap",d.metrics.holder_overlap],["training_seconds",d.metrics.training_seconds]];
+    mb.innerHTML = rows.map(([k,v])=>`<div><span>${k}</span><span>${
+      typeof v==="number" ? (v>=100?v.toFixed(1):v.toFixed(4)) : v}</span></div>`).join("");
+  } else { mb.innerHTML = `<div><span>—</span><span>no metrics (unmatched)</span></div>`; }
+
+  renderDownloads(d);
+
+  loadTrajectory(d);
+  card.scrollIntoView({behavior:"smooth", block:"start"});
+}
+
+// ===========================================================================
+// 3D viewport — orbit camera, nav-cube and playback bar
+// (control model ported from aim3d ui/frontend/src/services/viewportControls.js
+//  and components/SimulationPlaybackPanel.vue). Z-up, right-handed.
+// ===========================================================================
+const TAN_HALF_FOV = Math.tan(Math.PI / 8);
+const MAX_PITCH = 1.45;
+const ORBIT_SENS = 0.01;
+const clamp = (v,a,b)=>Math.min(b,Math.max(a,v));
+const vsub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+const vadd=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]];
+const vscale=(v,s)=>[v[0]*s,v[1]*s,v[2]*s];
+const vdot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const vlen=(v)=>Math.hypot(v[0],v[1],v[2]);
+// forward = into-screen; at yaw=0,pitch=0 eye sits on +Y looking toward -Y.
+const camFwd=(y,p)=>{const cp=Math.cos(p);return [-cp*Math.sin(y),-cp*Math.cos(y),-Math.sin(p)];};
+const camUp =(y,p)=>{const sp=Math.sin(p);return [-sp*Math.sin(y),-sp*Math.cos(y),Math.cos(p)];};
+const camRight=(y)=>[-Math.cos(y),Math.sin(y),0];
+const camEye=(c)=>{const f=camFwd(c.yaw,c.pitch);return vsub(c.target, vscale(f,c.distance));};
+
+// Perspective projection of a world point to canvas pixels (+ depth), or null.
+function project(p, c, W, H){
+  const e=camEye(c); const f=camFwd(c.yaw,c.pitch); const r=camRight(c.yaw); const u=camUp(c.yaw,c.pitch);
+  const rel=vsub(p,e);
+  const depth=vdot(rel,f);
+  if (depth <= 1e-4) return null;
+  const aspect = W / Math.max(1,H);
+  const ndcX = vdot(rel,r) / depth / (aspect * TAN_HALF_FOV);
+  const ndcY = vdot(rel,u) / depth / TAN_HALF_FOV;
+  return [((ndcX+1)/2)*W, ((1-ndcY)/2)*H, depth];
+}
+
+// Re-center on the trajectory's bounding sphere at the default isometric view.
+function homeCamera(pts){
+  let mn=[Infinity,Infinity,Infinity], mx=[-Infinity,-Infinity,-Infinity];
+  pts.forEach(p=>{for(let i=0;i<3;i++){mn[i]=Math.min(mn[i],p[i]);mx[i]=Math.max(mx[i],p[i]);}});
+  const center=[(mn[0]+mx[0])/2,(mn[1]+mx[1])/2,(mn[2]+mx[2])/2];
+  const radius = 0.5*Math.hypot(mx[0]-mn[0],mx[1]-mn[1],mx[2]-mn[2]) || 0.7;
+  return { target:center, distance: clamp((radius/TAN_HALF_FOV)*1.25, 0.8, 30), yaw:0.72, pitch:0.62 };
+}
+
+// Standard ortho views (Z up). yaw/pitch chosen so the eye looks at that face.
+const VIEWS = {
+  iso:   {yaw:0.72,         pitch:0.62},
+  front: {yaw:0,            pitch:0},
+  back:  {yaw:Math.PI,      pitch:0},
+  right: {yaw:Math.PI/2,    pitch:0},
+  left:  {yaw:-Math.PI/2,   pitch:0},
+  top:   {yaw:0,            pitch:MAX_PITCH},
+  bottom:{yaw:0,            pitch:-MAX_PITCH},
+};
+
+const CUBE_EDGES = [
+  [[0,0,0],[1,0,0]],[[1,0,0],[1,1,0]],[[1,1,0],[0,1,0]],[[0,1,0],[0,0,0]],
+  [[0,0,1],[1,0,1]],[[1,0,1],[1,1,1]],[[1,1,1],[0,1,1]],[[0,1,1],[0,0,1]],
+  [[0,0,0],[0,0,1]],[[1,0,0],[1,0,1]],[[1,1,0],[1,1,1]],[[0,1,0],[0,1,1]],
+];
+
+// Viewport state.
+let cam = {target:[0.5,0.5,0.5], distance:2.6, yaw:0.72, pitch:0.62};
+let curD = null;            // currently selected experiment
+let pbStep = 0, pbPlaying = false, pbSpeed = 1, pbLastT = 0, pbRAF = 0;
+let opt = {cube:true, axes:true, cmd:false};
+let vpInited = false;
+
+// WebGPU voxel viewer state. When `ready` is true the carved-stock mesh is rendered
+// on #voxel-canvas (ported from aim3d webgpuVoxelizer.js); otherwise the SVG
+// painter's-algorithm viewer is used as a fallback.
+let voxel = { viewer:null, ready:false, lastStep:-1, lastVc:-1, raf:0 };
+let voxelBadge = null;
+
+// Tool + holder geometry for the currently selected run, in stock-normalized
+// [0,1]^3 units. The Taichi CSGSimulatorDelta (simulator/csg_simulator.py) that
+// renders each run's run.mp4 measures SDFs in voxel space (radius_mm / voxel_mm)
+// over Nx = stock_mm / voxel_mm cells, so a normalized radius = radius_mm /
+// stock_mm. build_results_web.py embeds that conversion per-run as `tool_geom`
+// (so non-default stock/tool sizes match their video too); we fall back to the
+// sim's own defaults (tool_radius_mm 3.175, tool_height_mm 25.0, 2.5"-diameter
+// holder, 10"-Z work volume, 1" stock) when the field is absent.
+const DEFAULT_TOOL_GEOM = { toolRadius: 0.125, toolHeight: 0.984, holderRadius: 1.25, holderHeight: 10.0 };
+let curToolGeom = { ...DEFAULT_TOOL_GEOM };
+function toolGeomForRun(d){
+  if (d && d.tool_geom) return { ...DEFAULT_TOOL_GEOM, ...d.tool_geom };
+  return { ...DEFAULT_TOOL_GEOM };
+}
+
+function setVoxelBadge(text, ok){
+  if (!voxelBadge){
+    voxelBadge = document.createElement("div");
+    voxelBadge.style.cssText = "position:absolute;top:10px;left:10px;z-index:5;font-size:11px;" +
+      "padding:3px 8px;border-radius:6px;font-variant-numeric:tabular-nums;pointer-events:none;" +
+      "background:hsla(220,20%,15%,.78);backdrop-filter:blur(8px);border:1px solid hsla(220,20%,35%,.5)";
+    document.querySelector(".viewport-wrap").appendChild(voxelBadge);
+  }
+  voxelBadge.textContent = text;
+  voxelBadge.style.color = ok ? "#7ee787" : "#f0883e";
+}
+
+// Continuous render loop for the GPU canvas. Mesh extraction is async (mapAsync), so a
+// one-shot render would draw before the carved stock is ready; this loop keeps the
+// canvas fresh until the mesh lands and also drives playback animation on the GPU path.
+function startVoxelLoop(){
+  if (voxel.raf) return;
+  const frame = ()=>{
+    voxel.raf = 0;
+    if (!voxel.ready || !curD || !curD.trajectory){ return; }
+    const pts = curD.trajectory.traj;
+    const cstep = Math.max(0, Math.min(pts.length-1, Math.round(pbStep)));
+    if (cstep !== voxel.lastStep){ voxel.viewer.carveToStep(cstep); voxel.lastStep = cstep; }
+    const cmd = opt.cmd && curD.trajectory.cmd ? curD.trajectory.cmd : null;
+    try {
+      voxel.viewer.render(cam, cstep, { showCube: opt.cube, showAxes: opt.axes, cmdPts: cmd });
+    } catch (e) {
+      // A validation error in one frame (e.g. a bad bind group) must not kill the
+      // render loop — log once and keep the canvas alive.
+      if (!voxel._renderErr) { voxel._renderErr = true; console.error("[voxel] render error:", e); }
+    }
+    // Live triangle count so it's visible that the carved stock has geometry.
+    const vc = voxel.viewer.vertexCount;
+    if (vc !== voxel.lastVc){
+      voxel.lastVc = vc;
+      setVoxelBadge(`WebGPU · 96³ · ${Math.round(vc/3).toLocaleString()} tris`, true);
+    }
+    voxel.raf = requestAnimationFrame(frame);
+  };
+  voxel.raf = requestAnimationFrame(frame);
+}
+function stopVoxelLoop(){ if (voxel.raf){ cancelAnimationFrame(voxel.raf); voxel.raf=0; } }
+
+async function initVoxelViewer(){
+  if (voxel.viewer) return;
+  const canvas = document.getElementById("voxel-canvas");
+  setVoxelBadge("WebGPU…", false);
+  try {
+    const mod = await import("./voxel.js");
+    const viewer = await mod.createVoxelViewer(canvas, {
+      gridResolution: 96,
+      toolRadius: curToolGeom.toolRadius, toolHeight: curToolGeom.toolHeight,
+      holderRadius: curToolGeom.holderRadius, holderHeight: curToolGeom.holderHeight,
+      onStatus: (s)=>{ if (!s.available) console.warn("[voxel]", s.reason); },
+    });
+    if (viewer && viewer.available) {
+      voxel.viewer = viewer;
+      voxel.ready = true;
+      setVoxelBadge("WebGPU · 96³", true);
+      // If an experiment is already shown, switch it onto the GPU viewer now.
+      if (curD && curD.trajectory) loadTrajectory(curD);
+      else renderViewport();
+    } else {
+      setVoxelBadge("SVG fallback (no WebGPU)", false);
+    }
+  } catch (e) {
+    console.warn("[voxel] init failed, using SVG fallback:", e);
+    setVoxelBadge("SVG fallback (init error)", false);
+  }
+}
+
+function initViewport(){
+  if (vpInited) return;
+  vpInited = true;
+  const svg = d3.select("#traj");
+
+  // One persistent content group; geometry rebuilds inside it on every frame.
+  svg.append("rect").attr("class","drag-bg").attr("x",0).attr("y",0)
+    .attr("width","100%").attr("height","100%").attr("fill","transparent").style("cursor","grab");
+  svg.append("g").attr("class","traj-content");
+
+  // Orbit (drag) / pan (shift-drag) via pointer; zoom via wheel.
+  let lx=0, ly=0, panning=false;
+  svg.call(d3.drag()
+    .on("start", ev=>{
+      lx=ev.x; ly=ev.y; panning=ev.sourceEvent && ev.sourceEvent.shiftKey;
+      svg.select(".drag-bg").style("cursor", panning?"grabbing":"grabbing");
+    })
+    .on("drag", ev=>{
+      const dx=ev.x-lx, dy=ev.y-ly; lx=ev.x; ly=ev.y;
+      if (panning){
+        const W=svg.node().clientWidth, H=svg.node().clientHeight;
+        const factor = cam.distance / Math.max(1, Math.min(W,H));
+        const r=camRight(cam.yaw), u=camUp(cam.yaw,cam.pitch);
+        cam.target = vadd(cam.target, vsub(vscale(r, dx*factor), vscale(u, dy*factor)));
+      } else {
+        cam.yaw   -= dx * ORBIT_SENS;
+        cam.pitch  = clamp(cam.pitch - dy*ORBIT_SENS, -MAX_PITCH, MAX_PITCH);
+      }
+      renderViewport();
+    })
+    .on("end", ()=>svg.select(".drag-bg").style("cursor","grab")));
+
+  svg.node().addEventListener("wheel", ev=>{
+    ev.preventDefault();
+    cam.distance = clamp(cam.distance * Math.exp(ev.deltaY * 0.01), 0.5, 30);
+    renderViewport();
+  }, {passive:false});
+
+  // Same orbit/pan/zoom controls bound to the WebGPU canvas (active when the voxel
+  // viewer is ready). Native pointer events mirror the d3.drag logic on the SVG.
+  const vc = document.getElementById("voxel-canvas");
+  let vlx=0, vly=0, vdrag=false, vpan=false;
+  vc.addEventListener("pointerdown", ev=>{
+    vc.setPointerCapture(ev.pointerId); vlx=ev.clientX; vly=ev.clientY;
+    vpan=ev.shiftKey; vdrag=true; vc.style.cursor="grabbing";
+  });
+  vc.addEventListener("pointermove", ev=>{
+    if (!vdrag) return;
+    const dx=ev.clientX-vlx, dy=ev.clientY-vly; vlx=ev.clientX; vly=ev.clientY;
+    if (vpan){
+      const W=vc.clientWidth, H=vc.clientHeight;
+      const factor = cam.distance / Math.max(1, Math.min(W,H));
+      const r=camRight(cam.yaw), u=camUp(cam.yaw,cam.pitch);
+      cam.target = vadd(cam.target, vsub(vscale(r, dx*factor), vscale(u, dy*factor)));
+    } else {
+      cam.yaw   -= dx * ORBIT_SENS;
+      cam.pitch  = clamp(cam.pitch - dy*ORBIT_SENS, -MAX_PITCH, MAX_PITCH);
+    }
+    renderViewport();
+  });
+  const vcEnd = ()=>{ if(!vdrag) return; vdrag=false; vc.style.cursor="grab"; };
+  vc.addEventListener("pointerup", vcEnd);
+  vc.addEventListener("pointercancel", vcEnd);
+  vc.addEventListener("wheel", ev=>{
+    ev.preventDefault();
+    cam.distance = clamp(cam.distance * Math.exp(ev.deltaY * 0.01), 0.5, 30);
+    renderViewport();
+  }, {passive:false});
+
+  // Kick off the async WebGPU viewer init (falls back to SVG if unavailable).
+  initVoxelViewer();
+
+  // Toolbar: home + settings.
+  document.getElementById("vp-home").onclick = ()=>{ if (curD && curD.trajectory) Object.assign(cam, homeCamera(curD.trajectory.traj)); renderViewport(); };
+  const menu = document.getElementById("vp-settings-menu");
+  document.getElementById("vp-settings-btn").onclick = ()=>menu.classList.toggle("open");
+  document.getElementById("opt-cube").onchange = e=>{opt.cube=e.target.checked; renderViewport();};
+  document.getElementById("opt-axes").onchange  = e=>{opt.axes =e.target.checked; renderViewport();};
+  document.getElementById("opt-cmd").onchange   = e=>{opt.cmd  =e.target.checked; renderViewport();};
+
+  // Nav-cube: mirror orientation; click faces to snap.
+  document.querySelectorAll("#nav-cube .cube-face").forEach(face=>{
+    face.addEventListener("click", ()=>{
+      const v = VIEWS[face.dataset.view]; if (!v) return;
+      cam.yaw=v.yaw; cam.pitch=v.pitch; renderViewport();
+    });
+  });
+
+  // Playback controls.
+  document.getElementById("pb-play").onclick = togglePlay;
+  document.getElementById("pb-stop").onclick = ()=>{ pbPlaying=false; updatePlayBtn(); stopRAF(); setStep(curD ? (curD.trajectory?curD.trajectory.traj.length-1:0):0); };
+  document.getElementById("pb-reset").onclick = ()=>{ pbPlaying=false; updatePlayBtn(); stopRAF(); setStep(0); };
+  document.getElementById("pb-back").onclick = ()=>{ if(curD) setStep(Math.max(0, Math.floor(pbStep)-1)); };
+  document.getElementById("pb-fwd").onclick  = ()=>{ if(curD) setStep(Math.min((curD.trajectory?curD.trajectory.traj.length-1:0), Math.floor(pbStep)+1)); };
+  const speed = document.getElementById("pb-speed");
+  speed.oninput = ()=>{ pbSpeed = parseFloat(speed.value); document.getElementById("pb-speed-label").textContent = pbSpeed.toFixed(1)+"x"; };
+  const scrub = document.getElementById("pb-scrub");
+  scrub.oninput = ()=>{ if(curD) setStep(parseInt(scrub.value)); };
+}
+
+function loadTrajectory(d){
+  curD = d;
+  const T = d.trajectory ? d.trajectory.traj.length : 0;
+  const scrub = document.getElementById("pb-scrub");
+  scrub.min = 0; scrub.max = Math.max(0, T-1);
+
+  // Use the WebGPU carved-stock viewer when available; otherwise the SVG fallback.
+  const useVoxel = voxel.ready && d.trajectory;
+  document.getElementById("voxel-canvas").style.display = useVoxel ? "block" : "none";
+  document.getElementById("traj").style.display = useVoxel ? "none" : "block";
+  // Size the tool + holder to this run's args (matches the Taichi run.mp4 video).
+  curToolGeom = toolGeomForRun(d);
+  if (useVoxel) {
+    voxel.viewer.setToolGeometry(curToolGeom);
+    voxel.viewer.setTrajectory(d.trajectory.traj);
+    voxel.lastStep = T-1;            // setTrajectory already carves the full path
+  }
+
+  // Show the fully-carved path initially; playback restarts from step 0 on play.
+  setStep(T-1);
+  if (d.trajectory) Object.assign(cam, homeCamera(d.trajectory.traj));
+  renderViewport();
+}
+
+function setStep(s){
+  pbStep = s;
+  const T = curD && curD.trajectory ? curD.trajectory.traj.length : 0;
+  document.getElementById("pb-step-label").textContent = `${Math.round(s)} / ${Math.max(0,T-1)}`;
+  document.getElementById("pb-scrub").value = s;
+  renderViewport();
+}
+
+function updatePlayBtn(){ document.getElementById("pb-play").textContent = pbPlaying ? "⏸" : "▶"; }
+
+function stopRAF(){ if (pbRAF){ cancelAnimationFrame(pbRAF); pbRAF=0; } }
+
+function togglePlay(){
+  if (!curD || !curD.trajectory) return;
+  pbPlaying = !pbPlaying;
+  updatePlayBtn();
+  if (pbPlaying){
+    const T = curD.trajectory.traj.length;
+    if (pbStep >= T-1) setStep(0);      // restart from the beginning if at the end
+    pbLastT = performance.now();
+    pbRAF = requestAnimationFrame(playFrame);
+  } else { stopRAF(); }
+}
+
+function playFrame(now){
+  if (!pbPlaying || !curD || !curD.trajectory) return;
+  const T = curD.trajectory.traj.length;
+  const dt = (now - pbLastT) / 1000; pbLastT = now;
+  // ~24 base steps/sec, scaled by speed.
+  pbStep += dt * 24 * pbSpeed;
+  if (pbStep >= T-1){ pbStep = T-1; setStep(pbStep); pbPlaying=false; updatePlayBtn(); stopRAF(); return; }
+  setStep(pbStep);
+  pbRAF = requestAnimationFrame(playFrame);
+}
+
+// Render the whole 3D scene with painter's-algorithm depth sort.
+function renderViewport(){
+  updateNavCube();
+
+  // WebGPU path: carved voxel stock + overlays on the canvas. Handled by the
+  // continuous render loop (mesh extraction is async, so a one-shot render would
+  // draw before the carved stock is ready). Just ensure the loop is running.
+  if (voxel.ready && curD && curD.trajectory) {
+    startVoxelLoop();
+    return;
+  }
+
+  const svg = d3.select("#traj");
+  const content = svg.select(".traj-content");
+  content.selectAll("*").remove();
+
+  if (!curD || !curD.trajectory){
+    content.append("text").attr("x","50%").attr("y","50%").attr("text-anchor","middle")
+      .attr("fill","var(--muted)").text("No trajectory data for this experiment.");
+    return;
+  }
+  const W = svg.node().clientWidth, H = svg.node().clientHeight;
+  const pts = curD.trajectory.traj;
+  const cmd = opt.cmd ? curD.trajectory.cmd : null;
+  const cstep = Math.max(0, Math.min(pts.length-1, Math.round(pbStep)));
+
+  // Pre-project everything (with depth) for sorting.
+  const P = p => project(p, cam, W, H);
+  const projPts = pts.map(P);
+  const projCmd = cmd ? cmd.map(P) : null;
+
+  // Collect drawables as {depth, draw:(g)=>node} and sort far→near.
+  const draws = [];
+  const add = (depth, fn)=>{ if (depth!=null && !Number.isNaN(depth)) draws.push({depth, fn}); };
+
+  // Stock cube wireframe.
+  if (opt.cube){
+    CUBE_EDGES.forEach(([a,b])=>{
+      const pa=P(a), pb=P(b);
+      if (!pa||!pb) return;
+      add((pa[2]+pb[2])/2, g=>g.append("line")
+        .attr("x1",pa[0]).attr("y1",pa[1]).attr("x2",pb[0]).attr("y2",pb[1])
+        .attr("stroke","var(--grid)").attr("stroke-width",1).attr("opacity",.55));
+    });
+  }
+
+  // Axis triad at the stock origin corner.
+  if (opt.axes){
+    [["#e5534b",[1,0,0],"X"],["#56d364",[0,1,0],"Y"],["#58a6ff",[0,0,1],"Z"]].forEach(([col,end,lbl])=>{
+      const o=P([0,0,0]), e=P(end); if(!o||!e) return;
+      add((o[2]+e[2])/2, g=>{
+        g.append("line").attr("x1",o[0]).attr("y1",o[1]).attr("x2",e[0]).attr("y2",e[1])
+          .attr("stroke",col).attr("stroke-width",1.5).attr("opacity",.85);
+        g.append("text").attr("x",e[0]+4).attr("y",e[1]+4).attr("fill",col).attr("font-size",11).attr("font-weight","bold").text(lbl);
+      });
+    });
+  }
+
+  // Commanded (pre-clip) path, dashed.
+  if (projCmd){
+    for (let i=1;i<projCmd.length;i++){
+      const a=projCmd[i-1], b=projCmd[i]; if(!a||!b) continue;
+      add((a[2]+b[2])/2, g=>g.append("line")
+        .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
+        .attr("stroke","#9aa7b3").attr("stroke-width",1.1).attr("stroke-dasharray","4 4").attr("opacity",.45));
+    }
+  }
+
+  // Actual tool path, depth-colored. Reached prefix is bright; the not-yet-carved
+  // suffix is dim so playback progress is visible.
+  const zdepths = projPts.map(p=>p?p[2]:0);
+  const zscale = d3.scaleLinear().domain(d3.extent(zdepths).map(v=>v||0)).range([0.4,1]).clamp(true);
+  for (let i=1;i<projPts.length;i++){
+    const a=projPts[i-1], b=projPts[i]; if(!a||!b) continue;
+    const reached = i <= cstep;
+    add((a[2]+b[2])/2, g=>g.append("line")
+      .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
+      .attr("stroke", d3.interpolateRgb("#1f6feb","#7cc0ff")(zscale(b[2])))
+      .attr("stroke-width", reached?2.2:1.4)
+      .attr("opacity", reached?0.95:0.22));
+  }
+
+  // Start marker.
+  const sp = projPts[0];
+  if (sp) add(sp[2], g=>{
+    g.append("circle").attr("cx",sp[0]).attr("cy",sp[1]).attr("r",5).attr("fill","#56d364").attr("stroke","#000").attr("stroke-width",1);
+    g.append("text").attr("x",sp[0]+7).attr("y",sp[1]+4).attr("fill","#56d364").attr("font-size",10).text("start");
+  });
+
+  // End marker (only when fully reached).
+  const ep = projPts[pts.length-1];
+  if (ep && cstep >= pts.length-1) add(ep[2], g=>{
+    g.append("circle").attr("cx",ep[0]).attr("cy",ep[1]).attr("r",5).attr("fill","#e5534b").attr("stroke","#000").attr("stroke-width",1);
+    g.append("text").attr("x",ep[0]+7).attr("y",ep[1]+4).attr("fill","#e5534b").attr("font-size",10).text("end");
+  });
+
+  // Cutting tool + toolholder at the current tip, sized to this run's args (matches
+  // the Taichi sim: a flat-end Z-axis tool cylinder rising +Z by curToolGeom.toolHeight,
+  // with a wider holder cylinder stacked on top — holder radius/height are the 2.5"-
+  // diameter spindle and machine-Z travel). Drawn as 50%-opaque faces so they read
+  // over the stock on the SVG path (the WebGPU path draws its own in voxel.js).
+  const tipPt = pts[cstep];
+  if (tipPt) {
+    const N = 24;
+    // Draw a vertical Z cylinder from bottomZ..topZ on the tip axis in `fill` color.
+    const drawCyl = (bottomZ, topZ, R, fill) => {
+      const ring = (zz) => {
+        const out = [];
+        for (let i=0;i<N;i++){ const a=(i/N)*Math.PI*2; out.push([tipPt[0]+R*Math.cos(a), tipPt[1]+R*Math.sin(a), zz]); }
+        return out;
+      };
+      const Pb = ring(bottomZ).map(P), Pt = ring(topZ).map(P);
+      for (let i=0;i<N;i++){
+        const j=(i+1)%N;
+        const a=Pb[i], b=Pb[j], c=Pt[j], d=Pt[i];
+        if (!a||!b||!c||!d) continue;
+        add((a[2]+b[2]+c[2]+d[2])/4, g=>g.append("polygon")
+          .attr("points",`${a[0]},${a[1]} ${b[0]},${b[1]} ${c[0]},${c[1]} ${d[0]},${d[1]}`)
+          .attr("fill",fill).attr("fill-opacity",0.5)
+          .attr("stroke",fill).attr("stroke-width",0.5).attr("opacity",1.0));
+      }
+      if (Pt.every(p=>p)){
+        const depth = Pt.reduce((s,p)=>s+p[2],0)/N;
+        add(depth, g=>g.append("polygon")
+          .attr("points", Pt.map(p=>`${p[0]},${p[1]}`).join(" "))
+          .attr("fill",fill).attr("fill-opacity",0.5)
+          .attr("stroke",fill).attr("stroke-width",0.5));
+      }
+    };
+    const toolTop = tipPt[2] + curToolGeom.toolHeight;
+    drawCyl(tipPt[2], toolTop, curToolGeom.toolRadius, "#e63333");
+    drawCyl(toolTop, toolTop + curToolGeom.holderHeight, curToolGeom.holderRadius, "#8c939c");
+  }
+
+  // Moving tool marker at the current step.
+  const tp = projPts[cstep];
+  if (tp) add(tp[2]-1e-6, g=>{
+    g.append("circle").attr("cx",tp[0]).attr("cy",tp[1]).attr("r",8).attr("fill","none")
+      .attr("stroke","#ffd166").attr("stroke-width",1.5).attr("opacity",.9);
+    g.append("circle").attr("cx",tp[0]).attr("cy",tp[1]).attr("r",4).attr("fill","#ffd166").attr("stroke","#000").attr("stroke-width",1);
+  });
+
+  // Painter's algorithm: far first.
+  draws.sort((a,b)=>b.depth - a.depth);
+  const g = content;
+  draws.forEach(d=>d.fn(g));
+}
+
+function updateNavCube(){
+  const yawDeg = (cam.yaw * 180/Math.PI);
+  const pitchDeg = (cam.pitch * 180/Math.PI);
+  const body = document.getElementById("nav-cube-body");
+  if (body) body.style.transform = `rotateX(${-pitchDeg}deg) rotateY(${yawDeg}deg)`;
+}
+</script>
+</body>
+</html>

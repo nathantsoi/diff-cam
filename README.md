@@ -77,18 +77,22 @@ flags with the PPO trainers — see
 
 The normalized cube is the **stock box** (default a **1 in cube**), so
 `--voxel_size_mm 0.5` gives **sub-mm cubic voxels** on a tiny grid (51³, ~0.14 GB),
-and `--dt 0.12` makes each feed step ≈ 1 voxel (see
+and `--dt 0.45` (the proven default) advances ≈ 1 voxel per feed step so the tool
+can actually traverse the part (see
 [Stock box, work volume & precision](#stock-box-work-volume--precision)).
 
 ```bash
-# Headless (HPC / no display) — comparable to the csg_ppo baseline below:
-uv run python -m algorithms.train_csg --iters 128 --max_steps 64 \
-    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --target_radius_mm 11.43 --dt 0.12 \
-    --save_model --eval_freq 1 --record_video_freq 100 --video_fps 30 --progress_bar
+# Headless (HPC / no display) — comparable to the csg_ppo baseline below.
+# These are the proven operating-point defaults (dt=0.45 unlocks tool
+# traversal; grad_clip + eval_freq + best-checkpoint saving capture the peak):
+uv run python -m algorithms.train_csg --iters 5000 --max_steps 128 \
+    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --target_radius_mm 11.43 --dt 0.45 \
+    --grad_clip 0.5 --eval_freq 10 \
+    --save_model --record_video_freq 100 --video_fps 30 --progress_bar
 
 # Interactive live GUI (needs a display):
-uv run python -m algorithms.train_csg --iters 128 --max_steps 64 \
-    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12
+uv run python -m algorithms.train_csg --iters 5000 --max_steps 128 \
+    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.45
 ```
 
 #### Stock box, work volume & precision
@@ -176,12 +180,15 @@ The saved `trajectory.npy` is the **speed-clipped** path that was actually carve
 (not the raw cumulative sum of commanded deltas), so the exported G-code matches
 the optimized result.
 
-> **Note on `dt`.** The speed caps become per-step displacement caps
-> (`speed · dt`). At the default `dt=0.01` the feed cap is ~0.042 mm/step — far
-> below a 0.5 mm voxel — so each feed step is sub-voxel *in time*. To advance ~1
-> voxel per feed step set `--dt ≈ voxel_size_mm / feed_mm_per_s` (e.g. ≈ `0.12`
-> for 0.5 mm voxels at the default 10 ipm feed), or pass
-> `--no-enforce_speed_limits` to disable the constraint.
+> **Note on `dt` (the decisive lever).** The speed caps become per-step
+> displacement caps (`speed · dt`), so `dt` controls how far the tool moves per
+> step. At a small `dt` the feed cap is sub-voxel and the swept-cylinder tool is
+> **speed-limited**: its z-range clips to ~0.72–1.0 and it cannot descend or
+> traverse the part exterior, capping dice at ~0.56 regardless of the loss or
+> trajectory capacity. The proven default `dt=0.45` advances ≈ 1 voxel/step so
+> the tool covers the part (sphere 0.56 → 0.85, pyramid → 0.90); the sweet spot
+> is `dt ∈ [0.42, 0.5]`. To run unconstrained instead, pass
+> `--no-enforce_speed_limits`.
 
 ### Continuous — PPO baseline (Method 2)
 
@@ -246,7 +253,7 @@ eval can run frequently, while the (more expensive) video is encoded only at
 | flag | default | meaning |
 |------|---------|---------|
 | `--eval` | `False` | compute evaluation metrics (Dice/ASD/HD95/reward) during training and at the end |
-| `--eval_freq N` | `0` | run a greedy eval rollout + log Dice/ASD/HD95/reward every `N` iterations (`0` disables). No video is encoded unless the video cadence also lands on that iteration. |
+| `--eval_freq N` | `10` | run a greedy eval rollout + log Dice/ASD/HD95/reward every `N` iterations (`0` disables). A fine cadence (10) samples the transient dice peak for best-checkpoint saving; the `iters//10` auto-cadence is too coarse at i5000. No video is encoded unless the video cadence also lands on that iteration. |
 | `--record_video_freq N` | `0` | additionally record + upload a greedy rollout **video** every `N` iterations (`0` disables) |
 | `--progress_bar` | `False` | use interactive `tqdm` progress bar instead of clean scrolling log lines (set `False` for clean log files and LLM harness compatibility) |
 | `--log_freq N` | `1` | print scrolling log output every `N` iterations when `--progress_bar` is disabled |
@@ -300,9 +307,11 @@ under `metrics/*`. The final STL meshes and `metrics.json` files are exported ju
 Pass `--headless` to skip the live GUI (auto-disabled when no display is present).
 
 ```bash
-# Headless gradient descent for autoresearch / LLM harnesses:
-uv run python -m algorithms.train_csg --iters 128 --max_steps 64 \
-    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12 \
+# Headless gradient descent for autoresearch / LLM harnesses (proven operating
+# point: dt=0.45, grad_clip=0.5, eval_freq=10, best-checkpoint saving on):
+uv run python -m algorithms.train_csg --iters 5000 --max_steps 128 \
+    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.45 \
+    --grad_clip 0.5 --eval_freq 10 \
     --save_model --eval --no-track
 ```
 
@@ -326,33 +335,34 @@ The normalized cube is the **stock box**; choose its size with `--stock_size_in`
 by `--target_shape` (`sphere`, `cylinder`, `box`, `pyramid`) with
 `--target_radius_mm` (sphere/cylinder radius, or box/pyramid half-size) and
 `--target_height_mm` (cylinder/pyramid height). Tool/target sizes are millimetres
-(1 in = 25.4 mm), so size the part to fit *inside* the stock. Tune `--dt` to
-≈ `voxel_size_mm / feed_mm_per_s` so feed steps advance ≈ 1 voxel.
+(1 in = 25.4 mm), so size the part to fit *inside* the stock. Keep `--dt` near
+`0.45` (≈ 1 voxel/step at 0.5 mm voxels) so the tool can traverse the part — see
+the [Note on `dt`](#continuous--gradient-descent-method-1) above.
 
 ```bash
 # 1" cube stock, 0.9" diameter SPHERE, 0.5 mm voxels (51³, ~0.14 GB)
-uv run python -m algorithms.train_csg --iters 128 --max_steps 64 \
-    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12 \
+uv run python -m algorithms.train_csg --iters 5000 --max_steps 128 \
+    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.45 \
     --target_shape sphere --target_radius_mm 11.43 \
-    --headless --save_model --eval --no-track
+    --headless --save_model --eval_freq 10 --no-track
 
 # 1" cube stock, 0.9" diameter x 0.9" tall CYLINDER, 0.5 mm voxels
-uv run python -m algorithms.train_csg --iters 128 --max_steps 64 \
-    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.12 \
+uv run python -m algorithms.train_csg --iters 5000 --max_steps 128 \
+    --stock_size_in 1 1 1 --voxel_size_mm 0.5 --dt 0.45 \
     --target_shape cylinder --target_radius_mm 11.43 --target_height_mm 22.86 \
-    --headless --save_model --eval --no-track
+    --headless --save_model --eval_freq 10 --no-track
 
 # Larger 2" cube stock at the SAME 0.5 mm voxels (102³, ~1.1 GB) — a 1.6" sphere
-uv run python -m algorithms.train_csg --iters 128 --max_steps 96 \
-    --stock_size_in 2 2 2 --voxel_size_mm 0.5 --dt 0.12 \
+uv run python -m algorithms.train_csg --iters 5000 --max_steps 128 \
+    --stock_size_in 2 2 2 --voxel_size_mm 0.5 --dt 0.45 \
     --target_shape sphere --target_radius_mm 20.32 \
-    --headless --save_model --eval --no-track
+    --headless --save_model --eval_freq 10 --no-track
 
 # Non-cubic 2 x 1 x 1" bar, fine 0.25 mm voxels (203×102×102, ~2.2 GB) — a box part
-uv run python -m algorithms.train_csg --iters 128 --max_steps 96 \
-    --stock_size_in 2 1 1 --voxel_size_mm 0.25 --dt 0.06 \
+uv run python -m algorithms.train_csg --iters 5000 --max_steps 128 \
+    --stock_size_in 2 1 1 --voxel_size_mm 0.25 --dt 0.225 \
     --target_shape box --target_radius_mm 9.0 \
-    --headless --save_model --eval --no-track
+    --headless --save_model --eval_freq 10 --no-track
 ```
 
 Each run writes `trajectory.npy` (with `--save_model`) and copies it to the repo
@@ -380,13 +390,16 @@ directory between them, and forwards the geometry flags consistently. The
 exporter and visualizer additionally auto-read the run's `args.json`.
 
 ```bash
-# Fast end-to-end smoke test (small part, headless, no W&B):
-uv run python scripts/run_pipeline.py
+# Fast end-to-end smoke test (override iters down; the proven default of 5000
+# is a ~15-min run, so pass --iters 50 for a quick wiring check):
+uv run python scripts/run_pipeline.py --iters 50
 
-# A real 1" sphere at 0.5 mm voxels, Haas G-code + figure:
-uv run python scripts/run_pipeline.py --iters 128 --max-steps 64 \
+# A real 1" sphere at 0.5 mm voxels, Haas G-code + figure (proven operating
+# point: dt=0.45, grad-clip=0.5, eval-freq=10, best-checkpoint saving on):
+uv run python scripts/run_pipeline.py --iters 5000 --max-steps 128 \
     --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere \
-    --target-radius-mm 11.43 --post haas
+    --target-radius-mm 11.43 --post haas --dt 0.45 --grad-clip 0.5 \
+    --eval-freq 10
 
 # Fixture the stock top-centre at machine (8,6,5)" (emits G10 L2 in the Haas program):
 uv run python scripts/run_pipeline.py --stock-origin-in 8 6 5 --post haas

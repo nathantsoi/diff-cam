@@ -9,3 +9,21 @@ wandb/
 /trajectory.npy
 /trajectory_deltas.npy
 /args.json
+
+# self-signed HTTPS cert for the results dashboard (scripts/serve_web_https.py)
+**/web/.cert/
+*.log
+
+# Generated experiment data — regenerated from runs/ by the build/plot scripts,
+# never committed (the experiment log + per-run artifacts are the source of truth):
+#   scripts/build_results_web.py            -> autoresearch/tasks/train_csg/web/data.json
+#   scripts/plot_results.py                 -> results_over_time.png
+#   autoresearch/tasks/train_csg/plot_results.py -> autoresearch/tasks/train_csg/results_plot.png
+#   (the autoresearch harness)              -> results.tsv (local experiment log)
+/results.tsv
+/autoresearch/tasks/train_csg/web/data.json
+/results_over_time.png
+/autoresearch/tasks/train_csg/results_plot.png
+
+# Local throwaway diagnostic scripts (not part of the repo)
+/diag_init.py
