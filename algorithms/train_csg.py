@@ -50,6 +50,28 @@ CAM_POS = (2.0, 2.0, 1.6)
 CAM_TARGET = (0.5, 0.5, 0.5)
 CAM_UP = (0.0, 0.0, 1.0)
 
+# Canonical cutter start used for eval / best-checkpoint scoring, so dice is
+# comparable across iterations even when training randomizes the start.
+CANONICAL_TOOL_START = np.array([0.5, 0.5, 1.0], dtype=np.float32)
+
+
+def sample_tool_start(args, stock_z_mm):
+    """Random cutter start near the stock, always >= stock top + clearance.
+
+    XY is uniform in [margin, 1-margin]^2 (inside the stock footprint); Z is
+    ``1.0 + clearance/stock_z_mm + jitter`` in normalized coords, guaranteeing
+    the cutter sits at least ``tool_start_clearance_in`` inches above the stock
+    top (z=1.0). Returns a (3,) float32 array in normalized [0,1] coords.
+    """
+    from cam.units import inch_to_mm
+    margin = args.tool_start_xy_margin
+    x = np.random.uniform(margin, 1.0 - margin)
+    y = np.random.uniform(margin, 1.0 - margin)
+    z_floor = 1.0 + inch_to_mm(args.tool_start_clearance_in) / float(stock_z_mm)
+    z_jitter = inch_to_mm(args.tool_start_z_jitter_in) / float(stock_z_mm)
+    z = z_floor + np.random.uniform(0.0, z_jitter)
+    return np.array([x, y, z], dtype=np.float32)
+
 
 @dataclass
 class Args:
@@ -134,6 +156,40 @@ class Args:
     """weight on the holder/stock penetration barrier (one-sided; inactive until the holder contacts stock)"""
     holder_margin: float = 0.0
     """required holder standoff in unit-cube length (>0 keeps a clearance gap before contact)"""
+
+    # Trajectory regularizers (address jerky motion + time spent cutting air)
+    w_air: float = 0.0
+    """weight on the per-step AIR-CUT penalty (swept-tool volume in empty stock).
+    0 disables. Fires whenever the cutter traverses/hovers in open space instead
+    of removing material; ~0.5-1.0 discourages air-cutting without dominating the
+    geometry objective."""
+    w_jerk: float = 0.0
+    """weight on the JERK / smoothness penalty (squared diff of consecutive
+    deltas). 0 disables; ~1e-2 smooths abrupt direction/speed changes."""
+
+    # Robustness to initial conditions: random cutter start + restart-from-state
+    random_tool_start: bool = False
+    """randomize the cutter start each fresh start: random XY within the stock
+    footprint, Z >= stock top + tool_start_clearance_in. Trains trajectories
+    robust to the initial starting condition."""
+    tool_start_clearance_in: float = 0.2
+    """min cutter height above the stock top (inches) for a random start"""
+    tool_start_xy_margin: float = 0.1
+    """normalized XY margin inside the stock footprint for a random start"""
+    tool_start_z_jitter_in: float = 0.1
+    """extra random height (inches) above the clearance floor for a random start"""
+    restart_from_state: bool = False
+    """maintain a bank of saved mid-cut simulator states and, with probability
+    p_restart each iteration, restart the forward pass from a random saved state
+    instead of a fresh stock. Trains the trajectory to finish the part from many
+    partial states, not just a fixed start."""
+    p_restart: float = 0.25
+    """per-iteration probability of restarting from a saved state (keep < 0.5 so
+    full-trajectory fresh starts still train the early deltas)"""
+    state_bank_size: int = 32
+    """max saved simulator states (FIFO eviction)"""
+    save_state_prob: float = 0.05
+    """per-iteration probability of snapshotting a mid-cut state into the bank"""
 
     # Stock box (the normalized cube, voxelized) & machine work volume
     stock_size_in: tuple[float, float, float] = (1.0, 1.0, 1.0)
@@ -242,6 +298,8 @@ def eval_metrics(sim, T, dx):
     m["loss_residual"] = float(sim.diag_residual[None])
     m["loss_gouge"] = float(sim.diag_gouge[None])
     m["loss_holder"] = float(sim.diag_holder[None])
+    m["loss_air"] = float(sim.diag_air[None])
+    m["loss_jerk"] = float(sim.diag_jerk[None])
     return m
 
 
@@ -366,6 +424,9 @@ def main():
     sim.w_gouge[None] = args.w_gouge
     sim.holder_penalty_weight[None] = args.holder_penalty_weight
     sim.holder_margin[None] = args.holder_margin
+    # Trajectory regularizers (air-cut + jerk); 0 = disabled.
+    sim.w_air[None] = args.w_air
+    sim.w_jerk[None] = args.w_jerk
     sim.bake_target_grid()
     sim.set_target_volume()
 
@@ -514,6 +575,8 @@ def main():
     eval_interval = args.eval_freq if args.eval_freq > 0 else (max(1, args.iters // 10) if args.eval else 0)
     pbar = tqdm(range(args.iters), desc=run_name) if args.progress_bar else range(args.iters)
     prior_params = params.detach().clone()
+    # Bank of saved mid-cut simulator states for restart-from-state training.
+    state_bank = []
     try:
         for it in pbar:
             if gui is not None and not gui.running:
@@ -534,9 +597,24 @@ def main():
                     opt.param_groups[0]["lr"] = lrnow
 
             # Push current displacements into Taichi, then forward+backward.
+            # With restart_from_state, each iteration either starts fresh (optionally
+            # from a random tool_start) or restores a saved mid-cut state and carves
+            # only the tail [t0, T). The restored prefix is a detached constant, so
+            # only the carved tail receives gradient this iteration; Adam leaves the
+            # prefix untouched (standard stochastic per-slice optimization).
             sim.tool_delta.from_torch(params.detach())
-            with ti.ad.Tape(loss=sim.loss):
-                sim.forward(T)
+            t0 = 0
+            if args.restart_from_state and state_bank and np.random.random() < args.p_restart:
+                state = state_bank[np.random.randint(len(state_bank))]
+                t0 = int(state["t"])
+                sim.restore_state(state, t0)
+                with ti.ad.Tape(loss=sim.loss):
+                    sim.forward_from(t0, T)
+            else:
+                if args.random_tool_start:
+                    sim.tool_start[None] = ti.Vector(list(sample_tool_start(args, sim.Lz)))
+                with ti.ad.Tape(loss=sim.loss):
+                    sim.forward(T)
 
             grad = sim.tool_delta.grad.to_torch()[:T - 1]  # (T-1, 3)
             loss = float(sim.loss[None])
@@ -559,6 +637,15 @@ def main():
             opt.zero_grad()
             prior_params = params.detach().clone()
 
+            # Snapshot a mid-cut state into the bank (only on fresh starts, so
+            # every stock slot [0, T] is a freshly-carved value rather than a
+            # stale restored constant). Saved at random intervals.
+            if args.restart_from_state and t0 == 0 and np.random.random() < args.save_state_prob:
+                t_snap = np.random.randint(1, T)
+                state_bank.append(sim.save_state(t_snap))
+                if len(state_bank) > args.state_bank_size:
+                    state_bank.pop(0)
+
             # --- per-iter scalars (TensorBoard; synced to wandb via sync_tensorboard) ---
             writer.add_scalar("losses/loss", loss, it)
             writer.add_scalar("charts/grad_norm", grad_norm, it)
@@ -571,6 +658,15 @@ def main():
 
             # --- eval metrics (shared `_metrics` path; same keys as csg_ppo) ---
             if do_eval:
+                # If the training forward used a random start or a restored
+                # mid-cut state, re-run a canonical full forward from the fixed
+                # CANONICAL_TOOL_START so dice is comparable across iters and
+                # the best-checkpoint snapshot reflects a deployable trajectory.
+                if args.random_tool_start or t0 != 0:
+                    sim.tool_start[None] = ti.Vector(list(CANONICAL_TOOL_START))
+                    sim.tool_delta.from_torch(params.detach())
+                    sim.loss[None] = 0.0
+                    sim.forward(T)
                 m = eval_metrics(sim, T, dx)
                 last_m = m
                 if m["dice"] > best_dice:
@@ -593,12 +689,16 @@ def main():
                 writer.add_scalar("loss/residual", m["loss_residual"], it)
                 writer.add_scalar("loss/gouge", m["loss_gouge"], it)
                 writer.add_scalar("loss/holder", m["loss_holder"], it)
+                writer.add_scalar("loss/air", m["loss_air"], it)
+                writer.add_scalar("loss/jerk", m["loss_jerk"], it)
                 last_eval_iter = it
                 if args.progress_bar:
                     pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['dice']:.3f}",
                                      resid=f"{m['loss_residual']:.3f}",
                                      gouge=f"{m['loss_gouge']:.3f}",
-                                     hold=f"{m['loss_holder']:.2e}")
+                                     hold=f"{m['loss_holder']:.2e}",
+                                     air=f"{m['loss_air']:.3f}",
+                                     jerk=f"{m['loss_jerk']:.2e}")
             elif args.progress_bar:
                 pbar.set_postfix(loss=f"{loss:.4f}", grad=f"{grad_norm:.2e}")
 
@@ -640,6 +740,11 @@ def main():
         # --- Update simulator state to the final optimized model ---
         deltas = params.detach().numpy()
         sim.tool_delta.from_torch(params.detach())
+        # Evaluate/save from the canonical start so the reported dice and the
+        # saved trajectory correspond to a single deployable initial condition
+        # (training may have randomized the start or restarted from saved states).
+        sim.tool_start[None] = ti.Vector(list(CANONICAL_TOOL_START))
+        sim.loss[None] = 0.0
         # forward() (not reconstruct_positions) so the saved positions are the
         # speed-clipped trajectory that was actually carved/optimized, not the
         # raw cumulative sum of the commanded deltas.
@@ -680,6 +785,7 @@ def main():
                 # holder-overlap reflect the best model (a fresh carve -- visually
                 # equivalent; the reported dice is the already-measured best_m).
                 sim.tool_delta.from_torch(torch.as_tensor(best_deltas))
+                sim.loss[None] = 0.0
                 sim.forward(T)
                 used_best = True
                 print(f"[best] using best-dice checkpoint: dice={best_dice:.6f} @ iter {best_it} "

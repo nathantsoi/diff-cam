@@ -132,6 +132,28 @@ def main():
                     help="clip per-iter gradient L2 norm (0 = disabled); 0.4-0.5 "
                          "stabilizes the transient dice peak so best-checkpoint "
                          "saving captures a higher one")
+    ap.add_argument("--w-air", type=float, default=0.0,
+                    help="weight on the per-step air-cut penalty (0 = disabled; ~0.5-1.0)")
+    ap.add_argument("--w-jerk", type=float, default=0.0,
+                    help="weight on the jerk/smoothness penalty (0 = disabled; ~1e-2)")
+    ap.add_argument("--random-tool-start", action="store_true",
+                    help="randomize the cutter start each fresh start (XY in the stock "
+                         "footprint, Z >= stock top + --tool-start-clearance-in)")
+    ap.add_argument("--tool-start-clearance-in", type=float, default=0.2,
+                    help="min cutter height above the stock top (inches) for a random start")
+    ap.add_argument("--tool-start-xy-margin", type=float, default=0.1,
+                    help="normalized XY margin inside the stock footprint for a random start")
+    ap.add_argument("--tool-start-z-jitter-in", type=float, default=0.1,
+                    help="extra random height (inches) above the clearance floor for a random start")
+    ap.add_argument("--restart-from-state", action="store_true",
+                    help="save mid-cut simulator states and restart training from them "
+                         "(robustness to initial conditions)")
+    ap.add_argument("--p-restart", type=float, default=0.25,
+                    help="per-iter probability of restarting from a saved state")
+    ap.add_argument("--state-bank-size", type=int, default=32,
+                    help="max saved simulator states (FIFO)")
+    ap.add_argument("--save-state-prob", type=float, default=0.05,
+                    help="per-iter probability of snapshotting a mid-cut state")
     ap.add_argument("--eval-freq", type=int, default=10,
                     help="eval (dice) cadence in iters; 0 = auto (iters//10). "
                          "Fine cadence (10) samples the transient dice peak for "
@@ -207,6 +229,8 @@ def main():
             "--w_gouge", str(args.w_gouge),
             "--w_residual", str(args.w_residual),
             "--grad_clip", str(args.grad_clip),
+            "--w_air", str(args.w_air),
+            "--w_jerk", str(args.w_jerk),
             "--eval_freq", str(args.eval_freq),
             "--seed", str(args.seed),
             "--stock_size_in", *ssi,
@@ -222,6 +246,17 @@ def main():
             cmd.append("--save_model")
         cmd.append("--track" if args.track else "--no-track")
         cmd.append("--eval")
+        # Trajectory regularizers + robustness-to-initial-conditions options.
+        if args.random_tool_start:
+            cmd += ["--random_tool_start",
+                    "--tool_start_clearance_in", str(args.tool_start_clearance_in),
+                    "--tool_start_xy_margin", str(args.tool_start_xy_margin),
+                    "--tool_start_z_jitter_in", str(args.tool_start_z_jitter_in)]
+        if args.restart_from_state:
+            cmd += ["--restart_from_state",
+                    "--p_restart", str(args.p_restart),
+                    "--state_bank_size", str(args.state_bank_size),
+                    "--save_state_prob", str(args.save_state_prob)]
         rc, out = _run(cmd, "train")
         if rc != 0:
             raise SystemExit(f"training failed (exit {rc})")
