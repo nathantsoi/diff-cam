@@ -166,6 +166,11 @@ class Args:
     w_jerk: float = 0.0
     """weight on the JERK / smoothness penalty (squared diff of consecutive
     deltas). 0 disables; ~1e-2 smooths abrupt direction/speed changes."""
+    w_step: float = 0.0
+    """weight on the SPEED-REGULARITY (constant-feed) penalty (squared diff of
+    consecutive step LENGTHS). 0 disables; pushes the feed rate toward a uniform
+    value -- the canonical CNC toolpath pattern -- without discouraging the
+    back-and-forth direction reversals of a raster/boustrophedon path."""
 
     # Robustness to initial conditions: random cutter start + restart-from-state
     random_tool_start: bool = False
@@ -300,6 +305,7 @@ def eval_metrics(sim, T, dx):
     m["loss_holder"] = float(sim.diag_holder[None])
     m["loss_air"] = float(sim.diag_air[None])
     m["loss_jerk"] = float(sim.diag_jerk[None])
+    m["loss_step"] = float(sim.diag_step[None])
     return m
 
 
@@ -431,6 +437,7 @@ def main():
     # Trajectory regularizers (air-cut + jerk); 0 = disabled.
     sim.w_air[None] = args.w_air
     sim.w_jerk[None] = args.w_jerk
+    sim.w_step[None] = args.w_step
     sim.bake_target_grid()
     sim.set_target_volume()
 

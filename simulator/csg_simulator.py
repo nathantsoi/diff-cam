@@ -246,6 +246,12 @@ class CSGSimulatorDelta:
         # "jerky" artefact). Acts directly on tool_delta (needs_grad=True).
         self.w_jerk = ti.field(dtype=ti.f32, shape=())
         self.w_jerk[None] = 0.0
+        # Speed-regularity (constant-feed) penalty: squared difference of
+        # consecutive step LENGTHS (|delta_t| - |delta_{t-1}|)^2. Encourages a
+        # uniform feed rate -- the canonical CNC toolpath pattern -- independent
+        # of direction. Acts directly on tool_delta (needs_grad=True).
+        self.w_step = ti.field(dtype=ti.f32, shape=())
+        self.w_step[None] = 0.0
 
         # Holder collision is a PENETRATION BARRIER, not a proximity field: it is
         # exactly zero (zero gradient) while the holder has clearance, and grows
@@ -266,6 +272,7 @@ class CSGSimulatorDelta:
         self.diag_holder = ti.field(dtype=ti.f32, shape=())
         self.diag_air = ti.field(dtype=ti.f32, shape=())
         self.diag_jerk = ti.field(dtype=ti.f32, shape=())
+        self.diag_step = ti.field(dtype=ti.f32, shape=())
 
         # ---- Stock ----
         self.stock = ti.field(
@@ -839,6 +846,30 @@ class CSGSimulatorDelta:
             ti.atomic_add(self.loss[None], w * diff.dot(diff) / n)
 
     @ti.kernel
+    def compute_step_penalty(self, t_start: ti.i32, T: ti.i32):
+        """Differentiable SPEED-REGULARITY (constant-feed) penalty added to ``self.loss``.
+
+        Penalizes changes in the commanded per-step SPEED (step length):
+
+            step = (|tool_delta[t]| - |tool_delta[t-1]|)^2
+
+        summed over ``t in [max(t_start,1), T-1)`` and normalized by the segment
+        count. Unlike ``compute_jerk_penalty`` (which penalizes the full vector
+        difference of consecutive deltas, i.e. both speed AND direction changes),
+        this acts only on the step LENGTH, so it pushes the feed rate toward a
+        constant value without discouraging the legitimate back-and-forth
+        direction reversals of a boustrophedon/raster toolpath. Acts directly on
+        ``tool_delta`` (``needs_grad=True``). Gated by ``w_step`` (0 -> disabled).
+        """
+        for t in range(ti.max(t_start, 1), T - 1):
+            w = self.w_step[None]
+            n = ti.max(1, T - 1 - ti.max(t_start, 1))
+            d0 = ti.sqrt(self.tool_delta[t].dot(self.tool_delta[t]) + 1e-12)
+            d1 = ti.sqrt(self.tool_delta[t - 1].dot(self.tool_delta[t - 1]) + 1e-12)
+            diff = d0 - d1
+            ti.atomic_add(self.loss[None], w * diff * diff / n)
+
+    @ti.kernel
     def compute_diagnostics(self, T: ti.i32):
         """Non-differentiable breakdown of the loss into its three components.
 
@@ -852,6 +883,7 @@ class CSGSimulatorDelta:
         h = 0.0
         a = 0.0
         jk = 0.0
+        st = 0.0
         scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
         inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
         w_g = self.w_gouge[None]
@@ -859,6 +891,7 @@ class CSGSimulatorDelta:
         w_h = self.holder_penalty_weight[None]
         w_a = self.w_air[None]
         w_j = self.w_jerk[None]
+        w_s = self.w_step[None]
         margin = self.holder_margin[None]
         # Geometry terms on the final stock (stock[T]).
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
@@ -893,11 +926,19 @@ class CSGSimulatorDelta:
         for t in range(1, T - 1):
             diff = self.tool_delta[t] - self.tool_delta[t - 1]
             jk += w_j * diff.dot(diff) / nj
+        # Speed regularity over consecutive step lengths.
+        ns = ti.max(1, T - 2)
+        for t in range(1, T - 1):
+            d0 = ti.sqrt(self.tool_delta[t].dot(self.tool_delta[t]) + 1e-12)
+            d1 = ti.sqrt(self.tool_delta[t - 1].dot(self.tool_delta[t - 1]) + 1e-12)
+            sp = d0 - d1
+            st += w_s * sp * sp / ns
         self.diag_gouge[None] = g
         self.diag_residual[None] = r
         self.diag_holder[None] = h
         self.diag_air[None] = a
         self.diag_jerk[None] = jk
+        self.diag_step[None] = st
 
     @ti.kernel
     def holder_overlap_at(self, t: ti.i32) -> ti.f32:
@@ -955,6 +996,7 @@ class CSGSimulatorDelta:
         self.compute_holder_penalty(0, num_active_steps - 1)
         self.compute_air_penalty(0, num_active_steps - 1)
         self.compute_jerk_penalty(0, num_active_steps - 1)
+        self.compute_step_penalty(0, num_active_steps - 1)
 
     def forward_from(self, t0, num_active_steps):
         """Forward pass RESTARTED from a restored mid-cut state at step ``t0``.
@@ -980,6 +1022,7 @@ class CSGSimulatorDelta:
         self.compute_holder_penalty(t0, num_active_steps - 1)
         self.compute_air_penalty(t0, num_active_steps - 1)
         self.compute_jerk_penalty(t0, num_active_steps - 1)
+        self.compute_step_penalty(t0, num_active_steps - 1)
 
     # ------------------------------------------------------------------
     # State save / restore (for restart-from-state training)
