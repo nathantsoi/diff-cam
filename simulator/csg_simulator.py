@@ -849,24 +849,26 @@ class CSGSimulatorDelta:
     def compute_step_penalty(self, t_start: ti.i32, T: ti.i32):
         """Differentiable SPEED-REGULARITY (constant-feed) penalty added to ``self.loss``.
 
-        Penalizes changes in the commanded per-step SPEED (step length):
+        Penalizes changes in the commanded per-step SPEED (squared step length):
 
-            step = (|tool_delta[t]| - |tool_delta[t-1]|)^2
+            step = (|tool_delta[t]|^2 - |tool_delta[t-1]|^2)^2
 
         summed over ``t in [max(t_start,1), T-1)`` and normalized by the segment
         count. Unlike ``compute_jerk_penalty`` (which penalizes the full vector
         difference of consecutive deltas, i.e. both speed AND direction changes),
         this acts only on the step LENGTH, so it pushes the feed rate toward a
         constant value without discouraging the legitimate back-and-forth
-        direction reversals of a boustrophedon/raster toolpath. Acts directly on
-        ``tool_delta`` (``needs_grad=True``). Gated by ``w_step`` (0 -> disabled).
+        direction reversals of a boustrophedon/raster toolpath. Uses squared
+        lengths (polynomial, no sqrt) so the gradient stays well-conditioned near
+        zero step length. Acts directly on ``tool_delta`` (``needs_grad=True``).
+        Gated by ``w_step`` (0 -> disabled).
         """
         for t in range(ti.max(t_start, 1), T - 1):
             w = self.w_step[None]
             n = ti.max(1, T - 1 - ti.max(t_start, 1))
-            d0 = ti.sqrt(self.tool_delta[t].dot(self.tool_delta[t]) + 1e-12)
-            d1 = ti.sqrt(self.tool_delta[t - 1].dot(self.tool_delta[t - 1]) + 1e-12)
-            diff = d0 - d1
+            d2_0 = self.tool_delta[t].dot(self.tool_delta[t])
+            d2_1 = self.tool_delta[t - 1].dot(self.tool_delta[t - 1])
+            diff = d2_0 - d2_1
             ti.atomic_add(self.loss[None], w * diff * diff / n)
 
     @ti.kernel
@@ -929,9 +931,9 @@ class CSGSimulatorDelta:
         # Speed regularity over consecutive step lengths.
         ns = ti.max(1, T - 2)
         for t in range(1, T - 1):
-            d0 = ti.sqrt(self.tool_delta[t].dot(self.tool_delta[t]) + 1e-12)
-            d1 = ti.sqrt(self.tool_delta[t - 1].dot(self.tool_delta[t - 1]) + 1e-12)
-            sp = d0 - d1
+            d2_0 = self.tool_delta[t].dot(self.tool_delta[t])
+            d2_1 = self.tool_delta[t - 1].dot(self.tool_delta[t - 1])
+            sp = d2_0 - d2_1
             st += w_s * sp * sp / ns
         self.diag_gouge[None] = g
         self.diag_residual[None] = r

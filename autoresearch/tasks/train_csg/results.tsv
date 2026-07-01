@@ -1,1 +1,4 @@
 commit	dice	memory_gb	status	description	command
+ac065c7	0.606857	0.0	keep	baseline sphere seed1 (default scenario)	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --grad-clip 0.5 --eval-freq 10 --seed 1
+ac065c7	0.606008	0.0	keep	baseline sphere seed2	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --grad-clip 0.5 --eval-freq 10 --seed 2
+322fb7c	0.607514	0.0	keep	sphere seed1 w_jerk=1e-2	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --grad-clip 0.5 --eval-freq 10 --seed 1 --w-jerk 1e-2

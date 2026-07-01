@@ -126,10 +126,11 @@ class Args:
     init_scale: float = 0.05
     """half-range of the uniform random init for per-step displacements (0.02 and 0.1 both hurt)"""
     init_mode: str = "random"
-    """trajectory init: 'random', 'raster', 'spiral', 'shell', or 'zlayer' (z-level
-    descent that pre-clears the sphere exterior layer by layer, using the tall tool's
-    vertical extent). Structured inits are dead levers: raster/spiral/shell/zlayer all
-    fail via speed-limit clipping -- inits can't help until the tool can move (dt=0.45)."""
+    """trajectory init: 'random', 'raster', 'raster_fine', 'spiral', 'shell', or
+    'zlayer' (z-level descent that pre-clears the sphere exterior layer by layer,
+    using the tall tool's vertical extent). 'raster_fine' is a clipping-aware fine
+    boustrophedon (per-step <= feed cap) that survives the speed clip. The coarse
+    structured inits (raster/spiral/shell/zlayer) fail via speed-limit clipping."""
     grad_clip: float = 0.5
     """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
     transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5 is
@@ -450,7 +451,40 @@ def main():
     # For structured inits we generate the desired tool_pos[1..T-1] (T-1 points)
     # then difference (with the first delta measured from tool_start).
     tool_start = np.array([0.5, 0.5, 1.0], dtype=np.float32)
-    if args.init_mode == "raster":
+    if args.init_mode == "raster_fine":
+        # Clipping-aware fine boustrophedon: a 3D zigzag whose EVERY per-step
+        # displacement is <= the feed speed cap (feed_speed*dt, ~0.075 normalized
+        # at dt=0.45), so the simulator's per-step speed clip does NOT destroy
+        # the path (the failure mode of the coarse raster/spiral/shell inits).
+        # The tool snakes across the XY footprint at constant step (~0.06) while
+        # Z descends linearly -- a uniform, constant-feed CNC finishing pattern
+        # that pre-covers the whole part so the optimizer starts in a good basin.
+        n = T - 1
+        ncols = 11
+        nrows = 11
+        xs = np.linspace(0.20, 0.80, ncols)
+        ys = np.linspace(0.20, 0.80, nrows)
+        z_top, z_bot = 0.90, 0.10
+        positions = []
+        idx = 0
+        for j in range(nrows):
+            row_xs = xs if j % 2 == 0 else xs[::-1]
+            for x in row_xs:
+                frac = idx / max(1, n - 1)
+                z = z_top + (z_bot - z_top) * frac
+                positions.append([float(x), float(ys[j]), float(z)])
+                idx += 1
+                if idx >= n:
+                    break
+            if idx >= n:
+                break
+        positions = np.array(positions[:n], dtype=np.float32)
+        if len(positions) < n:
+            positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "raster":
         # Boustrophedon (zigzag) sweep over the cube cross-section at descending
         # z-levels. The tool carves a swept capsule along each segment, so this
         # pre-clears the stock exterior (the region the random init never reaches)
