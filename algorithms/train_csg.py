@@ -194,6 +194,10 @@ class Args:
     and only genuine excursions (deep empty corners, high retracts beyond r_tool)
     are charged. 0 disables. A soft nudge on trajectory shape -- unlike the
     per-voxel w_prox, does not stall carving."""
+    w_traj_prox_warmup_frac: float = 0.0
+    """fraction of iters before w_traj_prox begins ramping (0 = on from start).
+    Carve first (dice peaks), THEN ramp w_traj_prox on to polish excursions
+    without stalling the carving sweep."""
 
 
 
@@ -722,6 +726,15 @@ def main():
                 else:
                     span = max(1, args.iters - warm_start)
                     sim.w_prox[None] = args.w_prox * ((it - warm_start) / span)
+            # w_traj_prox warmup: same idea -- carve first, then polish
+            # trajectory excursions.
+            if args.w_traj_prox > 0.0 and args.w_traj_prox_warmup_frac > 0.0:
+                warm_start = int(args.iters * args.w_traj_prox_warmup_frac)
+                if it < warm_start:
+                    sim.w_traj_prox[None] = 0.0
+                else:
+                    span = max(1, args.iters - warm_start)
+                    sim.w_traj_prox[None] = args.w_traj_prox * ((it - warm_start) / span)
 
             # Push current displacements into Taichi, then forward+backward.
             # With restart_from_state, each iteration either starts fresh (optionally
