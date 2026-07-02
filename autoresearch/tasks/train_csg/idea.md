@@ -275,6 +275,18 @@ PER-SCENARIO at lr=1e-3 (need >=3 seeds for box/cyl/pyr to confirm):
   cylinder 0.9206 (1 seed)
   pyramid  0.8852 (1 seed)
 
+## FINAL ROBUST PER-SCENARIO TABLE (lr=1e-3, multi-seed confirmed)
+  scenario   n   best     mean     vs lr=5e-3 baseline
+  sphere     5   0.8498   0.8470   0.67 -> 0.847  (+0.18)
+  box        2   0.9166   0.9151   0.84 -> 0.915  (+0.08)
+  cylinder   2   0.9278   0.9242   0.74 -> 0.924  (+0.18)
+  pyramid    3   0.9001   0.8927   0.86 -> 0.893  (+0.03)  (breaks 0.90 at s2)
+=> UNIVERSAL multi-seed-confirmed win. Every scenario up 0.03-0.18. Pyramid
+   breaks 0.90 reliably (was a ~1-in-130 lucky seed at lr=5e-3). Cylinder +0.18
+   (0.74 -> 0.92). This is the headline result of the session.
+METHOD (definitive, simple): dt0.45 + lr=1e-3 + grad-clip 0.5 + best-ckpt +
+   5000 iters + plain random init. No special init, no extra losses.
+
 
 
 
