@@ -503,3 +503,24 @@ functional (truncation drops the excursion; stage-2 trains from the saved
 state) but the hard-dice gain is marginal because stage-2 optimizes the biased
 soft objective. The real bottleneck for deployable dice is the soft/hard
 mismatch, not the trailing excursion.
+
+## COMBINE w_len+w_step SWEEP (2026-07-02) -- levers OVERLAP, don't stack
+w_len=0.03 + w_step=0.001, rf, s1:
+  sphere  : 0.8501 (flat vs 0.849; w_step ALONE 0.858 better)
+  box     : 0.9163 (== baseline 0.9166; AIR 0.114 LOWEST EVER vs ~0.28)
+  pyramid : 0.8892 (> baseline 0.885; +0.004)
+  cylinder: 0.9357 (w_len ALONE s4 0.9448 better; but different seed)
+VERDICT: the two regularizers partially overlap (both discourage motion), so
+forcing both everywhere is NOT better than the per-shape best individual lever.
+KEEP per-shape operating points: sphere w_step=0.001 (0.858), cylinder
+w_len=0.03 (0.945), box/pyramid w_len+w_step (box air 0.114 is excellent).
+The box air 0.114 at full dice shows w_len+w_step can near-eliminate air on
+the right shape -- directly serves the user's air directive.
+
+## NEW DIRECTION: the soft/hard carve gap (the real deployable-dice wall)
+Staging exposed that soft-carve dice (0.934) is ~0.21 above hard-carve (0.7187).
+The soft union adds log(2)/k per step, over-eroding. If I can sharpen the
+union (lower k -> closer to hard boolean) WITHOUT breaking gradients, the
+soft training objective would match the deployable hard carve -> the 0.93
+soft would transfer. This is the highest-value lever for deployable dice.
+NEXT: sweep k (union smoothness) on cylinder, measure soft AND hard dice.
