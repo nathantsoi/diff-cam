@@ -377,3 +377,59 @@ region far from the sphere surface. The ~30% air is the price of 0.847 dice;
 it is NOT a tunable inefficiency. Revert all air/excursion losses to 0
 (the code remains for reference). The productive dice frontier is elsewhere
 (lr, iters, scenarios), not loss-based air reduction.
+
+## DICE FRONTIER (2026-07-02, after air-cutting analysis)
+
+### sphere dt=0.5 + m=160 at lr1e-3: WIN (higher dice AND less air!)
+s0: dice 0.8527, air 0.229 (vs operating point dt0.45 m128: 0.847, air 0.295).
+=> dt0.5 (faster tool, ~1.1 voxel/step) + m160 (more steps) covers the sphere
+   with HIGHER dice AND 22pct LESS air. This is the rare lever that improves
+   BOTH -- it directly addresses the user's air directive without the dice
+   trade-off (unlike the loss-based approaches which all failed). The faster
+   tool traverses the corners more directly (less re-traversal). Confirming
+   with seeds 1,2,3.
+   NOTE: dt0.5 needs m=160 (the operating-point note: m=160 optimal at dt0.5,
+   m=128 at dt<=0.45). m>=192 NaNs (SDF overflow).
+
+### sphere gc=0.4 at lr1e-3: WORSE (0.786, air 0.210)
+gc0.4 reduces air (0.295->0.210, lowest) but drops dice (0.847->0.786) -- yet
+another air-dice trade-off point. gc0.4 is a partial-air lever at a dice cost.
+Discard for dice. (The prior "gc0.4 for sphere" advice was from the lr=5e-3
+era; at lr=1e-3, gc0.5 is better.)
+
+### cylinder s3: NEW best 0.9398 (vs 0.928)
+Confirms cylinder is climbing with seeds; s4 running. Cylinder ceiling now
+~0.94.
+
+### box s3: 0.9172 (confirms box ~0.917, low variance)
+
+## dt0.5+m160 FLUKE CHECK (2026-07-02)
+sphere dt0.5 m160 across seeds: s0=0.8527, s1=0.841, s2=0.792, s3=0.848.
+=> mean 0.834, var HIGH, air 0.37-0.43 (vs dt0.45 m128 mean 0.849, air 0.295).
+   The s0=0.8527 "win" was a SINGLE-SEED FLUKE. dt0.5+m160 is higher-variance,
+   higher-air, and lower-mean than dt0.45+m128. ROBUST sphere operating point
+   REMAINS dt0.45 m128 lr1e-3 gc0.5 (mean 0.849 across s1/s2/s3). Discard
+   dt0.5+m160 for sphere. The autoresearch.md note "m=160 at dt0.5" is a
+   numerical sweet spot, not a dice improvement.
+
+## BACKLOG / NEXT DIRECTIONS (2026-07-02)
+Productive dice frontier (air-loss direction is DEAD -- see trade-off memo):
+1. lr sweep around 1e-3 (RUNNING: 5e-4, 2e-3, 3e-3 on sphere). Only 1e-3 and
+   5e-3 mapped so far; 1e-3 was a +0.13 jump from 5e-3. If 5e-4 > 1e-3, the
+   peak is lower (try 2e-4); if 2e-3 > 1e-3, higher.
+2. cylinder is the highest-dice shape and climbing (s3 0.9398, s4 0.9336).
+   Try cyl lr sweep + iters>5000 to push past 0.94.
+3. w_step (constant-feed regularizer, default 0) -- DIFFERENT from air losses;
+   encourages uniform feed (CNC-like) and may NOT oppose carving. Quick test
+   at small weight on sphere. Addresses user "uniform patterns" directive
+   via smoothness, not air.
+4. Parametric raster/spiral toolpath (low-dim, inherently uniform, low-air) --
+   big architectural change; would directly satisfy "uniform CNC patterns" +
+   cut less air. Hold as major direction if lr sweep stalls.
+
+## lr SWEEP COMPLETE (2026-07-02) -- lr EXHAUSTED
+sphere rf s0, dt0.45 m128 gc0.5:
+  5e-4 -> 0.804 | 1e-3 -> 0.849 (PEAK) | 2e-3 -> 0.754 | 3e-3 -> 0.720 | 5e-3 -> 0.717
+Sharp unimodal peak at 1e-3. Both sides drop fast. lr lever is DONE; 1e-3 is
+the sphere optimum. (Cylinder/box/pyramid also use 1e-3; no reason to re-sweep
+them -- the lever shape is the same.)

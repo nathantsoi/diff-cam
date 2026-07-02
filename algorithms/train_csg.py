@@ -198,6 +198,14 @@ class Args:
     """fraction of iters before w_traj_prox begins ramping (0 = on from start).
     Carve first (dice peaks), THEN ramp w_traj_prox on to polish excursions
     without stalling the carving sweep."""
+    w_len: float = 0.0
+    """weight on the PATH-LENGTH (minimal-motion) penalty: mean squared per-step
+    displacement. Agnostic to WHERE the tool is (unlike the contour-hug losses
+    which pull toward the surface and oppose carving), it only discourages
+    motion. On trailing steps with no residual left to carve it shrinks the
+    deltas toward zero so the tool STOPS instead of wandering into air -- the
+    targeted fix for the trailing-excursion failure (tool climbs off the part
+    for the last ~25% of the path). 0 disables."""
 
 
 
@@ -337,6 +345,7 @@ def eval_metrics(sim, T, dx):
     m["loss_step"] = float(sim.diag_step[None])
     m["loss_prox"] = float(sim.diag_prox[None])
     m["loss_traj_prox"] = float(sim.diag_traj_prox[None])
+    m["loss_len"] = float(sim.diag_len[None])
     # Air-cut fraction (independent of w_air): the fraction of the swept tool
     # volume over the trajectory that lies in empty stock. Computed as a RATIO
     # (air volume / total swept tool volume) so it is in [0,1] and independent
@@ -481,6 +490,7 @@ def main():
     sim.w_step[None] = args.w_step
     sim.w_prox[None] = args.w_prox
     sim.w_traj_prox[None] = args.w_traj_prox
+    sim.w_len[None] = args.w_len
     sim.bake_target_grid()
     sim.set_target_volume()
 
@@ -973,6 +983,7 @@ def main():
             "loss_step": round(float(last_m.get("loss_step", 0.0)), 6) if last_m else 0.0,
             "loss_prox": round(float(last_m.get("loss_prox", 0.0)), 6) if last_m else 0.0,
             "loss_traj_prox": round(float(last_m.get("loss_traj_prox", 0.0)), 6) if last_m else 0.0,
+            "loss_len": round(float(last_m.get("loss_len", 0.0)), 6) if last_m else 0.0,
             "air_cut_fraction": round(float(last_m.get("air_cut_fraction", 0.0)), 6) if last_m else 0.0,
             "air_cut_raw": round(float(last_m.get("air_cut_raw", 0.0)), 6) if last_m else 0.0,
             "tool_swept_raw": round(float(last_m.get("tool_swept_raw", 0.0)), 6) if last_m else 0.0,

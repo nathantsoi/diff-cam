@@ -150,6 +150,9 @@ def main():
     ap.add_argument("--w-traj-prox-warmup-frac", type=float, default=0.0,
                     help="fraction of iters before w_traj_prox ramps on (0 = on from start); "
                          "carve first, then polish excursions")
+    ap.add_argument("--w-len", type=float, default=0.0,
+                    help="weight on the path-length (minimal-motion) penalty (0 = disabled); "
+                         "shrinks trailing-step drift so the tool stops instead of wandering off the part")
     ap.add_argument("--random-tool-start", action="store_true",
                     help="randomize the cutter start each fresh start (XY in the stock "
                          "footprint, Z >= stock top + --tool-start-clearance-in)")
@@ -250,6 +253,7 @@ def main():
             "--w_prox_warmup_frac", str(args.w_prox_warmup_frac),
             "--w_traj_prox", str(args.w_traj_prox),
             "--w_traj_prox_warmup_frac", str(args.w_traj_prox_warmup_frac),
+            "--w_len", str(args.w_len),
             "--eval_freq", str(args.eval_freq),
             "--seed", str(args.seed),
             "--stock_size_in", *ssi,

@@ -272,6 +272,20 @@ class CSGSimulatorDelta:
         # trajectory shape. Gated by w_traj_prox (0 -> disabled).
         self.w_traj_prox = ti.field(dtype=ti.f32, shape=())
         self.w_traj_prox[None] = 0.0
+        # Path-length (minimal-motion) penalty: the squared step length
+        # |delta_t|^2 summed over all active segments. Unlike the contour-hug
+        # losses (w_prox / w_traj_prox) which pull the tool TOWARD the surface
+        # and so oppose the necessary carving excursions, this is agnostic to
+        # WHERE the tool is -- it only discourages motion. During carving the
+        # strong residual gradient dominates and the tool moves anyway; on the
+        # trailing steps (part already carved, no residual, gouge barrier pushes
+        # the tool off into open air) the length penalty is the only gradient
+        # and shrinks the deltas toward zero, so the tool STOPS instead of
+        # wandering away. This is the targeted fix for the trailing-excursion
+        # failure mode (tool climbs into air for the last ~25% of the path).
+        # Gated by w_len (0 -> disabled).
+        self.w_len = ti.field(dtype=ti.f32, shape=())
+        self.w_len[None] = 0.0
 
         # Holder collision is a PENETRATION BARRIER, not a proximity field: it is
         # exactly zero (zero gradient) while the holder has clearance, and grows
@@ -311,6 +325,10 @@ class CSGSimulatorDelta:
         # Trajectory contour-hug diagnostic (the w_traj_prox loss component,
         # independent of w_traj_prox so it is non-zero even when disabled).
         self.diag_traj_prox = ti.field(dtype=ti.f32, shape=())
+        # Path-length (minimal-motion) diagnostic: mean squared step length
+        # (the w_len loss component, independent of w_len so it is non-zero
+        # even when disabled -- measures how much the tool moves).
+        self.diag_len = ti.field(dtype=ti.f32, shape=())
 
         # ---- Stock ----
         self.stock = ti.field(
@@ -994,6 +1012,29 @@ class CSGSimulatorDelta:
             ti.atomic_add(self.loss[None], w * diff * diff / n)
 
     @ti.kernel
+    def compute_length_penalty(self, t_start: ti.i32, T: ti.i32):
+        """Differentiable PATH-LENGTH (minimal-motion) penalty on ``self.loss``.
+
+        Penalizes the squared per-step displacement summed over all active
+        segments:
+
+            len = |tool_delta[t]|^2
+
+        summed over ``t in [t_start, T)`` and normalized by the segment count.
+        Agnostic to WHERE the tool is (unlike w_prox / w_traj_prox, which pull
+        toward the surface and oppose carving): it only discourages motion. On
+        carving steps the residual gradient dominates so motion is preserved;
+        on trailing steps with no residual it shrinks the deltas toward zero so
+        the tool stops rather than wandering into air. Acts directly on
+        ``tool_delta`` (``needs_grad=True``). Gated by ``w_len`` (0 -> disabled).
+        """
+        for t in range(ti.max(t_start, 0), T):
+            w = self.w_len[None]
+            n = ti.max(1, T - ti.max(t_start, 0))
+            d2 = self.tool_delta[t].dot(self.tool_delta[t])
+            ti.atomic_add(self.loss[None], w * d2 / n)
+
+    @ti.kernel
     def compute_traj_prox_penalty(self, t_start: ti.i32, T: ti.i32):
         """Differentiable TRAJECTORY contour-hug penalty on the tool CENTER.
 
@@ -1046,6 +1087,7 @@ class CSGSimulatorDelta:
         tpx = 0.0
         jk = 0.0
         st = 0.0
+        ln = 0.0
         scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
         inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
         w_g = self.w_gouge[None]
@@ -1058,6 +1100,7 @@ class CSGSimulatorDelta:
         r_vox = self.tool_radius[None] / self.v
         r_safe = ti.max(r_vox, 1e-3)
         w_tp = self.w_traj_prox[None]
+        w_l = self.w_len[None]
         margin = self.holder_margin[None]
         # Geometry terms on the final stock (stock[T]).
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
@@ -1116,6 +1159,11 @@ class CSGSimulatorDelta:
             d = self.target_sdf_scalar(mid)
             exc = ti.max(0.0, d - r_vox)
             tpx += w_tp * exc * exc / ntp
+        # Path-length (minimal-motion) over all active segments.
+        nl = ti.max(1, T)
+        for t in range(T):
+            d2 = self.tool_delta[t].dot(self.tool_delta[t])
+            ln += w_l * d2 / nl
         self.diag_gouge[None] = g
         self.diag_residual[None] = r
         self.diag_holder[None] = h
@@ -1126,6 +1174,7 @@ class CSGSimulatorDelta:
         self.diag_tool_swept[None] = ts
         self.diag_prox[None] = px
         self.diag_traj_prox[None] = tpx
+        self.diag_len[None] = ln
 
     @ti.kernel
     def holder_overlap_at(self, t: ti.i32) -> ti.f32:
@@ -1185,6 +1234,7 @@ class CSGSimulatorDelta:
         self.compute_jerk_penalty(0, num_active_steps - 1)
         self.compute_step_penalty(0, num_active_steps - 1)
         self.compute_traj_prox_penalty(0, num_active_steps - 1)
+        self.compute_length_penalty(0, num_active_steps - 1)
 
     def forward_from(self, t0, num_active_steps):
         """Forward pass RESTARTED from a restored mid-cut state at step ``t0``.
@@ -1212,6 +1262,7 @@ class CSGSimulatorDelta:
         self.compute_jerk_penalty(t0, num_active_steps - 1)
         self.compute_step_penalty(t0, num_active_steps - 1)
         self.compute_traj_prox_penalty(t0, num_active_steps - 1)
+        self.compute_length_penalty(t0, num_active_steps - 1)
 
     # ------------------------------------------------------------------
     # State save / restore (for restart-from-state training)
