@@ -309,6 +309,10 @@ def eval_metrics(sim, T, dx):
     m["loss_air"] = float(sim.diag_air[None])
     m["loss_jerk"] = float(sim.diag_jerk[None])
     m["loss_step"] = float(sim.diag_step[None])
+    # Unweighted air-cut fraction (independent of w_air): the fraction of the
+    # swept tool volume over the trajectory that lies in empty stock. Lower =
+    # less air-cutting / more efficient toolpath.
+    m["air_cut_fraction"] = float(sim.diag_air_unweighted[None])
     return m
 
 
@@ -906,6 +910,7 @@ def main():
             "loss_air": round(float(last_m.get("loss_air", 0.0)), 6) if last_m else 0.0,
             "loss_jerk": round(float(last_m.get("loss_jerk", 0.0)), 6) if last_m else 0.0,
             "loss_step": round(float(last_m.get("loss_step", 0.0)), 6) if last_m else 0.0,
+            "air_cut_fraction": round(float(last_m.get("air_cut_fraction", 0.0)), 6) if last_m else 0.0,
         }
         metrics_path = os.path.join(run_dir, "metrics.json")
         with open(metrics_path, "w") as f:
