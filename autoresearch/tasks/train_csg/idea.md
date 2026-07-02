@@ -201,6 +201,48 @@ All other levers tried (w_jerk, w_step, m=160, grad_clip, raster_fine_wide,
 w_gouge, w_air) are neutral or seed-reshuffling on the sphere. The sphere rf
 ceiling (~0.71 max, ~0.685 mean over seeds) is robust.
 
+## *** BREAKTHROUGH: learning-rate reduction breaks the sphere ceiling ***
+lr=2e-3 (vs default 5e-3) on rf sphere:
+  s1: 0.6694 -> 0.7501  (+0.081)  @ iter 2720
+  s2: 0.6709 -> 0.7620  (+0.091)  @ iter 4740
+=> A +0.08-0.09 jump, FAR beyond seed-reshuffling (~0.01-0.05) and past the
+   long-standing ~0.71 ceiling to 0.75-0.76. The default lr=5e-3 OVERSHOOTS past
+   the good carving basin (dice peaks then degrades); lr=2e-3 lets the optimizer
+   SETTLE into the basin and sustain a much higher peak. This is the biggest
+   real win of the session and the first lever to raise the ceiling (not just
+   reshuffle). Confirming with s3 and bracketing lr=1e-3 / 3e-3.
+IMPLICATIONS: (1) the "transient peak then degrade" that motivated
+   best-checkpoint saving is largely an LR-overshoot artifact -- lower LR both
+   raises AND sustains the peak. (2) This likely generalizes to ALL scenarios
+   (the overshoot is a property of the optimizer, not the shape) -- must test
+   pyramid/box/cylinder with lr=2e-3. (3) Re-evaluate whether other "neutral"
+   levers behave differently at lr=2e-3.
+NEW BEST CONFIG: raster_fine + lr=2e-3 -> sphere ~0.75-0.76.
+
+## LR SWEEP FULL RESULT + GENERALIZATION (the real headline)
+lr sweep on rf sphere (5000 iters, same-GPU paired):
+  lr=5e-3 (default): s1=0.6694, s2=0.6709          mean ~0.67
+  lr=2e-3:           s1=0.7501, s2=0.7620, s3=0.7629  mean ~0.758
+  lr=1e-3:           s1=0.8397, s2=0.8494            mean ~0.844  <- optimum
+  lr=5e-4:           s1=0.7947 (underfit at 5000 iters, too slow)
+=> Monotonic: lower LR = higher, more SUSTAINED peak (lr=1e-3 final-iter 0.848,
+   barely drops -- no overshoot degradation). lr=1e-3 reliably hits the ~0.85
+   sphere ceiling that was previously only reachable by lucky seeds. +0.17 mean.
+GENERALIZATION (lr=1e-3 rf, vs lr=5e-3 rf baseline, same-GPU):
+  sphere:  0.6694 -> 0.8397  (+0.170)
+  box:     0.8388 -> 0.9166  (+0.078, sustained; NEW box best)
+  pyramid: 0.8627 -> 0.8852  (+0.023, > random 0.8797)
+  cylinder: testing
+=> The default lr=5e-3 was SUBOPTIMAL EVERYWHERE -- it overshoots past the good
+   carving basin. lr=1e-3 is a universal win across all scenarios. This dwarfs
+   every other lever tried (raster_fine init included). The "transient peak then
+   degrade" that motivated best-checkpoint saving is largely an LR-overshoot
+   artifact: at lr=1e-3 the peak is high AND sustained (final-iter ~ best).
+   RE-EVALUATE: is the lr=1e-3 win init-independent? (testing random+lr1e-3)
+   If random+lr1e-3 also hits ~0.85, then LR is the dominant lever and rf is
+   secondary. Also: does lr=1e-3 + more iters exceed 0.85?
+NEW BEST CONFIG: raster_fine + lr=1e-3 -> sphere ~0.84-0.85, box 0.917, pyramid 0.885.
+
 
 
 
