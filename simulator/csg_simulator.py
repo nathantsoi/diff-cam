@@ -840,13 +840,13 @@ class CSGSimulatorDelta:
         Differentiable in ``tool_pos``/``tool_delta`` (via ``tool_sdf``) and in
         ``stock`` (via ``stock_occ``); safe under ``ti.ad.Tape``.
         """
-        scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
-        inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
-        w = self.w_air[None]
-        w_p = self.w_prox[None]
-        r_vox = self.tool_radius[None] / self.v
-        r_safe = ti.max(r_vox, 1e-3)
         for t, i, j, k in ti.ndrange((t_start, T), self.Nx, self.Ny, self.Nz):
+            scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
+            inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
+            w = self.w_air[None]
+            w_p = self.w_prox[None]
+            r_vox = self.tool_radius[None] / self.v
+            r_safe = ti.max(r_vox, 1e-3)
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
@@ -859,14 +859,17 @@ class CSGSimulatorDelta:
             tool_occ = 1.0 / (1.0 + ti.exp(ta))             # ~1 inside the swept tool
             air = tool_occ * (1.0 - stock_occ)
 
-            ti.atomic_add(self.loss[None], inv_n * w * air * air)
             # Distance-weighted air: charge air-cutting in proportion to its
             # distance from the target surface (squared, in tool-radii). Zero on
             # the surface, grows into the empty corners. Cheap (target grid is a
             # constant lookup; the expensive tool_sdf is already computed above).
+            # Combined with the plain w_air term into ONE atomic_add so the
+            # serialized global reduction is not doubled.
             d_t = ti.max(0.0, self.target[i, j, k])
             w_dist = (d_t / r_safe) ** 2
-            ti.atomic_add(self.loss[None], inv_n * w_p * air * air * w_dist)
+            ti.atomic_add(
+                self.loss[None], inv_n * (w + w_p * w_dist) * air * air
+            )
 
     @ti.kernel
     def compute_jerk_penalty(self, t_start: ti.i32, T: ti.i32):
