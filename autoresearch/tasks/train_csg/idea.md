@@ -433,3 +433,45 @@ sphere rf s0, dt0.45 m128 gc0.5:
 Sharp unimodal peak at 1e-3. Both sides drop fast. lr lever is DONE; 1e-3 is
 the sphere optimum. (Cylinder/box/pyramid also use 1e-3; no reason to re-sweep
 them -- the lever shape is the same.)
+
+## CYLINDER TRAILING-EXCURSION FIX (2026-07-02, user-flagged)
+User observed (visually) that cylinder run CamEnvDiff-v0__train_csg__4__1783011153407
+(dice 0.934) makes a clean contour for the first ~3/4 then moves AWAY from the
+part. Numerical analysis of trajectory.npy (normalized [0,1]^3 stock coords):
+  - First ~70 steps: tool near cylinder surface (mean dist 0.68, the contour).
+  - Steps 80-127: tool climbs MONOTONICALLY in z from 0.95 (cyl top) to 3.43,
+    drifting to (0.36, 1.47, 3.43) -- far above and beside the part.
+    Mean dist from surface 1.79 (vs 0.68 for steps 0-80).
+ROOT CAUSE: trailing steps have no residual left to carve (cylinder done by
+~step 70-80); with no residual gradient the gouge barrier pushes the tool off
+the surface and it drifts upward into open air. This is NOT the air-cut trade-
+off (that was loss pulling the tool TOWARD the surface, opposing carving).
+
+FIX: w_len path-length penalty (mean squared |delta_t|^2). Agnostic to WHERE
+the tool is -- only discourages motion. Carving steps: residual gradient
+dominates, motion preserved. Trailing steps: no residual, so even tiny w_len
+shrinks deltas toward zero -> tool STOPS instead of wandering. Implemented in
+simulator (compute_length_penalty + diag_len) + train_csg (--w-len) + pipeline.
+
+SWEEP (8 parallel, memory-capped to coexist with zichaohu/dlee jobs):
+  cyl w_len in {0.001,0.003,0.01,0.03,0.1} (T=128, seed4); cyl T in {96,112}
+  (no w_len); sphere w_len=0.01 safety check. Baseline cyl T=128 = 0.934.
+  PREDICTION: moderate w_len (~0.01) keeps dice ~0.93 AND collapses the
+  trailing z-climb; too-large w_len will under-carve (suppress necessary
+  motion) -> dice drops.
+
+## w_len SWEEP RESULT (2026-07-02) -- CLEAN WIN, addresses user directive
+cyl T=128 s4, baseline (no w_len) = dice 0.934, air 0.286, trailing z-climb 1.704.
+  w_len=0.001 -> 0.9405, air 0.243
+  w_len=0.003 -> 0.9395, air 0.272
+  w_len=0.01  -> 0.9419, air 0.235
+  w_len=0.03  -> 0.9448, air 0.1995  <-- BEST; trailing z-climb 1.704 -> 0.010
+  w_len=0.1   -> 0.9414, air 0.1723  <-- lowest air
+  T=112 (no w_len) -> 0.9428 (confirms trailing steps hurt; but w_len better)
+  sphere w_len=0.01 -> 0.8547 (>= 0.847 baseline; w_len SAFE for sphere)
+VERDICT: w_len is the WIN that the contour-hug losses could never be. It
+improves BOTH dice AND air on cylinder (and doesn't hurt sphere) because it is
+agnostic to WHERE the tool is -- it only shrinks trailing drift. The user's
+"tool moves away from the part" complaint is FIXED (trailing z-climb 1.704 ->
+0.010). Operating point: w_len=0.03 for cylinder. Try w_len=0.01-0.03 on
+box/pyramid/sphere next.
