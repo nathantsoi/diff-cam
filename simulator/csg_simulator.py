@@ -337,6 +337,16 @@ class CSGSimulatorDelta:
             needs_grad=True,
         )
         self.stock_volume = ti.field(dtype=ti.f32, shape=())
+        # Saved mid-cut stock init (for staged training): when use_saved_init
+        # is set, ``init_stock`` writes this SDF into stock[0] instead of the
+        # full envelope, so a FRESH trajectory can start carving from a partially-
+        # carved state left by a previous trajectory. stock[0] is a constant
+        # (no grad), so autodiff through apply_cut on stock[1..T] is unaffected.
+        self.saved_stock = ti.field(
+            dtype=ti.f32, shape=(self.Nx, self.Ny, self.Nz)
+        )
+        self.use_saved_init = ti.field(dtype=ti.i32, shape=())
+        self.use_saved_init[None] = 0
 
         # ---- Target ----
         target_options = ["box", "cylinder", "sphere", "pyramid"]
@@ -633,16 +643,25 @@ class CSGSimulatorDelta:
 
     @ti.kernel
     def init_stock(self):
-        """Initial stock: the full envelope block, as a voxel-space SDF in stock[0]."""
+        """Initial stock: the full envelope block, as a voxel-space SDF in stock[0].
+
+        When ``use_saved_init`` is set (staged training), the saved mid-cut SDF
+        in ``saved_stock`` is written to stock[0] instead, so a fresh trajectory
+        starts carving from a partially-carved state.
+        """
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            p = ti.Vector(
-                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
-            )
-            self.stock[0, i, j, k] = box_sdf(
-                self._vox(p),
-                self._vox(ti.Vector([0.5, 0.5, 0.5])),
-                self._vox(ti.Vector([0.5, 0.5, 0.5])),
-            )
+            if self.use_saved_init[None]:
+                # Staged training: start from a saved mid-cut SDF.
+                self.stock[0, i, j, k] = self.saved_stock[i, j, k]
+            else:
+                p = ti.Vector(
+                    [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+                )
+                self.stock[0, i, j, k] = box_sdf(
+                    self._vox(p),
+                    self._vox(ti.Vector([0.5, 0.5, 0.5])),
+                    self._vox(ti.Vector([0.5, 0.5, 0.5])),
+                )
 
     @ti.kernel
     def bake_target_grid(self):
@@ -1295,6 +1314,22 @@ class CSGSimulatorDelta:
         pos_np[t0] = state["tool_pos"]
         self.stock.from_numpy(stock_np)
         self.tool_pos.from_numpy(pos_np)
+
+    def load_saved_init(self, stock_sdf, tool_pos):
+        """Configure staged-training: start each ``init_stock`` from a saved
+        mid-cut SDF (the carved stock left by a previous trajectory) and set
+        the tool start to the saved tool position. After this, a FRESH
+        ``forward(T)`` carves the remaining material (the residual the previous
+        trajectory left) starting from the mid-cut state.
+
+        ``stock_sdf``: (Nx, Ny, Nz) float array, the saved stock SDF.
+        ``tool_pos``: (3,) float array, the saved tool position in [0,1]^3.
+        """
+        self.saved_stock.from_numpy(np.asarray(stock_sdf, dtype=np.float32))
+        self.use_saved_init[None] = 1
+        self.tool_start[None] = ti.Vector(
+            [float(tool_pos[0]), float(tool_pos[1]), float(tool_pos[2])]
+        )
 
     # ========================================================================
     # Rendering

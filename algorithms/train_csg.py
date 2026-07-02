@@ -207,6 +207,14 @@ class Args:
     targeted fix for the trailing-excursion failure (tool climbs off the part
     for the last ~25% of the path). 0 disables."""
 
+    init_stock_from: str = ""
+    """STAGED TRAINING: path to a .npz saved by the truncation utility containing
+    a mid-cut stock SDF + tool position. When set, training starts each forward
+    pass from the SAVED partially-carved stock (instead of the full envelope)
+    and fixes the tool start to the saved tool position -- so this trajectory
+    carves the REMAINING material the previous trajectory left. Use with the
+    staged_train orchestrator: train -> truncate -> train --init-stock-from."""
+
 
 
     # Robustness to initial conditions: random cutter start + restart-from-state
@@ -494,6 +502,18 @@ def main():
     sim.bake_target_grid()
     sim.set_target_volume()
 
+    # --- Staged training: start from a saved mid-cut stock + tool position ---
+    # (the previous trajectory's truncated state). init_stock will then write
+    # the saved SDF into stock[0] each forward pass instead of the full envelope.
+    saved_tool_start = None
+    if args.init_stock_from:
+        saved = np.load(args.init_stock_from)
+        sim.load_saved_init(saved["stock_sdf"], saved["tool_pos"])
+        saved_tool_start = np.asarray(saved["tool_pos"], dtype=np.float32)
+        print(f"[staged] init from saved state {args.init_stock_from}: "
+              f"t*={int(saved['t_trunc'])}, tool_pos={saved['tool_pos'].tolist()}",
+              flush=True)
+
     # Voxels are physical cubes of side sim.v mm: use that as the grid spacing
     # for metric surface distances (mm) and STL mesh export.
     dx = sim.v
@@ -503,6 +523,11 @@ def main():
     # For structured inits we generate the desired tool_pos[1..T-1] (T-1 points)
     # then difference (with the first delta measured from tool_start).
     tool_start = np.array([0.5, 0.5, 1.0], dtype=np.float32)
+    # Staged training: the trajectory must start at the saved tool position so
+    # the structured-init delta[0] = positions[0] - tool_start lines up with
+    # sim.tool_start (which load_saved_init set to the same saved position).
+    if saved_tool_start is not None:
+        tool_start = saved_tool_start
     if args.init_mode == "raster_fine":
         # Clipping-aware fine boustrophedon: a 3D zigzag whose EVERY per-step
         # displacement is <= the feed speed cap (feed_speed*dt, ~0.075 normalized
