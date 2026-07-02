@@ -277,7 +277,12 @@ class CSGSimulatorDelta:
         # over the trajectory, normalized per voxel -- measures how much of the
         # tool motion is cutting air (0 = all cutting, 1 = all air). Independent
         # of w_air so it is non-zero even when the air penalty is disabled.
+        # diag_air_unweighted is the NUMERATOR (air volume); diag_tool_swept is
+        # the DENOMINATOR (total swept tool volume); the ratio air/swept is the
+        # true per-step air-cut fraction in [0,1], independent of how much total
+        # carving the trajectory did.
         self.diag_air_unweighted = ti.field(dtype=ti.f32, shape=())
+        self.diag_tool_swept = ti.field(dtype=ti.f32, shape=())
 
         # ---- Stock ----
         self.stock = ti.field(
@@ -890,6 +895,7 @@ class CSGSimulatorDelta:
         h = 0.0
         a = 0.0
         au = 0.0
+        ts = 0.0
         jk = 0.0
         st = 0.0
         scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
@@ -930,6 +936,7 @@ class CSGSimulatorDelta:
             air = tool_occ * (1.0 - stock_occ)
             a += inv_n * w_a * air * air
             au += inv_n * air
+            ts += inv_n * tool_occ
         # Jerk / smoothness over consecutive deltas.
         nj = ti.max(1, T - 2)
         for t in range(1, T - 1):
@@ -949,6 +956,7 @@ class CSGSimulatorDelta:
         self.diag_jerk[None] = jk
         self.diag_step[None] = st
         self.diag_air_unweighted[None] = au
+        self.diag_tool_swept[None] = ts
 
     @ti.kernel
     def holder_overlap_at(self, t: ti.i32) -> ti.f32:
