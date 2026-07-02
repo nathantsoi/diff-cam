@@ -182,6 +182,12 @@ class Args:
     air ~ 0) stay cheap. 0 disables. Directly attacks the "tool moving far from
     the part surface" failure mode without the blunt collapse of cranking w_air.
     Shares the air loop's tool_sdf eval, so it is nearly free."""
+    w_prox_warmup_frac: float = 0.0
+    """fraction of iters before w_prox begins ramping (0 = on from start).
+    Carving is established first (residual falls, dice peaks), THEN w_prox
+    ramps linearly from 0 to --w_prox over the remaining iters to polish
+    air-cutting without pinning the tool before the sweep is learned."""
+
 
 
     # Robustness to initial conditions: random cutter start + restart-from-state
@@ -695,6 +701,18 @@ def main():
                     span = max(1, args.iters - decay_start)
                     lrnow = args.learning_rate * (1.0 - (it - decay_start) / span)
                     opt.param_groups[0]["lr"] = lrnow
+
+            # w_prox warmup: keep w_prox at 0 until warmup_frac of iters, then
+            # ramp linearly to args.w_prox over the remaining iters so carving
+            # is established before the contour-hug penalty is engaged (avoids
+            # the tool-pinning stall that a constant w_prox causes).
+            if args.w_prox > 0.0 and args.w_prox_warmup_frac > 0.0:
+                warm_start = int(args.iters * args.w_prox_warmup_frac)
+                if it < warm_start:
+                    sim.w_prox[None] = 0.0
+                else:
+                    span = max(1, args.iters - warm_start)
+                    sim.w_prox[None] = args.w_prox * ((it - warm_start) / span)
 
             # Push current displacements into Taichi, then forward+backward.
             # With restart_from_state, each iteration either starts fresh (optionally

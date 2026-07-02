@@ -141,6 +141,9 @@ def main():
     ap.add_argument("--w-prox", type=float, default=0.0,
                     help="weight on the distance-weighted air-cut (contour-hug) penalty (0 = disabled); "
                          "charges air-cutting in proportion to squared distance from the target surface")
+    ap.add_argument("--w-prox-warmup-frac", type=float, default=0.0,
+                    help="fraction of iters before w_prox ramps on (0 = on from start); "
+                         "carve first, then polish air-cutting")
     ap.add_argument("--random-tool-start", action="store_true",
                     help="randomize the cutter start each fresh start (XY in the stock "
                          "footprint, Z >= stock top + --tool-start-clearance-in)")
@@ -238,6 +241,7 @@ def main():
             "--w_jerk", str(args.w_jerk),
             "--w_step", str(args.w_step),
             "--w_prox", str(args.w_prox),
+            "--w_prox_warmup_frac", str(args.w_prox_warmup_frac),
             "--eval_freq", str(args.eval_freq),
             "--seed", str(args.seed),
             "--stock_size_in", *ssi,
