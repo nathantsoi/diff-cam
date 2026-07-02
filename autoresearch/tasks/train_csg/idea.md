@@ -475,3 +475,14 @@ agnostic to WHERE the tool is -- it only shrinks trailing drift. The user's
 "tool moves away from the part" complaint is FIXED (trailing z-climb 1.704 ->
 0.010). Operating point: w_len=0.03 for cylinder. Try w_len=0.01-0.03 on
 box/pyramid/sphere next.
+
+## w_step SWEEP RESULT (2026-07-02) -- small sphere WIN + CNC-uniform
+sphere rf s0, dt0.45 m128 gc0.5 (baseline 0.849):
+  w_step=0.001 -> 0.8578 (BEST; +0.009 over baseline; air 0.322)
+  w_step=0.01  -> 0.8520
+  w_step=0.1   -> 0.8507
+w_step (constant-feed regularizer, penalizes step-LENGTH changes) gives a small
+sphere improvement AND directly encourages the uniform-feed CNC pattern the user
+asked for -- without opposing carving (it acts on step length, not direction or
+position). Saturates fast (0.001 is enough). Operating point: w_step=0.001 for
+sphere. NOTE: orthogonal to w_len (which fixes trailing drift); can combine.
