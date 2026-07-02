@@ -290,3 +290,90 @@ METHOD (definitive, simple): dt0.45 + lr=1e-3 + grad-clip 0.5 + best-ckpt +
 
 
 
+
+## AIR-CUT ANALYSIS (2026-07-02, addressing "tool moves far from surface")
+
+User directive: trajectories move far from the part surface, cutting air.
+Fix via the loss. Added a RATIO air-cut metric (air volume / total swept
+tool volume, in [0,1], GPU-independent) -- the raw air SUM was misleading
+(higher for high-dice trajectories that move more total volume).
+
+Baseline measurement (sphere, seed 0, random, lr1e-3 / lr5e-3, NEW ratio metric):
+  lr=5e-3  dice 0.717  air_cut_fraction 0.342   (1/3 of swept volume is air)
+  lr=1e-3  dice ~0.85  air_cut_fraction [running]
+=> air-cutting is REAL and large (~1/3 of motion at lr=5e-3).
+
+### Why w_air is the wrong tool
+w_air charges ALL air volume equally -- necessary corner-carving
+repositioning and useless far-from-surface excursions alike -- so cranking
+it collapses carving (confirmed: w_air>=0.1 -> dice ~0.563). The loss is too
+blunt. Geometry: the default sphere (r=11.43mm) nearly FILLS the 1in stock,
+so "air" is concentrated in the empty CORNERS (far from the sphere surface in
+3D). The tool re-traverses these corners.
+
+### New loss: distance-weighted air-cut (contour-hug), w_prox
+Charges air-cutting in proportion to SQUARED distance from the TARGET surface
+(from the precomputed target SDF grid, a constant -> no extra gradient path):
+  air = tool_occ * (1 - stock_occ)          # 1 where tool is in empty stock
+  d_t = max(0, target_grid[i,j,k])          # voxels outside target surface
+  loss += w_prox * air^2 * (d_t / r_tool)^2
+Folds into the existing compute_air_penalty loop (shares the tool_sdf eval ->
+nearly free). So: re-traversing empty CORNERS (far from part) heavily
+penalized; surface-hugging (small d_t) and necessary first-pass carving (in
+remaining stock, air~0) stay cheap. Exports loss_prox diagnostic.
+NOTE: unweighted prox signal ~15 at w_prox=0.5 -> to keep prox comparable to
+the geometry loss (~0.14 at convergence) need w_prox ~ 0.01; sweep {0.01,
+0.03, 0.1, 0.3} (loss at iter 8 scales 0.57/0.91/2.0/5.2, geometry ~0.5).
+GOAL: drop air_cut_fraction without losing dice. Sweep running on GPU5/6/7/9.
+
+### w_prox sweep RESULT: FAILS (stalls carving)
+Sweep w_prox in {0.01,0.03,0.1,0.3}, sphere seed0 random lr1e-3. ALL stall at
+dice ~0.555, resid stuck ~0.43 (vs baseline resid ~0.10), grad tiny (0.02-0.6).
+The distance-weighting BACKFIRES: w_dist=(d_t/r)^2 is LARGEST in the empty
+corners, exactly where the tool must travel to carve -> the prox gradient is
+strongest where carving needs to happen, pinning the tool to the surface and
+preventing the back-and-forth SWEEP motion that carving requires. Even
+w_prox=0.01 (prox contributes only ~0.07 to loss) fully stalls optimization.
+CONCLUSION: per-voxel air penalties (w_air AND w_prox) fundamentally conflict
+with the sweeping motion carving requires. Carving a near-filled sphere
+INHERENTLY needs air-traversal to reach the corners. Loss-based air reduction
+trades dice 0.85 -> 0.55. Dead lever (like w_air). Revert w_prox to 0.
+
+### w_traj_prox (gentle per-segment center-distance penalty) RESULT: ALSO STALLS
+A gentler design: per-segment (T terms, not T*N^3) penalty on the tool-CENTER
+segment-midpoint distance from the TARGET surface, with an r_tool DEADZONE so
+contact-cutting (incl. corner-carving, which sits within r_tool of the surface)
+is FREE and only genuine excursions are charged. Autodiff-safe via a new
+target_sdf_scalar (the Vector-field target_params trigger a Taichi autodiff
+MatrixPtrStmt load-forwarding bug when the SDF input is grad-tracked).
+Sweep w_traj_prox in {0.003,0.01,0.03,0.1}: ALL stall at resid plateau ~0.25,
+dice 0.52-0.57 (vs baseline 0.847). Even the tiniest weight prevents the
+carving-sweep BREAKTHROUGH (baseline resid 0.25->0.10 between iter 1000-1500;
+traj_prox stays at 0.25 past iter 2000). The excursion penalty, however gentle,
+consistently pulls against the corner-sweep that carving requires.
+FUNDAMENTAL FINDING: in this differentiable carving formulation, the high-dice
+(0.847) trajectory INHERENTLY makes corner excursions (~30% air). ANY loss term
+that discourages being far from the surface (w_air, w_prox per-voxel, w_traj_prox
+per-segment) impedes the carving sweep and drops dice to ~0.55. The 30% air is
+the price of high dice. => testing WARMUP (carve first, then polish) next.
+
+### WARMUP (carve first, then polish) RESULT: ALSO FAILS
+w_traj_prox with warmup_frac=0.3 (carve 1500 iters, then ramp traj_prox on).
+Carving established normally (dice ~0.78-0.80, resid ~0.10-0.13 by iter 1030).
+Once traj_prox ramps on (iter>1500) it DESTROYS the carve: dice 0.80->0.48-0.54,
+resid 0.10->0.24. The best-checkpoint (~0.80, captured pre-polish) is BELOW
+baseline 0.847 because only 1500 pure-carve iters ran before destruction.
+Even post-carve, the excursion penalty fundamentally opposes the high-dice
+trajectory -- it pulls the tool out of the corner-sweep that carving requires.
+
+### CONCLUSION (air-cutting vs dice)
+Robust across THREE loss designs (w_air per-voxel, w_prox distance-weighted
+per-voxel, w_traj_prox per-segment center-distance) AND warmup: ANY loss term
+that discourages the tool from being far from the part surface trades off dice
+heavily (0.847 -> ~0.55). The high-dice sphere trajectory INHERENTLY makes
+corner excursions (~30% air-cut fraction) because the sphere nearly fills the
+1in stock and carving the corners requires sweeping through the empty corner
+region far from the sphere surface. The ~30% air is the price of 0.847 dice;
+it is NOT a tunable inefficiency. Revert all air/excursion losses to 0
+(the code remains for reference). The productive dice frontier is elsewhere
+(lr, iters, scenarios), not loss-based air reduction.
