@@ -144,6 +144,63 @@ norm, center 0.5) spans 0.05-0.95 -- the raster UNDER-COVERS the sphere's outer
 annulus, capping rf at ~0.71. A wider-footprint raster (0.05-0.95, z 0.05-0.95)
 should cover the full sphere and push past 0.710. Testing.
 
+## raster_fine_wide RESULT: NOT a win (hypothesis refuted)
+raster_fine_wide (full 0.05-0.95 envelope) sphere seeds:
+  s1=0.6939, s2=0.6572, s3=0.6638, s5=0.6649. mean ~0.670, max 0.694.
+vs raster_fine (narrow 0.20-0.80): mean ~0.677, max 0.710 (s5).
+=> wide is slightly WORSE on mean and loses the high ceiling (0.710->0.694).
+   The under-coverage hypothesis is REFUTED: widening the footprint does not
+   help -- it wastes step budget on the corners and hits edge effects (high
+   gradients at 0.05/0.95). The narrow 0.20-0.80 footprint is well-tuned; the
+   ~0.71 ceiling is NOT a coverage issue. raster_fine (narrow) remains best.
+   (s1 was the exception: wide 0.694 > narrow 0.669, seed-dependent basin shift.)
+
+## NEXT LEVER: w_gouge sweep (sustain the transient peak)
+The dice peaks transiently then degrades (over-carving/gouging after the peak).
+A stronger gouge barrier (w_gouge 4.0 -> 6.0, 8.0) may prevent post-peak
+degradation and lift the best-checkpoint dice. Testing on rf sphere s1
+(baseline rf s1=0.6694 GPU8).
+
+## w_gouge SWEEP RESULT: 6.0 is the sweet spot (ROBUST MEAN WIN)
+w_gouge on rf sphere s1 (same-GPU vs baseline 0.6694):
+  4.0 (base): 0.6694
+  5.0:        0.6884  (+0.019)
+  6.0:        0.7086  (+0.039)  <- sweet spot
+  7.0:        (testing)
+  8.0:        0.6040  (collapse @ iter130; too strong)
+=> Monotonic increase 4->6, then collapse at 8. Peak near 6-7.
+w_gouge=6.0 distribution (rf sphere): s1=0.7086, s2=0.6974, s3=0.6949, s5=0.6772.
+  mean 0.694, 3 of 4 seeds >= 0.695. vs narrow rf mean 0.677 (10 seeds).
+=> w_gouge=6.0 reliably lifts TYPICAL sphere dice to ~0.69-0.71 (a +0.017 mean
+   improvement), making high dice ROBUST across seeds rather than dependent on a
+   lucky seed. It does NOT raise the absolute max (lucky s5 0.710 unchanged
+   ceiling; wg6 s5 0.677 is lower). Mechanism: stronger gouge barrier prevents
+   the post-peak over-carving that degrades dice, sustaining a higher best ckpt.
+BEST CONFIG SO FAR: raster_fine + w_gouge=6.0 -> reliable ~0.70 sphere dice.
+
+## w_gouge CORRECTION: seed-reshuffling, NOT a real mean win
+Added wg6 s4=0.6443 (vs narrow s4=0.6932, -0.049) and rechecked over 5 PAIRED
+seeds (same GPU pairings):
+  seed   narrow   wg6     delta
+  s1     0.6694   0.7086  +0.039
+  s2     0.6709   0.6974  +0.027
+  s3     0.6791   0.6949  +0.016
+  s4     0.6932   0.6443  -0.049
+  s5     0.7098   0.6772  -0.033
+  mean   0.6845   0.6845   0.000  <- IDENTICAL
+  max    0.7098   0.7086   -0.001  <- tied
+=> w_gouge=6.0 does NOT improve the mean or max over a fair seed sample. It
+   reshuffles dice across seeds (helps low seeds, hurts high seeds) -- a
+   basin-shift, not a real improvement. The earlier 3-seed "mean +0.011" was
+   subset variance. w_gouge=7.0 (0.6355) is past the sweet spot and hurts.
+   METHODOLOGICAL LESSON (same as the GPU-nondeterminism correction): need
+   >=5 PAIRED seeds to distinguish a real lever from seed-reshuffling. Single-
+   seed or 3-seed apparent wins can be pure variance.
+CONSOLIDATED: the ONLY real win is raster_fine vs random (+0.063 sphere mean).
+All other levers tried (w_jerk, w_step, m=160, grad_clip, raster_fine_wide,
+w_gouge, w_air) are neutral or seed-reshuffling on the sphere. The sphere rf
+ceiling (~0.71 max, ~0.685 mean over seeds) is robust.
+
 
 
 
