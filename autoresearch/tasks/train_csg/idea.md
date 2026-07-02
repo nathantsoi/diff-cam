@@ -486,3 +486,20 @@ sphere improvement AND directly encourages the uniform-feed CNC pattern the user
 asked for -- without opposing carving (it acts on step length, not direction or
 position). Saturates fast (0.001 is enough). Operating point: w_step=0.001 for
 sphere. NOTE: orthogonal to w_len (which fixes trailing drift); can combine.
+
+## STAGED TRAINING RESULT (2026-07-02) -- machinery works, hard-dice gain marginal
+cyl s4 (the user's flagged run), staged: stage1 train -> truncate t*=57 (drop
+70 trailing excursion steps) -> stage2 train from saved mid-cut stock.
+HARD-carve (deployable) dice, apples-to-apples:
+  stage-1 full (128 pos)      : 0.7187
+  stage-1 truncated (58 pos)  : 0.7187  (trailing 70 steps cut NOTHING)
+  staged concat (185 pos)     : 0.7203  (+0.0016 over stage-1; marginal)
+  stage-2 soft (on saved stock): 0.932  (training metric)
+KEY FINDING: the SOFT-carve training metric (0.934 for stage-1, 0.932 for
+stage-2) is HEAVILY INFLATED vs the HARD-carve deployable metric (0.7187) -- a
+0.21 gap. The soft union's log(2)/k per-step bias over-erodes; a trajectory
+optimized for soft does NOT transfer to hard. Staging machinery is correct and
+functional (truncation drops the excursion; stage-2 trains from the saved
+state) but the hard-dice gain is marginal because stage-2 optimizes the biased
+soft objective. The real bottleneck for deployable dice is the soft/hard
+mismatch, not the trailing excursion.
