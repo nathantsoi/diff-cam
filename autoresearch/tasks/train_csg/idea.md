@@ -524,3 +524,21 @@ union (lower k -> closer to hard boolean) WITHOUT breaking gradients, the
 soft training objective would match the deployable hard carve -> the 0.93
 soft would transfer. This is the highest-value lever for deployable dice.
 NEXT: sweep k (union smoothness) on cylinder, measure soft AND hard dice.
+
+## k SWEEP RESULT (2026-07-02) -- soft/hard gap is NOT a smoothness knob
+cyl w_len0.03 s4, sweep k (soft-union sharpness; lower=sharper=closer to hard):
+  k=10.0: soft 0.9383, HARD 0.7204  (the working k; gap 0.218)
+  k=5.0 : soft 0.7493, HARD 0.7175  (gradients weaken, soft drops)
+  k=2.0 : soft 0.0000, HARD 0.7175  (sharp union saturates -> degenerate)
+  k=1.0 : soft 0.0000, HARD 0.7175
+  k=0.5 : soft 0.0000, HARD 0.7175
+DECISIVE: the HARD carve is ~k-INVARIANT (~0.718 for all k<=5, 0.720 at k=10).
+Lowering k does NOT close the soft/hard gap -- it just breaks the optimizer
+(sharp union saturates, gradients vanish, trajectory degenerates to zero).
+The gap is the soft union's INHERENT per-step bias (smooth_max adds ~log(2)/k
+per carve -> soft over-erodes vs the hard boolean), NOT a tunable artifact.
+The soft training objective is a BIASED PROXY; the hard carve (~0.72) is the
+true deployable dice and is capped by trajectory coverage, not smoothness.
+CONCLUSION: k=10 is correct. The soft/hard gap is fundamental to the method.
+To raise DEPLOYABLE dice, must improve the TRAJECTORY's hard-carve coverage
+(more steps / finer feed / better path), not the loss smoothness.
