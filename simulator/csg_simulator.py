@@ -252,6 +252,16 @@ class CSGSimulatorDelta:
         # of direction. Acts directly on tool_delta (needs_grad=True).
         self.w_step = ti.field(dtype=ti.f32, shape=())
         self.w_step[None] = 0.0
+        # Distance-weighted AIR-CUT (contour-hug) penalty: like w_air but the
+        # charge scales with how far the swept voxel is from the TARGET surface
+        # (squared), so re-traversing empty CORNERS far from the part is heavily
+        # penalized while surface-hugging and the necessary first-pass carving
+        # (in remaining stock, air ~ 0) stay cheap. Directly attacks the
+        # "tool moving far from the part surface" failure mode without the
+        # blunt collapse that cranking w_air causes. Shares the air loop's
+        # tool_sdf eval, so it is nearly free. Gated by w_prox (0 -> disabled).
+        self.w_prox = ti.field(dtype=ti.f32, shape=())
+        self.w_prox[None] = 0.0
 
         # Holder collision is a PENETRATION BARRIER, not a proximity field: it is
         # exactly zero (zero gradient) while the holder has clearance, and grows
@@ -283,6 +293,11 @@ class CSGSimulatorDelta:
         # carving the trajectory did.
         self.diag_air_unweighted = ti.field(dtype=ti.f32, shape=())
         self.diag_tool_swept = ti.field(dtype=ti.f32, shape=())
+        # Distance-weighted air-cut (contour-hug) diagnostic: the w_prox loss
+        # component value, independent of w_prox so it is non-zero even when the
+        # penalty is disabled. Measures air-cutting concentrated far from the
+        # target surface.
+        self.diag_prox = ti.field(dtype=ti.f32, shape=())
 
         # ---- Stock ----
         self.stock = ti.field(
@@ -814,13 +829,24 @@ class CSGSimulatorDelta:
         so small engagements are cheap and long air traverses dominate. Gated by
         ``w_air`` (0 -> exactly zero, zero gradient -> disabled).
 
+        In the SAME loop we also add the distance-weighted (contour-hug) air
+        penalty gated by ``w_prox``: the air charge is multiplied by
+        ``(max(0, target_sdf) / r_tool)^2`` from the precomputed target grid, so
+        air-cutting FAR from the target surface (empty corners) is heavily
+        penalized while surface-hugging and the necessary first-pass carving
+        (in remaining stock, air ~ 0) stay cheap. The target grid is a constant
+        so it adds no gradient path -- gradient still flows only through ``air``.
+
         Differentiable in ``tool_pos``/``tool_delta`` (via ``tool_sdf``) and in
         ``stock`` (via ``stock_occ``); safe under ``ti.ad.Tape``.
         """
+        scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
+        inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
+        w = self.w_air[None]
+        w_p = self.w_prox[None]
+        r_vox = self.tool_radius[None] / self.v
+        r_safe = ti.max(r_vox, 1e-3)
         for t, i, j, k in ti.ndrange((t_start, T), self.Nx, self.Ny, self.Nz):
-            scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
-            inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
-            w = self.w_air[None]
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
@@ -834,6 +860,13 @@ class CSGSimulatorDelta:
             air = tool_occ * (1.0 - stock_occ)
 
             ti.atomic_add(self.loss[None], inv_n * w * air * air)
+            # Distance-weighted air: charge air-cutting in proportion to its
+            # distance from the target surface (squared, in tool-radii). Zero on
+            # the surface, grows into the empty corners. Cheap (target grid is a
+            # constant lookup; the expensive tool_sdf is already computed above).
+            d_t = ti.max(0.0, self.target[i, j, k])
+            w_dist = (d_t / r_safe) ** 2
+            ti.atomic_add(self.loss[None], inv_n * w_p * air * air * w_dist)
 
     @ti.kernel
     def compute_jerk_penalty(self, t_start: ti.i32, T: ti.i32):
@@ -896,6 +929,7 @@ class CSGSimulatorDelta:
         a = 0.0
         au = 0.0
         ts = 0.0
+        px = 0.0
         jk = 0.0
         st = 0.0
         scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
@@ -906,6 +940,9 @@ class CSGSimulatorDelta:
         w_a = self.w_air[None]
         w_j = self.w_jerk[None]
         w_s = self.w_step[None]
+        w_p = self.w_prox[None]
+        r_vox = self.tool_radius[None] / self.v
+        r_safe = ti.max(r_vox, 1e-3)
         margin = self.holder_margin[None]
         # Geometry terms on the final stock (stock[T]).
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
@@ -937,6 +974,11 @@ class CSGSimulatorDelta:
             a += inv_n * w_a * air * air
             au += inv_n * air
             ts += inv_n * tool_occ
+            # Distance-weighted air (contour-hug): same term as the w_prox
+            # loss component, weighted by squared distance from target surface.
+            d_t = ti.max(0.0, self.target[i, j, k])
+            w_dist = (d_t / r_safe) ** 2
+            px += inv_n * w_p * air * air * w_dist
         # Jerk / smoothness over consecutive deltas.
         nj = ti.max(1, T - 2)
         for t in range(1, T - 1):
@@ -957,6 +999,7 @@ class CSGSimulatorDelta:
         self.diag_step[None] = st
         self.diag_air_unweighted[None] = au
         self.diag_tool_swept[None] = ts
+        self.diag_prox[None] = px
 
     @ti.kernel
     def holder_overlap_at(self, t: ti.i32) -> ti.f32:

@@ -174,6 +174,15 @@ class Args:
     consecutive step LENGTHS). 0 disables; pushes the feed rate toward a uniform
     value -- the canonical CNC toolpath pattern -- without discouraging the
     back-and-forth direction reversals of a raster/boustrophedon path."""
+    w_prox: float = 0.0
+    """weight on the DISTANCE-WEIGHTED air-cut (contour-hug) penalty: like w_air
+    but the charge scales with squared distance from the TARGET surface, so
+    air-cutting in the empty CORNERS far from the part is heavily penalized
+    while surface-hugging and necessary first-pass carving (in remaining stock,
+    air ~ 0) stay cheap. 0 disables. Directly attacks the "tool moving far from
+    the part surface" failure mode without the blunt collapse of cranking w_air.
+    Shares the air loop's tool_sdf eval, so it is nearly free."""
+
 
     # Robustness to initial conditions: random cutter start + restart-from-state
     random_tool_start: bool = False
@@ -309,6 +318,7 @@ def eval_metrics(sim, T, dx):
     m["loss_air"] = float(sim.diag_air[None])
     m["loss_jerk"] = float(sim.diag_jerk[None])
     m["loss_step"] = float(sim.diag_step[None])
+    m["loss_prox"] = float(sim.diag_prox[None])
     # Air-cut fraction (independent of w_air): the fraction of the swept tool
     # volume over the trajectory that lies in empty stock. Computed as a RATIO
     # (air volume / total swept tool volume) so it is in [0,1] and independent
@@ -451,6 +461,7 @@ def main():
     sim.w_air[None] = args.w_air
     sim.w_jerk[None] = args.w_jerk
     sim.w_step[None] = args.w_step
+    sim.w_prox[None] = args.w_prox
     sim.bake_target_grid()
     sim.set_target_volume()
 
@@ -916,6 +927,7 @@ def main():
             "loss_air": round(float(last_m.get("loss_air", 0.0)), 6) if last_m else 0.0,
             "loss_jerk": round(float(last_m.get("loss_jerk", 0.0)), 6) if last_m else 0.0,
             "loss_step": round(float(last_m.get("loss_step", 0.0)), 6) if last_m else 0.0,
+            "loss_prox": round(float(last_m.get("loss_prox", 0.0)), 6) if last_m else 0.0,
             "air_cut_fraction": round(float(last_m.get("air_cut_fraction", 0.0)), 6) if last_m else 0.0,
             "air_cut_raw": round(float(last_m.get("air_cut_raw", 0.0)), 6) if last_m else 0.0,
             "tool_swept_raw": round(float(last_m.get("tool_swept_raw", 0.0)), 6) if last_m else 0.0,
