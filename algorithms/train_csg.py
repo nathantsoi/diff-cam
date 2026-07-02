@@ -899,6 +899,13 @@ def main():
             "training_seconds": round(total_seconds, 2),
             "peak_vram_mb": round(peak_vram_mb, 2),
             "num_steps": args.iters,
+            # Loss-component diagnostics (from the best checkpoint's eval). These
+            # do NOT affect the dice score -- they expose how much of the swept
+            # tool motion is cutting air (loss_air), jerk (loss_jerk), and feed
+            # irregularity (loss_step) for analysis of trajectory quality.
+            "loss_air": round(float(last_m.get("loss_air", 0.0)), 6) if last_m else 0.0,
+            "loss_jerk": round(float(last_m.get("loss_jerk", 0.0)), 6) if last_m else 0.0,
+            "loss_step": round(float(last_m.get("loss_step", 0.0)), 6) if last_m else 0.0,
         }
         metrics_path = os.path.join(run_dir, "metrics.json")
         with open(metrics_path, "w") as f:
