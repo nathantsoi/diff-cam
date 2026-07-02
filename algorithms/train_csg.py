@@ -126,11 +126,13 @@ class Args:
     init_scale: float = 0.05
     """half-range of the uniform random init for per-step displacements (0.02 and 0.1 both hurt)"""
     init_mode: str = "random"
-    """trajectory init: 'random', 'raster', 'raster_fine', 'spiral', 'shell', or
-    'zlayer' (z-level descent that pre-clears the sphere exterior layer by layer,
-    using the tall tool's vertical extent). 'raster_fine' is a clipping-aware fine
-    boustrophedon (per-step <= feed cap) that survives the speed clip. The coarse
-    structured inits (raster/spiral/shell/zlayer) fail via speed-limit clipping."""
+    """trajectory init: 'random', 'raster', 'raster_fine', 'raster_fine_wide',
+    'spiral', 'shell', or 'zlayer' (z-level descent that pre-clears the sphere
+    exterior layer by layer, using the tall tool's vertical extent). 'raster_fine'
+    is a clipping-aware fine boustrophedon (per-step <= feed cap) that survives
+    the speed clip; 'raster_fine_wide' spans the full target envelope (0.05-0.95)
+    instead of the inner 0.20-0.80 core. The coarse structured inits
+    (raster/spiral/shell/zlayer) fail via speed-limit clipping."""
     grad_clip: float = 0.5
     """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
     transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5 is
@@ -465,6 +467,38 @@ def main():
         xs = np.linspace(0.20, 0.80, ncols)
         ys = np.linspace(0.20, 0.80, nrows)
         z_top, z_bot = 0.90, 0.10
+        positions = []
+        idx = 0
+        for j in range(nrows):
+            row_xs = xs if j % 2 == 0 else xs[::-1]
+            for x in row_xs:
+                frac = idx / max(1, n - 1)
+                z = z_top + (z_bot - z_top) * frac
+                positions.append([float(x), float(ys[j]), float(z)])
+                idx += 1
+                if idx >= n:
+                    break
+            if idx >= n:
+                break
+        positions = np.array(positions[:n], dtype=np.float32)
+        if len(positions) < n:
+            positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "raster_fine_wide":
+        # Full-extent clipping-aware boustrophedon: same per-step <= feed-cap
+        # fine zigzag as raster_fine, but the XY footprint (0.05-0.95) and Z
+        # range (0.05-0.95) span the WHOLE target envelope instead of the inner
+        # 0.20-0.80 core. raster_fine under-covers the target's outer annulus
+        # (e.g. a sphere of normalized radius 0.45 centered at 0.5 reaches
+        # 0.05-0.95), which caps its dice; this variant pre-covers the full part.
+        n = T - 1
+        ncols = 11
+        nrows = 11
+        xs = np.linspace(0.05, 0.95, ncols)
+        ys = np.linspace(0.05, 0.95, nrows)
+        z_top, z_bot = 0.95, 0.05
         positions = []
         idx = 0
         for j in range(nrows):
