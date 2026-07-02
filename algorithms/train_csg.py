@@ -893,6 +893,10 @@ def main():
         # the exact best-iter positions + the measured dice is the honest
         # representation of the best model training found.
         used_best = False
+        # Capture the FINAL-iter metrics (before any best-checkpoint override)
+        # so the warmup/polish effect on the final trajectory's air-cut is
+        # measurable independently of the best-dice checkpoint.
+        final_iter_m = dict(last_m) if last_m is not None else None
         if best_positions is not None and best_dice > 0.0:
             final_iter_dice = float(last_m["dice"]) if last_m is not None else 0.0
             if best_dice > final_iter_dice:
@@ -949,6 +953,11 @@ def main():
             "air_cut_fraction": round(float(last_m.get("air_cut_fraction", 0.0)), 6) if last_m else 0.0,
             "air_cut_raw": round(float(last_m.get("air_cut_raw", 0.0)), 6) if last_m else 0.0,
             "tool_swept_raw": round(float(last_m.get("tool_swept_raw", 0.0)), 6) if last_m else 0.0,
+            # Final-iter (pre-best-checkpoint) trajectory metrics: exposes any
+            # late-training polish (e.g. w_prox warmup) on the final trajectory,
+            # independent of where the best-dice peak occurred.
+            "final_iter_dice": round(float(final_iter_m["dice"]), 6) if final_iter_m else 0.0,
+            "final_iter_air_cut_fraction": round(float(final_iter_m.get("air_cut_fraction", 0.0)), 6) if final_iter_m else 0.0,
         }
         metrics_path = os.path.join(run_dir, "metrics.json")
         with open(metrics_path, "w") as f:
