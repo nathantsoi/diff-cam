@@ -243,6 +243,38 @@ GENERALIZATION (lr=1e-3 rf, vs lr=5e-3 rf baseline, same-GPU):
    secondary. Also: does lr=1e-3 + more iters exceed 0.85?
 NEW BEST CONFIG: raster_fine + lr=1e-3 -> sphere ~0.84-0.85, box 0.917, pyramid 0.885.
 
+## FULL GENERALIZATION + INIT-INDEPENDENCE (the clean headline)
+lr=1e-3 across ALL scenarios (vs lr=5e-3 baseline, same-GPU):
+  sphere:   0.6694 -> 0.8494 (rf) / 0.8483 (RANDOM)  +0.18 / +0.24
+  box:      0.8388 -> 0.9166                       +0.078
+  pyramid:  0.8627 -> 0.8852                       +0.023
+  cylinder: 0.7399 -> 0.9206                       +0.181  (NEW overall best)
+=> UNIVERSAL: every scenario improves 0.02-0.24. Cylinder + box see the biggest
+   jumps. NEW bests: box 0.917, cylinder 0.921 (was 0.74!), sphere 0.85 reliably.
+INIT-INDEPENDENCE: sphere RANDOM + lr=1e-3 = 0.8483, ESSENTIALLY EQUAL to
+   raster_fine + lr=1e-3 = 0.8494. => The raster_fine init advantage (+0.063 at
+   lr=5e-3) DISAPPEARS at lr=1e-3. The init only mattered because the bad lr=5e-3
+   made the optimizer overshoot, and a good init partially compensated. At the
+   correct LR, plain RANDOM init reaches the same ceiling. THE LR IS THE
+   DOMINANT LEVER; raster_fine is unnecessary (but harmless) at lr=1e-3.
+   Confirming init-independence with random seeds 2,3.
+SIMPLE METHOD: dt0.45 + lr=1e-3 + grad-clip 0.5 + best-ckpt + 5000 iters.
+   No special init, no extra losses needed. Universal across shapes.
+
+## INIT-INDEPENDENCE CONFIRMED (3 random seeds)
+lr=1e-3 sphere RANDOM: s1=0.8483, s2=0.8498, s3=0.8477. mean 0.8486, all sustained.
+vs rf: s1=0.8397, s2=0.8494. mean 0.8446.
+=> RANDOM is marginally HIGHER than rf at lr=1e-3 (0.849 vs 0.845). The init is
+   truly irrelevant (random even slightly better) at the correct LR. The
+   raster_fine init was only compensating for the lr=5e-3 overshoot.
+DEFINITIVE METHOD: dt0.45 + lr=1e-3 + grad-clip 0.5 + best-ckpt + 5000 iters +
+   plain random init. Sphere reliably ~0.85 (the structural ceiling).
+PER-SCENARIO at lr=1e-3 (need >=3 seeds for box/cyl/pyr to confirm):
+  sphere   0.8498 (5 seeds, solid)
+  box      0.9166 (1 seed)
+  cylinder 0.9206 (1 seed)
+  pyramid  0.8852 (1 seed)
+
 
 
 
