@@ -655,6 +655,29 @@ function renderList(list){
 // mp4 is served statically thereafter, so re-viewing is instant. Requires the
 // HTTPS server (scripts/serve_web_https.py); plain `python3 -m http.server`
 // has no API endpoint and the button will report that.
+function triggerDownload(e, url, filename) {
+  if (e) e.preventDefault();
+  fetch(url)
+    .then(r => {
+      if (!r.ok) throw new Error(r.status || r.statusText);
+      return r.blob();
+    })
+    .then(blob => {
+      const bUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = bUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(bUrl), 5000);
+    })
+    .catch(err => {
+      console.warn("Fetch download failed, opening in new tab:", err);
+      window.open(url, "_blank");
+    });
+}
+
 function renderDownloads(d){
   const dl = document.getElementById("downloads");
   const title = document.getElementById("dl-title");
@@ -664,9 +687,9 @@ function renderDownloads(d){
     title.textContent = d.idx == null
       ? `Downloads — ${d.name||"run"}`
       : `Downloads — experiment #${d.idx} (${d.shape||"?"})`;
-    if (d.gcode) html += `<a class="nc" href="${BASE}${d.gcode}" download>⬇ G-code (${d.gcode.split('/').pop()})</a>`;
+    if (d.gcode) html += `<a class="nc" href="${BASE}${d.gcode}" onclick="triggerDownload(event, '${BASE}${d.gcode}', '${d.gcode.split('/').pop()}')">⬇ G-code (${d.gcode.split('/').pop()})</a>`;
     for (const [label,p] of Object.entries(d.stl||{}))
-      html += `<a class="stl" href="${BASE}${p}" download>⬇ ${label} STL</a>`;
+      html += `<a class="stl" href="${BASE}${p}" onclick="triggerDownload(event, '${BASE}${p}', '${p.split('/').pop()}')">⬇ ${label} STL</a>`;
     html += `<a href="${BASE}${d.run_dir}/" target="_blank">📂 open run dir</a>`;
     html += `<button id="gen-video-btn" class="vid">🎬 Generate run video</button>`;
   } else {

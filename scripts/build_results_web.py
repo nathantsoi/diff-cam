@@ -23,6 +23,8 @@ import json
 import os
 import re
 import sys
+import threading
+import time
 
 import numpy as np
 
@@ -34,7 +36,7 @@ WEB = os.path.join(REPO, "autoresearch", "tasks", "train_csg", "web")
 # reads) -- NOT the legacy repo-root results.tsv, which holds an unrelated
 # 14-row baseline set. Reading the task log is what makes every autoresearch
 # experiment, including staged multi-trajectory runs, appear in the dashboard.
-RESULTS = os.path.join(os.path.dirname(WEB), "results.tsv")
+RESULTS = os.path.join(REPO, "autoresearch", "tasks", "train_csg", "results.tsv")
 OUT = os.path.join(WEB, "data.json")
 
 DICE_TOL = 0.05  # results.tsv dice must be within this of a run's metrics dice
@@ -471,7 +473,7 @@ def stl_paths(run_rec):
     return out
 
 
-def main():
+def build_data_payload(generate_gcode=True, verbose=True):
     if not os.path.exists(RESULTS):
         raise SystemExit(f"results.tsv not found at {RESULTS}")
 
@@ -485,11 +487,13 @@ def main():
             rows.append(r)
 
     index, n_runs = build_run_index()
-    print(f"[index] {n_runs} indexed run dirs across {len(index)} keys")
-    print(f"[results] {len(rows)} rows in results.tsv")
+    if verbose:
+        print(f"[index] {n_runs} indexed run dirs across {len(index)} keys")
+        print(f"[results] {len(rows)} rows in results.tsv")
 
     # Pre-generate gcode for ALL indexed runs so any click-through works.
-    print("[gcode] generating missing Haas G-code for indexed runs...")
+    if verbose:
+        print("[gcode] checking/generating missing Haas G-code for indexed runs...")
     n_gen = 0
     seen = set()
     for cands in index.values():
@@ -498,9 +502,10 @@ def main():
                 continue
             seen.add(rec["run_dir"])
             if not os.path.exists(os.path.join(REPO, rec["run_dir"], "gcode_haas.nc")):
-                if ensure_gcode(rec) is not None:
+                if ensure_gcode(rec, generate=generate_gcode) is not None:
                     n_gen += 1
-    print(f"[gcode] generated {n_gen} new G-code files")
+    if verbose and n_gen > 0:
+        print(f"[gcode] generated {n_gen} new G-code files")
 
     # Build experiment records, matching each results row to a run dir.
     experiments = []
@@ -538,7 +543,7 @@ def main():
             "run_dir": run["run_dir"] if run else None,
             "metrics": run["metrics"] if run else None,
             "stl": stl_paths(run) if run else {},
-            "gcode": ensure_gcode(run) if run else None,
+            "gcode": ensure_gcode(run, generate=generate_gcode) if run else None,
             "trajectory": trajectory_json(run) if run else None,
             "tool_geom": tool_geom_from_args(run["args"]) if run else None,
         }
@@ -546,18 +551,99 @@ def main():
             n_matched += 1
         experiments.append(rec)
 
-    print(f"[match] {n_matched}/{len(rows)} rows matched to a run dir")
+    if verbose:
+        print(f"[match] {n_matched}/{len(rows)} rows matched to a run dir")
 
-    os.makedirs(WEB, exist_ok=True)
     payload = {
         "experiments": experiments,
         "n_experiments": len(experiments),
         "n_matched": n_matched,
         "repo_root_note": "paths are relative to the repo root; serve from there",
     }
-    with open(OUT, "w") as f:
-        json.dump(payload, f)
-    print(f"[write] {OUT} ({os.path.getsize(OUT) / 1e6:.2f} MB)")
+    return payload
+
+
+class IncrementalResultsBuilder:
+    """Watches results.tsv and runs/ for new files/experiments and builds data index on demand."""
+
+    def __init__(self, generate_gcode=True, verbose=True):
+        self.generate_gcode = generate_gcode
+        self.verbose = verbose
+        self.lock = threading.Lock()
+        self.last_results_mtime = 0.0
+        self.last_runs_mtime = 0.0
+        self.last_run_dirs = set()
+        self.payload = None
+
+    def has_changed(self):
+        """Check if results.tsv or runs/ contents changed since last build."""
+        try:
+            results_mtime = os.path.getmtime(RESULTS)
+        except OSError:
+            results_mtime = 0.0
+        if results_mtime != self.last_results_mtime:
+            return True
+
+        try:
+            runs_mtime = os.path.getmtime(RUNS)
+        except OSError:
+            runs_mtime = 0.0
+        if runs_mtime != self.last_runs_mtime:
+            return True
+
+        try:
+            current_run_dirs = {
+                name for name in os.listdir(RUNS)
+                if os.path.isdir(os.path.join(RUNS, name))
+            }
+        except OSError:
+            current_run_dirs = set()
+        if current_run_dirs != self.last_run_dirs:
+            return True
+
+        return self.payload is None
+
+    def get_payload(self, force=False):
+        """Get the data payload, rebuilding incrementally if files changed."""
+        with self.lock:
+            if force or self.has_changed():
+                if self.verbose and not force and self.payload is not None:
+                    print("[builder] new files or results detected, updating data index...")
+                try:
+                    payload = build_data_payload(generate_gcode=self.generate_gcode, verbose=self.verbose)
+                    os.makedirs(os.path.dirname(OUT), exist_ok=True)
+                    with open(OUT, "w") as f:
+                        json.dump(payload, f)
+                    if self.verbose:
+                        print(f"[write] {OUT} ({os.path.getsize(OUT) / 1e6:.2f} MB)")
+                    self.payload = payload
+                    try:
+                        self.last_results_mtime = os.path.getmtime(RESULTS)
+                    except OSError:
+                        pass
+                    try:
+                        self.last_runs_mtime = os.path.getmtime(RUNS)
+                        self.last_run_dirs = {
+                            name for name in os.listdir(RUNS)
+                            if os.path.isdir(os.path.join(RUNS, name))
+                        }
+                    except OSError:
+                        pass
+                except Exception as e:
+                    if self.verbose:
+                        print(f"[builder] error rebuilding payload: {e}")
+            if self.payload is None and os.path.exists(OUT):
+                try:
+                    with open(OUT) as f:
+                        self.payload = json.load(f)
+                except Exception:
+                    pass
+            return self.payload
+
+
+def main():
+    builder = IncrementalResultsBuilder(generate_gcode=True, verbose=True)
+    builder.get_payload(force=True)
 
 
 if __name__ == "__main__":

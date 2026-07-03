@@ -10,7 +10,7 @@ untrusted cert on first visit — click "Advanced → Proceed" to continue.
 The cert is generated once into <web_dir>/.cert/ and reused on subsequent runs.
 
 Usage:
-    uv run python scripts/serve_web_https.py [--port 8443] [--host 0.0.0.0] \\
+    uv run python scripts/serve_web_https.py [--port 8443] [--host 0.0.0.0] \
         [--root .] [--web autoresearch/tasks/train_csg/web]
 
 Defaults: host 0.0.0.0 (LAN-reachable), port 8443, repo root as the serve root
@@ -30,6 +30,8 @@ import socketserver
 import ssl
 import subprocess
 import sys
+import threading
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -215,19 +217,44 @@ def main() -> None:
     root = Path(args.root).resolve() if args.root else repo
     web_dir = (repo / args.web).resolve()
     if not web_dir.is_dir():
-        sys.exit(f"error: web dir not found: {web_dir}")
+        fallback = (repo / "autoresearch" / "tasks" / "train_csg" / "web").resolve()
+        if fallback.is_dir():
+            web_dir = fallback
+        else:
+            sys.exit(f"error: web dir not found: {web_dir}")
 
     cert, key = ensure_cert(web_dir / ".cert", args.host)
 
     os.chdir(root)
+
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    from build_results_web import IncrementalResultsBuilder
+
+    builder = IncrementalResultsBuilder(generate_gcode=True, verbose=True)
+    builder.get_payload()
+
+    def background_builder_loop():
+        while True:
+            time.sleep(3)
+            try:
+                builder.get_payload()
+            except Exception as e:
+                print(f"[builder sync error] {e}")
+
+    threading.Thread(target=background_builder_loop, daemon=True).start()
+
     # Dev server: send no-store so browsers never serve a cached JS module (the
     # dynamic import("./voxel.js") otherwise stays stale across edits, making code
     # changes appear to do nothing).
     class NoCacheHandler(http.server.SimpleHTTPRequestHandler):
         def end_headers(self):
-            self.send_header("Cache-Control", "no-store, must-revalidate")
-            self.send_header("Pragma", "no-cache")
-            self.send_header("Expires", "0")
+            path = urllib.parse.urlparse(self.path).path
+            if not path.startswith("/runs/"):
+                self.send_header("Cache-Control", "no-store, must-revalidate")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
             super().end_headers()
 
         def _json(self, obj, status=200):
@@ -239,9 +266,13 @@ def main() -> None:
             self.wfile.write(body)
 
         def do_GET(self):
-            # On-demand video generation: GET /__api/video?run=runs/<name>[&force=1]
             parsed = urllib.parse.urlparse(self.path)
-            if parsed.path == "/__api/video":
+            if parsed.path in ("/web/data.json", "/data.json", "/__api/data.json") or parsed.path.endswith("/data.json"):
+                data = builder.get_payload()
+                if data is not None:
+                    return self._json(data)
+            # On-demand video generation: GET /__api/video?run=runs/<name>[&force=1]
+            if parsed.path == "/__api/video" or parsed.path.endswith("/__api/video"):
                 qs = urllib.parse.parse_qs(parsed.query)
                 run = (qs.get("run", [""])[0] or "").strip()
                 force = "1" in qs.get("force", [])
@@ -251,7 +282,7 @@ def main() -> None:
             # List all viewable run dirs (newest first) for the dashboard's
             # arbitrary-run picker. Accepts ?batch=old|current|all to filter by
             # batch folder; no param returns every runs/<name>.
-            if parsed.path == "/__api/runs":
+            if parsed.path == "/__api/runs" or parsed.path.endswith("/__api/runs"):
                 import sys
                 scripts_dir = str(Path(__file__).resolve().parent)
                 if scripts_dir not in sys.path:
@@ -263,7 +294,7 @@ def main() -> None:
             # Discover experiment batch directories under runs/ — auto-populates
             # the dashboard's batch selector. New branches added to runs/ show up
             # here without code changes.
-            if parsed.path == "/__api/batches":
+            if parsed.path == "/__api/batches" or parsed.path.endswith("/__api/batches"):
                 import sys
                 scripts_dir = str(Path(__file__).resolve().parent)
                 if scripts_dir not in sys.path:
@@ -273,7 +304,7 @@ def main() -> None:
             # Fetch one arbitrary run's full record (args/metrics/trajectory/stl/
             # gcode/tool_geom). `run=latest` resolves to the newest run dir, so a
             # fresh train_csg run can be inspected without knowing its name.
-            if parsed.path == "/__api/run":
+            if parsed.path == "/__api/run" or parsed.path.endswith("/__api/run"):
                 qs = urllib.parse.parse_qs(parsed.query)
                 run = (qs.get("run", [""])[0] or "").strip()
                 run_dir = _resolve_run_arg(root, run)

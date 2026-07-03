@@ -220,7 +220,7 @@ seeds suggested.
 - `results_plot.png` (gitignored, regenerated) — progress + per-scenario dice
   over 86 experiments, via `autoresearch/tasks/train_csg/plot_results.py`.
 - `idea.md` — chronological working log (this file consolidates it).
-- Web dashboard (`autoresearch/tasks/train_csg/web/`, served by
+- Web dashboard (`web/`, served by
   `scripts/serve_web_https.py`): fixed (commit `aad0d2a`) to show the full
   **multi-stage concatenated trajectory** for staged runs (not just the
   stage-2-only path), with stage 2 rendered in amber, a "stage 1→2" boundary

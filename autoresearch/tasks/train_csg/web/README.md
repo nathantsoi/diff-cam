@@ -38,7 +38,7 @@ uv run python scripts/build_results_web.py
 
 This joins `results.tsv` to `runs/`, (re)generates missing Haas G-code for each
 run, extracts the tool trajectories, and writes
-`autoresearch/tasks/train_csg/web/data.json`. (Takes ~1–2 min, mostly G-code
+`web/data.json`. (Takes ~1–2 min, mostly G-code
 generation for ~510 runs.) It requires a local `results.tsv` (the autoresearch
 harness's experiment log) and the matched run dirs under `runs/` — both are
 machine-local and untracked, so a fresh clone has neither until you run
@@ -60,15 +60,15 @@ self-signed HTTPS server so WebGPU activates on any LAN host:
 ```bash
 cd /home/ntsoi/papers/icra26-diffcam/diff-cam
 uv run python3 scripts/serve_web_https.py            # default: 0.0.0.0:8443
-# overrides: --port 8443 --host 0.0.0.0 --root . --web autoresearch/tasks/train_csg/web
+# overrides: --port 8443 --host 0.0.0.0 --root . --web web
 ```
 
 This generates a self-signed cert once into `web/.cert/` (gitignored) and serves
 the repo root over HTTPS. Open in Chrome:
 
 ```
-https://robolidar:8443/autoresearch/tasks/train_csg/web/index.html
-https://128.83.141.126:8443/autoresearch/tasks/train_csg/web/index.html
+https://robolidar:8443/web/index.html
+https://128.83.141.126:8443/web/index.html
 ```
 
 Chrome will warn about the untrusted cert on first visit — click
@@ -88,9 +88,9 @@ python3 -m http.server 8000 --bind 0.0.0.0
 Then open in a browser:
 
 ```
-http://robolidar:8000/autoresearch/tasks/train_csg/web/index.html
+http://robolidar:8000/web/index.html
 ```
-(or `http://128.83.141.126:8000/autoresearch/tasks/train_csg/web/index.html`)
+(or `http://128.83.141.126:8000/web/index.html`)
 
 ### Access from a remote computer
 
@@ -107,7 +107,7 @@ ssh -L 8000:localhost:8000 ntsoi@128.83.141.126
 ```
 
 Keep that session open, then in the remote computer's browser open the
-corresponding `localhost:<port>/autoresearch/tasks/train_csg/web/index.html` URL.
+corresponding `localhost:<port>/web/index.html` URL.
 `localhost` is a secure context, so WebGPU works through the HTTPS tunnel.
 
 To bind only locally (single-user on the host; safest if you don't want other
