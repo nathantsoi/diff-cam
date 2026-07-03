@@ -588,3 +588,64 @@ at 2x the compute (100min). The 5000-iter runs already capture the basin; cyl is
 coverage-capped (hard dice flat ~0.718), so additional soft-dice gains are small
 and noisy. iters=5000 remains the practical budget. The i7000 dip (0.9428) and
 the seedval s1 high (0.9499) bracket the ~0.94-0.95 noise band.
+
+================ FINAL REPORT (2026-07-02, loop wound down) ================
+Branch: ar-agd/jul1-uniform-toolpath. ~127 experiments across the session.
+
+OPERATING POINT (the best method, all shapes):
+  --dt 0.45 --learning-rate 1e-3 --init-mode raster_fine --w-len 0.03 \
+  --max-steps 256 --grad-clip 0.5 --eval-freq 10 --iters 5000
+Best dice (soft, the tracked metric): box 0.917, sphere 0.850, pyramid 0.885,
+cylinder 0.950 (s1 high tail; mean 0.941). Cylinder iters=10000 -> 0.9477
+(marginal, 2x compute).
+
+THE THREE REAL LEVERS (in order of impact):
+  1. --learning-rate 1e-3 (NOT the old 5e-3 default). The single biggest lever.
+     Old 5e-3 OVERSHOOTS past the good carving basin; 1e-3 lets the optimizer
+     SETTLE. Monotonic on sphere: 5e-3->0.717, 2e-3->0.754, 1e-3->0.849,
+     5e-4->0.804 (underfits). Unimodal peak at 1e-3; lr EXHAUSTED. Universal
+     across shapes (sphere 0.67->0.84, box 0.84->0.92, pyramid 0.86->0.89).
+  2. --dt 0.45 (tool speed-limit is the bottleneck; ~1 voxel/step). Foundational.
+  3. --w-len 0.03 (path-length / minimal-motion penalty). THE fix for the user's
+     "tool moves away from the part" complaint. Agnostic to WHERE the tool is
+     (unlike the dead contour-hug losses which pull toward the surface and
+     oppose carving) -- only discourages motion. Trailing steps with no residual
+     shrink deltas to zero so the tool STOPS. Cylinder: trailing z-climb
+     1.704->0.010, dice 0.934->0.945, air 0.286->0.199.
+
+SMALLER / PER-SHAPE LEVERS:
+  --w-step 0.001 (constant-feed regularizer): sphere +0.004 mean (marginal;
+  single-seed 0.858 was a lucky high-variance seed). Encourages uniform CNC feed.
+  --init-mode raster_fine: +0.063 sphere vs random at lr=5e-3; at lr=1e-3 the lr
+  win largely subsumes it. Keep as the uniform-feed init.
+  --max-steps 256 (cyl): soft peaks T=256 (0.9457), marginal over T=128.
+
+DEAD LEVERS (discard, do NOT re-explore):
+  w_air, w_prox, w_traj_prox (contour-hug losses FUNDAMENTALLY trade off dice
+  0.847->0.55; ~30% air is inherent -- see air-cut-loss-tradeoff memo).
+  w_gouge (seed-reshuffling, not a real mean win over 5 paired seeds).
+  w_jerk. lr_decay_frac. dt0.5+m160 (single-seed fluke; mean 0.834 < dt0.45
+  0.849, higher air). raster_fine_wide. k<=2 (sharp union saturates ->
+  degenerate). iters>5000 (marginal, 2x compute). coarse structured inits
+  (raster/spiral/shell/zlayer fail speed-clip).
+
+FUNDAMENTAL FINDING: the soft/hard carve gap (~0.21). The tracked soft dice
+(~0.94) is a BIASED proxy; the true deployable HARD-carve dice is ~0.718 and is
+k-invariant, T-invariant (coverage-capped). Soft union over-erodes (adds
+~log(2)/k per step). To raise DEPLOYABLE dice, improve the trajectory's hard-
+carve coverage (more steps / finer feed / better path), NOT the loss
+smoothness. Staged training (train -> truncate at t* -> save state -> train 2nd
+trajectory to finish) works end-to-end but gave only +0.0016 hard dice because
+stage-2's soft optimization doesn't transfer to the hard carve.
+
+METHODOLOGICAL LESSONS: (1) need >=3 PAIRED same-GPU seeds to distinguish a
+real lever from seed variance -- single-seed apparent wins overstate ~2-3x
+(bit me on w_step, w_gouge, dt0.5+m160). (2) dice only comparable SAME GPU
+(atomic-add nondeterminism). (3) When a sweep is monotonic, keep going past the
+apparent edge (lr sweep would have stopped at 3e-3 "neutral"; going to 1e-3
+found the real win).
+
+ARTIFACTS: results.tsv (untracked) is the source of truth; results_plot.png
+(gitignored) regenerated over 86 experiments; web dashboard (committed aad0d2a)
+now shows full multi-stage trajectories with stage boundaries.
+=============================================================================
