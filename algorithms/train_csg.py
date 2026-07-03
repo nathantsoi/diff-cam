@@ -126,10 +126,13 @@ class Args:
     init_scale: float = 0.05
     """half-range of the uniform random init for per-step displacements (0.02 and 0.1 both hurt)"""
     init_mode: str = "random"
-    """trajectory init: 'random', 'raster', 'spiral', 'shell', or 'zlayer' (z-level
-    descent that pre-clears the sphere exterior layer by layer, using the tall tool's
-    vertical extent). Structured inits are dead levers: raster/spiral/shell/zlayer all
-    fail via speed-limit clipping -- inits can't help until the tool can move (dt=0.45)."""
+    """trajectory init: 'random', 'raster', 'raster_fine', 'raster_fine_wide',
+    'spiral', 'shell', or 'zlayer' (z-level descent that pre-clears the sphere
+    exterior layer by layer, using the tall tool's vertical extent). 'raster_fine'
+    is a clipping-aware fine boustrophedon (per-step <= feed cap) that survives
+    the speed clip; 'raster_fine_wide' spans the full target envelope (0.05-0.95)
+    instead of the inner 0.20-0.80 core. The coarse structured inits
+    (raster/spiral/shell/zlayer) fail via speed-limit clipping."""
     grad_clip: float = 0.5
     """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
     transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5 is
@@ -166,6 +169,53 @@ class Args:
     w_jerk: float = 0.0
     """weight on the JERK / smoothness penalty (squared diff of consecutive
     deltas). 0 disables; ~1e-2 smooths abrupt direction/speed changes."""
+    w_step: float = 0.0
+    """weight on the SPEED-REGULARITY (constant-feed) penalty (squared diff of
+    consecutive step LENGTHS). 0 disables; pushes the feed rate toward a uniform
+    value -- the canonical CNC toolpath pattern -- without discouraging the
+    back-and-forth direction reversals of a raster/boustrophedon path."""
+    w_prox: float = 0.0
+    """weight on the DISTANCE-WEIGHTED air-cut (contour-hug) penalty: like w_air
+    but the charge scales with squared distance from the TARGET surface, so
+    air-cutting in the empty CORNERS far from the part is heavily penalized
+    while surface-hugging and necessary first-pass carving (in remaining stock,
+    air ~ 0) stay cheap. 0 disables. Directly attacks the "tool moving far from
+    the part surface" failure mode without the blunt collapse of cranking w_air.
+    Shares the air loop's tool_sdf eval, so it is nearly free."""
+    w_prox_warmup_frac: float = 0.0
+    """fraction of iters before w_prox begins ramping (0 = on from start).
+    Carving is established first (residual falls, dice peaks), THEN w_prox
+    ramps linearly from 0 to --w_prox over the remaining iters to polish
+    air-cutting without pinning the tool before the sweep is learned."""
+    w_traj_prox: float = 0.0
+    """weight on the TRAJECTORY contour-hug penalty: a gentle per-segment penalty
+    on the tool-center segment-midpoint distance from the TARGET surface, with a
+    deadzone of one tool-radius so contact-cutting (incl. corner-carving) is free
+    and only genuine excursions (deep empty corners, high retracts beyond r_tool)
+    are charged. 0 disables. A soft nudge on trajectory shape -- unlike the
+    per-voxel w_prox, does not stall carving."""
+    w_traj_prox_warmup_frac: float = 0.0
+    """fraction of iters before w_traj_prox begins ramping (0 = on from start).
+    Carve first (dice peaks), THEN ramp w_traj_prox on to polish excursions
+    without stalling the carving sweep."""
+    w_len: float = 0.0
+    """weight on the PATH-LENGTH (minimal-motion) penalty: mean squared per-step
+    displacement. Agnostic to WHERE the tool is (unlike the contour-hug losses
+    which pull toward the surface and oppose carving), it only discourages
+    motion. On trailing steps with no residual left to carve it shrinks the
+    deltas toward zero so the tool STOPS instead of wandering into air -- the
+    targeted fix for the trailing-excursion failure (tool climbs off the part
+    for the last ~25% of the path). 0 disables."""
+
+    init_stock_from: str = ""
+    """STAGED TRAINING: path to a .npz saved by the truncation utility containing
+    a mid-cut stock SDF + tool position. When set, training starts each forward
+    pass from the SAVED partially-carved stock (instead of the full envelope)
+    and fixes the tool start to the saved tool position -- so this trajectory
+    carves the REMAINING material the previous trajectory left. Use with the
+    staged_train orchestrator: train -> truncate -> train --init-stock-from."""
+
+
 
     # Robustness to initial conditions: random cutter start + restart-from-state
     random_tool_start: bool = False
@@ -300,6 +350,20 @@ def eval_metrics(sim, T, dx):
     m["loss_holder"] = float(sim.diag_holder[None])
     m["loss_air"] = float(sim.diag_air[None])
     m["loss_jerk"] = float(sim.diag_jerk[None])
+    m["loss_step"] = float(sim.diag_step[None])
+    m["loss_prox"] = float(sim.diag_prox[None])
+    m["loss_traj_prox"] = float(sim.diag_traj_prox[None])
+    m["loss_len"] = float(sim.diag_len[None])
+    # Air-cut fraction (independent of w_air): the fraction of the swept tool
+    # volume over the trajectory that lies in empty stock. Computed as a RATIO
+    # (air volume / total swept tool volume) so it is in [0,1] and independent
+    # of how much total volume the trajectory moves -- lower = less air-cutting
+    # / a more efficient, contour-hugging toolpath.
+    air_vol = float(sim.diag_air_unweighted[None])
+    swept = float(sim.diag_tool_swept[None])
+    m["air_cut_raw"] = air_vol
+    m["tool_swept_raw"] = swept
+    m["air_cut_fraction"] = air_vol / max(swept, 1e-8)
     return m
 
 
@@ -431,8 +495,24 @@ def main():
     # Trajectory regularizers (air-cut + jerk); 0 = disabled.
     sim.w_air[None] = args.w_air
     sim.w_jerk[None] = args.w_jerk
+    sim.w_step[None] = args.w_step
+    sim.w_prox[None] = args.w_prox
+    sim.w_traj_prox[None] = args.w_traj_prox
+    sim.w_len[None] = args.w_len
     sim.bake_target_grid()
     sim.set_target_volume()
+
+    # --- Staged training: start from a saved mid-cut stock + tool position ---
+    # (the previous trajectory's truncated state). init_stock will then write
+    # the saved SDF into stock[0] each forward pass instead of the full envelope.
+    saved_tool_start = None
+    if args.init_stock_from:
+        saved = np.load(args.init_stock_from)
+        sim.load_saved_init(saved["stock_sdf"], saved["tool_pos"])
+        saved_tool_start = np.asarray(saved["tool_pos"], dtype=np.float32)
+        print(f"[staged] init from saved state {args.init_stock_from}: "
+              f"t*={int(saved['t_trunc'])}, tool_pos={saved['tool_pos'].tolist()}",
+              flush=True)
 
     # Voxels are physical cubes of side sim.v mm: use that as the grid spacing
     # for metric surface distances (mm) and STL mesh export.
@@ -443,7 +523,77 @@ def main():
     # For structured inits we generate the desired tool_pos[1..T-1] (T-1 points)
     # then difference (with the first delta measured from tool_start).
     tool_start = np.array([0.5, 0.5, 1.0], dtype=np.float32)
-    if args.init_mode == "raster":
+    # Staged training: the trajectory must start at the saved tool position so
+    # the structured-init delta[0] = positions[0] - tool_start lines up with
+    # sim.tool_start (which load_saved_init set to the same saved position).
+    if saved_tool_start is not None:
+        tool_start = saved_tool_start
+    if args.init_mode == "raster_fine":
+        # Clipping-aware fine boustrophedon: a 3D zigzag whose EVERY per-step
+        # displacement is <= the feed speed cap (feed_speed*dt, ~0.075 normalized
+        # at dt=0.45), so the simulator's per-step speed clip does NOT destroy
+        # the path (the failure mode of the coarse raster/spiral/shell inits).
+        # The tool snakes across the XY footprint at constant step (~0.06) while
+        # Z descends linearly -- a uniform, constant-feed CNC finishing pattern
+        # that pre-covers the whole part so the optimizer starts in a good basin.
+        n = T - 1
+        ncols = 11
+        nrows = 11
+        xs = np.linspace(0.20, 0.80, ncols)
+        ys = np.linspace(0.20, 0.80, nrows)
+        z_top, z_bot = 0.90, 0.10
+        positions = []
+        idx = 0
+        for j in range(nrows):
+            row_xs = xs if j % 2 == 0 else xs[::-1]
+            for x in row_xs:
+                frac = idx / max(1, n - 1)
+                z = z_top + (z_bot - z_top) * frac
+                positions.append([float(x), float(ys[j]), float(z)])
+                idx += 1
+                if idx >= n:
+                    break
+            if idx >= n:
+                break
+        positions = np.array(positions[:n], dtype=np.float32)
+        if len(positions) < n:
+            positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "raster_fine_wide":
+        # Full-extent clipping-aware boustrophedon: same per-step <= feed-cap
+        # fine zigzag as raster_fine, but the XY footprint (0.05-0.95) and Z
+        # range (0.05-0.95) span the WHOLE target envelope instead of the inner
+        # 0.20-0.80 core. raster_fine under-covers the target's outer annulus
+        # (e.g. a sphere of normalized radius 0.45 centered at 0.5 reaches
+        # 0.05-0.95), which caps its dice; this variant pre-covers the full part.
+        n = T - 1
+        ncols = 11
+        nrows = 11
+        xs = np.linspace(0.05, 0.95, ncols)
+        ys = np.linspace(0.05, 0.95, nrows)
+        z_top, z_bot = 0.95, 0.05
+        positions = []
+        idx = 0
+        for j in range(nrows):
+            row_xs = xs if j % 2 == 0 else xs[::-1]
+            for x in row_xs:
+                frac = idx / max(1, n - 1)
+                z = z_top + (z_bot - z_top) * frac
+                positions.append([float(x), float(ys[j]), float(z)])
+                idx += 1
+                if idx >= n:
+                    break
+            if idx >= n:
+                break
+        positions = np.array(positions[:n], dtype=np.float32)
+        if len(positions) < n:
+            positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "raster":
         # Boustrophedon (zigzag) sweep over the cube cross-section at descending
         # z-levels. The tool carves a swept capsule along each segment, so this
         # pre-clears the stock exterior (the region the random init never reaches)
@@ -600,6 +750,27 @@ def main():
                     lrnow = args.learning_rate * (1.0 - (it - decay_start) / span)
                     opt.param_groups[0]["lr"] = lrnow
 
+            # w_prox warmup: keep w_prox at 0 until warmup_frac of iters, then
+            # ramp linearly to args.w_prox over the remaining iters so carving
+            # is established before the contour-hug penalty is engaged (avoids
+            # the tool-pinning stall that a constant w_prox causes).
+            if args.w_prox > 0.0 and args.w_prox_warmup_frac > 0.0:
+                warm_start = int(args.iters * args.w_prox_warmup_frac)
+                if it < warm_start:
+                    sim.w_prox[None] = 0.0
+                else:
+                    span = max(1, args.iters - warm_start)
+                    sim.w_prox[None] = args.w_prox * ((it - warm_start) / span)
+            # w_traj_prox warmup: same idea -- carve first, then polish
+            # trajectory excursions.
+            if args.w_traj_prox > 0.0 and args.w_traj_prox_warmup_frac > 0.0:
+                warm_start = int(args.iters * args.w_traj_prox_warmup_frac)
+                if it < warm_start:
+                    sim.w_traj_prox[None] = 0.0
+                else:
+                    span = max(1, args.iters - warm_start)
+                    sim.w_traj_prox[None] = args.w_traj_prox * ((it - warm_start) / span)
+
             # Push current displacements into Taichi, then forward+backward.
             # With restart_from_state, each iteration either starts fresh (optionally
             # from a random tool_start) or restores a saved mid-cut state and carves
@@ -670,7 +841,7 @@ def main():
                     sim.tool_start[None] = ti.Vector(list(CANONICAL_TOOL_START))
                     sim.tool_delta.from_torch(params.detach())
                     sim.loss[None] = 0.0
-                    sim.forward(T)
+                sim.forward_hard(T)
                 m = eval_metrics(sim, T, dx)
                 last_m = m
                 if m["dice"] > best_dice:
@@ -754,6 +925,7 @@ def main():
         # raw cumulative sum of the commanded deltas.
         sim.forward(T)
         positions = sim.tool_pos.to_torch()[:T].numpy()
+        sim.forward_hard(T)
 
         if (args.eval or args.eval_freq > 0) and it != last_eval_iter:
             m = eval_metrics(sim, T, dx)
@@ -779,6 +951,10 @@ def main():
         # the exact best-iter positions + the measured dice is the honest
         # representation of the best model training found.
         used_best = False
+        # Capture the FINAL-iter metrics (before any best-checkpoint override)
+        # so the warmup/polish effect on the final trajectory's air-cut is
+        # measurable independently of the best-dice checkpoint.
+        final_iter_m = dict(last_m) if last_m is not None else None
         if best_positions is not None and best_dice > 0.0:
             final_iter_dice = float(last_m["dice"]) if last_m is not None else 0.0
             if best_dice > final_iter_dice:
@@ -790,7 +966,7 @@ def main():
                 # equivalent; the reported dice is the already-measured best_m).
                 sim.tool_delta.from_torch(torch.as_tensor(best_deltas))
                 sim.loss[None] = 0.0
-                sim.forward(T)
+                sim.forward_hard(T)
                 used_best = True
                 print(f"[best] using best-dice checkpoint: dice={best_dice:.6f} @ iter {best_it} "
                       f"(final-iter dice was {final_iter_dice:.6f})", flush=True)
@@ -824,6 +1000,24 @@ def main():
             "training_seconds": round(total_seconds, 2),
             "peak_vram_mb": round(peak_vram_mb, 2),
             "num_steps": args.iters,
+            # Loss-component diagnostics (from the best checkpoint's eval). These
+            # do NOT affect the dice score -- they expose how much of the swept
+            # tool motion is cutting air (loss_air), jerk (loss_jerk), and feed
+            # irregularity (loss_step) for analysis of trajectory quality.
+            "loss_air": round(float(last_m.get("loss_air", 0.0)), 6) if last_m else 0.0,
+            "loss_jerk": round(float(last_m.get("loss_jerk", 0.0)), 6) if last_m else 0.0,
+            "loss_step": round(float(last_m.get("loss_step", 0.0)), 6) if last_m else 0.0,
+            "loss_prox": round(float(last_m.get("loss_prox", 0.0)), 6) if last_m else 0.0,
+            "loss_traj_prox": round(float(last_m.get("loss_traj_prox", 0.0)), 6) if last_m else 0.0,
+            "loss_len": round(float(last_m.get("loss_len", 0.0)), 6) if last_m else 0.0,
+            "air_cut_fraction": round(float(last_m.get("air_cut_fraction", 0.0)), 6) if last_m else 0.0,
+            "air_cut_raw": round(float(last_m.get("air_cut_raw", 0.0)), 6) if last_m else 0.0,
+            "tool_swept_raw": round(float(last_m.get("tool_swept_raw", 0.0)), 6) if last_m else 0.0,
+            # Final-iter (pre-best-checkpoint) trajectory metrics: exposes any
+            # late-training polish (e.g. w_prox warmup) on the final trajectory,
+            # independent of where the best-dice peak occurred.
+            "final_iter_dice": round(float(final_iter_m["dice"]), 6) if final_iter_m else 0.0,
+            "final_iter_air_cut_fraction": round(float(final_iter_m.get("air_cut_fraction", 0.0)), 6) if final_iter_m else 0.0,
         }
         metrics_path = os.path.join(run_dir, "metrics.json")
         with open(metrics_path, "w") as f:
@@ -866,7 +1060,7 @@ def main():
         # Final interactive replay.
         if gui is not None and gui.running:
             sim.tool_delta.from_torch(params.detach())
-            sim.forward(T)
+            sim.forward_hard(T)
             render_trajectory_live(sim, gui, T, label="final")
     finally:
         writer.close()

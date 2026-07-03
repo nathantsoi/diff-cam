@@ -122,7 +122,7 @@ def main():
                          "(dead lever on current API; best-checkpoint saving subsumes it)")
     ap.add_argument("--init-scale", type=float, default=0.05,
                     help="half-range of the uniform random init for per-step displacements")
-    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "spiral", "shell", "zlayer"),
+    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "raster_fine", "raster_fine_wide", "spiral", "shell", "zlayer"),
                     help="trajectory init mode")
     ap.add_argument("--w-gouge", type=float, default=4.0,
                     help="loss weight on cutting INTO the part (barrier)")
@@ -136,6 +136,23 @@ def main():
                     help="weight on the per-step air-cut penalty (0 = disabled; ~0.5-1.0)")
     ap.add_argument("--w-jerk", type=float, default=0.0,
                     help="weight on the jerk/smoothness penalty (0 = disabled; ~1e-2)")
+    ap.add_argument("--w-step", type=float, default=0.0,
+                    help="weight on the speed-regularity (constant-feed) penalty (0 = disabled)")
+    ap.add_argument("--w-prox", type=float, default=0.0,
+                    help="weight on the distance-weighted air-cut (contour-hug) penalty (0 = disabled); "
+                         "charges air-cutting in proportion to squared distance from the target surface")
+    ap.add_argument("--w-prox-warmup-frac", type=float, default=0.0,
+                    help="fraction of iters before w_prox ramps on (0 = on from start); "
+                         "carve first, then polish air-cutting")
+    ap.add_argument("--w-traj-prox", type=float, default=0.0,
+                    help="weight on the trajectory contour-hug penalty (tool-center distance "
+                         "from target surface, r_tool deadzone; 0 = disabled)")
+    ap.add_argument("--w-traj-prox-warmup-frac", type=float, default=0.0,
+                    help="fraction of iters before w_traj_prox ramps on (0 = on from start); "
+                         "carve first, then polish excursions")
+    ap.add_argument("--w-len", type=float, default=0.0,
+                    help="weight on the path-length (minimal-motion) penalty (0 = disabled); "
+                         "shrinks trailing-step drift so the tool stops instead of wandering off the part")
     ap.add_argument("--random-tool-start", action="store_true",
                     help="randomize the cutter start each fresh start (XY in the stock "
                          "footprint, Z >= stock top + --tool-start-clearance-in)")
@@ -231,6 +248,12 @@ def main():
             "--grad_clip", str(args.grad_clip),
             "--w_air", str(args.w_air),
             "--w_jerk", str(args.w_jerk),
+            "--w_step", str(args.w_step),
+            "--w_prox", str(args.w_prox),
+            "--w_prox_warmup_frac", str(args.w_prox_warmup_frac),
+            "--w_traj_prox", str(args.w_traj_prox),
+            "--w_traj_prox_warmup_frac", str(args.w_traj_prox_warmup_frac),
+            "--w_len", str(args.w_len),
             "--eval_freq", str(args.eval_freq),
             "--seed", str(args.seed),
             "--stock_size_in", *ssi,

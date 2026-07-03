@@ -111,6 +111,7 @@ def main():
     ap.add_argument("--run", required=True, help="training run dir (runs/<name> or absolute)")
     ap.add_argument("--out", default=None, help="output mp4 path (default: <run>/videos/run.mp4)")
     ap.add_argument("--fps", type=int, default=30, help="frames per second")
+    ap.add_argument("--mode", choices=["hard", "soft", "both"], default="hard", help="carving mode for video rendering")
     args = ap.parse_args()
 
     run_dir = args.run if os.path.isabs(args.run) else os.path.join(REPO, args.run)
@@ -137,16 +138,34 @@ def main():
     pad = np.zeros((max_steps, 3), dtype=np.float32)
     pad[: min(len(d), max_steps)] = d[: max_steps]
     sim.tool_delta.from_torch(torch.as_tensor(pad))
-    sim.forward(T)
-    print(f"[video] carved {T} steps; rendering frames...")
 
-    out = args.out or os.path.join(run_dir, "videos", "run.mp4")
-    written = record_video(sim, None, T, out, args.fps)
-    if not written:
-        raise SystemExit("[video] rendering failed (no frames produced; check ffmpeg/taichi)")
-    print(f"[video] wrote {written}")
+    import shutil
+    canonical = args.out or os.path.join(run_dir, "videos", "run.mp4")
+    written_last = None
+
+    if args.mode in ("hard", "both"):
+        print(f"[video] carving {T} steps with hard boolean subtraction...")
+        sim.forward_hard(T)
+        out_hard = args.out if (args.out and args.mode == "hard") else os.path.join(run_dir, "videos", "run_hard.mp4")
+        written_last = record_video(sim, None, T, out_hard, args.fps)
+        if not written_last:
+            raise SystemExit("[video] rendering hard video failed (no frames produced; check ffmpeg/taichi)")
+        print(f"[video] wrote {written_last}")
+        if not args.out or args.mode == "both":
+            shutil.copyfile(written_last, canonical)
+
+    if args.mode in ("soft", "both"):
+        print(f"[video] carving {T} steps with soft smooth_max union...")
+        sim.forward(T)
+        out_soft = args.out if (args.out and args.mode == "soft") else os.path.join(run_dir, "videos", "run_soft.mp4")
+        written_last = record_video(sim, None, T, out_soft, args.fps)
+        if not written_last:
+            raise SystemExit("[video] rendering soft video failed (no frames produced; check ffmpeg/taichi)")
+        print(f"[video] wrote {written_last}")
+
     # Emit a machine-readable marker the server can parse.
-    print(f"VIDEO_PATH={os.path.relpath(written, REPO)}")
+    final_marker = canonical if os.path.exists(canonical) else written_last
+    print(f"VIDEO_PATH={os.path.relpath(final_marker, REPO)}")
 
 
 if __name__ == "__main__":

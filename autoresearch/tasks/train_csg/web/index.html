@@ -655,6 +655,29 @@ function renderList(list){
 // mp4 is served statically thereafter, so re-viewing is instant. Requires the
 // HTTPS server (scripts/serve_web_https.py); plain `python3 -m http.server`
 // has no API endpoint and the button will report that.
+function triggerDownload(e, url, filename) {
+  if (e) e.preventDefault();
+  fetch(url)
+    .then(r => {
+      if (!r.ok) throw new Error(r.status || r.statusText);
+      return r.blob();
+    })
+    .then(blob => {
+      const bUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = bUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(bUrl), 5000);
+    })
+    .catch(err => {
+      console.warn("Fetch download failed, opening in new tab:", err);
+      window.open(url, "_blank");
+    });
+}
+
 function renderDownloads(d){
   const dl = document.getElementById("downloads");
   const title = document.getElementById("dl-title");
@@ -664,9 +687,9 @@ function renderDownloads(d){
     title.textContent = d.idx == null
       ? `Downloads — ${d.name||"run"}`
       : `Downloads — experiment #${d.idx} (${d.shape||"?"})`;
-    if (d.gcode) html += `<a class="nc" href="${BASE}${d.gcode}" download>⬇ G-code (${d.gcode.split('/').pop()})</a>`;
+    if (d.gcode) html += `<a class="nc" href="${BASE}${d.gcode}" onclick="triggerDownload(event, '${BASE}${d.gcode}', '${d.gcode.split('/').pop()}')">⬇ G-code (${d.gcode.split('/').pop()})</a>`;
     for (const [label,p] of Object.entries(d.stl||{}))
-      html += `<a class="stl" href="${BASE}${p}" download>⬇ ${label} STL</a>`;
+      html += `<a class="stl" href="${BASE}${p}" onclick="triggerDownload(event, '${BASE}${p}', '${p.split('/').pop()}')">⬇ ${label} STL</a>`;
     html += `<a href="${BASE}${d.run_dir}/" target="_blank">📂 open run dir</a>`;
     html += `<button id="gen-video-btn" class="vid">🎬 Generate run video</button>`;
   } else {
@@ -1234,7 +1257,8 @@ function loadTrajectory(d){
   curToolGeom = toolGeomForRun(d);
   if (useVoxel) {
     voxel.viewer.setToolGeometry(curToolGeom);
-    voxel.viewer.setTrajectory(d.trajectory.traj);
+    voxel.viewer.setTrajectory(d.trajectory.traj,
+      (d.trajectory.staged && d.trajectory.stage_boundary != null) ? d.trajectory.stage_boundary : null);
     voxel.lastStep = T-1;            // setTrajectory already carves the full path
   }
 
@@ -1247,9 +1271,15 @@ function loadTrajectory(d){
 function setStep(s){
   pbStep = s;
   const T = curD && curD.trajectory ? curD.trajectory.traj.length : 0;
-  document.getElementById("pb-step-label").textContent = `${Math.round(s)} / ${Math.max(0,T-1)}`;
+  document.getElementById("pb-step-label").textContent = `${Math.round(s)} / ${Math.max(0,T-1)}${stageLabelFor(s)}`;
   document.getElementById("pb-scrub").value = s;
   renderViewport();
+}
+
+function stageLabelFor(step){
+  if (!curD || !curD.trajectory || !curD.trajectory.staged || curD.trajectory.stage_boundary == null) return "";
+  const b = curD.trajectory.stage_boundary;
+  return ` · Stage ${step <= b ? 1 : 2}`;
 }
 
 function updatePlayBtn(){ document.getElementById("pb-play").textContent = pbPlaying ? "⏸" : "▶"; }
@@ -1348,17 +1378,37 @@ function renderViewport(){
   }
 
   // Actual tool path, depth-colored. Reached prefix is bright; the not-yet-carved
-  // suffix is dim so playback progress is visible.
+  // suffix is dim so playback progress is visible. Staged runs color stage 2 in
+  // amber so the two trajectories are visually distinct.
+  const staged = curD.trajectory.staged && curD.trajectory.stage_boundary != null;
+  const boundary = staged ? curD.trajectory.stage_boundary : -1;
   const zdepths = projPts.map(p=>p?p[2]:0);
   const zscale = d3.scaleLinear().domain(d3.extent(zdepths).map(v=>v||0)).range([0.4,1]).clamp(true);
+  const stageColor = (i, z) => {
+    const ramp = (staged && i > boundary)
+      ? d3.interpolateRgb("#d97706","#fbbf24")
+      : d3.interpolateRgb("#1f6feb","#7cc0ff");
+    return ramp(zscale(z));
+  };
   for (let i=1;i<projPts.length;i++){
     const a=projPts[i-1], b=projPts[i]; if(!a||!b) continue;
     const reached = i <= cstep;
     add((a[2]+b[2])/2, g=>g.append("line")
       .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
-      .attr("stroke", d3.interpolateRgb("#1f6feb","#7cc0ff")(zscale(b[2])))
+      .attr("stroke", stageColor(i, b[2]))
       .attr("stroke-width", reached?2.2:1.4)
       .attr("opacity", reached?0.95:0.22));
+  }
+
+  // Stage boundary marker (staged runs): where stage 1 ends and stage 2 begins.
+  if (staged && boundary >= 0 && boundary < projPts.length) {
+    const bp = projPts[boundary];
+    if (bp) add(bp[2]-1e-6, g=>{
+      g.append("circle").attr("cx",bp[0]).attr("cy",bp[1]).attr("r",6).attr("fill","none")
+        .attr("stroke","#fbbf24").attr("stroke-width",2).attr("opacity",.95);
+      g.append("text").attr("x",bp[0]+8).attr("y",bp[1]-6).attr("fill","#fbbf24")
+        .attr("font-size",10).attr("font-weight","bold").text("stage 1→2");
+    });
   }
 
   // Start marker.

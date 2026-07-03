@@ -21,6 +21,7 @@ wandb/
 #   autoresearch/tasks/train_csg/plot_results.py -> autoresearch/tasks/train_csg/results_plot.png
 #   (the autoresearch harness)              -> results.tsv (local experiment log)
 /results.tsv
+/autoresearch/tasks/train_csg/results.tsv
 /autoresearch/tasks/train_csg/web/data.json
 /results_over_time.png
 /autoresearch/tasks/train_csg/results_plot.png

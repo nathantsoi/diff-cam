@@ -576,6 +576,23 @@ The figure is written next to the trajectory as
 `trajectory_viz_<post>.png` (or `--save`); add `--show` for the interactive
 matplotlib window.
 
+### Interactive Web Dashboard
+
+To interactively explore results across runs with a 3D WebGPU carved-stock viewer, run the webserver directly from the **root of the project**:
+
+1. **Build/refresh the data index**:
+   ```bash
+   uv run python scripts/build_results_web.py
+   ```
+2. **Start the webserver from project root**:
+   ```bash
+   uv run python scripts/serve_web_https.py
+   ```
+3. **Open in Chrome** (accepting the self-signed HTTPS certificate warning required for WebGPU activation):
+   - `https://localhost:8443/web/index.html` (or `https://<hostname>:8443/web/index.html`)
+
+See [`web/README.md`](file:///home/ntsoi/papers/icra26-diffcam/diff-cam/web/README.md) for full dashboard instructions.
+
 ### CAM API
 
 - `cam.trajectory_to_gcode(positions, config, post="rs274")` — export an

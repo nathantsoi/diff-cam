@@ -29,20 +29,8 @@ class _HardCarveSimulator(CSGSimulatorDelta):
     sharp capped-cylinder SDF (``tool_sdf_sharp``) to get exactly that.
     """
 
-    @ti.kernel
-    def apply_cut_hard(self, t: ti.i32):
-        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            p = ti.Vector(
-                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
-            )
-            tool_d = self.tool_sdf_sharp(p, t)
-            self.stock[t + 1, i, j, k] = ti.max(self.stock[t, i, j, k], -tool_d)
-
-    def forward_hard(self, num_active_steps):
-        self.reconstruct_positions(num_active_steps - 1)
-        self.init_stock()
-        for t in range(num_active_steps - 1):
-            self.apply_cut_hard(t)
+    def forward_hard(self, num_active_steps, clip_speeds=False):
+        super().forward_hard(num_active_steps, clip_speeds=clip_speeds)
 
 
 def carve_stock(

@@ -246,6 +246,46 @@ class CSGSimulatorDelta:
         # "jerky" artefact). Acts directly on tool_delta (needs_grad=True).
         self.w_jerk = ti.field(dtype=ti.f32, shape=())
         self.w_jerk[None] = 0.0
+        # Speed-regularity (constant-feed) penalty: squared difference of
+        # consecutive step LENGTHS (|delta_t| - |delta_{t-1}|)^2. Encourages a
+        # uniform feed rate -- the canonical CNC toolpath pattern -- independent
+        # of direction. Acts directly on tool_delta (needs_grad=True).
+        self.w_step = ti.field(dtype=ti.f32, shape=())
+        self.w_step[None] = 0.0
+        # Distance-weighted AIR-CUT (contour-hug) penalty: like w_air but the
+        # charge scales with how far the swept voxel is from the TARGET surface
+        # (squared), so re-traversing empty CORNERS far from the part is heavily
+        # penalized while surface-hugging and the necessary first-pass carving
+        # (in remaining stock, air ~ 0) stay cheap. Directly attacks the
+        # "tool moving far from the part surface" failure mode without the
+        # blunt collapse that cranking w_air causes. Shares the air loop's
+        # tool_sdf eval, so it is nearly free. Gated by w_prox (0 -> disabled).
+        self.w_prox = ti.field(dtype=ti.f32, shape=())
+        self.w_prox[None] = 0.0
+        # Trajectory contour-hug penalty on the tool CENTER: a GENTLE per-segment
+        # penalty (T terms, not T*N^3) on the segment-midpoint distance from the
+        # TARGET surface, with a deadzone of one tool-radius so contact-cutting
+        # (including corner-carving, which sits within r_tool of the surface) is
+        # FREE and only genuine excursions (deep into empty corners, high
+        # retracts beyond r_tool) are charged. Unlike the per-voxel w_prox whose
+        # huge corner gradient stalls carving, this is a soft nudge on the
+        # trajectory shape. Gated by w_traj_prox (0 -> disabled).
+        self.w_traj_prox = ti.field(dtype=ti.f32, shape=())
+        self.w_traj_prox[None] = 0.0
+        # Path-length (minimal-motion) penalty: the squared step length
+        # |delta_t|^2 summed over all active segments. Unlike the contour-hug
+        # losses (w_prox / w_traj_prox) which pull the tool TOWARD the surface
+        # and so oppose the necessary carving excursions, this is agnostic to
+        # WHERE the tool is -- it only discourages motion. During carving the
+        # strong residual gradient dominates and the tool moves anyway; on the
+        # trailing steps (part already carved, no residual, gouge barrier pushes
+        # the tool off into open air) the length penalty is the only gradient
+        # and shrinks the deltas toward zero, so the tool STOPS instead of
+        # wandering away. This is the targeted fix for the trailing-excursion
+        # failure mode (tool climbs into air for the last ~25% of the path).
+        # Gated by w_len (0 -> disabled).
+        self.w_len = ti.field(dtype=ti.f32, shape=())
+        self.w_len[None] = 0.0
 
         # Holder collision is a PENETRATION BARRIER, not a proximity field: it is
         # exactly zero (zero gradient) while the holder has clearance, and grows
@@ -266,6 +306,29 @@ class CSGSimulatorDelta:
         self.diag_holder = ti.field(dtype=ti.f32, shape=())
         self.diag_air = ti.field(dtype=ti.f32, shape=())
         self.diag_jerk = ti.field(dtype=ti.f32, shape=())
+        self.diag_step = ti.field(dtype=ti.f32, shape=())
+        # Unweighted air-cut fraction: sum of (tool swept volume in empty stock)
+        # over the trajectory, normalized per voxel -- measures how much of the
+        # tool motion is cutting air (0 = all cutting, 1 = all air). Independent
+        # of w_air so it is non-zero even when the air penalty is disabled.
+        # diag_air_unweighted is the NUMERATOR (air volume); diag_tool_swept is
+        # the DENOMINATOR (total swept tool volume); the ratio air/swept is the
+        # true per-step air-cut fraction in [0,1], independent of how much total
+        # carving the trajectory did.
+        self.diag_air_unweighted = ti.field(dtype=ti.f32, shape=())
+        self.diag_tool_swept = ti.field(dtype=ti.f32, shape=())
+        # Distance-weighted air-cut (contour-hug) diagnostic: the w_prox loss
+        # component value, independent of w_prox so it is non-zero even when the
+        # penalty is disabled. Measures air-cutting concentrated far from the
+        # target surface.
+        self.diag_prox = ti.field(dtype=ti.f32, shape=())
+        # Trajectory contour-hug diagnostic (the w_traj_prox loss component,
+        # independent of w_traj_prox so it is non-zero even when disabled).
+        self.diag_traj_prox = ti.field(dtype=ti.f32, shape=())
+        # Path-length (minimal-motion) diagnostic: mean squared step length
+        # (the w_len loss component, independent of w_len so it is non-zero
+        # even when disabled -- measures how much the tool moves).
+        self.diag_len = ti.field(dtype=ti.f32, shape=())
 
         # ---- Stock ----
         self.stock = ti.field(
@@ -274,6 +337,16 @@ class CSGSimulatorDelta:
             needs_grad=True,
         )
         self.stock_volume = ti.field(dtype=ti.f32, shape=())
+        # Saved mid-cut stock init (for staged training): when use_saved_init
+        # is set, ``init_stock`` writes this SDF into stock[0] instead of the
+        # full envelope, so a FRESH trajectory can start carving from a partially-
+        # carved state left by a previous trajectory. stock[0] is a constant
+        # (no grad), so autodiff through apply_cut on stock[1..T] is unaffected.
+        self.saved_stock = ti.field(
+            dtype=ti.f32, shape=(self.Nx, self.Ny, self.Nz)
+        )
+        self.use_saved_init = ti.field(dtype=ti.i32, shape=())
+        self.use_saved_init[None] = 0
 
         # ---- Target ----
         target_options = ["box", "cylinder", "sphere", "pyramid"]
@@ -287,6 +360,20 @@ class CSGSimulatorDelta:
         self.target = ti.field(
             dtype=ti.f32, shape=(self.Nx, self.Ny, self.Nz)
         )  # used for evaluation
+        # Scalar (non-Vector) copies of the target params, for use inside
+        # differentiable kernels that feed a GRAD-TRACKED position into the
+        # target SDF: the Vector-field target_params trigger a Taichi autodiff
+        # load-forwarding bug (MatrixPtrStmt assertion) when the SDF input
+        # depends on tool_pos. Center in normalized [0,1]; sizes in voxels.
+        self.tcx = ti.field(dtype=ti.f32, shape=()); self.tcx[None] = 0.5
+        self.tcy = ti.field(dtype=ti.f32, shape=()); self.tcy[None] = 0.5
+        self.tcz = ti.field(dtype=ti.f32, shape=()); self.tcz[None] = 0.5
+        self.tr_vox = ti.field(dtype=ti.f32, shape=()); self.tr_vox[None] = 0.0
+        self.th_vox = ti.field(dtype=ti.f32, shape=()); self.th_vox[None] = 0.0
+        self.thx_vox = ti.field(dtype=ti.f32, shape=()); self.thx_vox[None] = 0.0
+        self.thy_vox = ti.field(dtype=ti.f32, shape=()); self.thy_vox[None] = 0.0
+        self.thz_vox = ti.field(dtype=ti.f32, shape=()); self.thz_vox[None] = 0.0
+        self.tbase_vox = ti.field(dtype=ti.f32, shape=()); self.tbase_vox[None] = 0.0
 
         # ---- Loss ----
         self.loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
@@ -369,6 +456,23 @@ class CSGSimulatorDelta:
                 tp["base_half_size"][None] = hs
         if "center" in tp:
             tp["center"][None] = list(center)
+        # Mirror into the scalar (autodiff-safe) target-param fields. Center is
+        # in normalized [0,1]; sizes are converted to voxels.
+        cx, cy, cz = float(center[0]), float(center[1]), float(center[2])
+        self.tcx[None] = cx
+        self.tcy[None] = cy
+        self.tcz[None] = cz
+        if radius_mm is not None:
+            self.tr_vox[None] = float(radius_mm) / self.v
+        if height_mm is not None:
+            self.th_vox[None] = float(height_mm) / self.v
+        if half_size_mm is not None:
+            hs = half_size_mm if hasattr(half_size_mm, "__len__") else (half_size_mm,) * 3
+            hs = [float(c) / self.v for c in hs]
+            self.thx_vox[None] = hs[0]
+            self.thy_vox[None] = hs[1]
+            self.thz_vox[None] = hs[2]
+            self.tbase_vox[None] = hs[0]
 
     # ========================================================================
     # SDFs  (all distances in VOXELS; cubic voxels make this isotropic)
@@ -493,6 +597,38 @@ class CSGSimulatorDelta:
             d = pyramid_sdf(pv, cv.x, cv.y, cv.z - 0.5 * height, half_base, height)
         return d
 
+    @ti.func
+    def target_sdf_scalar(self, p):
+        """Target SDF (voxels) from the SCALAR target-param fields -- an
+        autodiff-safe mirror of target_sdf for use inside differentiable kernels
+        that feed a grad-tracked position p (the Vector-field target_params
+        trigger a Taichi autodiff load-forwarding bug there). Center in [0,1],
+        sizes pre-converted to voxels.
+        """
+        d = 0.0
+        pv = ti.Vector([p.x * self.Nx, p.y * self.Ny, p.z * self.Nz])
+        cv = ti.Vector([self.tcx[None] * self.Nx, self.tcy[None] * self.Ny, self.tcz[None] * self.Nz])
+        if ti.static(self.target_shape == "sphere"):
+            d = (pv - cv).norm() - self.tr_vox[None]
+        elif ti.static(self.target_shape == "box"):
+            dd = ti.abs(pv - cv) - ti.Vector([self.thx_vox[None], self.thy_vox[None], self.thz_vox[None]])
+            d = ti.max(dd.x, ti.max(dd.y, dd.z))
+        elif ti.static(self.target_shape == "cylinder"):
+            d_h = ti.Vector([pv.x - cv.x, pv.y - cv.y]).norm() - self.tr_vox[None]
+            d_z = ti.max(cv.z - 0.5 * self.th_vox[None] - pv.z, pv.z - (cv.z + 0.5 * self.th_vox[None]))
+            d = ti.max(d_h, d_z)
+        elif ti.static(self.target_shape == "pyramid"):
+            h = self.th_vox[None]
+            t = (pv.z - (cv.z - 0.5 * h)) / h
+            d_bottom = (cv.z - 0.5 * h) - pv.z
+            d_top = pv.z - (cv.z + 0.5 * h)
+            allowed = self.tbase_vox[None] * (1.0 - t)
+            dx = ti.abs(pv.x - cv.x) - allowed
+            dy = ti.abs(pv.y - cv.y) - allowed
+            d_sides = ti.max(dx, dy)
+            d = ti.max(d_bottom, ti.max(d_top, d_sides))
+        return d
+
     @ti.kernel
     def set_target_volume(self):
         """Target volume as a fraction of the envelope (occupied voxels / total)."""
@@ -507,16 +643,25 @@ class CSGSimulatorDelta:
 
     @ti.kernel
     def init_stock(self):
-        """Initial stock: the full envelope block, as a voxel-space SDF in stock[0]."""
+        """Initial stock: the full envelope block, as a voxel-space SDF in stock[0].
+
+        When ``use_saved_init`` is set (staged training), the saved mid-cut SDF
+        in ``saved_stock`` is written to stock[0] instead, so a fresh trajectory
+        starts carving from a partially-carved state.
+        """
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            p = ti.Vector(
-                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
-            )
-            self.stock[0, i, j, k] = box_sdf(
-                self._vox(p),
-                self._vox(ti.Vector([0.5, 0.5, 0.5])),
-                self._vox(ti.Vector([0.5, 0.5, 0.5])),
-            )
+            if self.use_saved_init[None]:
+                # Staged training: start from a saved mid-cut SDF.
+                self.stock[0, i, j, k] = self.saved_stock[i, j, k]
+            else:
+                p = ti.Vector(
+                    [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+                )
+                self.stock[0, i, j, k] = box_sdf(
+                    self._vox(p),
+                    self._vox(ti.Vector([0.5, 0.5, 0.5])),
+                    self._vox(ti.Vector([0.5, 0.5, 0.5])),
+                )
 
     @ti.kernel
     def bake_target_grid(self):
@@ -683,6 +828,16 @@ class CSGSimulatorDelta:
             self.stock[t + 1, i, j, k] = smooth_max(self.stock[t, i, j, k], -tool_d, kv)
 
     @ti.kernel
+    def apply_cut_hard(self, t: ti.i32):
+        """stock[t+1] = max(stock[t], -tool_sdf_sharp at segment t)."""
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            p = ti.Vector(
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+            )
+            tool_d = self.tool_sdf_sharp(p, t)
+            self.stock[t + 1, i, j, k] = ti.max(self.stock[t, i, j, k], -tool_d)
+
+    @ti.kernel
     def loss_at(self, t: ti.i32) -> ti.f32:
         """Exact replica of compute_loss's objective, evaluated on stock[t].
 
@@ -797,6 +952,14 @@ class CSGSimulatorDelta:
         so small engagements are cheap and long air traverses dominate. Gated by
         ``w_air`` (0 -> exactly zero, zero gradient -> disabled).
 
+        In the SAME loop we also add the distance-weighted (contour-hug) air
+        penalty gated by ``w_prox``: the air charge is multiplied by
+        ``(max(0, target_sdf) / r_tool)^2`` from the precomputed target grid, so
+        air-cutting FAR from the target surface (empty corners) is heavily
+        penalized while surface-hugging and the necessary first-pass carving
+        (in remaining stock, air ~ 0) stay cheap. The target grid is a constant
+        so it adds no gradient path -- gradient still flows only through ``air``.
+
         Differentiable in ``tool_pos``/``tool_delta`` (via ``tool_sdf``) and in
         ``stock`` (via ``stock_occ``); safe under ``ti.ad.Tape``.
         """
@@ -804,6 +967,9 @@ class CSGSimulatorDelta:
             scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
             inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
             w = self.w_air[None]
+            w_p = self.w_prox[None]
+            r_vox = self.tool_radius[None] / self.v
+            r_safe = ti.max(r_vox, 1e-3)
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
@@ -816,7 +982,17 @@ class CSGSimulatorDelta:
             tool_occ = 1.0 / (1.0 + ti.exp(ta))             # ~1 inside the swept tool
             air = tool_occ * (1.0 - stock_occ)
 
-            ti.atomic_add(self.loss[None], inv_n * w * air * air)
+            # Distance-weighted air: charge air-cutting in proportion to its
+            # distance from the target surface (squared, in tool-radii). Zero on
+            # the surface, grows into the empty corners. Cheap (target grid is a
+            # constant lookup; the expensive tool_sdf is already computed above).
+            # Combined with the plain w_air term into ONE atomic_add so the
+            # serialized global reduction is not doubled.
+            d_t = ti.max(0.0, self.target[i, j, k])
+            w_dist = (d_t / r_safe) ** 2
+            ti.atomic_add(
+                self.loss[None], inv_n * (w + w_p * w_dist) * air * air
+            )
 
     @ti.kernel
     def compute_jerk_penalty(self, t_start: ti.i32, T: ti.i32):
@@ -839,6 +1015,89 @@ class CSGSimulatorDelta:
             ti.atomic_add(self.loss[None], w * diff.dot(diff) / n)
 
     @ti.kernel
+    def compute_step_penalty(self, t_start: ti.i32, T: ti.i32):
+        """Differentiable SPEED-REGULARITY (constant-feed) penalty added to ``self.loss``.
+
+        Penalizes changes in the commanded per-step SPEED (squared step length):
+
+            step = (|tool_delta[t]|^2 - |tool_delta[t-1]|^2)^2
+
+        summed over ``t in [max(t_start,1), T-1)`` and normalized by the segment
+        count. Unlike ``compute_jerk_penalty`` (which penalizes the full vector
+        difference of consecutive deltas, i.e. both speed AND direction changes),
+        this acts only on the step LENGTH, so it pushes the feed rate toward a
+        constant value without discouraging the legitimate back-and-forth
+        direction reversals of a boustrophedon/raster toolpath. Uses squared
+        lengths (polynomial, no sqrt) so the gradient stays well-conditioned near
+        zero step length. Acts directly on ``tool_delta`` (``needs_grad=True``).
+        Gated by ``w_step`` (0 -> disabled).
+        """
+        for t in range(ti.max(t_start, 1), T - 1):
+            w = self.w_step[None]
+            n = ti.max(1, T - 1 - ti.max(t_start, 1))
+            d2_0 = self.tool_delta[t].dot(self.tool_delta[t])
+            d2_1 = self.tool_delta[t - 1].dot(self.tool_delta[t - 1])
+            diff = d2_0 - d2_1
+            ti.atomic_add(self.loss[None], w * diff * diff / n)
+
+    @ti.kernel
+    def compute_length_penalty(self, t_start: ti.i32, T: ti.i32):
+        """Differentiable PATH-LENGTH (minimal-motion) penalty on ``self.loss``.
+
+        Penalizes the squared per-step displacement summed over all active
+        segments:
+
+            len = |tool_delta[t]|^2
+
+        summed over ``t in [t_start, T)`` and normalized by the segment count.
+        Agnostic to WHERE the tool is (unlike w_prox / w_traj_prox, which pull
+        toward the surface and oppose carving): it only discourages motion. On
+        carving steps the residual gradient dominates so motion is preserved;
+        on trailing steps with no residual it shrinks the deltas toward zero so
+        the tool stops rather than wandering into air. Acts directly on
+        ``tool_delta`` (``needs_grad=True``). Gated by ``w_len`` (0 -> disabled).
+        """
+        for t in range(ti.max(t_start, 0), T):
+            w = self.w_len[None]
+            n = ti.max(1, T - ti.max(t_start, 0))
+            d2 = self.tool_delta[t].dot(self.tool_delta[t])
+            ti.atomic_add(self.loss[None], w * d2 / n)
+
+    @ti.kernel
+    def compute_traj_prox_penalty(self, t_start: ti.i32, T: ti.i32):
+        """Differentiable TRAJECTORY contour-hug penalty on the tool CENTER.
+
+        A GENTLE per-segment penalty (T terms, not T*N^3) on the segment
+        midpoint's distance from the TARGET surface, with a deadzone of one
+        tool-radius so contact-cutting is FREE:
+
+            d   = target_sdf(seg_midpoint)        # voxels, >0 outside target
+            exc = max(0, d - r_tool)               # only beyond tool reach
+            loss += w_traj_prox * exc^2 / n_segments
+
+        Corner-carving sits within r_tool of the surface (the base at r_tool
+        from a corner voxel is ~0.4*r_tool from the sphere surface), so it is
+        NOT charged; only genuine excursions (deep empty corners beyond r_tool,
+        high retracts beyond r_tool) are. Unlike the per-voxel w_prox whose
+        huge corner gradient stalls carving, this is a soft nudge on the
+        trajectory shape. Differentiable in tool_pos/tool_delta (via the
+        midpoint and target_sdf). Gated by w_traj_prox (0 -> disabled).
+        """
+        for t in range(t_start, T - 1):
+            w = self.w_traj_prox[None]
+            n = ti.max(1, T - 1 - t_start)
+            r_vox = self.tool_radius[None] / self.v
+            # Component-wise midpoint (avoids a Taichi autodiff load-forwarding
+            # issue with Vector-field arithmetic feeding target_sdf).
+            mx = 0.5 * (self.tool_pos[t].x + self.tool_pos[t + 1].x)
+            my = 0.5 * (self.tool_pos[t].y + self.tool_pos[t + 1].y)
+            mz = 0.5 * (self.tool_pos[t].z + self.tool_pos[t + 1].z)
+            mid = ti.Vector([mx, my, mz])
+            d = self.target_sdf_scalar(mid)
+            exc = ti.max(0.0, d - r_vox)
+            ti.atomic_add(self.loss[None], w * exc * exc / n)
+
+    @ti.kernel
     def compute_diagnostics(self, T: ti.i32):
         """Non-differentiable breakdown of the loss into its three components.
 
@@ -851,7 +1110,13 @@ class CSGSimulatorDelta:
         r = 0.0
         h = 0.0
         a = 0.0
+        au = 0.0
+        ts = 0.0
+        px = 0.0
+        tpx = 0.0
         jk = 0.0
+        st = 0.0
+        ln = 0.0
         scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
         inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
         w_g = self.w_gouge[None]
@@ -859,6 +1124,12 @@ class CSGSimulatorDelta:
         w_h = self.holder_penalty_weight[None]
         w_a = self.w_air[None]
         w_j = self.w_jerk[None]
+        w_s = self.w_step[None]
+        w_p = self.w_prox[None]
+        r_vox = self.tool_radius[None] / self.v
+        r_safe = ti.max(r_vox, 1e-3)
+        w_tp = self.w_traj_prox[None]
+        w_l = self.w_len[None]
         margin = self.holder_margin[None]
         # Geometry terms on the final stock (stock[T]).
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
@@ -888,16 +1159,51 @@ class CSGSimulatorDelta:
             tool_occ = 1.0 / (1.0 + ti.exp(ta))
             air = tool_occ * (1.0 - stock_occ)
             a += inv_n * w_a * air * air
+            au += inv_n * air
+            ts += inv_n * tool_occ
+            # Distance-weighted air (contour-hug): same term as the w_prox
+            # loss component, weighted by squared distance from target surface.
+            d_t = ti.max(0.0, self.target[i, j, k])
+            w_dist = (d_t / r_safe) ** 2
+            px += inv_n * w_p * air * air * w_dist
         # Jerk / smoothness over consecutive deltas.
         nj = ti.max(1, T - 2)
         for t in range(1, T - 1):
             diff = self.tool_delta[t] - self.tool_delta[t - 1]
             jk += w_j * diff.dot(diff) / nj
+        # Speed regularity over consecutive step lengths.
+        ns = ti.max(1, T - 2)
+        for t in range(1, T - 1):
+            d2_0 = self.tool_delta[t].dot(self.tool_delta[t])
+            d2_1 = self.tool_delta[t - 1].dot(self.tool_delta[t - 1])
+            sp = d2_0 - d2_1
+            st += w_s * sp * sp / ns
+        # Trajectory contour-hug (tool-center distance from target surface).
+        ntp = ti.max(1, T - 1)
+        for t in range(T - 1):
+            mx = 0.5 * (self.tool_pos[t].x + self.tool_pos[t + 1].x)
+            my = 0.5 * (self.tool_pos[t].y + self.tool_pos[t + 1].y)
+            mz = 0.5 * (self.tool_pos[t].z + self.tool_pos[t + 1].z)
+            mid = ti.Vector([mx, my, mz])
+            d = self.target_sdf_scalar(mid)
+            exc = ti.max(0.0, d - r_vox)
+            tpx += w_tp * exc * exc / ntp
+        # Path-length (minimal-motion) over all active segments.
+        nl = ti.max(1, T)
+        for t in range(T):
+            d2 = self.tool_delta[t].dot(self.tool_delta[t])
+            ln += w_l * d2 / nl
         self.diag_gouge[None] = g
         self.diag_residual[None] = r
         self.diag_holder[None] = h
         self.diag_air[None] = a
         self.diag_jerk[None] = jk
+        self.diag_step[None] = st
+        self.diag_air_unweighted[None] = au
+        self.diag_tool_swept[None] = ts
+        self.diag_prox[None] = px
+        self.diag_traj_prox[None] = tpx
+        self.diag_len[None] = ln
 
     @ti.kernel
     def holder_overlap_at(self, t: ti.i32) -> ti.f32:
@@ -955,6 +1261,27 @@ class CSGSimulatorDelta:
         self.compute_holder_penalty(0, num_active_steps - 1)
         self.compute_air_penalty(0, num_active_steps - 1)
         self.compute_jerk_penalty(0, num_active_steps - 1)
+        self.compute_step_penalty(0, num_active_steps - 1)
+        self.compute_traj_prox_penalty(0, num_active_steps - 1)
+        self.compute_length_penalty(0, num_active_steps - 1)
+
+    def forward_hard(self, num_active_steps, clip_speeds=True):
+        """Hard boolean forward pass for evaluation and rendering.
+
+        Position advancement follows forward() when clip_speeds is True, but carving
+        uses exact apply_cut_hard (ti.max union with tool_sdf_sharp) instead of
+        smooth_max. Step-count invariant and non-differentiable.
+        """
+        self.reconstruct_positions(0)
+        self.init_stock()
+        if clip_speeds:
+            for t in range(num_active_steps - 1):
+                self.advance_position(t)
+                self.apply_cut_hard(t)
+        else:
+            self.reconstruct_positions(num_active_steps - 1)
+            for t in range(num_active_steps - 1):
+                self.apply_cut_hard(t)
 
     def forward_from(self, t0, num_active_steps):
         """Forward pass RESTARTED from a restored mid-cut state at step ``t0``.
@@ -980,6 +1307,9 @@ class CSGSimulatorDelta:
         self.compute_holder_penalty(t0, num_active_steps - 1)
         self.compute_air_penalty(t0, num_active_steps - 1)
         self.compute_jerk_penalty(t0, num_active_steps - 1)
+        self.compute_step_penalty(t0, num_active_steps - 1)
+        self.compute_traj_prox_penalty(t0, num_active_steps - 1)
+        self.compute_length_penalty(t0, num_active_steps - 1)
 
     # ------------------------------------------------------------------
     # State save / restore (for restart-from-state training)
@@ -1012,6 +1342,22 @@ class CSGSimulatorDelta:
         pos_np[t0] = state["tool_pos"]
         self.stock.from_numpy(stock_np)
         self.tool_pos.from_numpy(pos_np)
+
+    def load_saved_init(self, stock_sdf, tool_pos):
+        """Configure staged-training: start each ``init_stock`` from a saved
+        mid-cut SDF (the carved stock left by a previous trajectory) and set
+        the tool start to the saved tool position. After this, a FRESH
+        ``forward(T)`` carves the remaining material (the residual the previous
+        trajectory left) starting from the mid-cut state.
+
+        ``stock_sdf``: (Nx, Ny, Nz) float array, the saved stock SDF.
+        ``tool_pos``: (3,) float array, the saved tool position in [0,1]^3.
+        """
+        self.saved_stock.from_numpy(np.asarray(stock_sdf, dtype=np.float32))
+        self.use_saved_init[None] = 1
+        self.tool_start[None] = ti.Vector(
+            [float(tool_pos[0]), float(tool_pos[1]), float(tool_pos[2])]
+        )
 
     # ========================================================================
     # Rendering
