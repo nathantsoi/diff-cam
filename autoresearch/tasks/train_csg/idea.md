@@ -542,3 +542,23 @@ true deployable dice and is capped by trajectory coverage, not smoothness.
 CONCLUSION: k=10 is correct. The soft/hard gap is fundamental to the method.
 To raise DEPLOYABLE dice, must improve the TRAJECTORY's hard-carve coverage
 (more steps / finer feed / better path), not the loss smoothness.
+
+## T SWEEP RESULT (2026-07-02) -- soft dice peaks T=256 cyl, marginal
+cyl w_len0.03 s4: T128=0.9383(k10)/0.9448(orig s4) | T160=0.9429 | T192=0.9443
+| T256=0.9457 (PEAK) | T320=0.9399 (drops, unstable). +0.0009 soft over T128 at
+T256; air rises with T (0.175->0.349). HARD dice ~0.718 FLAT across all T
+(confirms hard is coverage-capped, not T-limited). T=256 is the cyl soft peak
+but the gain is marginal and costs air + budget headroom; T=128-192 is the
+practical operating range.
+
+## DICE CONVENTION FINDING (critical, 2026-07-02)
+eval_csg dice: pred=sdf_to_mask(stock)=stock<0=REMAINING material, target=PART.
+Dice = 2|remaining∩part|/(|remaining|+|part|) -- rewards LEAVING the part
+(not gouging) more than removing waste. A STATIONARY tool scores 0.728
+(=2|cyl|/(|stock|+|cyl|)=2·0.572/1.572) because it leaves the whole part. The
+soft union over-erodes (removes outside-part material the hard boolean doesn't),
+so SOFT dice (0.94) >> HARD dice (0.718). The soft dice is a BIASED proxy; the
+hard carve is the deployable number. Per autoresearch.md the loop tracks soft
+dice (grep "^dice:" train log); hard carve is a separate validation that must
+not be modified. IMPLICATION: the reported soft wins (sphere 0.85, cyl 0.945)
+are real on the tracked metric but overstate deployable quality by ~0.21.
