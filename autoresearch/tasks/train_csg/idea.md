@@ -577,3 +577,14 @@ VERDICT: both "wins" survive paired seeds but are SMALL (~+0.004 mean), not the
 +0.01 the single seeds suggested. Confirms the methodological lesson: single-
 seed apparent wins overstate. The operating point (dt0.45 lr1e-3 w_len0.03
 T256) is still the best method, just with honest effect sizes.
+
+## ITERS>5000 SWEEP RESULT (2026-07-02) -- marginal cyl gain at 10k
+cyl w_len0.03 T256 s1, sweep training iters (NOT max_steps):
+  iters=5000 (T256, seedval s1) -> 0.9499 (high-variance tail)
+  iters=7000  -> 0.9428 (NO gain; plateau, coverage-capped)
+  iters=10000 -> 0.9477 (marginal new high at fixed seed; +0.002 over T256 0.9457)
+VERDICT: more training iters gives at best a MARGINAL cyl gain (~+0.002 at 10k)
+at 2x the compute (100min). The 5000-iter runs already capture the basin; cyl is
+coverage-capped (hard dice flat ~0.718), so additional soft-dice gains are small
+and noisy. iters=5000 remains the practical budget. The i7000 dip (0.9428) and
+the seedval s1 high (0.9499) bracket the ~0.94-0.95 noise band.
