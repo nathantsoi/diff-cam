@@ -647,7 +647,7 @@ export async function createVoxelViewer(canvas, options = {}) {
 
   // ---- public API ----
   // Trajectory points are normalized [0,1]^3. Re-init stock and carve 0..step-1.
-  let carvedStep = 0, trajectoryPts = null;
+  let carvedStep = 0, trajectoryPts = null, stageBoundaryIdx = null;
   const cutsFor = (upto) => {
     const cuts = [];
     for (let i=0; i<upto && i+1<trajectoryPts.length; i++){
@@ -676,8 +676,9 @@ export async function createVoxelViewer(canvas, options = {}) {
     return cuts;
   };
 
-  const setTrajectory = (pts) => {
+  const setTrajectory = (pts, stageBoundary) => {
     trajectoryPts = pts ? pts.map(p => [p[0], p[1], p[2]]) : null;
+    stageBoundaryIdx = (typeof stageBoundary === "number") ? stageBoundary : null;
     initGrid(); carvedStep = 0; vertexCount = 0;
     if (pts && pts.length) { applyCuts(cutsFor(pts.length-1)); carvedStep = pts.length-1; extractMesh(); }
   };
@@ -785,9 +786,21 @@ export async function createVoxelViewer(canvas, options = {}) {
         if (i <= rstep) continue;
         segs.push({ a:trajectoryPts[i-1], b:trajectoryPts[i], color:[0.22,0.45,0.66,0.25] });
       }
-      // Reached prefix: bright.
+      // Reached prefix: bright; stage 2 (staged runs) in amber to distinguish
+      // the second trajectory from the first.
       for (let i=1;i<=rstep;i++){
-        segs.push({ a:trajectoryPts[i-1], b:trajectoryPts[i], color:[0.36,0.75,1.0,0.95] });
+        const c = (stageBoundaryIdx != null && i > stageBoundaryIdx)
+          ? [0.98,0.75,0.14,0.95] : [0.36,0.75,1.0,0.95];
+        segs.push({ a:trajectoryPts[i-1], b:trajectoryPts[i], color:c });
+      }
+      // Stage boundary marker (staged runs): amber 3-axis cross where stage 1
+      // ends and stage 2 begins.
+      if (stageBoundaryIdx != null && stageBoundaryIdx < trajectoryPts.length) {
+        const bp = trajectoryPts[stageBoundaryIdx], L = 0.06;
+        [[1,0,0],[0,1,0],[0,0,1]].forEach(([dx,dy,dz])=>{
+          segs.push({ a:bp, b:[bp[0]+dx*L,bp[1]+dy*L,bp[2]+dz*L], color:[0.98,0.75,0.14,1] });
+          segs.push({ a:bp, b:[bp[0]-dx*L,bp[1]-dy*L,bp[2]-dz*L], color:[0.98,0.75,0.14,1] });
+        });
       }
       // tool-tip marker: small 3-axis cross at the current tip.
       const tip = trajectoryPts[rstep], L = 0.05;

@@ -28,9 +28,13 @@ import numpy as np
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)  # so `import cam` works when run as a script
-RESULTS = os.path.join(REPO, "results.tsv")
 RUNS = os.path.join(REPO, "runs")
 WEB = os.path.join(REPO, "autoresearch", "tasks", "train_csg", "web")
+# The canonical experiment log for this task (the same file plot_results.py
+# reads) -- NOT the legacy repo-root results.tsv, which holds an unrelated
+# 14-row baseline set. Reading the task log is what makes every autoresearch
+# experiment, including staged multi-trajectory runs, appear in the dashboard.
+RESULTS = os.path.join(os.path.dirname(WEB), "results.tsv")
 OUT = os.path.join(WEB, "data.json")
 
 DICE_TOL = 0.05  # results.tsv dice must be within this of a run's metrics dice
@@ -38,6 +42,8 @@ DICE_TOL = 0.05  # results.tsv dice must be within this of a run's metrics dice
 
 def parse_cmd(cmd):
     """Pull shape / iters / seed out of a results.tsv command string."""
+    if not isinstance(cmd, str):
+        cmd = ""
     shape = re.search(r"--target-shape\s+(\S+)", cmd)
     iters = re.search(r"--iters\s+(\d+)", cmd)
     seed = re.search(r"--seed\s+(\d+)", cmd)
@@ -279,6 +285,64 @@ def match_row(row_dice, shape, iters, seed, index):
     return best
 
 
+def parse_seed_desc(desc):
+    """Recover a seed from a results.tsv description like 'cyl s4 STAGED ...'."""
+    m = re.search(r"\bs(\d+)\b", desc or "")
+    return int(m.group(1)) if m else None
+
+
+def _stage1_seed(run_rec):
+    """Seed of a staged run's stage-1 trajectory, read from the stage-1 run's
+    args.json via ``init_stock_from``. The results.tsv description's 'sN' refers
+    to the STAGE-1 seed (the run that got truncated), not the stage-2 run's own
+    seed, so match against this."""
+    args = run_rec.get("args") or {}
+    init_from = args.get("init_stock_from")
+    if not init_from:
+        return None
+    try:
+        run1_dir = os.path.dirname(init_from)
+        with open(os.path.join(REPO, run1_dir, "args.json")) as f:
+            a1 = json.load(f)
+        return int(a1.get("seed"))
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def find_concat_run(shape, seed):
+    """Find the most recent staged run dir (has trajectory_concat.npy) matching
+    shape (+stage-1 seed). Staged results.tsv rows log the deployable HARD-carve
+    dice (~0.72), which can't match a run's soft dice via ``match_row``; this
+    links them to the stage-2 run dir that owns the concatenated trajectory.
+    ``seed`` is the STAGE-1 seed (what the description's 'sN' refers to)."""
+    if shape is None:
+        return None
+    found = []
+
+    def walk(base):
+        if not os.path.isdir(base):
+            return
+        for name in sorted(os.listdir(base)):
+            full = os.path.join(base, name)
+            if os.path.isfile(full):
+                continue
+            rec = load_run(full)
+            if rec is None:
+                walk(full)
+                continue
+            if (rec["shape"] == shape
+                    and os.path.exists(os.path.join(full, "trajectory_concat.npy"))):
+                if seed is None or _stage1_seed(rec) == seed:
+                    found.append(rec)
+            else:
+                walk(full)
+
+    walk(RUNS)
+    if not found:
+        return None
+    return max(found, key=lambda r: r["mtime"])
+
+
 # --- G-code generation (mirrors scripts/export_gcode.py's MachineConfig build) ---
 def make_machine_config(args):
     from cam import MachineConfig
@@ -310,7 +374,12 @@ def ensure_gcode(run_rec, generate=True):
         return None
     try:
         from cam import save_gcode
-        tp = os.path.join(REPO, run_rec["run_dir"], "trajectory.npy")
+        d = os.path.join(REPO, run_rec["run_dir"])
+        # Staged runs: the deployable path is the concatenated multi-stage
+        # trajectory, not the stage-2-only trajectory.npy.
+        tp = os.path.join(d, "trajectory_concat.npy")
+        if not os.path.exists(tp):
+            tp = os.path.join(d, "trajectory.npy")
         positions = np.load(tp).astype(np.float64)
         cfg = make_machine_config(run_rec["args"])
         save_gcode(positions, gpath, cfg, post="haas")
@@ -320,9 +389,52 @@ def ensure_gcode(run_rec, generate=True):
         return None
 
 
+def _staged_boundary(run_rec):
+    """For a staged run, return the stage-1 boundary index t* (the index of the
+    last stage-1 position within the concatenated trajectory). Read from the
+    ``init_stock_from`` npz (run1/trunc_state.npz -> t_trunc). Returns None if
+    the run isn't staged or the truncation point can't be recovered."""
+    args = run_rec.get("args") or {}
+    init_from = args.get("init_stock_from")
+    if not init_from:
+        return None
+    try:
+        z = np.load(init_from)
+        return int(z["t_trunc"])
+    except (OSError, KeyError, ValueError, TypeError):
+        return None
+
+
 def trajectory_json(run_rec, decimals=4):
-    """Load trajectory + commanded path, return compact JSON-ready arrays."""
+    """Load trajectory + commanded path, return compact JSON-ready arrays.
+
+    For STAGED runs (a ``trajectory_concat.npy`` exists), the deployable
+    artifact is the concatenated ``stage1[:t*+1] + stage2[1:]`` path -- NOT the
+    stage-2-only ``trajectory.npy``, which starts mid-cut from the saved stock
+    and is misleading on its own. Return the concat as ``traj``, expose the
+    stage boundary (``stage_boundary`` = t*), and keep the stage-2-only path as
+    ``stage2_traj`` for reference. No ``cmd`` (commanded/pre-clip) path exists
+    for a concatenated multi-stage trajectory.
+    """
     d = os.path.join(REPO, run_rec["run_dir"])
+    concat_path = os.path.join(d, "trajectory_concat.npy")
+    if os.path.exists(concat_path):
+        try:
+            pos = np.load(concat_path).astype(np.float64)
+        except OSError:
+            return None
+        out = {
+            "traj": np.round(pos, decimals).tolist(),
+            "cmd": None,
+            "staged": True,
+            "stage_boundary": _staged_boundary(run_rec),
+        }
+        try:
+            p2 = np.load(os.path.join(d, "trajectory.npy")).astype(np.float64)
+            out["stage2_traj"] = np.round(p2, decimals).tolist()
+        except OSError:
+            out["stage2_traj"] = None
+        return out
     try:
         pos = np.load(os.path.join(d, "trajectory.npy")).astype(np.float64)
     except OSError:
@@ -394,17 +506,24 @@ def main():
     experiments = []
     n_matched = 0
     for i, r in enumerate(rows):
-        cmd = r.get("command", "")
-        desc = r.get("description", "")
+        cmd = r.get("command", "") or ""
+        desc = r.get("description", "") or ""
         dice = float(r["dice"])
         p = parse_cmd(cmd)
         shape = p["shape"]
-        if shape is None:  # recover from description
-            for s in ("sphere", "cylinder", "box", "pyramid"):
-                if s in desc or s in cmd:
+        if shape is None:  # recover from description (desc often abbreviates
+            # "cylinder" as "cyl")
+            for s, alias in (("sphere","sphere"), ("cylinder","cyl"),
+                             ("box","box"), ("pyramid","pyramid")):
+                if s in desc or s in cmd or alias in desc or alias in cmd:
                     shape = s
                     break
         run = match_row(dice, shape, p["iters"], p["seed"], index)
+        # Staged rows log the hard-carve concat dice (~0.72), which can't match a
+        # run's soft dice; link them to the stage-2 run dir with the concat path.
+        if run is None and ("STAGED" in desc or "concat" in desc.lower()):
+            seed = p["seed"] if p["seed"] is not None else parse_seed_desc(desc)
+            run = find_concat_run(shape, seed)
         rec = {
             "idx": i,
             "commit": r.get("commit", ""),
