@@ -22,9 +22,9 @@ To create a new experiment:
 1. **Choose run tag**: choose a new tag for your experiment that includes the date and a unique word description (e.g. `jun27-random-init`). The branch `ar-agd/<tag>` must not already exist, this is a fresh run.
 2. **Create the branch**: `git checkout -b ar-agd/<tag>` from the `autoresearch` branch.
 3. **Clear the previous run's results**: the result artifacts from the last run still sit in `autoresearch/tasks/train_csg/` and will contaminate the new branch if not cleared — a new branch must start from a clean slate, with results recorded only for *this* run. Once you are on the new branch, reset/truncate them:
-   - `results.tsv` → truncate to just the header row (`commit\tdice\tmemory_gb\tstatus\tdescription\tcommand`). Do NOT carry over any prior experiment rows.
-   - `idea.md` → overwrite with a fresh file (step 6 below) noting the new branch/tag, starting point, and plan. The old chronological findings log does not apply to this run.
-   - `report.md` → `rm` it. It is the *final* report from the previous run and is regenerated only when this run concludes; leaving it around would report stale numbers as if they were this run's.
+   - `results.tsv` → truncate to just the header row (`commit\tdice\tmemory_gb\tstatus\tdescription\tcommand`). Do NOT carry over any prior experiment rows. (Leave it untracked — do not commit it; see "Logging results".)
+   - `idea.md` → overwrite with a fresh file (step 6 below) noting the new branch/tag, starting point, and plan. The old chronological working log does not apply to this run.
+   - `findings.md` → `rm` it. It is the *consolidated findings record* from the previous run and is regenerated only when this run concludes; leaving it around would report stale numbers as if they were this run's. (The prior run's findings are preserved on its own branch in git history and in memory.)
    - `rm -f results_plot.png run.log` (both untracked) so the plot/log don't mix runs.
    These are committed-on-the-new-branch changes (or untracked deletions); do not push them back to the prior branch. The prior run's results remain preserved on its own branch in git history.
 4. **Create the run-output folder**: `mkdir -p runs/<tag>` (e.g. `runs/jun27-random-init`). Every experiment on this branch must land **inside** `runs/<tag>/` — the results dashboard groups runs by these direct child folders of `runs/` (see `discover_batches` in `scripts/build_results_web.py`), so a branch's experiments only appear together as one batch if they share the folder. The trainer writes to `runs/<run_name>` at the top level by default, so after each run you must move it into `runs/<tag>/` (done in the experiment loop below).
@@ -33,9 +33,14 @@ To create a new experiment:
 
 ## Experimentation
 
-Run each experiment on a single GPU, you can run multiple experiments at once, but check GPU load first and distribute accordingly by setting CUDA_VISIBLE_DEVICES. The training script runs for a **fixed time budget of no more than 15 minutes** (wall clock training time, excluding startup/compilation). Launch training as: `uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --grad-clip 0.5 --eval-freq 10`
+Run each experiment on a single GPU, you can run multiple experiments at once, but check GPU load first and distribute accordingly by setting CUDA_VISIBLE_DEVICES. The training script runs for a **fixed time budget of no more than 15 minutes** (wall clock training time, excluding startup/compilation). Launch training as: `uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --learning-rate 1e-3 --grad-clip 0.5 --eval-freq 10`
 
-`--voxel-size-mm` is the precision knob (a 1 in cube at `0.5` → 51³ grid, ~0.14 GB). **`--dt 0.45` is the decisive lever** (do NOT use the old `≈ 0.12` advice): at low dt the swept-cylinder tool is speed-limited and cannot descend/traverse the part exterior, capping dice at ~0.56 regardless of the loss or trajectory capacity. dt=0.45 advances ≈ 1 voxel/step so the tool covers the part (sphere 0.56 → 0.85, pyramid → 0.90). The sweet spot is `dt ∈ [0.42, 0.5]`. `--grad-clip 0.5` (0.4 for sphere) + `--eval-freq 10` + best-checkpoint saving capture the transient dice peak.
+`--voxel-size-mm` is the precision knob (a 1 in cube at `0.5` → 51³ grid, ~0.14 GB). Two levers dominate everything else:
+
+- **`--learning-rate 1e-3` is the single biggest lever** (the code default is still the old `5e-3` — you MUST pass `--learning-rate 1e-3` explicitly). The old `5e-3` **overshoots** past the good carving basin (dice peaks mid-training then degrades); `1e-3` lets the optimizer **settle** into the basin, producing a higher *and sustained* peak (final-iter ≈ best). Monotonic on sphere: `5e-3→0.717, 2e-3→0.754, 1e-3→0.849 (peak), 5e-4→0.804 (underfits)`. Sharp unimodal peak at `1e-3`; **lr is exhausted** — do not re-sweep. Universal across shapes (sphere 0.67→0.84, box 0.84→0.92, pyramid 0.86→0.89, cylinder 0.74→0.92). At `1e-3` the "transient peak then degrade" that motivated best-checkpoint saving is largely gone, but keep best-checkpoint saving on (cheap insurance).
+- **`--dt 0.45`** is the foundational lever (do NOT use the old `≈ 0.12` advice): at low dt the swept-cylinder tool is speed-limited and cannot descend/traverse the part exterior, capping dice at ~0.56. `dt=0.45` advances ≈ 1 voxel/step so the tool covers the part. Sweet spot `dt ∈ [0.42, 0.5]` (but see dead levers: `dt0.5 + m160` is a single-seed fluke, not a real win).
+
+`--grad-clip 0.5` + `--eval-freq 10` + best-checkpoint saving capture the dice peak. (The old "`--grad-clip 0.4` for sphere" advice is obsolete — at lr=1e-3, gc=0.4 drops sphere to 0.786; use gc=0.5 everywhere.) Per-shape refinements `--w-len 0.03` (trailing-drift fix), `--w-step 0.001` (uniform-feed), `--init-mode raster_fine`, and cyl `--max-steps 256` are documented in [Proven operating point & dead levers](#proven-operating-point--dead-levers).
 
 **What you CAN do:**
 - Modify `train_csg.py`, parameters when you call this script, and related components. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, max steps, etc. Importantly, if you need to implement new loss components, this will need to be done in the differentiable simulator, which is allowed.
@@ -53,7 +58,7 @@ Run each experiment on a single GPU, you can run multiple experiments at once, b
 
 **Simplicity criterion**: All else being equal, simpler is better. A small improvement that adds ugly complexity is not worth it. Conversely, removing something and getting equal or better results is a great outcome — that's a simplification win. When evaluating whether to keep a change, weigh the complexity cost against the improvement magnitude. A 0.001 dice improvement that adds 20 lines of hacky code? Probably not worth it. A 0.001 dice improvement from deleting code? Definitely keep. An improvement of ~0 but much simpler code? Keep.
 
-**The first run**: Your very first run should always be to establish the baseline — run the pipeline script with the default scenario (the baseline command in [Experimentation](#experimentation): default 1 in cube stock, sphere target, `--voxel-size-mm 0.5`) and no method changes. All later scenario or method variations are compared against this. **Note**: the code defaults already encode the proven operating point (`--dt 0.45 --grad-clip 0.5 --eval-freq 10 --iters 5000`), so a fresh baseline run scores **~0.85 (sphere) / ~0.90 (pyramid)**, NOT the old 0.56 — compare new ideas against this strong basin. The prior 0.56 baseline was the speed-limited default before this was fixed; see [Proven operating point & dead levers](#proven-operating-point--dead-levers) for what is already baked in and what has been ruled out.
+**The first run**: Your very first run should always be to establish the baseline — run the pipeline script with the default scenario (the baseline command in [Experimentation](#experimentation): default 1 in cube stock, sphere target, `--voxel-size-mm 0.5`, and **`--learning-rate 1e-3`**) and no method changes. All later scenario or method variations are compared against this. **Note**: most of the proven operating point is baked into the code defaults (`--dt 0.45 --grad-clip 0.5 --eval-freq 10 --iters 5000`), **but `--learning-rate` is NOT — its code default is still the old `5e-3`**, so you must pass `--learning-rate 1e-3` explicitly or the run overshoots and scores ~0.67 (sphere) instead of ~0.85. With `--learning-rate 1e-3`, a fresh baseline scores **~0.85 (sphere) / ~0.92 (box) / ~0.89 (pyramid) / ~0.92 (cylinder)** reliably — compare new ideas against this strong basin. See [Proven operating point & dead levers](#proven-operating-point--dead-levers) for what is already established and what has been ruled out.
 
 ## Output format
 
@@ -103,10 +108,10 @@ Example:
 
 ```
 commit	dice	memory_gb	status	description	command
-a1b2c3d	0.852300	0.1	keep	baseline	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --grad-clip 0.5 --eval-freq 10
-b2c3d4e	0.861200	0.1	keep	increase LR to 0.01	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --grad-clip 0.5 --eval-freq 10 --learning-rate 0.01
-c3d4e5f	0.812000	1.1	keep	0.9in cylinder on 1in cube	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape cylinder --target-radius-mm 11.43 --target-height-mm 22.86 --post haas --dt 0.45 --grad-clip 0.5 --eval-freq 10
-d4e5f6g	0.000000	0.0	crash	0.1mm voxels on 2in cube (OOM)	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 2 2 2 --voxel-size-mm 0.1 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --grad-clip 0.5 --eval-freq 10
+a1b2c3d	0.849800	0.1	keep	baseline sphere (lr1e-3)	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --learning-rate 1e-3 --grad-clip 0.5 --eval-freq 10
+b2c3d4e	0.854700	0.1	keep	sphere + w_len 0.03	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --learning-rate 1e-3 --grad-clip 0.5 --eval-freq 10 --w-len 0.03
+c3d4e5f	0.920600	1.1	keep	cylinder (lr1e-3, w_len, T256)	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 256 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape cylinder --target-radius-mm 11.43 --target-height-mm 22.86 --post haas --dt 0.45 --learning-rate 1e-3 --grad-clip 0.5 --eval-freq 10 --w-len 0.03
+d4e5f6g	0.000000	0.0	crash	0.1mm voxels on 2in cube (OOM)	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 2 2 2 --voxel-size-mm 0.1 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --learning-rate 1e-3 --grad-clip 0.5 --eval-freq 10
 ```
 
 ## The experiment loop
@@ -119,7 +124,7 @@ LOOP FOREVER:
 2. Tune `algorithms/train_csg.py` with an experimental idea by directly hacking the code.
 3. git commit
 4. Run the experiment, redirecting everything to `run.log` (do NOT use tee or let output flood your context). Record the exact command you ran (see "Logging results"). Example:
-   `uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --grad-clip 0.5 --eval-freq 10 > run.log 2>&1`
+   `uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --learning-rate 1e-3 --grad-clip 0.5 --eval-freq 10 > run.log 2>&1`
 5. **Move the run into the branch folder** so the dashboard groups it with this branch's batch: extract the run dir the trainer reported (`grep "writing outputs to" run.log` → `runs/<run_name>`) and `mv runs/<run_name> runs/<tag>/`. This must happen before the next experiment so runs don't pile up at the top level of `runs/` (where `discover_batches` can't see them). The run-dir matching in `build_results_web.py` keys on (shape, iters, seed) + dice, not path, so moving is safe.
 6. Read out the results: `grep "^dice:\|^peak_vram_mb:" run.log` or read `runs/latest_metrics.json`
 7. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
@@ -146,45 +151,57 @@ Generate the plot from `results.tsv` (the source of truth — it has the per-exp
 - **Progress over experiments**: dice on the y-axis vs. experiment order on the x-axis, with kept vs. discarded vs. crashed points distinguished, and a "running best" line so the improvement trajectory is obvious.
 - **Generality across scenarios**: since you vary the stock/target, also show the **best dice per machining scenario** (parse the stock/target flags out of the `command` column — e.g. group by `--target-shape` and `--stock-size-in`). A grouped bar chart is fine. This is the payoff of varying the scenario: it shows where the method is strong and where it struggles.
 
-Keep the script simple and robust (skip `crash` rows / `0.000000` dice where appropriate, handle a commit appearing more than once by taking its best). Then summarize the plot's takeaways in `idea.md` and in your final message. After the plot exists and is saved, you may conclude.
+Keep the script simple and robust (skip `crash` rows / `0.000000` dice where appropriate, handle a commit appearing more than once by taking its best). Then summarize the plot's takeaways in `idea.md` and in your final message. Finally, write `autoresearch/tasks/train_csg/findings.md` — the consolidated, deduplicated record of every finding from the run (task, best method, the real levers in order of impact, dead levers, methodological lessons, artifacts), drawing on `idea.md` (chronological) and `results.tsv` (numbers). This is the file the next run's `autoresearch.md` "Proven operating point" section will be built from, so be precise about configs and effect sizes. After the plot and `findings.md` exist, you may conclude.
 
 ## Proven operating point & dead levers
 
-The `ar-agd/jun28-decay-port` effort (514 experiments; see `idea.md` and `report.md`) established the operating point below. **The decisive defaults are now baked into the code** (`scripts/run_pipeline.py` + `algorithms/train_csg.py`), so a fresh baseline run starts in the strong basin (~0.85 sphere / ~0.90 pyramid), not the old 0.56. Use this as the reference point; do not waste runs re-discovering what is already known.
+The `ar-agd/jul1-uniform-toolpath` effort (~127 experiments; see `findings.md` and the prior `idea.md`/`results.tsv` on that branch) established the operating point below, superseding the older `jun28-decay-port` table (whose `lr=5e-3` advice is now known to be suboptimal). Most of it is baked into the code defaults (`scripts/run_pipeline.py` + `algorithms/train_csg.py`), **except `--learning-rate`** (code default is still `5e-3` — pass `1e-3` explicitly). Use this as the reference point; do not waste runs re-discovering what is already known.
 
-### Operating point (already the code defaults)
+### Operating point (the best method, all shapes)
 
-| lever | value | why |
-|-------|-------|-----|
-| `--dt` | `0.45` | **The decisive lever.** At low dt the tool is speed-limited (z-range clips to 0.72–1.0) and cannot traverse the exterior → dice caps ~0.56. 0.45 ≈ 1 voxel/step. Sweet spot `dt ∈ [0.42, 0.5]`. |
-| `--max-steps` | `128` | m=128 optimal at dt≤0.45; m=160 optimal at dt=0.5; m≥192 NaNs (SDF overflow); m=144 slightly worse. |
-| `--learning-rate` | `5e-3` | Optimum; 3e-3 neutral, 7e-3 diverges at dt0.5. |
-| `--init-scale` | `0.05` | 0.02 and 0.1 both hurt. |
-| `--grad-clip` | `0.5` (0.4 for sphere) | Stabilizes the transient dice peak so best-checkpoint saving captures a higher one. 0.0 → unstable peak → dice ~0.56. |
-| `--eval-freq` | `10` | Fine cadence samples the transient peak; `iters//10` auto is too coarse at i5000 and misses it. |
-| `--iters` | `5000` | Peaks appear LATER as iters grow (sphere @530→@2450; pyramid @680→@1590). i5000 is the sweet spot; i8000 gives no gain and breaks the 15-min budget. |
-| best-checkpoint saving | on (in `train_csg.py`) | Dice peaks transiently mid-training then degrades (loss keeps dropping while dice falls). Report the best-iter dice + save that trajectory — no re-eval (GPU atomic-add nondeterminism). |
+```
+--dt 0.45 --learning-rate 1e-3 --init-mode raster_fine --w-len 0.03 \
+--max-steps 256 --grad-clip 0.5 --eval-freq 10 --iters 5000
+```
 
-**Seed variance strategy**: high run-to-run variance (±0.04–0.05) from init stochasticity + GPU atomic-add nondeterminism. Run many seeds and take the max — the best trajectory found is what counts. New overall bests appeared roughly every 20–30 pyramid seeds as lucky transient peaks.
+| lever | value | code default | why |
+|-------|-------|--------------|-----|
+| `--learning-rate` | `1e-3` | `5e-3` ❗ (must pass flag) | **The single biggest lever.** Old `5e-3` OVERSHOOTS past the good carving basin (dice peaks then degrades); `1e-3` lets the optimizer SETTLE — higher *and sustained* peak. Monotonic on sphere: `5e-3→0.717, 2e-3→0.754, 1e-3→0.849 (peak), 5e-4→0.804`. Sharp unimodal peak; lr EXHAUSTED. Universal across shapes. |
+| `--dt` | `0.45` | `0.45` ✓ | Foundational lever. dt=0.12 caps dice ~0.56 (tool too slow to cover); 0.45 ≈ 1 voxel/step. Sweet spot `dt ∈ [0.42, 0.5]`. |
+| `--w-len` | `0.03` | `0.0` ❗ (pass for cyl) | Path-length / minimal-motion penalty (mean sq `|Δ_t|²`). **The fix for "tool moves away from the part"** — agnostic to *where* the tool is (unlike the dead contour-hug losses), only discourages motion; trailing steps with no residual shrink to zero so the tool STOPS. Cylinder: trailing z-climb 1.704→0.010, dice 0.934→0.945, air 0.286→0.199. Safe for sphere (0.847→0.855). |
+| `--w-step` | `0.001` | `0.0` ❗ (pass for sphere) | Constant-feed regularizer (squared step-LENGTH change). Encourages the uniform-feed CNC pattern without opposing carving. Saturates fast (0.001 enough). Sphere +0.004 mean — **marginal** (single-seed 0.858 was a lucky high-variance seed). Orthogonal to `w_len` but the two overlap (both discourage motion), so they do not stack. |
+| `--init-mode` | `raster_fine` | `random` ❗ (optional) | Clipping-aware fine boustrophedon (per-step ≤ feed cap). +0.063 sphere mean vs random at lr=5e-3. At lr=1e-3 the LR win largely subsumes it (random + lr1e-3 ≈ rf + lr1e-3 on sphere) — kept as the uniform-feed init, but unnecessary at the correct LR. |
+| `--max-steps` | `128` (256 for cyl) | `128` ✓ | m=128 optimal at dt≤0.45; cyl soft-dice peaks T=256 (0.9457, marginal over T=128). m≥192 NaNs (SDF overflow); m=144 slightly worse; T=320 unstable. |
+| `--grad-clip` | `0.5` | `0.5` ✓ | Stabilizes the peak so best-checkpoint saving captures a higher one. **Use 0.5 everywhere** — the old "0.4 for sphere" advice is obsolete (at lr=1e-3, gc=0.4 drops sphere to 0.786). |
+| `--eval-freq` | `10` | `10` ✓ | Fine cadence samples the peak. |
+| `--iters` | `5000` | `5000` ✓ | Sweet spot. iters>5000 is marginal (cyl 10k→0.9477, +0.002 at 2× compute) — coverage-capped, not iters-limited. |
+| best-checkpoint saving | on | on ✓ | At lr=1e-3 the peak is largely sustained, but keep it on (cheap insurance). No re-eval — GPU atomic-add nondeterminism gives ±0.01–0.05 run-to-run variance. |
 
-### Dead levers (confirmed no help on current API — do NOT re-explore)
+**Seed variance strategy**: high run-to-run variance (±0.04–0.05) from init stochasticity + GPU atomic-add nondeterminism. **Need ≥3 (ideally ≥5) paired same-GPU seeds** to distinguish a real lever from seed-reshuffling — single-seed apparent wins overstate effect size ~2–3× (this bit the prior run on `w_step`, `w_gouge`, `dt0.5+m160`). **Dice is only comparable on the SAME GPU** (atomic-add nondeterminism); cross-GPU comparisons are confounded.
 
-- **`lr_decay_frac`** — the stale branch's lever (0.29→0.84); loss/simulator changed, it is dead here (all settings tied the 0.56 baseline). Best-checkpoint saving subsumes it.
-- **`w_gouge` sweep** — loss balance is NOT the lever; ±0.005 noise (0.5 gouges, 1.0–2.0 neutral).
-- **finer `voxel_size_mm`** — 0.4 = 0.683, 0.35 = 0.648, both WORSE than 0.5; the speed limit binds harder relative to voxel size.
-- **structured inits** (`raster`/`spiral`/`shell`/`zlayer`) — all fail via speed-limit clipping; inits can't help until the tool can move (dt=0.45).
-- **`init-scale`** 0.02 / 0.1 — both hurt.
-- **`max-steps`** 144 (slightly worse than 128), ≥192 (NaN).
-- **`lr`** 3e-3 (neutral), 7e-3 (diverges at dt0.5).
-- **`iters`** 8000 — no gain over 5000, breaks budget.
+### Dead levers (confirmed no help — do NOT re-explore)
 
-### Per-scenario ceilings (default stock 1.0 in, voxel 0.5 mm)
+- **`w_air`, `w_prox`, `w_traj_prox`** (loss-based air / "keep tool near surface") — FUNDAMENTALLY trade off dice (0.847→~0.55) across all weights AND warmup. The default sphere nearly fills the 1in stock, so carving the corners inherently requires sweeping through empty corner region far from the surface → ~30% air-cut fraction is the *price* of 0.847 dice, not a tunable inefficiency. The air fix is `w_len` (stops trailing wandering) + `raster_fine` init (pre-covers the part), NOT a loss term. Code remains gated at default 0.
+- **`w_gouge`** sweep (4→8) — seed-reshuffling, not a real mean win over 5 paired seeds (mean identical 0.6845; reshuffles dice across seeds). The 3-seed "+0.011 mean" was subset variance.
+- **`w_jerk`** — ~neutral at every weight tested.
+- **`lr_decay_frac`** — dead (all settings tied the baseline); best-checkpoint saving subsumes it.
+- **`dt0.5 + m160`** — single-seed fluke (s0=0.853); mean 0.834 < dt0.45 m128 mean 0.849, higher air, higher variance.
+- **`raster_fine_wide`** (full 0.05–0.95 envelope) — slightly worse mean, loses the high ceiling; under-coverage hypothesis refuted.
+- **`k ≤ 2`** (sharp soft union) — saturates, gradients vanish, trajectory degenerates (soft dice 0.0). k=10 is correct.
+- **`iters > 5000`** — marginal (cyl 10k→0.9477, +0.002 at 2× compute); cyl is coverage-capped.
+- **finer `voxel_size_mm`** — 0.4 / 0.35 both WORSE than 0.5; the speed limit binds harder relative to voxel size.
+- **coarse structured inits** (`raster`/`spiral`/`shell`/`zlayer`) — fail the speed clip (only `raster_fine` survives, because its per-step is ≤ feed cap).
+- **`init-scale`** 0.02 / 0.1 — both hurt. **`lr`** 3e-3 (neutral), 7e-3 (diverges), 5e-4 (underfits) — lr EXHAUSTED, peak at 1e-3. **`max-steps`** 144 (slightly worse), ≥192 (NaN).
 
-| scenario | best dice | config | seed | best@iter |
-|----------|-----------|--------|------|-----------|
-| pyramid | **0.9010** | dt0.45 gc0.5 i5000 ef10 | 115 | 1240 |
-| sphere | **0.8499** | dt0.45 gc0.4 i5000 ef10 | 20 | 2450 |
-| box | **0.8311** | dt0.45 gc0.5 | 2 | 960 |
-| cylinder | **0.7557** | dt0.45 gc0.5 | 8 | 420 |
+### Per-scenario ceilings (default stock 1.0 in, voxel 0.5 mm, lr=1e-3)
 
-Pyramid/sphere are high-variance (ceilings rest on lucky seeds); box/cylinder are low-variance and structurally capped. Pure seeding has hit diminishing returns after 514 experiments — the productive frontier is a *new method lever* (e.g. a differentiable loss/simulator change that lifts the structural cap on cylinder/box, or reduces sphere/pyramid variance), not more seeds.
+| scenario | best soft dice | mean (multi-seed) | config | vs lr=5e-3 baseline |
+|----------|----------------|--------------------|--------|---------------------|
+| cylinder | **0.9499** | 0.941 | dt0.45 lr1e-3 w_len0.03 T256 | 0.74 → 0.94 (+0.18) |
+| box | **0.9172** | 0.915 | dt0.45 lr1e-3 rf | 0.84 → 0.92 (+0.08) |
+| sphere | **0.8498** | 0.847 | dt0.45 lr1e-3 (rf or random) w_step0.001 | 0.67 → 0.85 (+0.18) |
+| pyramid | **0.9001** | 0.893 | dt0.45 lr1e-3 rf | 0.86 → 0.89 (+0.03) |
+
+These are **soft**-dice ceilings (the tracked metric). **Critical caveat — the soft/hard carve gap (~0.21):** the tracked soft dice (~0.94 cyl) is a BIASED proxy; the true deployable HARD-carve dice is ~0.718 and is k-invariant, T-invariant (coverage-capped). The soft union over-erodes (adds ~log(2)/k per step), so a trajectory optimized for soft does NOT transfer to hard. Staged training (train → truncate at t* → save state → train a 2nd trajectory to finish) works end-to-end but gave only +0.0016 hard dice because stage-2's soft optimization doesn't transfer. **To raise DEPLOYABLE dice, improve the trajectory's hard-carve coverage (more steps / finer feed / better path), not the loss smoothness or soft dice.** This is the highest-value open frontier.
+
+Pure seeding and the levers above have hit diminishing returns — the productive frontier is a *new method lever*: either close the soft/hard gap (a less-biased soft objective, or a trajectory that covers more hard material), a parametric low-air toolpath (inherently uniform CNC pattern), or lifting a structural cap on a specific shape. Not more seeds, not more lr/iters/w_len sweeps.
