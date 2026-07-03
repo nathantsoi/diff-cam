@@ -828,6 +828,16 @@ class CSGSimulatorDelta:
             self.stock[t + 1, i, j, k] = smooth_max(self.stock[t, i, j, k], -tool_d, kv)
 
     @ti.kernel
+    def apply_cut_hard(self, t: ti.i32):
+        """stock[t+1] = max(stock[t], -tool_sdf_sharp at segment t)."""
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            p = ti.Vector(
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+            )
+            tool_d = self.tool_sdf_sharp(p, t)
+            self.stock[t + 1, i, j, k] = ti.max(self.stock[t, i, j, k], -tool_d)
+
+    @ti.kernel
     def loss_at(self, t: ti.i32) -> ti.f32:
         """Exact replica of compute_loss's objective, evaluated on stock[t].
 
@@ -1254,6 +1264,24 @@ class CSGSimulatorDelta:
         self.compute_step_penalty(0, num_active_steps - 1)
         self.compute_traj_prox_penalty(0, num_active_steps - 1)
         self.compute_length_penalty(0, num_active_steps - 1)
+
+    def forward_hard(self, num_active_steps, clip_speeds=True):
+        """Hard boolean forward pass for evaluation and rendering.
+
+        Position advancement follows forward() when clip_speeds is True, but carving
+        uses exact apply_cut_hard (ti.max union with tool_sdf_sharp) instead of
+        smooth_max. Step-count invariant and non-differentiable.
+        """
+        self.reconstruct_positions(0)
+        self.init_stock()
+        if clip_speeds:
+            for t in range(num_active_steps - 1):
+                self.advance_position(t)
+                self.apply_cut_hard(t)
+        else:
+            self.reconstruct_positions(num_active_steps - 1)
+            for t in range(num_active_steps - 1):
+                self.apply_cut_hard(t)
 
     def forward_from(self, t0, num_active_steps):
         """Forward pass RESTARTED from a restored mid-cut state at step ``t0``.

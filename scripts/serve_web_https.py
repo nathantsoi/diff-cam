@@ -190,7 +190,7 @@ def generate_run_video(root: Path, run_rel: str, force: bool = False) -> dict:
     if gpu is not None:
         env["CUDA_VISIBLE_DEVICES"] = gpu
 
-    cmd = [sys.executable, str(script), "--run", run_rel]
+    cmd = [sys.executable, str(script), "--run", run_rel, "--mode", "both"]
     print(f"[video] generating {run_rel} (gpu={gpu}) ...")
     try:
         proc = subprocess.run(

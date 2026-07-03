@@ -841,7 +841,7 @@ def main():
                     sim.tool_start[None] = ti.Vector(list(CANONICAL_TOOL_START))
                     sim.tool_delta.from_torch(params.detach())
                     sim.loss[None] = 0.0
-                    sim.forward(T)
+                sim.forward_hard(T)
                 m = eval_metrics(sim, T, dx)
                 last_m = m
                 if m["dice"] > best_dice:
@@ -925,6 +925,7 @@ def main():
         # raw cumulative sum of the commanded deltas.
         sim.forward(T)
         positions = sim.tool_pos.to_torch()[:T].numpy()
+        sim.forward_hard(T)
 
         if (args.eval or args.eval_freq > 0) and it != last_eval_iter:
             m = eval_metrics(sim, T, dx)
@@ -965,7 +966,7 @@ def main():
                 # equivalent; the reported dice is the already-measured best_m).
                 sim.tool_delta.from_torch(torch.as_tensor(best_deltas))
                 sim.loss[None] = 0.0
-                sim.forward(T)
+                sim.forward_hard(T)
                 used_best = True
                 print(f"[best] using best-dice checkpoint: dice={best_dice:.6f} @ iter {best_it} "
                       f"(final-iter dice was {final_iter_dice:.6f})", flush=True)
@@ -1059,7 +1060,7 @@ def main():
         # Final interactive replay.
         if gui is not None and gui.running:
             sim.tool_delta.from_torch(params.detach())
-            sim.forward(T)
+            sim.forward_hard(T)
             render_trajectory_live(sim, gui, T, label="final")
     finally:
         writer.close()
