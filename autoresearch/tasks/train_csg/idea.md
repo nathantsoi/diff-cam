@@ -562,3 +562,18 @@ hard carve is the deployable number. Per autoresearch.md the loop tracks soft
 dice (grep "^dice:" train log); hard carve is a separate validation that must
 not be modified. IMPLICATION: the reported soft wins (sphere 0.85, cyl 0.945)
 are real on the tracked metric but overstate deployable quality by ~0.21.
+
+## PAIRED-SEED ROBUSTNESS VALIDATION (2026-07-02) -- wins are modest, not big
+6-run paired-seed check of the two headline wins (same GPU, 3 seeds each):
+  SPHERE w_step=0.001: s1=0.8503, s2=0.8468, s3=0.8580 -> mean 0.8517
+    vs baseline ~0.848 -> +0.004 (WITHIN NOISE; s1/s2 below baseline, s3 above).
+    The earlier single-seed 0.858 was a high-variance lucky seed. w_step is at
+    best a marginal sphere lever, NOT a reliable +0.01.
+  CYLINDER w_len=0.03 T256: s1=0.9499, s2=0.9398, s3=0.9336 -> mean 0.9411
+    vs baseline s3=0.9398/s4=0.9336 (mean 0.9367) -> +0.004 mean. s1=0.9499 is a
+    HIGH OUTLIER; s2/s3 (0.9398/0.9336) == baseline. w_len+T256 gives a
+    high-variance high tail but the mean gain is modest (~+0.004).
+VERDICT: both "wins" survive paired seeds but are SMALL (~+0.004 mean), not the
++0.01 the single seeds suggested. Confirms the methodological lesson: single-
+seed apparent wins overstate. The operating point (dt0.45 lr1e-3 w_len0.03
+T256) is still the best method, just with honest effect sizes.
