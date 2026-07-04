@@ -236,6 +236,125 @@ soft optimization IMPROVE on 0.779 or collapse it (like raster_fine 0.311→0.60
 If it collapses, the win is "use zlayer + minimal/low-lr optimization" or even
 "zlayer init only" — and the method generalizes via per-shape offset sweeps.
 
+### zlayer 0.779 is UNREALIZABLE — speed clip collapses it to floor
+The trainer's eval uses `forward_hard(clip_speeds=True)`; my 0.779 diagnostic
+used `carve_trajectory_metrics` → `_HardCarveSimulator.forward_hard(clip_speeds=False)`.
+The zlayer per-step is **4.7× the feed cap** (8.88mm vs 1.905mm cap at dt=0.45,
+feed_ipm=10): 12 revs over 127 steps is far too fast. Under clipping, EVERY
+structured init collapses: the first move from tool_start (z=1.0) to the orbit
+is huge and feed-regime, so `advance_position` shrinks it to the cap; then
+cumulative-scan deltas point at fixed intended positions but the tool crawls
+from the clipped position → it never reaches the orbit (single-ring test:
+clipped tool z stayed 0.999..1.000, xy radius 0.016 — never moved). This is
+WHY jul1 found "coarse structured inits fail via speed-limit clipping"; only
+`raster_fine` survived because its per-step (incl. first) is ≤ cap.
+
+**The path must satisfy the speed limit at EVERY step including the descent
+from tool_start.** Budget: 127 steps × 0.075 = 9.5 normalized units total path
+length; descending z=1.0→0.5 alone costs ~7 steps. So coverage is severely
+budget-limited. Options: (a) `--max-steps 256` doubles the budget (jul1 said
+T-invariant on SOFT dice — but for a COVERAGE path more steps = more sweep,
+re-test on HARD); (b) design a clipping-aware zlayer (per-step ≤ cap, gradual
+descent, fewer revs); (c) higher `--feed-ipm` raises the cap (but that changes
+the machining scenario, allowed via CLI — it's a speed limit, not the metric).
+
+**Key realization**: the unclipped 0.779 reveals the GEOMETRY that works (per-z
+annulus sweep from sphere+r_tool out to cube wall). The task is to realize that
+geometry within the speed budget. Highest-value next test: `--max-steps 256` +
+clipping-aware zlayer + maybe higher feed_ipm.
+
+### RESULT: zlayer + feed_ipm=60 = 0.7791 (best=iter0), soft opt COLLAPSES to 0.605
+Full training with `--init-mode zlayer --feed-ipm 60.0` (feed60 raises the cap
+so the zlayer per-step is no longer clipped → the geometry survives). Best dice
+**0.779147 @ iter 0** (the init itself, saved by best-checkpoint); final-iter
+dice collapsed to **0.604883**. So: **soft optimization HURTS the zlayer init**
+— it degrades 0.779→0.605, exactly the raster_fine collapse pattern
+(0.311→0.601) but in reverse direction (here the init is already good and opt
+wrecks it). The best-checkpoint mechanism is what makes this a KEEP: the
+reported dice is the init's 0.779, +0.16 over baseline 0.6170. → results.tsv
+row 8 (keep). **This is the new operating point for sphere HARD dice.**
+
+**Implication**: the productive method is "zlayer init + DON'T optimize (or
+optimize so gently it preserves the init)." Two follow-ups:
+1. **Gentle optimization** (lr=1e-4 or 1e-5): does it improve on 0.779 or stay
+   neutral? If neutral, 0.779 is the ceiling for this geometry and the win is
+   purely the init. Running zlayer+feed60+lr1e-4 (GPU7).
+2. **More coverage budget** (feed120, max-steps 256): the unclipped 0.779 used
+   12 revs/127 steps; finer annuli (more revs) may push higher. Running
+   zlayer+feed120 (GPU8).
+3. **Generalize to other shapes** (the robustness requirement): zlayer is
+   sphere-specific (uses r_sphere(z)). For cylinder/box/pyramid need per-shape
+   offset-surface annulus sweeps. This is the next architectural step once the
+   sphere ceiling is found.
+
+### BREAKTHROUGH 2: zlayer geometry search -> sphere 0.854, cylinder 0.9066
+The 0.779 was the DEFAULT zlayer (revs=12, osc=3, margin=0.03), NOT the
+geometry ceiling. `scripts/zlayer_search.py` parameterizes the zlayer
+(revs/osc/margin) and scores it unclipped via `carve_trajectory_metrics`
+(seconds/config; matches the trainer's clipped eval at feed>=60 since the
+zlayer per-step is then unclipped). Sweeping found:
+
+- **Sphere**: revs=18, osc=9, margin=0.005 → **0.8540** unclipped (default
+  12/3/0.03 → 0.779). +0.075 from denser sweep + tighter margin. revs=36
+  over-denses and collapses (~0.56); sweet spot is 15-21 revs, 8-10 osc,
+  0.005-0.015 margin (robust plateau 0.848-0.854). Tighter margin helps
+  sphere (less residual surface waste; tool inner edge still clears part).
+- **Cylinder** (shape-aware zlayer: r_safe = r_cyl+r_tool+margin, z-invariant):
+  revs=15, osc=9, margin=0.015 → **0.9066** unclipped. vs jul1 cyl hard
+  baseline 0.718 = **+0.19**. Cylinder prefers FEWER revs (15) and LARGER
+  margin (0.015) than sphere — its constant-radius annulus is cleaner so
+  needs less density and tolerates a looser surface gap.
+
+**Both verified under the trainer's clipped eval at feed120**: sphere iter-0
+0.8540, cylinder iter-0 0.9066 (exact match to unclipped diagnostic → geometry
+survives clipping at feed120). Best-checkpoint saving preserves iter-0 (soft
+optimization still collapses both, as expected). → results.tsv rows 9-10.
+
+**This is the operating point**: shape-aware zlayer init (sphere revs18/osc9/
+m0.005, cyl revs15/osc9/m0.015) + feed120 + best-checkpoint. Sphere 0.854
+(+0.237 over baseline 0.617), cylinder 0.9066 (+0.19 over 0.718). The method
+is "use a well-designed coverage init and DON'T let soft optimization wreck
+it" — the differentiable soft loss is structurally decoupled from hard dice
+(established earlier), so the win is the init geometry, not optimization.
+
+### T=512: more steps = finer coverage. Sphere 0.890, cylinder 0.9385 (ceiling ~0.90)
+The 0.854/0.9066 were at T=128. The zlayer ceiling is NOT fixed — more steps
+let the orbit use more revolutions (finer angular coverage) without larger
+per-step jumps. `zlayer_search` sweep across T:
+- Sphere: T=128→0.854, T=256→0.876, T=384→0.887, T=512→0.890, T=768→0.897,
+  T=1024→0.901. Diminishing; ~0.90 is the practical ceiling (scallop + surface
+  gap + unreachable 8 cube corners). T=512 revs=60/osc=10/m0.005 = 0.890.
+- Cylinder: T=512 revs=40/osc=8/m0.015 = **0.9385** (constant-radius annulus
+  is cleanest; cylinder near its ceiling).
+
+**Both verified under trainer clipped eval at feed120** (sphere 0.889987 @
+iter0, cyl 0.9385 @ iter0; final-iter collapsed to 0.614/0.718 — optimization
+still wrecks the init at T=512 too, best-checkpoint saves iter-0). → results.tsv
+rows 11-12. **Operating point: shape-aware zlayer + feed120 + best-checkpoint,
+short --iters 500 (win is iter-0).**
+
+### Box + pyramid: zlayer does NOT generalize (different waste geometry)
+- **Box**: target fills [0.05,0.95]³ (do-nothing floor = 0.844 — already high;
+  the box IS most of the stock). raster_fine baseline = 0.8144 FLAT — BELOW
+  floor (the init gouges the box). Hard ceiling ~0.844 (the 8 cube corners +
+  edge slivers are unreachable by a cylindrical tool). Box wants MINIMAL
+  carving, not a zlayer. → results.tsv row 13 (discard).
+- **Pyramid**: floor ~0.217 (small pyramid in a big cube — lots of waste).
+  zlayer FAILS: (a) circular orbit at r_safe=pyramid_half+r_tool under-covers
+  the SQUARE waste-annulus corners (0.31); (b) square orbit (square-point
+  mapping) also 0.37 — the waste ABOVE/BELOW the pyramid (z outside
+  [0.275,0.725]) is a FULL DISK, not an annulus, and the rotating-radius
+  zlayer covers a disk sparsely; (c) skip-inside boustrophedon GOUGES on
+  transit (tool carves the jump across the interior). The zlayer pattern is
+  fundamentally for ANNULAR waste (axisymmetric shapes: sphere, cylinder).
+  Pyramid needs a different approach (full-disk clearing above/below + square
+  annulus beside) — open. Measuring pyramid default-opt hard baseline now.
+
+**Robustness status**: sphere 0.890, cylinder 0.9385 (zlayer wins); box ~0.844
+(ceiling, minimal carving); pyramid TBD (zlayer doesn't apply, testing default).
+The zlayer is a SHAPE-SPECIFIC method for axisymmetric parts; box/pyramid
+have different waste geometry and different optima.
+
 ## Methodological reminders
 
 - ≥3 (ideally ≥5) paired same-GPU seeds to call a lever real.

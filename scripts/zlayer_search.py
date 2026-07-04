@@ -30,10 +30,10 @@ def zlayer_positions(n, target_shape, target_radius_mm, target_height_mm,
     stock_mm = stock_size_in * 25.4
     r_tool = tool_radius_mm / stock_mm
     r_outer = 0.5 + r_tool
+    r_sp = target_radius_mm / stock_mm   # sphere radius / cylinder radius / pyramid base half-size
     positions = np.zeros((n, 3), dtype=np.float32)
 
     if target_shape == "sphere":
-        r_sp = target_radius_mm / stock_mm
         for t in range(n):
             frac = t / max(1, n - 1)
             zb = z_top + (z_bot - z_top) * frac
@@ -65,10 +65,36 @@ def zlayer_positions(n, target_shape, target_radius_mm, target_height_mm,
             positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
             positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
             positions[t, 2] = zb
+    elif target_shape == "pyramid":
+        # Square-pyramid: base half-size r_sp at z=base_z, shrinking to 0 at apex.
+        # The waste annulus is SQUARE, so a circular orbit under-covers the
+        # corners. Use a SQUARE orbit: map angle -> square perimeter via
+        # (cos,sin)/max(|cos|,|sin|), scaled by an oscillating half-size that
+        # sweeps from the safe square (pyramid_half(z)+r_tool+margin) out to the
+        # cube wall. Continuous path that stays in the square annulus (no transit
+        # gouging). The square analog of the circular zlayer.
+        h = target_height_mm / stock_mm
+        base_z = 0.5 - 0.5 * h
+        for t in range(n):
+            frac = t / max(1, n - 1)
+            zb = z_top + (z_bot - z_top) * frac
+            if zb < base_z or zb > base_z + h:
+                hp = 0.0
+            else:
+                t_pyr = (zb - base_z) / h
+                hp = r_sp * (1.0 - t_pyr)
+            s_safe = hp + r_tool + margin          # safe square half-size
+            s_orbit = s_safe + (r_outer - s_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
+            phase = 2.0 * math.pi * revs * frac
+            cx, cy = math.cos(phase), math.sin(phase)
+            m = max(abs(cx), abs(cy))
+            positions[t, 0] = 0.5 + s_orbit * cx / m
+            positions[t, 1] = 0.5 + s_orbit * cy / m
+            positions[t, 2] = zb
     else:
-        # box / pyramid: fall back to a full-annulus sweep (no shape-specific
-        # inner radius -- r_safe = r_tool + margin, sweeps to the wall). Coarse
-        # but tests whether the annulus pattern generalizes.
+        # box: full-annulus sweep (r_safe = r_tool + margin). The box target
+        # fills nearly the whole stock cross-section, so sweeping the annulus
+        # GOUGES it -- box is handled by its high do-nothing floor, not zlayer.
         r_safe = r_tool + margin
         for t in range(n):
             frac = t / max(1, n - 1)
