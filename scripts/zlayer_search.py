@@ -92,17 +92,22 @@ def zlayer_positions(n, target_shape, target_radius_mm, target_height_mm,
             positions[t, 1] = 0.5 + s_orbit * cy / m
             positions[t, 2] = zb
     else:
-        # box: full-annulus sweep (r_safe = r_tool + margin). The box target
-        # fills nearly the whole stock cross-section, so sweeping the annulus
-        # GOUGES it -- box is handled by its high do-nothing floor, not zlayer.
-        r_safe = r_tool + margin
+        # box: the box fills [0.05, 0.95]^3 (half-size r_sp=0.45). The waste is
+        # the face slivers (x/y/z in [0, 0.05]). A tool orbiting JUST OUTSIDE
+        # the box faces (square radius r_sp + r_tool + margin = 0.58) removes
+        # the sliver [0, 0.045] without touching the box (starts at 0.05). The
+        # tall tool spans the stock height so one orbit per z clears the side
+        # slivers. Square orbit (matches the box cross-section).
+        r_safe = r_sp + r_tool + margin
         for t in range(n):
             frac = t / max(1, n - 1)
             zb = z_top + (z_bot - z_top) * frac
-            r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
+            s_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
             phase = 2.0 * math.pi * revs * frac
-            positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
-            positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
+            cx, cy = math.cos(phase), math.sin(phase)
+            m = max(abs(cx), abs(cy))
+            positions[t, 0] = 0.5 + s_orbit * cx / m
+            positions[t, 1] = 0.5 + s_orbit * cy / m
             positions[t, 2] = zb
 
     full = np.vstack([tool_start[None, :], positions])

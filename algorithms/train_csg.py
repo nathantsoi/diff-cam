@@ -779,12 +779,22 @@ def main():
                 elif args.target_shape == "cylinder":
                     r_safe = r_sp + r_tool + margin          # constant radius
                 else:
-                    r_safe = r_tool + margin                 # full-annulus heuristic (box)
+                    # box: orbit JUST OUTSIDE the box faces (square radius
+                    # r_sp + r_tool + margin) to remove the face slivers
+                    # [0, 0.045] without gouging the box (starts at 0.05).
+                    r_safe = r_sp + r_tool + margin
                 # oscillate orbit radius to cover the annulus out to the cube wall
                 r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
                 phase = 2.0 * math.pi * revs * frac
-                positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
-                positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
+                if args.target_shape == "box":
+                    # square orbit (matches the box cross-section)
+                    cx, cy = math.cos(phase), math.sin(phase)
+                    m = max(abs(cx), abs(cy))
+                    positions[t, 0] = 0.5 + r_orbit * cx / m
+                    positions[t, 1] = 0.5 + r_orbit * cy / m
+                else:
+                    positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
+                    positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
                 positions[t, 2] = zb
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
