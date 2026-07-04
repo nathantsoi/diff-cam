@@ -686,14 +686,17 @@ def main():
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
     elif args.init_mode == "zlayer":
-        # Z-level descent: the tool is a tall vertical cylinder (height ~= stock)
-        # whose tool_pos.z is its BASE, extending upward by h. By descending the
-        # base from above the stock down past the bottom, each layer's tool only
-        # reaches DOWN to its base, so a high base never touches the equator and
-        # can safely carve the top interior exterior at small radius. The safe
-        # orbit radius at each base is set by the sphere radius at the
-        # equator-closest z the tool reaches, plus the tool radius. A radius
-        # oscillation sweeps the annulus out to the cube wall. Sphere-specific.
+        # Z-level finishing descent: the tool is a tall vertical cylinder
+        # (height ~= stock) whose tool_pos.z is its BASE, extending upward by h.
+        # Descending the base from above the stock down past the bottom means each
+        # layer's tool only reaches DOWN to its base, so a high base never touches
+        # the equator and can safely carve the top interior exterior at small
+        # radius. The orbit radius oscillates from a surface-offset safe radius
+        # out to the cube wall, sweeping the waste ANNULUS at every z (a real CNC
+        # z-level finishing pattern). Shape-aware safe radius:
+        #   sphere   -> r_sphere(z_eq) + r_tool + margin  (varies with z)
+        #   cylinder -> r_cyl + r_tool + margin           (z-invariant)
+        #   box/pyramid -> r_tool + margin                (full annulus heuristic)
         n = T - 1
         stock_mm = args.stock_size_in[0] * 25.4
         r_sp = args.target_radius_mm / stock_mm
@@ -707,19 +710,24 @@ def main():
         for t in range(n):
             frac = t / max(1, n - 1)
             zb = z_top + (z_bot - z_top) * frac          # base descends through stock
-            # equator-closest in-stock z the tool reaches (in [zb, zb+h])
-            zhi = zb + 1.0
-            if zb > 0.5:
-                z_eq = zb
-            elif zhi < 0.5:
-                z_eq = zhi
+            if args.target_shape == "sphere":
+                # equator-closest in-stock z the tool reaches (in [zb, zb+h])
+                zhi = zb + 1.0
+                if zb > 0.5:
+                    z_eq = zb
+                elif zhi < 0.5:
+                    z_eq = zhi
+                else:
+                    z_eq = 0.5
+                rs = math.sqrt(max(0.0, r_sp * r_sp - (z_eq - 0.5) * (z_eq - 0.5)))
+                r_safe = rs + r_tool + margin
+            elif args.target_shape == "cylinder":
+                r_safe = r_sp + r_tool + margin          # constant radius
             else:
-                z_eq = 0.5
-            rs = math.sqrt(max(0.0, r_sp * r_sp - (z_eq - 0.5) * (z_eq - 0.5)))
-            r_safe = rs + r_tool + margin
+                r_safe = r_tool + margin                 # full-annulus heuristic
             # oscillate orbit radius to cover the annulus out to the cube wall
             r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
-            phase = 2.0 * np.pi * revs * frac
+            phase = 2.0 * math.pi * revs * frac
             positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
             positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
             positions[t, 2] = zb
