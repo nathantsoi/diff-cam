@@ -117,6 +117,14 @@ def main():
                     help="trajectory length T (number of tool motions; m=128 at "
                          "dt<=0.45, m=160 at dt0.5; m>=192 NaNs)")
     ap.add_argument("--learning-rate", type=float, default=5e-3)
+    ap.add_argument("--k-init", type=float, default=10.0,
+                    help="smooth-min/max SDF smoothness k. k=10 is the soft-dice "
+                         "operating point (large per-step soft-union bias log(2)/kv "
+                         "voxels; soft loss over-erodes vs hard carve). Higher k "
+                         "(30/60/100) shrinks the bias so the soft loss tracks HARD "
+                         "coverage better -> optimizer improves real carving. "
+                         "Unlocked by the numerically-stable smooth_max (no exp "
+                         "overflow at high k / large max_steps).")
     ap.add_argument("--lr-decay-frac", type=float, default=0.0,
                     help="fraction of iters (at the end) over which LR decays to 0 "
                          "(dead lever on current API; best-checkpoint saving subsumes it)")
@@ -240,6 +248,7 @@ def main():
             "--iters", str(args.iters),
             "--max_steps", str(args.max_steps),
             "--learning_rate", str(args.learning_rate),
+            "--k_init", str(args.k_init),
             "--lr_decay_frac", str(args.lr_decay_frac),
             "--init_scale", str(args.init_scale),
             "--init_mode", args.init_mode,
