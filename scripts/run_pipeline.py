@@ -208,6 +208,13 @@ def main():
                          "lower k makes the soft carve closer to the hard carve so soft-dice "
                          "optimization transfers to hard dice). k=10 default; k<=2 saturates "
                          "(gradients vanish).")
+    ap.add_argument("--feed-ipm", type=float, default=10.0,
+                    help="max cutting feed speed (inches/min) when near the stock — the per-step "
+                         "displacement cap is feed_ipm*dt. Default 10; structured coverage inits "
+                         "(zlayer) need a higher feed (>=60) for their per-step to survive the "
+                         "speed clip. A machining-condition knob (not the dice metric).")
+    ap.add_argument("--rapid-ipm", type=float, default=500.0,
+                    help="max traverse speed (inches/min) when clear of the stock.")
     # --- G-code / viz ---
     ap.add_argument("--post", default="haas", choices=("rs274", "haas"),
                     help="post-processor for export/eval/viz")
@@ -273,6 +280,8 @@ def main():
             "--target_height_mm", str(args.target_height_mm),
             "--dt", str(args.dt),
             "--k_init", str(args.k_init),
+            "--feed_ipm", str(args.feed_ipm),
+            "--rapid_ipm", str(args.rapid_ipm),
             "--headless",
         ]
         if not args.no_save_model:
