@@ -42,4 +42,14 @@ def pyramid_sdf(p, cx, cy, base_z, half_base, height):
 # Math
 @ti.func
 def smooth_max(a, b, k):
-    return (1.0 / k) * ti.log(ti.exp(k * a) + ti.exp(k * b))
+    # Numerically-stable log-sum-exp form: subtract the max before exp so both
+    # exponents are <= 0 (no f32 exp overflow, no NaN gradient under autodiff).
+    # Mathematically IDENTICAL to (1/k)*log(exp(k*a)+exp(k*b)); only the
+    # numerical conditioning changes. The naive form overflows when k*a > ~88
+    # (kv*k_ref*k... = the soft-union bias accumulating stock over many steps),
+    # which is what capped max_steps at ~192. The stable form lifts that cap so
+    # longer trajectories (more hard-carve coverage) train without NaNing.
+    # Gradient is the same softmax weight as the naive form: autodiff through
+    # ti.max (subgradient) + the (1/k)*log(1+exp(...)) tail reproduces it exactly.
+    m = ti.max(a, b)
+    return m + (1.0 / k) * ti.log(ti.exp(k * (a - m)) + ti.exp(k * (b - m)))
