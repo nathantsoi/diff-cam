@@ -135,6 +135,21 @@ just outside the sphere surface — re-examine its hard dice (it was discarded o
 SOFT dice / speed-clip grounds; on HARD dice it may be the right starting
 point). Then optimize its params end-to-end.
 
+### Soft loss diverges late, hard dice stays flat — they are DECOUPLED
+Baseline sphere iter 4859: soft loss jumped 0.2 → **274**, grad 5e4 (the soft
+over-erosion cheat blowing up), yet hard dice **0.561** (still the floor). The
+soft objective is now utterly disconnected from the deployable hard metric —
+optimizing it harder cannot help. This is the strongest evidence that the
+productive lever is NOT loss-tuning but trajectory-coverage structure.
+
+### Skip-inside-sphere z-raster = 0.582 (first path to beat the 0.548 floor)
+A z-layer boustrophedon over the full cube footprint that SKIPS points inside
+the sphere (so it removes corner waste without gouging) scores 0.582 — the only
+hand-designed path above the floor. Still far from good (coarse, tool can't
+reach all corner waste), but it confirms: **systematic waste removal that
+respects the surface is the direction.** The optimizer must be steered toward
+this, not free to cheat via soft over-erosion.
+
 ## Methodological reminders
 
 - ≥3 (ideally ≥5) paired same-GPU seeds to call a lever real.
