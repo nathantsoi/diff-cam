@@ -376,16 +376,19 @@ Each shape needs its own safe-radius + orbit-shape:
   raster_fine 0.43. → results row 14.
 
 **FINAL RESULTS (hard dice, the tracked metric, best-checkpoint @ iter0):**
-| shape    | baseline | zlayer  | delta   |
-|----------|----------|---------|---------|
-| sphere   | 0.617    | 0.9075  | +0.291  |
-| cylinder | 0.718    | 0.9390  | +0.221  |
-| box      | 0.814    | 0.9013  | +0.087  |
-| pyramid  | 0.43     | 0.8166  | +0.387  |
+| shape    | baseline | zlayer  | delta   | T    |
+|----------|----------|---------|---------|------|
+| sphere   | 0.617    | 0.9306  | +0.314  | 1536 |
+| cylinder | 0.718    | 0.9390  | +0.221  | 512  |
+| box      | 0.814    | 0.9014  | +0.087  | 384  |
+| pyramid  | 0.43     | 0.8166  | +0.387  | 512  |
+| **mean** | **0.645**| **0.897**| **+0.252**|  |
 
-All verified under the trainer's clipped eval (clip_speeds=True): sphere 0.9075,
-cyl 0.9390, box 0.9013, pyramid 0.8166 @ iter0. Soft optimization COLLAPSES
+All verified under the trainer's clipped eval (clip_speeds=True): sphere 0.930596,
+cyl 0.9390, box 0.9014, pyramid 0.8166 @ iter0. Soft optimization COLLAPSES
 all four (final-iter dice 0.43-0.61); best-checkpoint saving preserves the init.
+At a fixed T=512: sphere 0.9075, mean 0.891. Sphere scales with T (z-varying
+annulus); cyl/box/pyramid are at structural ceilings (T-flat).
 **The method: shape-aware zlayer coverage init + adequate feed (120 for the
 smooth orbits, 300 for the pyramid's jumpy hybrid) + best-checkpoint. The win
 is the init GEOMETRY (the differentiable soft loss is structurally decoupled
