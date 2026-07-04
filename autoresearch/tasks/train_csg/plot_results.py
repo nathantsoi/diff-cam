@@ -1,12 +1,12 @@
-"""Plot the autoresearch results.tsv: progress over experiments + per-scenario dice.
+"""Plot the autoresearch results.tsv: progress over experiments + per-shape k-sweep.
 
 Reads autoresearch/tasks/train_csg/results.tsv (tab-separated; header + rows):
     commit  dice  memory_gb  status  description  command
 
 Produces autoresearch/tasks/train_csg/results_plot.png with two panels:
   A. dice vs experiment order, with keep/discard/crash distinguished + running-best line.
-  B. best dice per (target-shape, init-mode) machining scenario, parsed from the
-     command column. Shows where the uniform raster_fine init wins vs random.
+  B. HARD dice per shape across the k sweep (the headline lever of this run):
+     grouped bars, one cluster per target-shape, one bar per k value.
 """
 import os
 import re
@@ -34,9 +34,10 @@ def parse_cmd(cmd):
         return cast(m.group(1)) if m else default
     shape = flag("target-shape", default="?")
     init = flag("init-mode", default="random")
+    k = flag("k-init", cast=float, default=10.0)
     m = re.search(r"--stock-size-in\s+(\S+)\s+(\S+)\s+(\S+)", cmd)
     stock = f"{m.group(1)}x{m.group(2)}x{m.group(3)}" if m else "?"
-    return shape, init, stock
+    return shape, init, stock, k
 
 
 def main():
@@ -50,7 +51,7 @@ def main():
                 dice = float(r["dice"])
             except (ValueError, KeyError):
                 continue
-            shape, init, stock = parse_cmd(r["command"])
+            shape, init, stock, k = parse_cmd(r["command"])
             rows.append({
                 "dice": dice,
                 "status": r.get("status", ""),
@@ -59,6 +60,7 @@ def main():
                 "shape": shape,
                 "init": init,
                 "stock": stock,
+                "k": k,
             })
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
@@ -80,44 +82,49 @@ def main():
     ax1.plot(order, best_line, color="#1565c0", lw=1.8, ls="--",
              label="running best", zorder=2)
     ax1.set_xlabel("experiment order")
-    ax1.set_ylabel("dice")
+    ax1.set_ylabel("HARD dice")
     ax1.set_title("Progress over experiments")
     ax1.legend(loc="lower right", fontsize=9)
     ax1.grid(True, alpha=0.3)
-    ax1.set_ylim(0.55, 0.92)
+    ax1.set_ylim(0.35, 0.92)
 
-    # --- Panel B: best dice per (shape, init) ---
-    groups = {}
-    for r in rows:
-        if r["status"] == "crash" or r["dice"] <= 0:
-            continue
-        key = (r["shape"], r["init"])
-        groups.setdefault(key, []).append(r["dice"])
-    labels = []
-    bests = []
-    colors = []
-    color_map = {"raster_fine": "#2e7d32", "random": "#1976d2"}
-    for (shape, init), dices in sorted(groups.items(), key=lambda kv: (kv[0][0], kv[0][1])):
-        labels.append(f"{shape}\n{init}")
-        bests.append(max(dices))
-        colors.append(color_map.get(init, "#9e9e9e"))
-    x = range(len(labels))
-    bars = ax2.bar(x, bests, color=colors, edgecolor="black", lw=0.5)
-    ax2.set_xticks(list(x))
-    ax2.set_xticklabels(labels, fontsize=8)
-    ax2.set_ylabel("best dice")
-    ax2.set_title("Best dice per machining scenario (shape x init)")
+    # --- Panel B: HARD dice per shape across the k sweep (grouped bars) ---
+    # Collect, per shape, the best dice at each k value tested.
+    shape_order = ["sphere", "cylinder", "box", "pyramid"]
+    shapes_present = [s for s in shape_order if any(r["shape"] == s for r in rows)]
+    # k values in ascending order, bucketed to integers for labeling.
+    k_vals = sorted({int(round(r["k"])) for r in rows if r["status"] != "crash"})
+    # One stable color per k value (low k = blue, high k = red).
+    cmap = plt.cm.viridis
+    k_color = {kv: cmap(i / max(1, len(k_vals) - 1)) for i, kv in enumerate(k_vals)}
+    import numpy as np
+    n_k = len(k_vals)
+    n_sh = len(shapes_present)
+    bar_w = 0.8 / max(1, n_k)
+    xpos = np.arange(n_sh)
+    for ki, kv in enumerate(k_vals):
+        ys = []
+        for sh in shapes_present:
+            dices = [r["dice"] for r in rows
+                     if r["shape"] == sh and r["status"] != "crash"
+                     and int(round(r["k"])) == kv]
+            ys.append(max(dices) if dices else 0.0)
+        offs = (ki - (n_k - 1) / 2.0) * bar_w
+        bars = ax2.bar(xpos + offs, ys, bar_w, color=k_color[kv],
+                       edgecolor="black", lw=0.4, label=f"k={kv}")
+        for b, v in zip(bars, ys):
+            if v > 0:
+                ax2.text(b.get_x() + b.get_width() / 2, v + 0.006, f"{v:.3f}",
+                         ha="center", va="bottom", fontsize=7)
+    ax2.set_xticks(list(xpos))
+    ax2.set_xticklabels(shapes_present, fontsize=9)
+    ax2.set_ylabel("best HARD dice")
+    ax2.set_title("HARD dice per shape across the k sweep")
     ax2.grid(True, alpha=0.3, axis="y")
-    ax2.set_ylim(0.55, 0.92)
-    for b, v in zip(bars, bests):
-        ax2.text(b.get_x() + b.get_width() / 2, v + 0.005, f"{v:.3f}",
-                 ha="center", va="bottom", fontsize=8)
-    from matplotlib.patches import Patch
-    ax2.legend(handles=[Patch(color="#2e7d32", label="raster_fine (uniform)"),
-                        Patch(color="#1976d2", label="random")],
-               loc="lower right", fontsize=9)
+    ax2.set_ylim(0.35, 0.92)
+    ax2.legend(loc="lower right", fontsize=8, ncol=2)
 
-    fig.suptitle("ar-agd/jul1-uniform-toolpath: uniform CNC raster init (raster_fine)",
+    fig.suptitle("ar-agd/jul3-hard-carve-gap: the k lever (stable smooth_max unlocks high-k)",
                  fontsize=13)
     fig.tight_layout(rect=[0, 0, 1, 0.96])
     fig.savefig(OUT, dpi=130)

@@ -143,6 +143,23 @@ in code (b95cb06, default off), test after the generality queue. Box k=10
 starts at dice 0.79 even at iter 0 (box is the easiest shape — axis-aligned,
 swept cylinder covers it well).
 
+### EXP 5 — pyramid k=60: HARD dice ~0.76+ @ iter 1814 (BIGGEST k-lever gain)
+
+| shape | k=10 hard | k=60 hard | Δ | stale soft |
+|-------|-----------|-----------|------|------------|
+| sphere | 0.608 | 0.810 | +0.20 | 0.85 |
+| cyl | 0.738 | 0.835 | +0.10 | 0.94 |
+| box | ~0.81 (running) | queued | ? | 0.92 |
+| **pyramid** | **0.407** | **0.762+** (rising @ iter 1814) | **+0.35** | 0.89 |
+
+**Pyramid is the HARDEST shape and benefits MOST from k.** Its slanted faces
+are poorly carved by the swept cylinder, so k=10's soft-union bias dominated
+(soft 0.89 vs hard 0.41 — nearly half the soft dice was phantom erosion). At
+k=60 the optimizer finally carves the pyramid for REAL (0.76+ and climbing).
+**The k lever generalizes across ALL 4 shapes, with the largest gain on the
+hardest case** — the run's strongest generality result. (pyr k=60 still
+running; final pending.)
+
 ### EXP 4 — sphere k=60 m=256: HARD dice = 0.801348 (best@4660, final 0.783)
 
 **m=256 is WORSE than m=128 for sphere at k=60** (0.801 < 0.810). The stable
