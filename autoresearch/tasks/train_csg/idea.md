@@ -65,7 +65,34 @@ dt0.5+m160 (single-seed fluke), raster_fine_wide, k≤2 (saturates), iters>5000
 
 ## Notes / findings
 
-_(populated as experiments run)_
+### Pivotal: the tracked metric is now HARD dice (autoresearch.md "0.85" baseline is STALE)
+
+Git-blame on `algorithms/train_csg.py:844` (`sim.forward_hard(T)` in the eval
+block) → commit `7dc8008` (the jul1 PR #5 merge, 2026-07-03 15:26). The jul1
+*loop* ran Jul 1–2 with the **soft** `forward()` eval → its findings.md soft-dice
+numbers (sphere 0.85, cyl 0.94) are pre-port. The merge ported eval to
+`forward_hard` (`apply_cut_hard` = exact `ti.max` union with `tool_sdf_sharp`,
+binary-mask `dice_score`) AFTER the loop wound down. So:
+
+- **This run's tracked `dice:` is HARD-carve dice**, not soft. autoresearch.md's
+  "fresh baseline scores ~0.85 (sphere)" / "tracked soft dice ~0.94" text is
+  stale (predates the port). The real baseline is the hard-dice number this run
+  establishes (~0.72 cyl per jul1's separate hard measurement; sphere TBD).
+- The "open frontier — close the soft/hard gap" is now DIRECTLY the tracked
+  metric: every experiment already selects/saves checkpoints by hard dice, and
+  the soft loss is only the differentiable proxy. Good — plan aligns.
+- **Dice convention** (jul1 findings): `pred = stock<0 = REMAINING material`,
+  `target = PART`. A STATIONARY tool scores 2|target|/(|stock|+|target|) =
+  **0.553 (sphere r=11.43)** / 0.728 (cyl). Baseline iter 130 = 0.5486 ≈ the
+  stationary floor (trajectory hasn't carved waste yet). Soft-optimized hard
+  carve actively GOUGES (cyl hard 0.718 < stationary 0.728) — the gap is real.
+
+**Implication**: the "proven operating point" (lr=1e-3 → 0.85) was tuned for
+SOFT dice. For HARD dice it may be suboptimal — lr is worth re-examining on the
+hard metric. The productive levers for HARD dice are coverage (more steps /
+finer feed / better path) and a less-biased soft objective, NOT the exhausted
+soft-dice knobs. Note: jul1's "T≥192 NaNs / iters>5000 marginal" were SOFT-dice
+findings — for HARD (coverage-capped) dice they may differ; re-test on hard.
 
 ## Methodological reminders
 
