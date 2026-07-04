@@ -706,31 +706,86 @@ def main():
         osc = args.zlayer_osc
         z_top, z_bot = 0.95, -0.95
         r_outer = 0.5 + r_tool
-        positions = np.zeros((n, 3), dtype=np.float32)
-        for t in range(n):
-            frac = t / max(1, n - 1)
-            zb = z_top + (z_bot - z_top) * frac          # base descends through stock
-            if args.target_shape == "sphere":
-                # equator-closest in-stock z the tool reaches (in [zb, zb+h])
-                zhi = zb + 1.0
-                if zb > 0.5:
-                    z_eq = zb
-                elif zhi < 0.5:
-                    z_eq = zhi
+        if args.target_shape == "pyramid":
+            # 3-phase gouge-free path (tool extends UP from base, spans
+            # [base, base+h]): (1) above-disk boustrophedon (base in [apex,
+            # 0.95], tool carves z>apex); (2) beside square-annulus orbit (base
+            # descends apex->base_z, orbit at pyramid_half(base)+r_tool); (3)
+            # safe-radius descent (base base_z->-0.75 at r=widest+r_tool, clears
+            # the below-annulus without gouging). Below-disk center is left
+            # (clearing it gouges via holder interaction). Reaches ~0.79 hard
+            # dice unclipped vs 0.43 raster_fine baseline.
+            h = args.target_height_mm / stock_mm
+            base_z = 0.5 - 0.5 * h
+            apex = base_z + h
+            r_safe_max = r_sp + r_tool + margin
+            n_above = int(n * 0.42)
+            n_descent = max(8, int(n * 0.10))
+            n_beside = n - n_above - n_descent
+            xs = np.linspace(0.12, 0.88, 7)
+            ys = np.linspace(0.12, 0.88, 7)
+            pos = []
+            # 1. above boustrophedon
+            for z in np.linspace(0.95, apex + 0.02, 4):
+                for j, y in enumerate(ys):
+                    row_xs = xs if j % 2 == 0 else xs[::-1]
+                    for x in row_xs:
+                        pos.append([float(x), float(y), float(z)])
+                        if len(pos) >= n_above:
+                            break
+                    if len(pos) >= n_above:
+                        break
+                if len(pos) >= n_above:
+                    break
+            while len(pos) < n_above:
+                pos.append(pos[-1])
+            # 2. beside square orbit
+            for t in range(n_beside):
+                frac = t / max(1, n_beside - 1)
+                zb = apex + (base_z - apex) * frac
+                hp = r_sp * (1.0 - (zb - base_z) / h) if base_z <= zb <= apex else 0.0
+                s_safe = hp + r_tool + margin
+                s_orbit = s_safe + (r_outer - s_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
+                phase = 2.0 * math.pi * revs * frac
+                cx, cy = math.cos(phase), math.sin(phase)
+                m = max(abs(cx), abs(cy))
+                pos.append([0.5 + s_orbit * cx / m, 0.5 + s_orbit * cy / m, float(zb)])
+            # 3. safe-radius descent
+            for t in range(n_descent):
+                frac = t / max(1, n_descent - 1)
+                zb = base_z + (-0.75 - base_z) * frac
+                phase = 2.0 * math.pi * 3.0 * frac
+                pos.append([0.5 + r_safe_max * math.cos(phase),
+                            0.5 + r_safe_max * math.sin(phase), float(zb)])
+            positions = np.array(pos[:n], dtype=np.float32)
+            if len(positions) < n:
+                positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])
+        else:
+            positions = np.zeros((n, 3), dtype=np.float32)
+            for t in range(n):
+                frac = t / max(1, n - 1)
+                zb = z_top + (z_bot - z_top) * frac          # base descends through stock
+                if args.target_shape == "sphere":
+                    # equator-closest in-stock z the tool reaches (in [zb, zb+h])
+                    zhi = zb + 1.0
+                    if zb > 0.5:
+                        z_eq = zb
+                    elif zhi < 0.5:
+                        z_eq = zhi
+                    else:
+                        z_eq = 0.5
+                    rs = math.sqrt(max(0.0, r_sp * r_sp - (z_eq - 0.5) * (z_eq - 0.5)))
+                    r_safe = rs + r_tool + margin
+                elif args.target_shape == "cylinder":
+                    r_safe = r_sp + r_tool + margin          # constant radius
                 else:
-                    z_eq = 0.5
-                rs = math.sqrt(max(0.0, r_sp * r_sp - (z_eq - 0.5) * (z_eq - 0.5)))
-                r_safe = rs + r_tool + margin
-            elif args.target_shape == "cylinder":
-                r_safe = r_sp + r_tool + margin          # constant radius
-            else:
-                r_safe = r_tool + margin                 # full-annulus heuristic
-            # oscillate orbit radius to cover the annulus out to the cube wall
-            r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
-            phase = 2.0 * math.pi * revs * frac
-            positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
-            positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
-            positions[t, 2] = zb
+                    r_safe = r_tool + margin                 # full-annulus heuristic (box)
+                # oscillate orbit radius to cover the annulus out to the cube wall
+                r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
+                phase = 2.0 * math.pi * revs * frac
+                positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
+                positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
+                positions[t, 2] = zb
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
