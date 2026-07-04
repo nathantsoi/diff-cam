@@ -198,6 +198,23 @@ barrier, GPU2) in parallel. w_gouge=16 hit 0.6458 @ iter 847 (above baseline
 0.6170 — possibly seed variance or the stronger barrier helping even softly).
 [result pending for both]
 
+**w_gouge=16 = 0.6458** @ iter 825 (final-iter 0.5484) — **+0.029 vs baseline
+0.6170**. The stock-based soft gouge barrier at 4x weight HELPS hard dice
+(single seed — needs paired-seed verification; jul1 found w_gouge 4→8 was
+seed-reshuffling on SOFT dice, but this is HARD dice at a much higher weight).
+→ results.tsv row 4 (keep, provisional). Best peaks EARLY (iter 825) then
+degrades — best-checkpoint saving is essential.
+
+**w_tool_gouge=1.0 = 0.5508 (floor)** — TOO STRONG. The geometric barrier pins
+the tool off the part entirely (gouge diag 0.0001) so it can't carve the waste
+adjacent to the surface either. → results.tsv row 5 (discard). Running
+w_tool_gouge=0.1 (10x gentler) to test whether a nudge helps without pinning.
+
+### Open question: is w_gouge=16's +0.029 real or seed variance?
+jul1's lesson: single-seed wins overstate ~2–3×. Need ≥3 paired same-GPU seeds
+of baseline vs w_gouge=16 on GPU 8 to confirm. QUEUED after the w_tool_gouge
+sweep. If real, sweep w_gouge {8, 16, 32, 64} to find the peak.
+
 ## Methodological reminders
 
 - ≥3 (ideally ≥5) paired same-GPU seeds to call a lever real.
