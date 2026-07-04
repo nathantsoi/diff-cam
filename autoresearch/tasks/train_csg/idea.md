@@ -215,6 +215,27 @@ jul1's lesson: single-seed wins overstate ~2–3×. Need ≥3 paired same-GPU se
 of baseline vs w_gouge=16 on GPU 8 to confirm. QUEUED after the w_tool_gouge
 sweep. If real, sweep w_gouge {8, 16, 32, 64} to find the peak.
 
+### BREAKTHROUGH: zlayer init = 0.7791 HARD dice (no optimization!)
+`scripts/coverage_diagnostic`-style hand-eval of the existing `zlayer` init
+(descends through the stock orbiting at safe radius `r_sphere(z_eq)+r_tool+margin`,
+oscillating out to the cube wall) scores **0.7791** — vs baseline 0.6170,
+raster_fine 0.311, shell 0.341, dense offset-surface spiral 0.015, annulus
+spiral 0.582. **+0.16 over baseline with ZERO optimization.** This is the path:
+systematic per-z-layer annulus sweep from the sphere surface OUT to the cube
+wall — removes corner waste while staying clear of the part. The dense
+offset-surface spiral (0.015) FAILS because it only grazes the surface without
+removing corner waste; the zlayer covers the full waste annulus.
+
+**Why it works**: the zlayer is sphere-specific (uses r_sphere(z)) and sweeps
+the ANNULLUS (sphere+r_tool → cube wall) at every z, which is exactly the waste
+region. It's a real CNC z-level finishing pattern. jul1 discarded it on SOFT
+dice / speed-clip grounds; on HARD dice it's the best init by far.
+
+**Running**: `--init-mode zlayer` full training (GPU7). Open question: does
+soft optimization IMPROVE on 0.779 or collapse it (like raster_fine 0.311→0.601)?
+If it collapses, the win is "use zlayer + minimal/low-lr optimization" or even
+"zlayer init only" — and the method generalizes via per-shape offset sweeps.
+
 ## Methodological reminders
 
 - ≥3 (ideally ≥5) paired same-GPU seeds to call a lever real.
