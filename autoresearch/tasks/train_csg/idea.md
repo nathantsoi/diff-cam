@@ -1,8 +1,9 @@
-# idea.md — ar-agd/jul3-hard-carve-gap
+# idea.md — ar-agd/jul4-hard-carve-gap
 
-Branch: `ar-agd/jul3-hard-carve-gap` (from `autoresearch`). **TODO**: create with
-`git checkout -b ar-agd/jul3-hard-carve-gap` before the first experiment (tag/direction
-is a placeholder set while the user was away — rename freely).
+Branch: `ar-agd/jul4-hard-carve-gap` (created fresh from `autoresearch` on 2026-07-04).
+This run continues the **soft/hard carve-gap** frontier opened by `ar-agd/jul3-hard-carve-gap`
+(preserved on its own branch in git history) — fresh branch because the prior one already
+existed; numbers below are re-established from a clean baseline, not inherited.
 
 ## Starting point (the baked-in operating point)
 
