@@ -469,3 +469,22 @@ this method — one run suffices.** The +0.29 sphere delta vs baseline 0.617 is 
   `ti.atomic_add`s; mirror Vector-field target params into SCALAR fields
   (`tcx/tcy/tcz/tr_vox/...`) and use `target_sdf_scalar` to avoid the
   `MatrixPtrStmt` load-forwarding assertion when SDF input is grad-tracked.
+
+## CONVERGENCE (2026-07-04, run end)
+
+**Search converged.** All four shapes at their tool-radius-limited structural
+ceilings (cyl/box/pyramid T-flat; sphere scales with T but decelerating). Final
+mean HARD dice 0.898 (+0.253 over baseline 0.645). Method fully verified and
+DETERMINISTIC (bit-identical across seeds). Findings in `findings.md`; plot
+`results_over_time.png`; 21 experiments in `results.tsv`.
+
+Pyramid gap analysis (the one shape <0.9, 0.8166 vs ceiling 0.929): 3675 voxels
+over-carved (descent corner gouge — necessary trade-off; gouge-free square/higher-
+r descent carves less lower-annulus, net worse) + 8332 under-carved (beside-
+annulus corners + oscillation radial stripes; more-beside splits tested, worse).
+Both are intrinsic to the cylindrical-tool + square-pyramid geometry.
+
+**No remaining lever within scenario constraints** (fixed tool r=3.175mm, voxel
+0.5mm, no metric/eval changes, no new deps). Further gains need: a smaller tool
+(box/cyl/pyramid corners) — changes the scenario; or more compute (sphere T→2560
+= 0.9383, diminishing) — not a method gain. Loop entering monitoring state.
