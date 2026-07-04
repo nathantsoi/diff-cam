@@ -150,6 +150,33 @@ reach all corner waste), but it confirms: **systematic waste removal that
 respects the surface is the direction.** The optimizer must be steered toward
 this, not free to cheat via soft over-erosion.
 
+### Experiment results
+
+**Baseline sphere (lr1e-3, HARD dice) = 0.6170** @ iter 2540 best (final-iter
+0.5554). Above the 0.548 do-nothing floor but FAR below the stale soft 0.85.
+The soft-optimized trajectory carves a little in hard space, peaks mid-training,
+then degrades as soft loss diverges. → results.tsv row 1.
+
+**k=5 (sharper soft union) = CRASH (grad vanished)**. grad=7e-10, loss frozen at
+1.3381, dice stuck 0.43 < floor. Confirms jul1: lower k saturates the soft union
+and gradients vanish. **Soft-union sharpness (k) is a DEAD lever for hard dice**
+— k=10 is the only viable value, and at k=10 the soft loss is decoupled from
+hard dice. → results.tsv row 2 (crash). Do NOT re-explore k.
+
+**raster_fine init**: running (hypothesis: coverage init → hard-dice-friendlier
+basin). [result pending]
+
+### Why the soft loss can't fix hard dice (the structural reason)
+The terminal `compute_loss` operates on SOFT occupancy `sigmoid(stock_d)` where
+stock is the smooth_max-unioned soft carve. The optimizer satisfies residual+
+gouge in SOFT space by over-erosion (small motions that read as full coverage
+softly). Lowering k to sharpen hits the vanishing-gradient wall (k=5 dead). So
+NO soft-loss tuning can transfer optimization to hard dice — confirmed by k=5
+AND by the baseline's loss diverging to 274 while hard dice stayed flat. The
+lever MUST be trajectory structure (coverage path that respects the surface) or
+a non-soft objective. Next: high w_gouge (force surface respect) + raster_fine
+init; then parametric surface-offset toolpath if those stall.
+
 ## Methodological reminders
 
 - ≥3 (ideally ≥5) paired same-GPU seeds to call a lever real.
