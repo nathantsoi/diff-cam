@@ -15,16 +15,17 @@ the init, @ iter 0).
 
 | shape    | baseline | zlayer  | delta   | T    |
 |----------|----------|---------|---------|------|
-| sphere   | 0.617    | 0.9349  | +0.318  | 2048 |
+| sphere   | 0.617    | 0.9393  | +0.322  | 4096 |
 | cylinder | 0.718    | 0.9390  | +0.221  | 512  |
 | box      | 0.814    | 0.9014  | +0.087  | 384  |
-| pyramid  | 0.43     | 0.8166  | +0.387  | 512  |
-| **mean** | **0.645**| **0.898**| **+0.253**|  |
+| pyramid  | 0.43     | 0.8308  | +0.401  | 512  |
+| **mean** | **0.645**| **0.903**| **+0.258**|  |
 
-At a fixed T=512 (sphere 0.9075) the mean is 0.891. All four verified under the
-trainer's clipped eval; all four @ iter 0 (the init), preserved by
+All verified under the trainer's clipped eval; all four @ iter 0 (the init), preserved by
 best-checkpoint because soft optimization collapses every one (final-iter dice
-0.43–0.61). **Search converged** — all four at tool-radius-limited ceilings.
+0.43–0.61). Sphere scales with T (saturating ~0.94); cyl/box at tool-radius
+ceilings; pyramid tuned via 4-phase budget rebalancing (above/below trimmed,
+beside densified).
 
 ## The method
 
