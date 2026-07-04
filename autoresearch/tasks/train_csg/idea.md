@@ -127,15 +127,21 @@ from over-sharp gradients.
 
 ### EXP 3 FINAL — cyl k=30: HARD dice = 0.810147 (best @ iter 2070, final 0.805)
 
-| shape | k=10 | k=30 | k=60 | k=100 |
-|-------|------|------|------|-------|
-| sphere (m=128) | 0.608 | 0.722 | 0.810 | **0.828** (best@4770, final 0.816) |
-| cyl (m=256)    | 0.738 | 0.810 | **0.835** (best@3350, final 0.813) | running |
+| shape | k=10 | k=30 | k=60 | k=100 | k=200 |
+|-------|------|------|------|-------|-------|
+| sphere (m=128) | 0.608 | 0.722 | 0.810 | 0.828 | **0.834** (gains noise-level past 60) |
+| cyl (m=256)    | 0.738 | 0.810 | **0.835** | 0.793 ↓ | — |
 
-cyl k=60 (0.835) > cyl k=30 (0.810) — still monotonic for cyl. cyl reaches
-higher than sphere at equal k (less corner-air exploitation needed). Both
-shapes: k lever gives +0.10–0.22 hard dice. k=100 sphere & cyl k=100 running
-to find the tapering edge; k=200 sphere queued (GPU2).
+**k SATURATES and can REVERSE**: cyl k=100 (0.793) < cyl k=60 (0.835) —
+non-monotonic. k=100 is past cyl's optimum (likely gradient sparsity in the
+256-step chain: high k → softmax weight → 1 on max arg, → 0 elsewhere →
+vanishing gradient for early steps in the longer trajectory). Sphere k=200
+still slowly rising (0.834) but +0.006 over k=100 is within seed noise. **Best
+fixed k ≈ 60–100, shape-dependent.** Strongly motivates **k-anneal** (10→100:
+smooth exploration early without over-sharp fixed-k commitment) — lever staged
+in code (b95cb06, default off), test after the generality queue. Box k=10
+starts at dice 0.79 even at iter 0 (box is the easiest shape — axis-aligned,
+swept cylinder covers it well).
 
 ### EXP 4 — sphere k=60 m=256: HARD dice = 0.801348 (best@4660, final 0.783)
 
