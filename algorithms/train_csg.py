@@ -133,6 +133,18 @@ class Args:
     the speed clip; 'raster_fine_wide' spans the full target envelope (0.05-0.95)
     instead of the inner 0.20-0.80 core. The coarse structured inits
     (raster/spiral/shell/zlayer) fail via speed-limit clipping."""
+    zlayer_revs: float = 12.0
+    """zlayer init: angular revolutions over the full z descent. Geometry search
+    found revs=18 (+osc=9, margin=0.005) reaches hard dice ~0.854 unclipped vs
+    0.779 at default 12; the win is the init geometry, preserved by
+    best-checkpoint saving (soft optimization collapses it)."""
+    zlayer_osc: float = 3.0
+    """zlayer init: radial oscillation cycles (r_safe -> r_outer) over the
+    descent. Higher = denser annulus coverage; ~9 is the sweet spot."""
+    zlayer_margin: float = 0.03
+    """zlayer init: normalized gap between sphere surface + r_tool and the
+    tool-center orbit. Tighter (0.005-0.015) leaves less residual surface waste
+    without gouging (tool inner edge still clears the part)."""
     grad_clip: float = 0.5
     """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
     transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5 is
@@ -215,6 +227,15 @@ class Args:
     deltas toward zero so the tool STOPS instead of wandering into air -- the
     targeted fix for the trailing-excursion failure (tool climbs off the part
     for the last ~25% of the path). 0 disables."""
+    w_tool_gouge: float = 0.0
+    """weight on the TOOL-POSITION gouge barrier (soft-union-INDEPENDENT surface
+    respect). Charges the tool CENTER directly for penetrating the target
+    expanded by r_tool: relu(r_tool - target_sdf(seg_mid))^2 -- ZERO when the
+    tool is tangent-or-outside the surface (contact-cutting waste just outside
+    the part is FREE), grows as the tool penetrates the part. Unlike the
+    stock-based w_gouge (satisfied trivially by soft-union over-erosion while
+    the HARD carve still gouges), this constrains the trajectory GEOMETRY
+    directly so it transfers to hard dice. 0 disables."""
 
     init_stock_from: str = ""
     """STAGED TRAINING: path to a .npz saved by the truncation utility containing
@@ -363,6 +384,7 @@ def eval_metrics(sim, T, dx):
     m["loss_prox"] = float(sim.diag_prox[None])
     m["loss_traj_prox"] = float(sim.diag_traj_prox[None])
     m["loss_len"] = float(sim.diag_len[None])
+    m["loss_tool_gouge"] = float(sim.diag_tool_gouge[None])
     # Air-cut fraction (independent of w_air): the fraction of the swept tool
     # volume over the trajectory that lies in empty stock. Computed as a RATIO
     # (air volume / total swept tool volume) so it is in [0,1] and independent
@@ -508,6 +530,7 @@ def main():
     sim.w_prox[None] = args.w_prox
     sim.w_traj_prox[None] = args.w_traj_prox
     sim.w_len[None] = args.w_len
+    sim.w_tool_gouge[None] = args.w_tool_gouge
     sim.bake_target_grid()
     sim.set_target_volume()
 
@@ -672,42 +695,132 @@ def main():
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
     elif args.init_mode == "zlayer":
-        # Z-level descent: the tool is a tall vertical cylinder (height ~= stock)
-        # whose tool_pos.z is its BASE, extending upward by h. By descending the
-        # base from above the stock down past the bottom, each layer's tool only
-        # reaches DOWN to its base, so a high base never touches the equator and
-        # can safely carve the top interior exterior at small radius. The safe
-        # orbit radius at each base is set by the sphere radius at the
-        # equator-closest z the tool reaches, plus the tool radius. A radius
-        # oscillation sweeps the annulus out to the cube wall. Sphere-specific.
+        # Z-level finishing descent: the tool is a tall vertical cylinder
+        # (height ~= stock) whose tool_pos.z is its BASE, extending upward by h.
+        # Descending the base from above the stock down past the bottom means each
+        # layer's tool only reaches DOWN to its base, so a high base never touches
+        # the equator and can safely carve the top interior exterior at small
+        # radius. The orbit radius oscillates from a surface-offset safe radius
+        # out to the cube wall, sweeping the waste ANNULUS at every z (a real CNC
+        # z-level finishing pattern). Shape-aware safe radius:
+        #   sphere   -> r_sphere(z_eq) + r_tool + margin  (varies with z)
+        #   cylinder -> r_cyl + r_tool + margin           (z-invariant)
+        #   box/pyramid -> r_tool + margin                (full annulus heuristic)
         n = T - 1
         stock_mm = args.stock_size_in[0] * 25.4
         r_sp = args.target_radius_mm / stock_mm
         r_tool = args.tool_radius_mm / stock_mm
-        margin = 0.03
-        revs = 12.0
+        margin = args.zlayer_margin
+        revs = args.zlayer_revs
+        osc = args.zlayer_osc
         z_top, z_bot = 0.95, -0.95
         r_outer = 0.5 + r_tool
-        positions = np.zeros((n, 3), dtype=np.float32)
-        for t in range(n):
-            frac = t / max(1, n - 1)
-            zb = z_top + (z_bot - z_top) * frac          # base descends through stock
-            # equator-closest in-stock z the tool reaches (in [zb, zb+h])
-            zhi = zb + 1.0
-            if zb > 0.5:
-                z_eq = zb
-            elif zhi < 0.5:
-                z_eq = zhi
-            else:
-                z_eq = 0.5
-            rs = math.sqrt(max(0.0, r_sp * r_sp - (z_eq - 0.5) * (z_eq - 0.5)))
-            r_safe = rs + r_tool + margin
-            # oscillate orbit radius to cover the annulus out to the cube wall
-            r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * 3.0 * frac))
-            phase = 2.0 * np.pi * revs * frac
-            positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
-            positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
-            positions[t, 2] = zb
+        if args.target_shape == "pyramid":
+            # 4-phase gouge-free path (tool extends UP from base, spans
+            # [base, base+h], h~=stock): (1) above-disk boustrophedon (base in
+            # [apex, 0.95], tool carves z>apex); (2) beside square-annulus orbit
+            # (base descends apex->base_z, orbit at pyramid_half(base)+r_tool);
+            # (3) safe-radius descent (base base_z->below-phase base at
+            # r=widest+r_tool, clears the below-annulus); (4) below-disk
+            # boustrophedon at FIXED base = base_z-1-margin so the tool top
+            # (=base+h) sits at base_z-margin < pyramid base -> carves the whole
+            # below-slab without gouging. forward_hard uses tool_sdf_sharp only
+            # (no holder carve), so the wide holder above the tool does not cut.
+            # Reaches ~0.82 hard dice unclipped vs 0.43 raster_fine baseline.
+            h = args.target_height_mm / stock_mm
+            base_z = 0.5 - 0.5 * h
+            apex = base_z + h
+            r_safe_max = r_sp + r_tool + margin
+            z_base_below = base_z - 1.0 - margin           # tool top = base_z - margin < pyramid base
+            n_above = int(n * 0.26)
+            n_below = int(n * 0.24)
+            n_descent = max(8, int(n * 0.05))
+            n_beside = n - n_above - n_below - n_descent
+            xs = np.linspace(0.12, 0.88, 7)
+            ys = np.linspace(0.12, 0.88, 7)
+            bx = np.linspace(0.0 + r_tool, 1.0 - r_tool, 9)
+            by = np.linspace(0.0 + r_tool, 1.0 - r_tool, 9)
+            pos = []
+            # 1. above boustrophedon
+            for z in np.linspace(0.95, apex + 0.02, 4):
+                for j, y in enumerate(ys):
+                    row_xs = xs if j % 2 == 0 else xs[::-1]
+                    for x in row_xs:
+                        pos.append([float(x), float(y), float(z)])
+                        if len(pos) >= n_above:
+                            break
+                    if len(pos) >= n_above:
+                        break
+                if len(pos) >= n_above:
+                    break
+            while len(pos) < n_above:
+                pos.append(pos[-1])
+            # 2. beside square orbit
+            for t in range(n_beside):
+                frac = t / max(1, n_beside - 1)
+                zb = apex + (base_z - apex) * frac
+                hp = r_sp * (1.0 - (zb - base_z) / h) if base_z <= zb <= apex else 0.0
+                s_safe = hp + r_tool + margin
+                s_orbit = s_safe + (r_outer - s_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
+                phase = 2.0 * math.pi * revs * frac
+                cx, cy = math.cos(phase), math.sin(phase)
+                m = max(abs(cx), abs(cy))
+                pos.append([0.5 + s_orbit * cx / m, 0.5 + s_orbit * cy / m, float(zb)])
+            # 3. safe-radius descent (circular; clears lower annulus)
+            for t in range(n_descent):
+                frac = t / max(1, n_descent - 1)
+                zb = base_z + (z_base_below - base_z) * frac
+                phase = 2.0 * math.pi * 3.0 * frac
+                pos.append([0.5 + r_safe_max * math.cos(phase),
+                            0.5 + r_safe_max * math.sin(phase), float(zb)])
+            # 4. below-disk boustrophedon at fixed base (tool top < pyramid base)
+            for j, y in enumerate(by):
+                row_xs = bx if j % 2 == 0 else bx[::-1]
+                for x in row_xs:
+                    pos.append([float(x), float(y), float(z_base_below)])
+                    if len(pos) >= n_above + n_beside + n_descent + n_below:
+                        break
+                if len(pos) >= n_above + n_beside + n_descent + n_below:
+                    break
+            positions = np.array(pos[:n], dtype=np.float32)
+            if len(positions) < n:
+                positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])
+        else:
+            positions = np.zeros((n, 3), dtype=np.float32)
+            for t in range(n):
+                frac = t / max(1, n - 1)
+                zb = z_top + (z_bot - z_top) * frac          # base descends through stock
+                if args.target_shape == "sphere":
+                    # equator-closest in-stock z the tool reaches (in [zb, zb+h])
+                    zhi = zb + 1.0
+                    if zb > 0.5:
+                        z_eq = zb
+                    elif zhi < 0.5:
+                        z_eq = zhi
+                    else:
+                        z_eq = 0.5
+                    rs = math.sqrt(max(0.0, r_sp * r_sp - (z_eq - 0.5) * (z_eq - 0.5)))
+                    r_safe = rs + r_tool + margin
+                elif args.target_shape == "cylinder":
+                    r_safe = r_sp + r_tool + margin          # constant radius
+                else:
+                    # box: orbit JUST OUTSIDE the box faces (square radius
+                    # r_sp + r_tool + margin) to remove the face slivers
+                    # [0, 0.045] without gouging the box (starts at 0.05).
+                    r_safe = r_sp + r_tool + margin
+                # oscillate orbit radius to cover the annulus out to the cube wall
+                r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
+                phase = 2.0 * math.pi * revs * frac
+                if args.target_shape == "box":
+                    # square orbit (matches the box cross-section)
+                    cx, cy = math.cos(phase), math.sin(phase)
+                    m = max(abs(cx), abs(cy))
+                    positions[t, 0] = 0.5 + r_orbit * cx / m
+                    positions[t, 1] = 0.5 + r_orbit * cy / m
+                else:
+                    positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
+                    positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
+                positions[t, 2] = zb
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
@@ -1027,6 +1140,7 @@ def main():
             "loss_prox": round(float(last_m.get("loss_prox", 0.0)), 6) if last_m else 0.0,
             "loss_traj_prox": round(float(last_m.get("loss_traj_prox", 0.0)), 6) if last_m else 0.0,
             "loss_len": round(float(last_m.get("loss_len", 0.0)), 6) if last_m else 0.0,
+            "loss_tool_gouge": round(float(last_m.get("loss_tool_gouge", 0.0)), 6) if last_m else 0.0,
             "air_cut_fraction": round(float(last_m.get("air_cut_fraction", 0.0)), 6) if last_m else 0.0,
             "air_cut_raw": round(float(last_m.get("air_cut_raw", 0.0)), 6) if last_m else 0.0,
             "tool_swept_raw": round(float(last_m.get("tool_swept_raw", 0.0)), 6) if last_m else 0.0,

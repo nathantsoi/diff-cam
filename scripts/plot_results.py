@@ -39,12 +39,18 @@ def main():
 
     # Short, human-readable branch labels mapping each commit to its theme.
     branch_labels = {
-        "b2cbdd1": "b2cbdd1 baseline + LR/ms sweeps",
-        "2ef96bf": "2ef96bf ms160 + loss/weight sweeps (soft-Dice)",
-        "4d5c71c": "4d5c71c iters push + LR3e-3 + seed sweep",
-        "9f58c21": "9f58c21 decay discovery (anneal_k/iters)",
-        "80d6e28": "80d6e28 late-LR-decay stabilization",
-        "d6c722a": "d6c722a final confirmation",
+        "6e0d2f4": "baseline (sphere, HARD dice)",
+        "2b2f30a": "k=5 sharper soft union (crash)",
+        "6278dd0": "raster_fine init",
+        "116078a": "w_gouge / w_tool_gouge barriers",
+        "625ec5d": "w_gouge=16 seed2",
+        "edfd235": "zlayer init discovery",
+        "d2f5f02": "zlayer + feed_ipm (speed cap)",
+        "3e09bf7": "zlayer param sweep (revs/osc/margin)",
+        "38392cb": "shape-aware pyramid/box",
+        "2bf863b": "pyramid 4-phase (below-disk recovery)",
+        "08d6f14": "sphere osc resonance + cyl osc",
+        "7e31dfa": "sphere T-scaling + determinism",
     }
 
     cmap = plt.get_cmap("tab10")

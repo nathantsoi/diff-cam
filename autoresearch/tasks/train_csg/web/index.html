@@ -684,12 +684,20 @@ function renderDownloads(d){
   const card = document.getElementById("downloads-card");
   let html = "";
   if (d && d.run_dir){
+    // Descriptive, run-unique download filenames. Every run's exported meshes
+    // share step-numbered names (e.g. target_step_000004999.stl), so without a
+    // shape+run prefix a sphere target downloaded earlier and a cylinder target
+    // downloaded now collide on disk / in the viewer and the stale sphere shows
+    // up instead of the just-downloaded file. Prefixing with shape + run name
+    // makes each download self-identifying.
+    const shape = d.shape || "run";
+    const runName = (d.run_dir.split("/").pop()) || (d.name || "run");
     title.textContent = d.idx == null
       ? `Downloads — ${d.name||"run"}`
       : `Downloads — experiment #${d.idx} (${d.shape||"?"})`;
-    if (d.gcode) html += `<a class="nc" href="${BASE}${d.gcode}" onclick="triggerDownload(event, '${BASE}${d.gcode}', '${d.gcode.split('/').pop()}')">⬇ G-code (${d.gcode.split('/').pop()})</a>`;
+    if (d.gcode) html += `<a class="nc" href="${BASE}${d.gcode}" onclick="triggerDownload(event, '${BASE}${d.gcode}', '${shape}_gcode_${runName}.nc')">⬇ G-code (${shape})</a>`;
     for (const [label,p] of Object.entries(d.stl||{}))
-      html += `<a class="stl" href="${BASE}${p}" onclick="triggerDownload(event, '${BASE}${p}', '${p.split('/').pop()}')">⬇ ${label} STL</a>`;
+      html += `<a class="stl" href="${BASE}${p}" onclick="triggerDownload(event, '${BASE}${p}', '${shape}_${label}_${runName}.stl')">⬇ ${label} STL (${shape})</a>`;
     html += `<a href="${BASE}${d.run_dir}/" target="_blank">📂 open run dir</a>`;
     html += `<button id="gen-video-btn" class="vid">🎬 Generate run video</button>`;
   } else {

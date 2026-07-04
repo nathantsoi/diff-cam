@@ -1,134 +1,145 @@
-"""Plot the autoresearch results.tsv: progress over experiments + per-shape k-sweep.
-
-Reads autoresearch/tasks/train_csg/results.tsv (tab-separated; header + rows):
-    commit  dice  memory_gb  status  description  command
-
-Produces autoresearch/tasks/train_csg/results_plot.png with two panels:
-  A. dice vs experiment order, with keep/discard/crash distinguished + running-best line.
-  B. HARD dice per shape across the k sweep (the headline lever of this run):
-     grouped bars, one cluster per target-shape, one bar per k value.
-"""
+"""Plot autoresearch train_csg results over time, grouped by experiment branch/commit."""
+import csv
 import os
 import re
-import csv
 
-import matplotlib
-matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.lines import Line2D
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-TSV = os.path.join(HERE, "results.tsv")
-OUT = os.path.join(HERE, "results_plot.png")
-
-STATUS_STYLE = {
-    "keep":    {"color": "#2e7d32", "marker": "o", "label": "keep"},
-    "discard": {"color": "#c62828", "marker": "x", "label": "discard"},
-    "crash":   {"color": "#9e9e9e", "marker": "s", "label": "crash"},
-}
-
-
-def parse_cmd(cmd):
-    """Extract scenario flags from a run command string."""
-    def flag(name, cast=str, default=None):
-        m = re.search(rf"--{re.escape(name)}\s+(\S+)", cmd)
-        return cast(m.group(1)) if m else default
-    shape = flag("target-shape", default="?")
-    init = flag("init-mode", default="random")
-    k = flag("k-init", cast=float, default=10.0)
-    m = re.search(r"--stock-size-in\s+(\S+)\s+(\S+)\s+(\S+)", cmd)
-    stock = f"{m.group(1)}x{m.group(2)}x{m.group(3)}" if m else "?"
-    return shape, init, stock, k
+RESULTS = "results.tsv"
+OUT = "results_over_time.png"
 
 
 def main():
     rows = []
-    with open(TSV, newline="") as f:
-        rdr = csv.DictReader(f, delimiter="\t")
-        for r in rdr:
-            if not r.get("command"):
-                continue
+    with open(RESULTS, newline="") as f:
+        reader = csv.DictReader(f, delimiter="\t")
+        for r in reader:
             try:
-                dice = float(r["dice"])
+                rows.append({
+                    "commit": r["commit"],
+                    "dice": float(r["dice"]),
+                    "status": r["status"],
+                    "desc": r["description"],
+                })
             except (ValueError, KeyError):
                 continue
-            shape, init, stock, k = parse_cmd(r["command"])
-            rows.append({
-                "dice": dice,
-                "status": r.get("status", ""),
-                "desc": r.get("description", ""),
-                "command": r["command"],
-                "shape": shape,
-                "init": init,
-                "stock": stock,
-                "k": k,
-            })
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+    # Order = experiment order (file order = chronological run order).
+    x = list(range(len(rows)))
+    dice = [r["dice"] for r in rows]
+    commits = [r["commit"] for r in rows]
+    statuses = [r["status"] for r in rows]
 
-    # --- Panel A: dice vs experiment order + running best ---
-    order = list(range(len(rows)))
-    for st, style in STATUS_STYLE.items():
-        xs = [i for i, r in enumerate(rows) if r["status"] == st]
-        ys = [rows[i]["dice"] for i in xs]
-        if xs:
-            ax1.scatter(xs, ys, c=style["color"], marker=style["marker"],
-                        s=55, label=style["label"], zorder=3)
+    # Distinct commit -> branch label + color. The commit hash is the branch state.
+    unique_commits = []
+    for c in commits:
+        if c not in unique_commits:
+            unique_commits.append(c)
+
+    # Short, human-readable branch labels mapping each commit to its theme.
+    branch_labels = {
+        "6e0d2f4": "baseline (sphere, HARD dice)",
+        "2b2f30a": "k=5 sharper soft union (crash)",
+        "6278dd0": "raster_fine init",
+        "116078a": "w_gouge / w_tool_gouge barriers",
+        "625ec5d": "w_gouge=16 seed2",
+        "edfd235": "zlayer init discovery",
+        "d2f5f02": "zlayer + feed_ipm (speed cap)",
+        "3e09bf7": "zlayer param sweep (revs/osc/margin)",
+        "38392cb": "shape-aware pyramid/box",
+        "2bf863b": "pyramid 4-phase (below-disk recovery)",
+        "08d6f14": "sphere osc resonance + cyl osc",
+        "7e31dfa": "sphere T-scaling + determinism",
+    }
+
+    cmap = plt.get_cmap("tab10")
+    commit_color = {c: cmap(i % 10) for i, c in enumerate(unique_commits)}
+
+    status_marker = {
+        "keep": "o",
+        "discard": "x",
+        "crash": "v",
+    }
+    status_label = {
+        "keep": "keep",
+        "discard": "discard",
+        "crash": "crash",
+    }
+
+    fig, ax = plt.subplots(figsize=(16, 7))
+
+    # Plot per status so the legend stays clean.
+    for status, marker in status_marker.items():
+        xs = [i for i, s in enumerate(statuses) if s == status]
+        if not xs:
+            continue
+        ax.scatter(
+            [x[i] for i in xs],
+            [dice[i] for i in xs],
+            c=[commit_color[commits[i]] for i in xs],
+            marker=marker,
+            s=70 if status == "keep" else 45,
+            edgecolors="black",
+            linewidths=0.6 if status == "keep" else 0.0,
+            label=status_label[status],
+            zorder=3,
+        )
+
+    # Running best (max so far) line.
+    running_best = []
     best = -1.0
-    best_line = []
-    for r in rows:
-        if r["status"] != "crash" and r["dice"] > 0:
-            best = max(best, r["dice"])
-        best_line.append(best if best > 0 else None)
-    ax1.plot(order, best_line, color="#1565c0", lw=1.8, ls="--",
-             label="running best", zorder=2)
-    ax1.set_xlabel("experiment order")
-    ax1.set_ylabel("HARD dice")
-    ax1.set_title("Progress over experiments")
-    ax1.legend(loc="lower right", fontsize=9)
-    ax1.grid(True, alpha=0.3)
-    ax1.set_ylim(0.35, 0.92)
+    for d in dice:
+        if d > best:
+            best = d
+        running_best.append(best)
+    ax.plot(x, running_best, color="crimson", lw=1.8, ls="--",
+            label="running best", zorder=2)
 
-    # --- Panel B: HARD dice per shape across the k sweep (grouped bars) ---
-    # Collect, per shape, the best dice at each k value tested.
-    shape_order = ["sphere", "cylinder", "box", "pyramid"]
-    shapes_present = [s for s in shape_order if any(r["shape"] == s for r in rows)]
-    # k values in ascending order, bucketed to integers for labeling.
-    k_vals = sorted({int(round(r["k"])) for r in rows if r["status"] != "crash"})
-    # One stable color per k value (low k = blue, high k = red).
-    cmap = plt.cm.viridis
-    k_color = {kv: cmap(i / max(1, len(k_vals) - 1)) for i, kv in enumerate(k_vals)}
-    import numpy as np
-    n_k = len(k_vals)
-    n_sh = len(shapes_present)
-    bar_w = 0.8 / max(1, n_k)
-    xpos = np.arange(n_sh)
-    for ki, kv in enumerate(k_vals):
-        ys = []
-        for sh in shapes_present:
-            dices = [r["dice"] for r in rows
-                     if r["shape"] == sh and r["status"] != "crash"
-                     and int(round(r["k"])) == kv]
-            ys.append(max(dices) if dices else 0.0)
-        offs = (ki - (n_k - 1) / 2.0) * bar_w
-        bars = ax2.bar(xpos + offs, ys, bar_w, color=k_color[kv],
-                       edgecolor="black", lw=0.4, label=f"k={kv}")
-        for b, v in zip(bars, ys):
-            if v > 0:
-                ax2.text(b.get_x() + b.get_width() / 2, v + 0.006, f"{v:.3f}",
-                         ha="center", va="bottom", fontsize=7)
-    ax2.set_xticks(list(xpos))
-    ax2.set_xticklabels(shapes_present, fontsize=9)
-    ax2.set_ylabel("best HARD dice")
-    ax2.set_title("HARD dice per shape across the k sweep")
-    ax2.grid(True, alpha=0.3, axis="y")
-    ax2.set_ylim(0.35, 0.92)
-    ax2.legend(loc="lower right", fontsize=8, ncol=2)
+    # Vertical separators + labels per commit block.
+    boundaries = []
+    for i in range(1, len(commits)):
+        if commits[i] != commits[i - 1]:
+            boundaries.append(i)
+    for b in boundaries:
+        ax.axvline(b - 0.5, color="gray", lw=0.7, ls=":", alpha=0.7, zorder=1)
 
-    fig.suptitle("ar-agd/jul3-hard-carve-gap: the k lever (stable smooth_max unlocks high-k)",
-                 fontsize=13)
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
-    fig.savefig(OUT, dpi=130)
-    print(f"[plot] saved {OUT} ({len(rows)} experiments)")
+    # Commit labels centered over each block, placed near the top.
+    blocks = []
+    start = 0
+    for b in boundaries + [len(commits)]:
+        blocks.append((start, b - 1))
+        start = b
+    ymax = max(dice) if max(dice) > 0 else 1.0
+    for (s, e), c in zip(blocks, unique_commits):
+        mid = (s + e) / 2.0
+        label = branch_labels.get(c, c)
+        ax.text(mid, ymax * 1.03, label, ha="center", va="bottom",
+                fontsize=8, color=commit_color[c], fontweight="bold", rotation=0)
+
+    ax.set_xlabel("experiment # (chronological run order)")
+    ax.set_ylabel("dice")
+    ax.set_title("GradMill (train_csg) autoresearch — dice over time, by branch/commit")
+    ax.set_xlim(-1, len(rows))
+    ax.set_ylim(-0.05, ymax * 1.18)
+    ax.grid(True, alpha=0.25, zorder=0)
+
+    # Legend: status markers + commit colors + running best.
+    handles = []
+    for status, marker in status_marker.items():
+        handles.append(Line2D([0], [0], marker=marker, color="gray",
+                              linestyle="none", markersize=8, label=status))
+    handles.append(Line2D([0], [0], color="crimson", ls="--", lw=1.8, label="running best"))
+    for c in unique_commits:
+        handles.append(Line2D([0], [0], marker="s", color=commit_color[c],
+                              linestyle="none", markersize=9, markeredgecolor="black",
+                              markeredgewidth=0.5,
+                              label=branch_labels.get(c, c)))
+    ax.legend(handles=handles, loc="lower right", fontsize=7.5, ncol=2, framealpha=0.9)
+
+    fig.tight_layout()
+    fig.savefig(OUT, dpi=150)
+    print(f"saved {OUT} ({len(rows)} experiments, {len(unique_commits)} commits)")
 
 
 if __name__ == "__main__":
