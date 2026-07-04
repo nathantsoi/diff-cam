@@ -166,6 +166,13 @@ hard dice. → results.tsv row 2 (crash). Do NOT re-explore k.
 **raster_fine init**: running (hypothesis: coverage init → hard-dice-friendlier
 basin). [result pending]
 
+**raster_fine init = 0.6007** @ iter 4175 — WORSE than random-init baseline
+0.6170. The coverage init does NOT help hard dice: soft optimization collapses
+it back via over-erosion (the init pre-covers, but the optimizer's soft
+objective rewards small cheating motions over maintaining coverage). → results.tsv
+row 3 (discard). **Init is not the lever** (consistent with jul1: at lr=1e-3 the
+LR win subsumed raster_fine on soft dice too).
+
 ### Why the soft loss can't fix hard dice (the structural reason)
 The terminal `compute_loss` operates on SOFT occupancy `sigmoid(stock_d)` where
 stock is the smooth_max-unioned soft carve. The optimizer satisfies residual+
