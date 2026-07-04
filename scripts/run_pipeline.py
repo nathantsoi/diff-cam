@@ -125,6 +125,12 @@ def main():
                          "coverage better -> optimizer improves real carving. "
                          "Unlocked by the numerically-stable smooth_max (no exp "
                          "overflow at high k / large max_steps).")
+    ap.add_argument("--k-anneal", action="store_true",
+                    help="ramp k linearly from --k-init to --k-final over training "
+                         "(low k = smooth exploration early; high k = hard-tracking "
+                         "late). Continuation method; may beat any fixed k.")
+    ap.add_argument("--k-final", type=float, default=10.0,
+                    help="final k when --k-anneal is on.")
     ap.add_argument("--lr-decay-frac", type=float, default=0.0,
                     help="fraction of iters (at the end) over which LR decays to 0 "
                          "(dead lever on current API; best-checkpoint saving subsumes it)")
@@ -249,6 +255,7 @@ def main():
             "--max_steps", str(args.max_steps),
             "--learning_rate", str(args.learning_rate),
             "--k_init", str(args.k_init),
+            "--k_final", str(args.k_final),
             "--lr_decay_frac", str(args.lr_decay_frac),
             "--init_scale", str(args.init_scale),
             "--init_mode", args.init_mode,
@@ -278,6 +285,8 @@ def main():
             cmd.append("--save_model")
         cmd.append("--track" if args.track else "--no-track")
         cmd.append("--eval")
+        if args.k_anneal:
+            cmd.append("--k_anneal")
         # Trajectory regularizers + robustness-to-initial-conditions options.
         if args.random_tool_start:
             cmd += ["--random_tool_start",

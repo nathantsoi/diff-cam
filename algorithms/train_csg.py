@@ -149,6 +149,15 @@ class Args:
     """target shape: 'box', 'cylinder', 'sphere', 'pyramid'"""
     k_init: float = 10.0
     """initial smoothness parameter for the smooth-min/max SDF ops"""
+    k_anneal: bool = False
+    """linearly ramp the smoothness k from k_init to k_final over training.
+    Continuation method: low k early = smooth landscape, broad gradients (good
+    exploration of the carve basin); high k late = sharp union, soft loss
+    tracks HARD coverage (polish of real carving). May beat any fixed k by
+    combining exploration with hard-tracking. Only meaningful with the stable
+    smooth_max (high k no longer NaNs)."""
+    k_final: float = 10.0
+    """final smoothness k when --k-anneal is on (ramped linearly from k_init)."""
 
     # Loss balancing (objective vs. safety barriers; see CSGSimulatorDelta)
     w_residual: float = 1.0
@@ -749,6 +758,14 @@ def main():
                     span = max(1, args.iters - decay_start)
                     lrnow = args.learning_rate * (1.0 - (it - decay_start) / span)
                     opt.param_groups[0]["lr"] = lrnow
+
+            # k-anneal: ramp smoothness k from k_init to k_final over training
+            # (low k = smooth exploration early; high k = hard-tracking late).
+            # Independent of the lr block above (the two can combine).
+            if args.k_anneal:
+                sim.k[None] = args.k_init + (args.k_final - args.k_init) * (
+                    it / max(1, args.iters)
+                )
 
             # w_prox warmup: keep w_prox at 0 until warmup_frac of iters, then
             # ramp linearly to args.w_prox over the remaining iters so carving
