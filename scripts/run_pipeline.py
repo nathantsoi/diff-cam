@@ -215,6 +215,15 @@ def main():
                          "speed clip. A machining-condition knob (not the dice metric).")
     ap.add_argument("--rapid-ipm", type=float, default=500.0,
                     help="max traverse speed (inches/min) when clear of the stock.")
+    ap.add_argument("--zlayer-revs", type=float, default=12.0,
+                    help="zlayer init: angular revolutions over the z descent. 18 is the "
+                         "geometry-search sweet spot (~0.854 hard dice unclipped vs 0.779 at 12).")
+    ap.add_argument("--zlayer-osc", type=float, default=3.0,
+                    help="zlayer init: radial oscillation cycles over the descent (denser annulus "
+                         "coverage); ~9 is the sweet spot.")
+    ap.add_argument("--zlayer-margin", type=float, default=0.03,
+                    help="zlayer init: normalized gap between sphere+r_tool and the orbit. Tighter "
+                         "(0.005-0.015) leaves less residual waste without gouging.")
     # --- G-code / viz ---
     ap.add_argument("--post", default="haas", choices=("rs274", "haas"),
                     help="post-processor for export/eval/viz")
@@ -282,6 +291,9 @@ def main():
             "--k_init", str(args.k_init),
             "--feed_ipm", str(args.feed_ipm),
             "--rapid_ipm", str(args.rapid_ipm),
+            "--zlayer_revs", str(args.zlayer_revs),
+            "--zlayer_osc", str(args.zlayer_osc),
+            "--zlayer_margin", str(args.zlayer_margin),
             "--headless",
         ]
         if not args.no_save_model:

@@ -133,6 +133,18 @@ class Args:
     the speed clip; 'raster_fine_wide' spans the full target envelope (0.05-0.95)
     instead of the inner 0.20-0.80 core. The coarse structured inits
     (raster/spiral/shell/zlayer) fail via speed-limit clipping."""
+    zlayer_revs: float = 12.0
+    """zlayer init: angular revolutions over the full z descent. Geometry search
+    found revs=18 (+osc=9, margin=0.005) reaches hard dice ~0.854 unclipped vs
+    0.779 at default 12; the win is the init geometry, preserved by
+    best-checkpoint saving (soft optimization collapses it)."""
+    zlayer_osc: float = 3.0
+    """zlayer init: radial oscillation cycles (r_safe -> r_outer) over the
+    descent. Higher = denser annulus coverage; ~9 is the sweet spot."""
+    zlayer_margin: float = 0.03
+    """zlayer init: normalized gap between sphere surface + r_tool and the
+    tool-center orbit. Tighter (0.005-0.015) leaves less residual surface waste
+    without gouging (tool inner edge still clears the part)."""
     grad_clip: float = 0.5
     """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
     transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5 is
@@ -686,8 +698,9 @@ def main():
         stock_mm = args.stock_size_in[0] * 25.4
         r_sp = args.target_radius_mm / stock_mm
         r_tool = args.tool_radius_mm / stock_mm
-        margin = 0.03
-        revs = 12.0
+        margin = args.zlayer_margin
+        revs = args.zlayer_revs
+        osc = args.zlayer_osc
         z_top, z_bot = 0.95, -0.95
         r_outer = 0.5 + r_tool
         positions = np.zeros((n, 3), dtype=np.float32)
@@ -705,7 +718,7 @@ def main():
             rs = math.sqrt(max(0.0, r_sp * r_sp - (z_eq - 0.5) * (z_eq - 0.5)))
             r_safe = rs + r_tool + margin
             # oscillate orbit radius to cover the annulus out to the cube wall
-            r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * 3.0 * frac))
+            r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
             phase = 2.0 * np.pi * revs * frac
             positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
             positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
