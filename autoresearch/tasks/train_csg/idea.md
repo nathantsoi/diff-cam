@@ -378,14 +378,14 @@ Each shape needs its own safe-radius + orbit-shape:
 **FINAL RESULTS (hard dice, the tracked metric, best-checkpoint @ iter0):**
 | shape    | baseline | zlayer  | delta   |
 |----------|----------|---------|---------|
-| sphere   | 0.617    | 0.890   | +0.273  |
-| cylinder | 0.718    | 0.9385  | +0.22   |
+| sphere   | 0.617    | 0.9075  | +0.291  |
+| cylinder | 0.718    | 0.9390  | +0.221  |
 | box      | 0.814    | 0.9013  | +0.087  |
-| pyramid  | 0.43     | 0.7935  | +0.36   |
+| pyramid  | 0.43     | 0.8166  | +0.387  |
 
-All verified under the trainer's clipped eval (clip_speeds=True): sphere 0.889987,
-cyl 0.9385, box 0.9013, pyramid 0.793482 @ iter0. Soft optimization COLLAPSES
-all four (final-iter dice 0.55-0.61); best-checkpoint saving preserves the init.
+All verified under the trainer's clipped eval (clip_speeds=True): sphere 0.9075,
+cyl 0.9390, box 0.9013, pyramid 0.8166 @ iter0. Soft optimization COLLAPSES
+all four (final-iter dice 0.43-0.61); best-checkpoint saving preserves the init.
 **The method: shape-aware zlayer coverage init + adequate feed (120 for the
 smooth orbits, 300 for the pyramid's jumpy hybrid) + best-checkpoint. The win
 is the init GEOMETRY (the differentiable soft loss is structurally decoupled
@@ -416,6 +416,18 @@ pyramid). Fixed-low-base is the fix.
 Ported to train_csg.py pyramid branch; verifying under clipped eval at feed300.
 Param sweep plateaued ~0.81-0.82 (ceiling given remaining-material volume
 ~0.94-0.96; gap = over-carve at transitions + sparse per-z angular coverage).
+
+### BREAKTHROUGH 5: sphere osc resonance (osc30 -> 0.9075)
+
+Swept sphere zlayer osc at T=512, revs=60. dice is NON-MONOTONIC in osc:
+osc10=0.890, osc18=0.903, osc22=0.903, osc26=0.899, **osc30=0.9075**, osc34=0.898,
+osc40=0.906. The oscillation (radial annulus sweep) resonates with the angular
+step (revs/T) — at osc30 the radial+angular pattern covers the annulus gaps that
+osc10 leaves. Higher revs (80/100/120) HURT (coarser angular step per rev →
+gaps); revs=60 is the sweet spot. revs=64 has a higher ceiling (0.966) but lower
+dice (over-carves). margin 0.003-0.005 all ~equal. Sphere 0.890→0.9075 (+0.0175),
+verified under clipped eval at feed120 (orbit arc 0.46"/step < 0.9" feed cap, no
+clip). Cylinder osc12→0.9390 (marginal over osc8 0.9385; at ceiling).
 
 ## Methodological reminders
 
