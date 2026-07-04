@@ -378,17 +378,21 @@ Each shape needs its own safe-radius + orbit-shape:
 **FINAL RESULTS (hard dice, the tracked metric, best-checkpoint @ iter0):**
 | shape    | baseline | zlayer  | delta   | T    |
 |----------|----------|---------|---------|------|
-| sphere   | 0.617    | 0.9306  | +0.314  | 1536 |
+| sphere   | 0.617    | 0.9349  | +0.318  | 2048 |
 | cylinder | 0.718    | 0.9390  | +0.221  | 512  |
 | box      | 0.814    | 0.9014  | +0.087  | 384  |
 | pyramid  | 0.43     | 0.8166  | +0.387  | 512  |
-| **mean** | **0.645**| **0.897**| **+0.252**|  |
+| **mean** | **0.645**| **0.898**| **+0.253**|  |
 
-All verified under the trainer's clipped eval (clip_speeds=True): sphere 0.930596,
+All verified under the trainer's clipped eval (clip_speeds=True): sphere 0.934850,
 cyl 0.9390, box 0.9014, pyramid 0.8166 @ iter0. Soft optimization COLLAPSES
 all four (final-iter dice 0.43-0.61); best-checkpoint saving preserves the init.
 At a fixed T=512: sphere 0.9075, mean 0.891. Sphere scales with T (z-varying
-annulus); cyl/box/pyramid are at structural ceilings (T-flat).
+annulus; decelerating: T1536=0.9306, T2048=0.9349, T2560=0.9383 unclipped —
+diminishing, just more compute); cyl/box/pyramid are at structural ceilings
+(T-flat). **SEARCH CONVERGED** — all four shapes at their tool-radius-limited
+ceilings; further gains need a smaller tool (box/cyl corners) or more compute
+(sphere T).
 **The method: shape-aware zlayer coverage init + adequate feed (120 for the
 smooth orbits, 300 for the pyramid's jumpy hybrid) + best-checkpoint. The win
 is the init GEOMETRY (the differentiable soft loss is structurally decoupled
