@@ -184,6 +184,20 @@ lever MUST be trajectory structure (coverage path that respects the surface) or
 a non-soft objective. Next: high w_gouge (force surface respect) + raster_fine
 init; then parametric surface-offset toolpath if those stall.
 
+### NEW LEVER: w_tool_gouge — soft-union-INDEPENDENT surface respect
+Implemented `compute_tool_gouge_penalty`: charges the TOOL CENTER directly for
+penetrating target+r_tool — `relu(r_tool - target_sdf(seg_mid))^2`, ZERO when
+tangent-or-outside (contact-cutting waste is FREE). Unlike stock-based w_gouge
+(satisfied by soft over-erosion while hard carve gouges), this constrains
+trajectory GEOMETRY directly → should transfer to hard dice. Differentiable via
+midpoint→target_sdf_scalar. Gated by `--w-tool-gouge` (forwarded through
+run_pipeline). Smoke-tested (40 iters, exit 0, grad ~10 flows).
+
+**Running**: w_gouge=16 (stock barrier, GPU8) AND w_tool_gouge=1.0 (geometric
+barrier, GPU2) in parallel. w_gouge=16 hit 0.6458 @ iter 847 (above baseline
+0.6170 — possibly seed variance or the stronger barrier helping even softly).
+[result pending for both]
+
 ## Methodological reminders
 
 - ≥3 (ideally ≥5) paired same-GPU seeds to call a lever real.
