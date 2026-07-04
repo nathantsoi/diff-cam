@@ -85,8 +85,8 @@ def make_traj(mode, n, r_sp, r_tool, target_height_mm, stock_mm,
             zb = apex + (base_z - apex) * frac
             hp = pyramid_half(zb, base_z, h, r_sp)
             s_safe = hp + r_tool + margin
-            s_orbit = s_safe + (r_outer - s_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * 8.0 * frac))
-            phase = 2.0 * math.pi * 20.0 * frac
+            s_orbit = s_safe + (r_outer - s_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc_above * frac))
+            phase = 2.0 * math.pi * revs_beside * frac
             cx, cy = math.cos(phase), math.sin(phase)
             m = max(abs(cx), abs(cy))
             positions.append([0.5 + s_orbit * cx / m, 0.5 + s_orbit * cy / m, float(zb)])
