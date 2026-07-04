@@ -111,6 +111,13 @@ def main():
                     help="truncation removed-volume noise floor")
     ap.add_argument("--min-keep-frac", type=float, default=0.3,
                     help="min fraction of stage-1 trajectory to keep")
+    # --- Collision safety (forwarded to BOTH training stages) ---
+    ap.add_argument("--z-floor-epsilon-mm", type=float, default=1.0,
+                    help="allowed tool-base travel below the part bottom (mm); "
+                         "the executed tool z is clamped so the holder cannot "
+                         "plunge into the remaining stock (forwarded to both stages)")
+    ap.add_argument("--no-z-floor", action="store_true",
+                    help="disable the z-floor clamp (forwarded to both stages)")
     args = ap.parse_args()
 
     ssi = _as_list(args.stock_size_in)
@@ -134,6 +141,8 @@ def main():
         "--target_radius_mm", str(args.target_radius_mm),
         "--target_height_mm", str(args.target_height_mm),
         "--dt", str(args.dt),
+        "--z_floor_epsilon_mm", str(args.z_floor_epsilon_mm),
+        "--enforce_z_floor" if not args.no_z_floor else "--no-enforce_z_floor",
         "--headless", "--save_model", "--no-track", "--eval",
     ]
 

@@ -314,6 +314,24 @@ class CSGSimulatorDelta:
         self.holder_margin = ti.field(dtype=ti.f32, shape=())
         self.holder_margin[None] = 0.0
 
+        # Z-floor: a hard lower bound on the tool BASE z (normalized [0,1]).
+        # The zlayer init descends the tool base well below the part (z_bot=-0.95)
+        # to carve the below-part slab, but the tool extends UPWARD from its base
+        # by tool_height and the wide holder rides above that -- so a deep base
+        # plunge drops the holder into the remaining stock (a machine crash). The
+        # floor clamps the executed move's base z, exactly like the feed/rapid
+        # speed clip below: the init deltas may command a deeper z, but the
+        # executed/clipped trajectory (and the saved one) stays at/above the floor.
+        # Default -1e9 (disabled); set enforce_z_floor=1 and z_floor to enable.
+        self.z_floor = ti.field(dtype=ti.f32, shape=())
+        self.z_floor[None] = -1e9
+        self.enforce_z_floor = ti.field(dtype=ti.i32, shape=())
+        self.enforce_z_floor[None] = 0
+        # Scratch accumulator for holder_min_clearance_at (a parallel min-reduction
+        # needs a global field + ti.atomic_min; a local scalar races under the
+        # parallel ti.ndrange loop and returns a partial/garbage value).
+        self._clearance_buf = ti.field(dtype=ti.f32, shape=())
+
         # Diagnostics (non-differentiable read-outs of each loss component so the
         # objective/barrier balance is observable during training).
         self.diag_gouge = ti.field(dtype=ti.f32, shape=())
@@ -570,12 +588,22 @@ class CSGSimulatorDelta:
         closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
         d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
 
-        # Holder bottom sits at (interpolated tool tip z) + tool_height; the
-        # holder body spans [z_bottom, z_bottom + h].
-        z_base = a.z + (b.z - a.z) * h_param
-        z_bottom = z_base + tool_h
-        z_center = z_bottom + 0.5 * h
-        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * h
+        # Holder Z extent UNIONED over the swept segment (see holder_sdf_sharp
+        # for the full rationale). The holder bottom tracks the tool base
+        # (z_base + tool_h) from a to b; the body extends up by h. The unioned
+        # range [min(bottom_a, bottom_b), max(bottom_a, bottom_b) + h] captures
+        # the full swept Z extent -- evaluating at a single h_param misses the
+        # sweep on near-vertical segments (deep plunge -> holder drops into
+        # material the SDF reads as clear). ti.min/ti.max are subdifferentiable
+        # so this stays autodiff-safe. With holder_height = full machine Z, the
+        # top is always above the grid and the lowest bottom is binding.
+        z_bottom_a = a.z + tool_h
+        z_bottom_b = b.z + tool_h
+        z_low = ti.min(z_bottom_a, z_bottom_b)
+        z_high = ti.max(z_bottom_a, z_bottom_b) + h
+        z_center = 0.5 * (z_low + z_high)
+        z_half = 0.5 * (z_high - z_low)
+        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - z_half
 
         d_xy_pos = smooth_max(d_xy, 0.0, kv)
         d_z_pos = smooth_max(d_z, 0.0, kv)
@@ -826,7 +854,17 @@ class CSGSimulatorDelta:
         enforced = ti.cast(self.enforce_speed_limits[None], ti.f32)
         scale = scale * enforced + (1.0 - enforced)  # 1.0 when not enforcing
 
-        self.tool_pos[t + 1] = a + delta * scale
+        next_pos = a + delta * scale
+
+        # Z-floor: clamp the executed tool BASE z to >= z_floor (normalized).
+        # Like the speed clip above, this is a subgradient -- gradient flows
+        # through above the floor and is zero below it (the requested hard
+        # limit). Runtime-gated by enforce_z_floor so it is configurable per run.
+        z_new = next_pos.z
+        z_floored = ti.max(z_new, self.z_floor[None])
+        floor_on = ti.cast(self.enforce_z_floor[None], ti.f32)
+        z_final = z_floored * floor_on + z_new * (1.0 - floor_on)
+        self.tool_pos[t + 1] = ti.Vector([next_pos.x, next_pos.y, z_final])
 
     @ti.kernel
     def zero_tool_deltas(self):
@@ -1285,6 +1323,33 @@ class CSGSimulatorDelta:
         return vol
 
     @ti.kernel
+    def holder_min_clearance_at(self, t: ti.i32) -> ti.f32:
+        """Min holder-to-stock CLEARANCE over segment t (voxels; positive = gap).
+
+        For every remaining-material voxel (stock[t+1] < 0) takes the min of the
+        sharp holder SDF: positive means the holder clears that voxel by that
+        many voxels, negative means the holder penetrates it. The min over all
+        material voxels is the worst-case clearance for the segment -- the value
+        ``truncate_collision`` compares against the safety margin to decide where
+        to stop the toolpath. Voxels far from the holder return large positives
+        and do not affect the min. Non-differentiable; safe outside a Tape.
+
+        Uses a global scratch field (``_clearance_buf``) with ``ti.atomic_min``
+        because a local-scalar min races under the parallel ``ti.ndrange`` loop.
+        """
+        self._clearance_buf[None] = 1e9
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            if self.stock[t + 1, i, j, k] < 0.0:
+                d = self.holder_sdf_sharp(
+                    ti.Vector(
+                        [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+                    ),
+                    t,
+                )
+                ti.atomic_min(self._clearance_buf[None], d)
+        return self._clearance_buf[None]
+
+    @ti.kernel
     def holder_overlap_total(self, T: ti.i32) -> ti.f32:
         """Hard holder/stock overlap summed over all segments (diagnostics).
 
@@ -1714,10 +1779,23 @@ class CSGSimulatorDelta:
         closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
         d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
 
-        z_base = a.z + (b.z - a.z) * h_param
-        z_bottom = z_base + tool_h
-        z_center = z_bottom + 0.5 * h
-        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * h
+        # Holder Z extent UNIONED over the swept segment. The holder bottom
+        # tracks the tool base (z_base + tool_h) from a to b; the body extends
+        # up by h. Evaluating Z at a single h_param (the XY-closest point) misses
+        # the sweep on near-vertical segments -- the base can plunge far below
+        # the evaluated point, dropping the holder into material the SDF reads
+        # as clear. The unioned range [min(bottom_a, bottom_b),
+        # max(bottom_a, bottom_b) + h] captures the full swept Z extent (a
+        # superset of the true swept volume, so collision-safe). With the
+        # default holder_height = full machine Z (>> stock), the top is always
+        # above the grid and the lowest bottom is the binding constraint.
+        z_bottom_a = a.z + tool_h
+        z_bottom_b = b.z + tool_h
+        z_low = ti.min(z_bottom_a, z_bottom_b)
+        z_high = ti.max(z_bottom_a, z_bottom_b) + h
+        z_center = 0.5 * (z_low + z_high)
+        z_half = 0.5 * (z_high - z_low)
+        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - z_half
 
         d_xy_pos = ti.max(d_xy, 0.0)
         d_z_pos = ti.max(d_z, 0.0)

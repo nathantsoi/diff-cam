@@ -181,6 +181,25 @@ class Args:
     holder_margin: float = 0.0
     """required holder standoff in unit-cube length (>0 keeps a clearance gap before contact)"""
 
+    # Z-floor: hard limit on the tool BASE's negative-z travel. The zlayer init
+    # descends the tool base below the part to carve the below-part slab, but the
+    # tool extends UPWARD from its base by tool_height and the wide holder rides
+    # above that -- so a deep base plunge drops the holder into the remaining
+    # stock (a machine crash: the spindle slams the workpiece). The floor clamps
+    # the EXECUTED move's base z (the init deltas may still command a deeper z),
+    # exactly like the feed/rapid speed clip. Set --no-enforce-z-floor to disable.
+    z_floor_epsilon_mm: float = 1.0
+    """allowed tool-base travel below the part bottom, in mm. The floor is
+    part_bottom_z - epsilon/stock_z_mm; the executed base z is clamped to it.
+    The crash-free floor (holder bottom >= stock top) is roughly
+    1 - tool_height/stock_z ~= 0.016 for the default tool/stock, i.e. epsilon
+    must keep the floor >= ~0 (for the default 0.9in sphere, part_bottom_z ~=
+    0.018 so epsilon <= ~0.5mm is fully safe; epsilon=1.0 carves a hair below
+    the part and relies on truncate_collision as the backstop)."""
+    enforce_z_floor: bool = True
+    """clamp the executed tool base z to the z-floor (disable to recover the
+    unbounded deep-plunge behaviour; truncate_collision then catches the crash)"""
+
     # Trajectory regularizers (address jerky motion + time spent cutting air)
     w_air: float = 0.0
     """weight on the per-step AIR-CUT penalty (swept-tool volume in empty stock).
@@ -533,6 +552,23 @@ def main():
     sim.w_tool_gouge[None] = args.w_tool_gouge
     sim.bake_target_grid()
     sim.set_target_volume()
+
+    # --- Z-floor: clamp the executed tool BASE z so the holder (which rides
+    # above the base by tool_height) cannot plunge into the remaining stock.
+    # Floor = part_bottom_z - epsilon_mm/stock_z_mm, in normalized [0,1].
+    # Shape-specific part bottom (matches set_target_params geometry):
+    #   sphere/box        -> 0.5 - radius_mm / stock_z_mm
+    #   cylinder/pyramid  -> 0.5 - height_mm / (2 * stock_z_mm)
+    stock_z_mm = float(args.stock_size_in[2]) * inch_to_mm(1.0)
+    if args.target_shape in ("cylinder", "pyramid"):
+        part_bottom_z = 0.5 - args.target_height_mm / (2.0 * stock_z_mm)
+    else:  # sphere / box (radius/half-size spans from center)
+        part_bottom_z = 0.5 - args.target_radius_mm / stock_z_mm
+    z_floor = part_bottom_z - args.z_floor_epsilon_mm / stock_z_mm
+    sim.z_floor[None] = float(z_floor)
+    sim.enforce_z_floor[None] = 1 if args.enforce_z_floor else 0
+    print(f"[z-floor] part_bottom_z={part_bottom_z:.4f} epsilon={args.z_floor_epsilon_mm}mm "
+          f"-> floor={z_floor:.4f} (enforced={bool(sim.enforce_z_floor[None])})", flush=True)
 
     # --- Staged training: start from a saved mid-cut stock + tool position ---
     # (the previous trajectory's truncated state). init_stock will then write

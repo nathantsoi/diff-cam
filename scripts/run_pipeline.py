@@ -99,9 +99,9 @@ def main():
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     # --- Stage control ---
-    ap.add_argument("--stages", default="train,eval,export,viz",
+    ap.add_argument("--stages", default="train,trunc,eval,export,viz",
                     help="comma-separated subset of stages to run "
-                         "(train,eval,export,viz); useful to resume a pipeline")
+                         "(train,trunc,eval,export,viz); useful to resume a pipeline")
     ap.add_argument("--run-dir", default=None,
                     help="existing run dir to use (skips discovering one from "
                          "training; required when 'train' is not in --stages)")
@@ -197,6 +197,28 @@ def main():
                     help="don't pass --save_model (trajectory won't be written to the run dir)")
     ap.add_argument("--track", action="store_true",
                     help="enable W&B tracking in training (default off for a clean one-step run)")
+    # --- Collision safety (z-floor during training + post-process truncation) ---
+    ap.add_argument("--z-floor-epsilon-mm", type=float, default=1.0,
+                    help="allowed tool-base travel below the part bottom (mm). "
+                         "The executed tool z is clamped to part_bottom_z - epsilon/stock_z "
+                         "so the holder cannot plunge into the remaining stock. "
+                         "Forwarded to train_csg.")
+    ap.add_argument("--no-z-floor", action="store_true",
+                    help="disable the z-floor clamp during training (recover the "
+                         "unbounded deep-plunge behaviour; --truncate-collision then "
+                         "catches the resulting crash)")
+    ap.add_argument("--truncate-collision", action="store_true", default=True,
+                    help="after training, truncate the trajectory at the first "
+                         "holder/stock collision (stop a clearance margin before it). "
+                         "Default on; the truncated path replaces trajectory.npy "
+                         "(original saved as trajectory.untruncated.npy).")
+    ap.add_argument("--no-truncate-collision", dest="truncate_collision",
+                    action="store_false",
+                    help="skip the collision-truncation stage")
+    ap.add_argument("--collision-clearance-mm", type=float, default=1.0,
+                    help="safety margin (mm) for --truncate-collision: stop the "
+                         "toolpath at the last segment whose holder-to-stock "
+                         "clearance exceeds this")
     # --- Geometry (forwarded consistently to every stage that needs it) ---
     ap.add_argument("--stock-size-in", type=float, nargs=3, default=(1.0, 1.0, 1.0),
                     metavar=("X", "Y", "Z"), help="stock box in inches (the normalized cube)")
@@ -217,11 +239,6 @@ def main():
                          "(0.12/0.01) the tool is speed-limited and cannot traverse "
                          "the exterior (dice caps ~0.56); 0.45 advances ~1 voxel/step. "
                          "Sweet spot dt in [0.42, 0.5].")
-    ap.add_argument("--k-init", type=float, default=10.0,
-                    help="smooth-CSG smoothness k (sharper = less soft-union over-erosion; "
-                         "lower k makes the soft carve closer to the hard carve so soft-dice "
-                         "optimization transfers to hard dice). k=10 default; k<=2 saturates "
-                         "(gradients vanish).")
     ap.add_argument("--feed-ipm", type=float, default=10.0,
                     help="max cutting feed speed (inches/min) when near the stock — the per-step "
                          "displacement cap is feed_ipm*dt. Default 10; structured coverage inits "
@@ -254,9 +271,9 @@ def main():
     args = ap.parse_args()
 
     stages = [s.strip() for s in args.stages.split(",") if s.strip()]
-    unknown = [s for s in stages if s not in ("train", "eval", "export", "viz")]
+    unknown = [s for s in stages if s not in ("train", "trunc", "eval", "export", "viz")]
     if unknown:
-        raise SystemExit(f"unknown stage(s): {unknown}; valid: train,eval,export,viz")
+        raise SystemExit(f"unknown stage(s): {unknown}; valid: train,trunc,eval,export,viz")
 
     run_dir = args.run_dir
     if run_dir is not None:
@@ -310,6 +327,8 @@ def main():
             "--zlayer_revs", str(args.zlayer_revs),
             "--zlayer_osc", str(args.zlayer_osc),
             "--zlayer_margin", str(args.zlayer_margin),
+            "--z_floor_epsilon_mm", str(args.z_floor_epsilon_mm),
+            "--enforce_z_floor" if not args.no_z_floor else "--no-enforce_z_floor",
             "--headless",
         ]
         if not args.no_save_model:
@@ -346,6 +365,27 @@ def main():
             f"or point --run-dir at a run that has trajectory.npy"
         )
     artifacts["trajectory"] = traj
+
+    # ------------------------------------------------------------------- trunc
+    if "trunc" in stages and args.truncate_collision:
+        # Post-process backstop: stop the toolpath at the first holder/stock
+        # collision (a clearance margin before contact). The z-floor clamp during
+        # training prevents most collisions; this trims any that remain so the
+        # exported G-code is crash-free. The original path is preserved as
+        # trajectory.untruncated.npy; the truncated path replaces trajectory.npy.
+        cmd = [
+            PYTHON, "-m", "algorithms.truncate_collision",
+            "--run-dir", run_dir,
+            "--clearance-mm", str(args.collision_clearance_mm),
+        ]
+        rc, _ = _run(cmd, "truncate-collision")
+        if rc != 0:
+            print(f"[pipeline] WARNING: truncate-collision exited {rc}; "
+                  f"trajectory left unchanged")
+        else:
+            artifacts["truncated"] = traj
+    elif "trunc" in stages and not args.truncate_collision:
+        print("[pipeline] truncate-collision stage skipped (--no-truncate-collision)")
 
     # ------------------------------------------------------------------- eval
     if "eval" in stages:
