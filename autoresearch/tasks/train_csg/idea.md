@@ -94,6 +94,37 @@ finer feed / better path) and a less-biased soft objective, NOT the exhausted
 soft-dice knobs. Note: jul1's "T≥192 NaNs / iters>5000 marginal" were SOFT-dice
 findings — for HARD (coverage-capped) dice they may differ; re-test on hard.
 
+### jul1 already ruled out k-annealing AND more-steps for hard dice
+jul1 findings: **hard dice is k-INVARIANT** (~0.718 for all k≤5, 0.720 at k=10)
+and **T-INVARIANT** (hard flat ~0.718 across all T). `smooth_max(a,b,k) =
+(1/k)log(exp(ka)+exp(kb))`; larger k = sharper = less bias, but k≤2 saturates
+(gradients vanish). So: do NOT try k-annealing (k-invariant) or more steps of
+the SOFT-optimized path (T-invariant). **T-invariance was tested on
+soft-optimized paths only** — a SYSTEMATIC coverage path (parametric raster) may
+use T more effectively, so "better path" is NOT ruled out. jul1 cyl hard 0.718 ≈
+stationary cyl 0.728; sphere hard ~0.553 = stationary sphere 0.553. ⇒ the
+soft-optimized trajectory does not carve the part in hard space AT ALL (soft
+over-erosion did 100% of the apparent soft-dice work). Huge room: 0.553 →
+potentially 0.8+ if real coverage is forced.
+
+### Speed problem: forward_hard eval doubled per-iter cost (port side-effect)
+jul1's 5.5 iter/s (soft eval) → now 2.66 iter/s (soft forward + forward_hard eval
+every 10 iters) = 5000 iters in ~31 min, OVER the 20-min kill threshold. For
+experiments use `--eval-freq 25` (≈22 min) or `--eval-freq 50` (≈18 min) +
+`--iters 3000` if hard dice is flat (no transient peak to capture on hard). The
+baseline (already running at freq=10) is allowed to run long — it's the
+reference. Hard dice appears flat (no sharp peak), so coarser eval is safe.
+
+### Experiment priority (after baseline confirms the stationary floor)
+1. **Coverage diagnostic**: eval the `raster_fine` init's HARD dice with no/1
+   iter optimization. If >> 0.553, coverage is confirmed as the lever and soft
+   optimization is what collapses it. (cheap, fast)
+2. **Parametric toolpath** (the real lever): low-dim raster/spiral params
+   optimized end-to-end so the optimizer can ONLY produce systematic sweeps —
+   cannot cheat with small motions. Directly serves "uniform CNC patterns" +
+   coverage. (big, architectural)
+3. Re-examine lr / w_len on the HARD metric (they were tuned for soft). (cheap)
+
 ## Methodological reminders
 
 - ≥3 (ideally ≥5) paired same-GPU seeds to call a lever real.
