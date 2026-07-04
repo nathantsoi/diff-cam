@@ -206,6 +206,15 @@ class Args:
     deltas toward zero so the tool STOPS instead of wandering into air -- the
     targeted fix for the trailing-excursion failure (tool climbs off the part
     for the last ~25% of the path). 0 disables."""
+    w_tool_gouge: float = 0.0
+    """weight on the TOOL-POSITION gouge barrier (soft-union-INDEPENDENT surface
+    respect). Charges the tool CENTER directly for penetrating the target
+    expanded by r_tool: relu(r_tool - target_sdf(seg_mid))^2 -- ZERO when the
+    tool is tangent-or-outside the surface (contact-cutting waste just outside
+    the part is FREE), grows as the tool penetrates the part. Unlike the
+    stock-based w_gouge (satisfied trivially by soft-union over-erosion while
+    the HARD carve still gouges), this constrains the trajectory GEOMETRY
+    directly so it transfers to hard dice. 0 disables."""
 
     init_stock_from: str = ""
     """STAGED TRAINING: path to a .npz saved by the truncation utility containing
@@ -354,6 +363,7 @@ def eval_metrics(sim, T, dx):
     m["loss_prox"] = float(sim.diag_prox[None])
     m["loss_traj_prox"] = float(sim.diag_traj_prox[None])
     m["loss_len"] = float(sim.diag_len[None])
+    m["loss_tool_gouge"] = float(sim.diag_tool_gouge[None])
     # Air-cut fraction (independent of w_air): the fraction of the swept tool
     # volume over the trajectory that lies in empty stock. Computed as a RATIO
     # (air volume / total swept tool volume) so it is in [0,1] and independent
@@ -499,6 +509,7 @@ def main():
     sim.w_prox[None] = args.w_prox
     sim.w_traj_prox[None] = args.w_traj_prox
     sim.w_len[None] = args.w_len
+    sim.w_tool_gouge[None] = args.w_tool_gouge
     sim.bake_target_grid()
     sim.set_target_volume()
 
@@ -1010,6 +1021,7 @@ def main():
             "loss_prox": round(float(last_m.get("loss_prox", 0.0)), 6) if last_m else 0.0,
             "loss_traj_prox": round(float(last_m.get("loss_traj_prox", 0.0)), 6) if last_m else 0.0,
             "loss_len": round(float(last_m.get("loss_len", 0.0)), 6) if last_m else 0.0,
+            "loss_tool_gouge": round(float(last_m.get("loss_tool_gouge", 0.0)), 6) if last_m else 0.0,
             "air_cut_fraction": round(float(last_m.get("air_cut_fraction", 0.0)), 6) if last_m else 0.0,
             "air_cut_raw": round(float(last_m.get("air_cut_raw", 0.0)), 6) if last_m else 0.0,
             "tool_swept_raw": round(float(last_m.get("tool_swept_raw", 0.0)), 6) if last_m else 0.0,

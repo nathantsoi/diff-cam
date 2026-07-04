@@ -286,6 +286,21 @@ class CSGSimulatorDelta:
         # Gated by w_len (0 -> disabled).
         self.w_len = ti.field(dtype=ti.f32, shape=())
         self.w_len[None] = 0.0
+        # TOOL-POSITION gouge barrier (SOFT-UNION-INDEPENDENT surface respect).
+        # The stock-based w_gouge charges soft-occupancy target voxels emptied in
+        # the SOFT stock -- but the soft union over-erodes, so that barrier is
+        # trivially satisfied in soft space while the HARD carve still gouges the
+        # part. This term instead charges the TOOL CENTER directly: the tool
+        # capsule (radius r_tool) gouges the target when target_sdf(center) <
+        # r_tool, so the penalty is relu(r_tool - target_sdf(seg_mid))^2 -- ZERO
+        # when the tool is tangent-or-outside the surface (contact-cutting the
+        # waste just outside the part is FREE), and grows quadratically as the
+        # tool penetrates the target. Differentiable in tool_pos/tool_delta via
+        # the segment midpoint and target_sdf_scalar, and crucially INDEPENDENT
+        # of the soft stock -- it constrains the trajectory geometry directly,
+        # so it transfers to the hard carve. Gated by w_tool_gouge (0 -> disabled).
+        self.w_tool_gouge = ti.field(dtype=ti.f32, shape=())
+        self.w_tool_gouge[None] = 0.0
 
         # Holder collision is a PENETRATION BARRIER, not a proximity field: it is
         # exactly zero (zero gradient) while the holder has clearance, and grows
@@ -329,6 +344,10 @@ class CSGSimulatorDelta:
         # (the w_len loss component, independent of w_len so it is non-zero
         # even when disabled -- measures how much the tool moves).
         self.diag_len = ti.field(dtype=ti.f32, shape=())
+        # Tool-position gouge diagnostic (the w_tool_gouge loss component,
+        # independent of the weight so it is non-zero even when disabled --
+        # measures how far the tool center penetrates the target+r_tool).
+        self.diag_tool_gouge = ti.field(dtype=ti.f32, shape=())
 
         # ---- Stock ----
         self.stock = ti.field(
@@ -1098,6 +1117,41 @@ class CSGSimulatorDelta:
             ti.atomic_add(self.loss[None], w * exc * exc / n)
 
     @ti.kernel
+    def compute_tool_gouge_penalty(self, t_start: ti.i32, T: ti.i32):
+        """Differentiable TOOL-POSITION gouge barrier (soft-union-independent).
+
+        Charges the TOOL CENTER directly for penetrating the target expanded by
+        the tool radius -- the tool capsule gouges the part exactly when
+        ``target_sdf(center) < r_tool``:
+
+            d   = target_sdf(seg_midpoint)        # voxels, >0 outside target
+            pen = max(0, r_tool - d)              # >0 only when the tool penetrates
+            loss += w_tool_gouge * pen^2 / n_segments
+
+        ZERO (zero gradient) whenever the tool is tangent-or-outside the surface
+        (``d >= r_tool``): contact-cutting the waste just outside the part is
+        FREE, so this never opposes legitimate carving. Unlike the stock-based
+        ``w_gouge`` (which charges soft-occupancy and is trivially satisfied by
+        soft-union over-erosion), this constrains the trajectory GEOMETRY
+        directly and is independent of the soft stock -- so it transfers to the
+        hard carve. Differentiable in tool_pos/tool_delta via the midpoint and
+        ``target_sdf_scalar``. Gated by ``w_tool_gouge`` (0 -> disabled).
+        """
+        for t in range(t_start, T - 1):
+            w = self.w_tool_gouge[None]
+            n = ti.max(1, T - 1 - t_start)
+            r_vox = self.tool_radius[None] / self.v
+            # Component-wise midpoint (avoids the same Taichi autodiff
+            # load-forwarding issue as compute_traj_prox_penalty).
+            mx = 0.5 * (self.tool_pos[t].x + self.tool_pos[t + 1].x)
+            my = 0.5 * (self.tool_pos[t].y + self.tool_pos[t + 1].y)
+            mz = 0.5 * (self.tool_pos[t].z + self.tool_pos[t + 1].z)
+            mid = ti.Vector([mx, my, mz])
+            d = self.target_sdf_scalar(mid)
+            pen = ti.max(0.0, r_vox - d)
+            ti.atomic_add(self.loss[None], w * pen * pen / n)
+
+    @ti.kernel
     def compute_diagnostics(self, T: ti.i32):
         """Non-differentiable breakdown of the loss into its three components.
 
@@ -1117,6 +1171,7 @@ class CSGSimulatorDelta:
         jk = 0.0
         st = 0.0
         ln = 0.0
+        tg = 0.0
         scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
         inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
         w_g = self.w_gouge[None]
@@ -1130,6 +1185,7 @@ class CSGSimulatorDelta:
         r_safe = ti.max(r_vox, 1e-3)
         w_tp = self.w_traj_prox[None]
         w_l = self.w_len[None]
+        w_tg = self.w_tool_gouge[None]
         margin = self.holder_margin[None]
         # Geometry terms on the final stock (stock[T]).
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
@@ -1178,7 +1234,9 @@ class CSGSimulatorDelta:
             d2_1 = self.tool_delta[t - 1].dot(self.tool_delta[t - 1])
             sp = d2_0 - d2_1
             st += w_s * sp * sp / ns
-        # Trajectory contour-hug (tool-center distance from target surface).
+        # Trajectory contour-hug (tool-center distance from target surface) +
+        # tool-position gouge (tool center penetrating target + r_tool). Both
+        # read the same segment midpoint + target_sdf, so they share this loop.
         ntp = ti.max(1, T - 1)
         for t in range(T - 1):
             mx = 0.5 * (self.tool_pos[t].x + self.tool_pos[t + 1].x)
@@ -1188,6 +1246,8 @@ class CSGSimulatorDelta:
             d = self.target_sdf_scalar(mid)
             exc = ti.max(0.0, d - r_vox)
             tpx += w_tp * exc * exc / ntp
+            pen = ti.max(0.0, r_vox - d)
+            tg += w_tg * pen * pen / ntp
         # Path-length (minimal-motion) over all active segments.
         nl = ti.max(1, T)
         for t in range(T):
@@ -1204,6 +1264,7 @@ class CSGSimulatorDelta:
         self.diag_prox[None] = px
         self.diag_traj_prox[None] = tpx
         self.diag_len[None] = ln
+        self.diag_tool_gouge[None] = tg
 
     @ti.kernel
     def holder_overlap_at(self, t: ti.i32) -> ti.f32:
@@ -1264,6 +1325,7 @@ class CSGSimulatorDelta:
         self.compute_step_penalty(0, num_active_steps - 1)
         self.compute_traj_prox_penalty(0, num_active_steps - 1)
         self.compute_length_penalty(0, num_active_steps - 1)
+        self.compute_tool_gouge_penalty(0, num_active_steps - 1)
 
     def forward_hard(self, num_active_steps, clip_speeds=True):
         """Hard boolean forward pass for evaluation and rendering.
@@ -1310,6 +1372,7 @@ class CSGSimulatorDelta:
         self.compute_step_penalty(t0, num_active_steps - 1)
         self.compute_traj_prox_penalty(t0, num_active_steps - 1)
         self.compute_length_penalty(t0, num_active_steps - 1)
+        self.compute_tool_gouge_penalty(t0, num_active_steps - 1)
 
     # ------------------------------------------------------------------
     # State save / restore (for restart-from-state training)
