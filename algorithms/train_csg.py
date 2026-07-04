@@ -707,23 +707,30 @@ def main():
         z_top, z_bot = 0.95, -0.95
         r_outer = 0.5 + r_tool
         if args.target_shape == "pyramid":
-            # 3-phase gouge-free path (tool extends UP from base, spans
-            # [base, base+h]): (1) above-disk boustrophedon (base in [apex,
-            # 0.95], tool carves z>apex); (2) beside square-annulus orbit (base
-            # descends apex->base_z, orbit at pyramid_half(base)+r_tool); (3)
-            # safe-radius descent (base base_z->-0.75 at r=widest+r_tool, clears
-            # the below-annulus without gouging). Below-disk center is left
-            # (clearing it gouges via holder interaction). Reaches ~0.79 hard
-            # dice unclipped vs 0.43 raster_fine baseline.
+            # 4-phase gouge-free path (tool extends UP from base, spans
+            # [base, base+h], h~=stock): (1) above-disk boustrophedon (base in
+            # [apex, 0.95], tool carves z>apex); (2) beside square-annulus orbit
+            # (base descends apex->base_z, orbit at pyramid_half(base)+r_tool);
+            # (3) safe-radius descent (base base_z->below-phase base at
+            # r=widest+r_tool, clears the below-annulus); (4) below-disk
+            # boustrophedon at FIXED base = base_z-1-margin so the tool top
+            # (=base+h) sits at base_z-margin < pyramid base -> carves the whole
+            # below-slab without gouging. forward_hard uses tool_sdf_sharp only
+            # (no holder carve), so the wide holder above the tool does not cut.
+            # Reaches ~0.82 hard dice unclipped vs 0.43 raster_fine baseline.
             h = args.target_height_mm / stock_mm
             base_z = 0.5 - 0.5 * h
             apex = base_z + h
             r_safe_max = r_sp + r_tool + margin
-            n_above = int(n * 0.42)
-            n_descent = max(8, int(n * 0.10))
-            n_beside = n - n_above - n_descent
+            z_base_below = base_z - 1.0 - margin           # tool top = base_z - margin < pyramid base
+            n_above = int(n * 0.40)
+            n_below = int(n * 0.30)
+            n_descent = max(8, int(n * 0.06))
+            n_beside = n - n_above - n_below - n_descent
             xs = np.linspace(0.12, 0.88, 7)
             ys = np.linspace(0.12, 0.88, 7)
+            bx = np.linspace(0.0 + r_tool, 1.0 - r_tool, 9)
+            by = np.linspace(0.0 + r_tool, 1.0 - r_tool, 9)
             pos = []
             # 1. above boustrophedon
             for z in np.linspace(0.95, apex + 0.02, 4):
@@ -750,13 +757,22 @@ def main():
                 cx, cy = math.cos(phase), math.sin(phase)
                 m = max(abs(cx), abs(cy))
                 pos.append([0.5 + s_orbit * cx / m, 0.5 + s_orbit * cy / m, float(zb)])
-            # 3. safe-radius descent
+            # 3. safe-radius descent (circular; clears lower annulus)
             for t in range(n_descent):
                 frac = t / max(1, n_descent - 1)
-                zb = base_z + (-0.75 - base_z) * frac
+                zb = base_z + (z_base_below - base_z) * frac
                 phase = 2.0 * math.pi * 3.0 * frac
                 pos.append([0.5 + r_safe_max * math.cos(phase),
                             0.5 + r_safe_max * math.sin(phase), float(zb)])
+            # 4. below-disk boustrophedon at fixed base (tool top < pyramid base)
+            for j, y in enumerate(by):
+                row_xs = bx if j % 2 == 0 else bx[::-1]
+                for x in row_xs:
+                    pos.append([float(x), float(y), float(z_base_below)])
+                    if len(pos) >= n_above + n_beside + n_descent + n_below:
+                        break
+                if len(pos) >= n_above + n_beside + n_descent + n_below:
+                    break
             positions = np.array(pos[:n], dtype=np.float32)
             if len(positions) < n:
                 positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])

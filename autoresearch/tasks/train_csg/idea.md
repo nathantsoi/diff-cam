@@ -350,10 +350,72 @@ short --iters 500 (win is iter-0).**
   Pyramid needs a different approach (full-disk clearing above/below + square
   annulus beside) — open. Measuring pyramid default-opt hard baseline now.
 
-**Robustness status**: sphere 0.890, cylinder 0.9385 (zlayer wins); box ~0.844
-(ceiling, minimal carving); pyramid TBD (zlayer doesn't apply, testing default).
-The zlayer is a SHAPE-SPECIFIC method for axisymmetric parts; box/pyramid
-have different waste geometry and different optima.
+### BREAKTHROUGH 3: shape-aware zlayer works for ALL FOUR shapes
+The zlayer is NOT just axisymmetric — the KEY is "orbit just outside the
+target surface (surface_offset + r_tool + margin) and sweep the waste annulus."
+Each shape needs its own safe-radius + orbit-shape:
+
+- **Sphere** (circular orbit, r_sphere(z_eq)+r_tool): 0.890 (T=512).
+- **Cylinder** (circular orbit, r_cyl+r_tool, z-invariant): 0.9385 (T=512).
+- **Box** (SQUARE orbit, r_sp+r_tool+margin = 0.58, OUTSIDE the box faces):
+  **0.9013** (T=384). The box waste is the 6 face slivers; a square orbit just
+  outside the faces (tool center outside the stock at x=±0.58) removes the
+  sliver [0, 0.045] without gouging the box (starts at 0.05). The tall tool
+  spans the stock height so one orbit/z clears the side slivers. +0.087 over
+  raster_fine 0.814, +0.057 over the do-nothing floor 0.844. → results row 15.
+  (The earlier box zlayer used r_safe=r_tool+margin=0.13 — INSIDE the box →
+  gouged. The fix is r_safe=r_sp+r_tool+margin, OUTSIDE.)
+- **Pyramid** (3-phase HYBRID, feed300): **0.7935** (T=256). The pyramid's
+  waste is the above-disk (z>apex), below-disk (z<base), and beside-annulus.
+  3-phase path: (1) above-disk boustrophedon (base>apex, tool carves z>apex);
+  (2) beside square-annulus orbit (base descends apex→base_z, orbit at
+  pyramid_half(base)+r_tool); (3) safe-radius descent (base→-0.75 at
+  r=r_sp+r_tool, clears the below-annulus). The below-disk CENTER is left
+  (clearing it gouges via holder interaction — open). Needs feed300 (the phase
+  transitions are discontinuous jumps that clip at feed120). +0.36 over
+  raster_fine 0.43. → results row 14.
+
+**FINAL RESULTS (hard dice, the tracked metric, best-checkpoint @ iter0):**
+| shape    | baseline | zlayer  | delta   |
+|----------|----------|---------|---------|
+| sphere   | 0.617    | 0.890   | +0.273  |
+| cylinder | 0.718    | 0.9385  | +0.22   |
+| box      | 0.814    | 0.9013  | +0.087  |
+| pyramid  | 0.43     | 0.7935  | +0.36   |
+
+All verified under the trainer's clipped eval (clip_speeds=True): sphere 0.889987,
+cyl 0.9385, box 0.9013, pyramid 0.793482 @ iter0. Soft optimization COLLAPSES
+all four (final-iter dice 0.55-0.61); best-checkpoint saving preserves the init.
+**The method: shape-aware zlayer coverage init + adequate feed (120 for the
+smooth orbits, 300 for the pyramid's jumpy hybrid) + best-checkpoint. The win
+is the init GEOMETRY (the differentiable soft loss is structurally decoupled
+from hard dice — established earlier — so optimization cannot help and must be
+prevented from wrecking the init).**
+
+Remaining: paired-seed verification (init dice is deterministic — seed only
+affects the discarded optimization, so variance should be ~0; verify). The
+pyramid below-disk center is the one unreachable region (holder interaction);
+a shorter tool or a clean below-spiral might recover it (→ ~0.9 pyramid).
+
+### BREAKTHROUGH 4: pyramid below-disk RECOVERED (fixed-low-base boustrophedon)
+
+Re-examined the "below-disk unreachable" claim. The tool spans [z_base, z_base+h]
+(h~=stock). forward_hard uses tool_sdf_sharp ONLY — the wide holder above the
+tool does NOT carve in the hard eval (it's a soft-loss barrier only). So the
+below-disk slab (z in [0, base_z=0.275]) IS reachable: set z_base =
+base_z - 1 - margin (= -0.73) so the tool top = base_z - margin < pyramid base
+→ carves the whole below-slab without gouging. The earlier "below" mode gouged
+because it swept z_base in [0.05, 0.255] (tool top reached 1.05+, carving the
+pyramid). Fixed-low-base is the fix.
+
+4-phase full4 (above 40% + beside square-orbit + circular safe-radius descent 6%
++ below fixed-base boustrophedon 30%), T=512, margin=0.005 → **0.8166** unclipped
+(vs 0.7935 3-phase). Tight margin (0.005) and more above-phase help; tighter
+(0.002) hurts. Square descent (gouge-free at corners) is WORSE than circular
+(circular carves more lower-annulus, net positive despite corner proximity).
+Ported to train_csg.py pyramid branch; verifying under clipped eval at feed300.
+Param sweep plateaued ~0.81-0.82 (ceiling given remaining-material volume
+~0.94-0.96; gap = over-carve at transitions + sparse per-z angular coverage).
 
 ## Methodological reminders
 
