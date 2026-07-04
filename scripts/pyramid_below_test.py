@@ -28,7 +28,8 @@ def pyramid_half(z, base_z, h, r_sp):
 
 
 def make_traj(mode, n, r_sp, r_tool, target_height_mm, stock_mm,
-              margin=0.005, split=(0.34, 0.30, 0.08), osc_above=8.0, revs_beside=20.0):
+              margin=0.005, split=(0.34, 0.30, 0.08), osc_above=8.0, revs_beside=20.0,
+              descent_r=None):
     tool_start = np.array([0.5, 0.5, 1.0], dtype=np.float32)
     h = target_height_mm / stock_mm
     base_z = 0.5 - 0.5 * h
@@ -93,12 +94,13 @@ def make_traj(mode, n, r_sp, r_tool, target_height_mm, stock_mm,
         # r_safe_max clears the lower annulus (net positive despite corner
         # proximity; the square alternative leaves too much waste).
         z_base_below = base_z - 1.0 - 0.005
+        r_desc = r_safe_max if descent_r is None else descent_r
         for t in range(n_descent):
             frac = t / max(1, n_descent - 1)
             zb = base_z + (z_base_below - base_z) * frac
             phase = 2.0 * math.pi * 3.0 * frac
-            positions.append([0.5 + r_safe_max * math.cos(phase),
-                              0.5 + r_safe_max * math.sin(phase), float(zb)])
+            positions.append([0.5 + r_desc * math.cos(phase),
+                              0.5 + r_desc * math.sin(phase), float(zb)])
         # 4. below: FIXED-base boustrophedon (tool top = 0.27 < pyramid base 0.275)
         bx = np.linspace(0.0 + r_tool, 1.0 - r_tool, 9)
         by = np.linspace(0.0 + r_tool, 1.0 - r_tool, 9)

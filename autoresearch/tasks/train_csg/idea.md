@@ -429,6 +429,29 @@ dice (over-carves). margin 0.003-0.005 all ~equal. Sphere 0.890→0.9075 (+0.017
 verified under clipped eval at feed120 (orbit arc 0.46"/step < 0.9" feed cap, no
 clip). Cylinder osc12→0.9390 (marginal over osc8 0.9385; at ceiling).
 
+### BREAKTHROUGH 6: sphere dice SCALES with T (z-varying annulus); others maxed
+
+Sphere dice keeps climbing with more steps (denser angular coverage of the
+z-varying annulus — each z-level has a different r_sphere, needing its own revs):
+T=512/60/30=0.9075, T=768/90/30=0.9181, T=1024/120/30=0.9244, T=1280/150/36=0.9305,
+T=1536/180/36=0.9306. Cylinder (0.9390) and box (0.9014) are FLAT in T — their
+cross-sections are z-invariant so a fixed rev count already covers the annulus
+(structural ceiling). Pyramid does NOT scale (4-phase budget is T-tuned; higher T
+rebalances wrong -> worse). Only sphere benefits from more T. Verifying T=1536
+under clipped eval.
+
+### DETERMINISM: zlayer init + best-checkpoint is FULLY DETERMINISTIC (zero variance)
+
+Paired-seed verify (sphere osc30, seeds 2/3/4): ALL THREE give bit-identical
+0.907526 @ iter0 (and bit-identical final-iter 0.581061). The --seed flag has
+ZERO effect here — it only governs `random-tool-start` (unused with init-mode
+zlayer, which sets a canonical tool_start). The hard eval of a fixed trajectory
+is deterministic (the atomic-add nondeterminism noted in the protocol affects the
+soft TRAINING gradients, not the hard carve of a fixed path — and even the
+training trajectory is deterministic from a deterministic init). **Conclusion:
+the wins are exact, not "real within noise." Paired-seed verification is moot for
+this method — one run suffices.** The +0.29 sphere delta vs baseline 0.617 is exact.
+
 ## Methodological reminders
 
 - ≥3 (ideally ≥5) paired same-GPU seeds to call a lever real.
