@@ -723,9 +723,9 @@ def main():
             apex = base_z + h
             r_safe_max = r_sp + r_tool + margin
             z_base_below = base_z - 1.0 - margin           # tool top = base_z - margin < pyramid base
-            n_above = int(n * 0.40)
-            n_below = int(n * 0.30)
-            n_descent = max(8, int(n * 0.06))
+            n_above = int(n * 0.26)
+            n_below = int(n * 0.24)
+            n_descent = max(8, int(n * 0.05))
             n_beside = n - n_above - n_below - n_descent
             xs = np.linspace(0.12, 0.88, 7)
             ys = np.linspace(0.12, 0.88, 7)
