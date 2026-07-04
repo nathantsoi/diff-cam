@@ -200,6 +200,11 @@ def main():
                          "(0.12/0.01) the tool is speed-limited and cannot traverse "
                          "the exterior (dice caps ~0.56); 0.45 advances ~1 voxel/step. "
                          "Sweet spot dt in [0.42, 0.5].")
+    ap.add_argument("--k-init", type=float, default=10.0,
+                    help="smooth-CSG smoothness k (sharper = less soft-union over-erosion; "
+                         "lower k makes the soft carve closer to the hard carve so soft-dice "
+                         "optimization transfers to hard dice). k=10 default; k<=2 saturates "
+                         "(gradients vanish).")
     # --- G-code / viz ---
     ap.add_argument("--post", default="haas", choices=("rs274", "haas"),
                     help="post-processor for export/eval/viz")
@@ -263,6 +268,7 @@ def main():
             "--target_radius_mm", str(args.target_radius_mm),
             "--target_height_mm", str(args.target_height_mm),
             "--dt", str(args.dt),
+            "--k_init", str(args.k_init),
             "--headless",
         ]
         if not args.no_save_model:
