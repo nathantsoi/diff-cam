@@ -115,15 +115,25 @@ experiments use `--eval-freq 25` (≈22 min) or `--eval-freq 50` (≈18 min) +
 baseline (already running at freq=10) is allowed to run long — it's the
 reference. Hard dice appears flat (no sharp peak), so coarser eval is safe.
 
-### Experiment priority (after baseline confirms the stationary floor)
-1. **Coverage diagnostic**: eval the `raster_fine` init's HARD dice with no/1
-   iter optimization. If >> 0.553, coverage is confirmed as the lever and soft
-   optimization is what collapses it. (cheap, fast)
-2. **Parametric toolpath** (the real lever): low-dim raster/spiral params
-   optimized end-to-end so the optimizer can ONLY produce systematic sweeps —
-   cannot cheat with small motions. Directly serves "uniform CNC patterns" +
-   coverage. (big, architectural)
-3. Re-examine lr / w_len on the HARD metric (they were tuned for soft). (cheap)
+### Coverage diagnostic RESULT (sphere, raster_fine init, 0 optimization)
+- `scripts/coverage_diagnostic.py` hard-carves a trajectory with the exact eval
+  path (`eval.eval_csg.carve_trajectory_metrics`) and scores it.
+- **Do-nothing floor = 0.548** (tool never enters material; stock_occ=132651,
+  target_occ=50061, floor=2·50061/(132651+50061)=0.548). Matches the baseline's
+  flat 0.5482 ⇒ the soft-optimized trajectory carves NOTHING in hard space; the
+  soft 0.85 was 100% over-erosion artifact.
+- **raster_fine init (systematic boustrophedon) = 0.311** — WORSE than doing
+  nothing. The blind raster plunges through the sphere and GOUGES it (over-
+  removes part material). Coverage alone is not the answer; the path must
+  OFFSET from the target surface by tool radius (a real CNC finishing /
+  shell-offset path), not blindly sweep the bounding box.
+
+⇒ **Refined direction**: the lever is a parametric toolpath that (a) covers the
+waste region systematically AND (b) stays offset ≥ r_tool from the target
+surface so it removes waste without gouging. The existing `shell` init orbits
+just outside the sphere surface — re-examine its hard dice (it was discarded on
+SOFT dice / speed-clip grounds; on HARD dice it may be the right starting
+point). Then optimize its params end-to-end.
 
 ## Methodological reminders
 
