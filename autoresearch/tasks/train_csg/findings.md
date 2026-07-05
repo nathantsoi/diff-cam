@@ -39,40 +39,38 @@ All crash-safe runs: `holder_overlap=0`, trunc trims only genuine near-collision
 (cyl 19 steps @ 0.15mm; sphere/box holder-clear runs byte-identical pre/post
 trunc — verified `trajectory.untruncated.npy == trajectory.npy`).
 
-## Size robustness (1in → 1.5in stock, proportional target)
+## Size robustness (0.75in / 1in / 1.5in stock, proportional target)
 
 The method **generalizes** across stock sizes (crash-safe, best@iter0 init-peak
-pattern holds for sphere/cyl/box; opt-helps for pyramid), but absolute dice
-**drops with larger stock** because the fixed 25mm tool spans less of it
-(≈1.0 stock-heights at 1in → 0.66 at 1.5in). The drop is **shape-dependent**:
+pattern holds for all shapes at 0.75in; opt-helps for the 1in pyramid only),
+and dice is **monotonically decreasing in stock size for ALL 4 shapes** — the
+fixed 25mm tool spans more of a smaller stock (1.31 stock-heights at 0.75in →
+0.66 at 1.5in), so more interior is reachable:
 
-| shape    | 1in    | 1.5in  | Δ      | crash-safe? | notes |
+| shape    | 0.75in | 1in    | 1.5in  | crash-safe? | notes |
 |----------|--------|--------|--------|-------------|-------|
-| box      | 0.892  | 0.884  | -0.008 | yes (1.69mm) | z-invariant square orbit carves full-height sides → size-robust |
-| cyl      | 0.916  | 0.842  | -0.074 | yes (1.69mm) | curved side; wider annulus at 1.5in less fully covered |
-| sphere   | 0.819  | 0.705  | -0.114 | yes (1.69mm) | 3D interior; tool spans less → more lower-interior unreachable |
-| pyramid  | 0.457  | 0.431  | -0.026 | yes (10.6mm) | already ceiling-limited; barely changes |
-| **mean** | **0.771** | **0.716** | -0.055 | | |
+| box      | 0.937  | 0.892  | 0.884  | yes | z-invariant square orbit; most size-robust (Δ-0.05 full range) |
+| cyl      | 0.933  | 0.916  | 0.842  | yes | curved side; moderate |
+| sphere   | 0.843  | 0.819  | 0.705  | yes | 3D interior; largest swing (Δ-0.14) |
+| pyramid  | 0.556  | 0.457  | 0.431  | yes | ceiling-limited; opt-helps only at 1in |
+| **mean** | **0.817** | **0.771** | **0.716** | | |
 
-Takeaway: flat/z-invariant surfaces (box) are size-robust; curved/3D surfaces
-(sphere, cyl) lose dice as the tool-to-stock ratio falls. The 1.5in runs are
-crash-safe by construction (trunc no-trim, holder_overlap=0). Eval stage OOMs
-on the 76³ grid (known) but viz produces the canonical carved-vs-target Dice.
+Takeaway: the crash-safe ceilings are **reachability ceilings set by the
+tool-to-stock ratio**. Flat/z-invariant surfaces (box) are most robust; curved/3D
+surfaces (sphere, cyl, pyramid) swing more. All runs crash-safe by construction
+(trunc no-trim, holder_overlap=0). Eval stage OOMs/crashes on the larger grids
+(known) but viz produces the canonical carved-vs-target Dice.
 
-The trend is **monotonic in stock size** (sphere tested at 3 sizes): 0.843 /
-0.819 / 0.705 at 0.75in / 1in / 1.5in. At 0.75in the 25mm tool is *taller* than
-the 19mm stock (z-floor dips below the part bottom, -0.0025), so the
-lower-interior wedge becomes partially reachable → dice rises above the 1in
-ceiling. Larger stock → tool spans less → more interior unreachable.
+At 0.75in the 25mm tool is *taller* than the 19mm stock (z-floor dips below the
+part bottom, -0.0025), so the lower-interior wedge / sloped-face inner band
+become partially reachable → every shape's dice rises above its 1in ceiling.
 
-The **pyramid follows the same monotonic trend**: 0.556 / 0.457 / 0.431 at
-0.75in / 1in / 1.5in. This **revises the earlier "structural/geometric ceiling"
-framing** — the pyramid ceiling is *not* purely geometric; it is tool-to-stock-
-ratio limited, same driver as the sphere. At 0.75in (tool taller than stock) the
-sloped-face inner band becomes partially reachable and best@iter0 returns
-(init=win, like the sphere), whereas at 1in the init is marginal so optimization
-helps (best@iter15). The crash-safe ceilings are fundamentally reachability
-ceilings set by the fixed 25mm tool vs the stock height.
+The pyramid trend **revises the earlier "structural/geometric ceiling" framing**:
+the pyramid ceiling is *not* purely geometric — it is tool-to-stock-ratio
+limited, same driver as the sphere. At 0.75in the sloped-face inner band becomes
+partially reachable and best@iter0 returns (init=win, like the sphere), whereas
+at 1in the init is marginal so optimization helps (best@iter15). The opt-helps
+pattern is a symptom of a marginal init, not a pyramid invariant.
 
 **Confirmed directly via tool length**: a 1in sphere with a 50mm tool (2× stock
 height) raises viz dice 0.819 → 0.840, crash-safe (min clr 25mm, no trim). The
