@@ -13,13 +13,17 @@ deployed metric. Tracked alongside the train-summary HARD dice (pre-trunc).
 The prior zlayer wins **do not survive** collision safety unchanged. Three
 shapes (sphere/cyl/box) re-baseline close to their old numbers once the init is
 made crash-aware (orbits stay above the part, so the z-floor barely bites).
-**Pyramid regresses hard** (0.817 → ~0.46): its old win relied on a deep
+**Pyramid regresses hard** (0.817 → ~0.46 at 1in): its old win relied on a deep
 tool-base plunge that is now (correctly) forbidden — that plunge was a real
-machine crash. The crash-safe pyramid ceiling is **structural**, not a coverage
-bug (confirmed below). Crash-safe pyramid improved 0.416 → 0.457 via a 2D
-descending-annulus boustrophedon (replacing the measure-zero 1D orbit), and
-optimization HELPS the pyramid (pure-init 0.402 → 25-iter 0.457, best@iter15),
-unlike sphere/cyl/box where init=iter0 is best.
+machine crash. The crash-safe ceilings (sphere lower-interior wedge, pyramid
+sloped-face inner band) are **reachability ceilings set by the fixed 25mm tool
+vs the stock height** — not purely geometric. They are **monotonic in stock
+size**: both sphere (0.843/0.819/0.705) and pyramid (0.556/0.457/0.431) rise at
+0.75in (tool taller than stock → more interior reachable) and fall at 1.5in.
+Crash-safe pyramid improved 0.416 → 0.457 via a 2D descending-annulus
+boustrophedon. Optimization HELPS the 1in pyramid (0.402 → 0.457, best@iter15)
+but hurts the 0.75in pyramid (best@iter0, like the sphere) — the init is strong
+enough at 0.75in that opt collapses it.
 
 ## Crash-safe per-shape results (viz carve Dice, post-trunc)
 
@@ -61,6 +65,15 @@ the 19mm stock (z-floor dips below the part bottom, -0.0025), so the
 lower-interior wedge becomes partially reachable → dice rises above the 1in
 ceiling. Larger stock → tool spans less → more interior unreachable.
 
+The **pyramid follows the same monotonic trend**: 0.556 / 0.457 / 0.431 at
+0.75in / 1in / 1.5in. This **revises the earlier "structural/geometric ceiling"
+framing** — the pyramid ceiling is *not* purely geometric; it is tool-to-stock-
+ratio limited, same driver as the sphere. At 0.75in (tool taller than stock) the
+sloped-face inner band becomes partially reachable and best@iter0 returns
+(init=win, like the sphere), whereas at 1in the init is marginal so optimization
+helps (best@iter15). The crash-safe ceilings are fundamentally reachability
+ceilings set by the fixed 25mm tool vs the stock height.
+
 ## What changed in the sim (recap)
 
 - **Z-floor clamp** (`--z-floor-epsilon-mm`, default 1.0mm): executed tool BASE
@@ -85,7 +98,7 @@ constraints (in `algorithms/train_csg.py`):
 For sphere/cyl/box the `else`-branch `z_bot = max(z_bot, z_floor+0.005,
 z_holder_clear)` suffices — the equator orbit stays above the floor.
 
-## Pyramid: why ~0.42 is the crash-safe ceiling (NOT a coverage bug)
+## Pyramid: why ~0.46 is the 1in crash-safe ceiling (reachability, not coverage)
 
 The pyramid's old 0.8166 used a **below-disk boustrophedon at fixed
 `z_base_below = base_z - 1 - margin ≈ -0.955`** — a deep plunge placing the
@@ -119,8 +132,12 @@ the pyramid half-size `hp(zb) ≥ hp(z)`, so a tool at radius `hp(z)+r_tool` wou
 The only crash-free radius at base `zb` is `≥ hp(zb)+r_tool+margin`, which at
 height z leaves the inner band `[hp(z), hp(zb)+r_tool]` un-carvable. A
 full-height tool cannot hug a sloped face without the deep plunge. This mirrors
-the sphere's lower-interior wedge — a fundamental crash-safe ceiling, not a
-tuning problem.
+the sphere's lower-interior wedge. **However, this ceiling is tool-to-stock-
+ratio dependent, not absolute**: at 0.75in (tool 25mm taller than the 19mm
+stock) the inner band becomes partially reachable and the pyramid rises to
+0.556 (see Size robustness). At 1.5in it falls to 0.431. The "fundamental
+ceiling" holds for a FIXED tool/stock ratio; a relatively taller tool (or
+articulated holder) lifts it.
 
 ## Dead levers confirmed / added
 
@@ -145,9 +162,11 @@ tuning problem.
 
 - The viz "carved voxels: sim=N" line is the **remaining solid** count
   (`stock<0`), not removed — read accordingly.
-- Pyramid best-checkpoint is at **iter 15** (NOT iter-0): optimization HELPS the
-  pyramid (0.33 → 0.42), unlike sphere/cyl/box where init=iter0 is best and soft
-  opt collapses it. The pyramid soft loss is partially correlated with hard dice.
+- Pyramid best-checkpoint is at **iter 15** at 1in (optimization HELPS: 0.33 →
+  0.46), but at **iter 0** at 0.75in (init strong enough that opt collapses it,
+  like the sphere). The opt-helps pattern is a symptom of a marginal init, not a
+  pyramid invariant — when reachability improves (smaller stock) the init
+  dominates and opt hurts.
 - Crash-safe pyramid `holder_overlap=0`, trunc no-trim (min clearance 21mm) —
   the path is genuinely collision-free; the loss is purely the unreachable waste.
 - **Training-barrier vs trunc-threshold mismatch**: the holder collision barrier
@@ -163,7 +182,12 @@ tuning problem.
 
 - A **shorter tool** is worse (less reach). A **longer tool** reaches deeper but
   gouges (full-height carve through the body). No tool_height recovers the slab
-  crash-free.
-- The pyramid crash-safe ceiling (~0.42) is accepted as structural. Recovering
-  ≥0.8 would require either a non-full-height tool model (scenario change) or
-  an articulated holder — out of scope for this sim.
+  crash-free at a fixed stock size.
+- The crash-safe ceilings are **tool-to-stock-ratio limited**, not absolute: the
+  pyramid rises 0.431→0.457→0.556 and the sphere 0.705→0.819→0.843 as the stock
+  shrinks 1.5→1→0.75in (tool 25mm fixed). Recovering ≥0.8 crash-free at 1in would
+  require a relatively taller tool (scenario change) or an articulated holder —
+  out of scope for this sim.
+- The `holder_margin` soft barrier (weight 50) is overpowered by the residual
+  loss; a higher weight or a hard holder clamp (analogous to the z-floor) would
+  let face-hugging low-zb inits survive trunc — untested.
