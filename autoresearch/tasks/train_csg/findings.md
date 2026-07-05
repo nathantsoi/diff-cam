@@ -13,12 +13,12 @@ deployed metric. Tracked alongside the train-summary HARD dice (pre-trunc).
 The prior zlayer wins **do not survive** collision safety unchanged. Three
 shapes (sphere/cyl/box) re-baseline close to their old numbers once the init is
 made crash-aware (orbits stay above the part, so the z-floor barely bites).
-**Pyramid regresses hard** (0.817 → ~0.46 at 1in): its old win relied on a deep
+**Pyramid regresses hard** (0.817 → ~0.53 at 1in): its old win relied on a deep
 tool-base plunge that is now (correctly) forbidden — that plunge was a real
 machine crash. The crash-safe ceilings (sphere lower-interior wedge, pyramid
 sloped-face inner band) are **reachability ceilings set by the fixed 25mm tool
 vs the stock height** — not purely geometric. They are **monotonic in stock
-size**: both sphere (0.843/0.819/0.705) and pyramid (0.556/0.457/0.431) rise at
+size**: both sphere (0.843/0.819/0.705) and pyramid (~0.55/0.526/~0.34) rise at
 0.75in (tool taller than stock → more interior reachable) and fall at 1.5in.
 Crash-safe pyramid improved 0.416 → 0.457 (25-iter) → 0.492 (50-iter) → 0.517
 (100-iter) → **0.526 (200-iter, best@iter199, PLATEAUING)** via a 2D
@@ -28,11 +28,11 @@ it climbs iter15 0.453 → iter45 0.492 → iter80 0.517 → iter199 0.526. The 
 gains are in the first 80 iters; beyond iter100 diminishing returns (+0.009 over
 the last 120 iters, loss 0.082 still decreasing). **The true 1in crash-safe
 pyramid ceiling is ~0.526** (vs infeasible 0.817 — the inner band remains
-partially unreachable, but the reachable annulus is now fully carved). It hurts
-the 0.75in pyramid at 25 iters (best@iter0, like the sphere) — but the 0.75in
-opt-headroom at 200 iters is under test. **Max-steps matters**: the pyramid
-opt-helps at max-steps=512 (shorter trajectory, init marginal) but opt-COLLAPSES
-at max-steps=1536 (best@iter0, 0.417 — the init saturates the larger budget, like
+partially unreachable, but the reachable annulus is now fully carved). Opt HURTS
+the 0.75in pyramid even at 200 iters (best@iter0 0.546, init strong → opt
+collapses, like the sphere). **Max-steps matters**: the pyramid opt-helps at
+max-steps=512 (shorter trajectory, init marginal) but opt-COLLAPSES at
+max-steps=1536 (best@iter0, 0.417 — the init saturates the larger budget, like
 the sphere at 0.75in). The opt-helps pattern is a symptom of a marginal init
 (shape × max-steps × stock size), not a pyramid invariant.
 
