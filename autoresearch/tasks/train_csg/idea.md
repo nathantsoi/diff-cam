@@ -18,29 +18,37 @@ the deployed hard carve (`apply_cut_hard`, sharp max).
 
 ## Core idea
 
-**Anneal the union sharpness k during training** (high→low): keep k=10 early so
-gradients flow (avoids the k≤2 gradient-death failure), then lower k late so the
-final-iteration soft stock is sharper / less over-eroded — closer to the hard
-carve, lifting the *deployable* dice. The `--k-anneal` / `--k-init` / `--k-final`
-flags already exist in run_pipeline.py but are NOT in the dead-lever list and
-have NOT been swept at the lr=1e-3 operating point. Shape-blind by construction
-(k is a global SDF smoothness param, no shape metadata).
+**Anneal the union sharpness k during training** — LOW early (smooth, gradient
+flow, exploration) → HIGH late (sharp, less over-erosion, closer to hard carve).
 
-This is a *less-biased soft objective* — exactly frontier candidate #1.
+Sign convention (verified from `smooth_max` in simulator_utils.py + SDF-negative-
+inside): `smooth_max = max + (1/k)·log(1+exp(-k|a-b|))`, so the soft-union excess
+over the hard carve is ~log(2)/k. **Lower k ⇒ MORE over-erosion; higher k ⇒
+sharper ⇒ LESS over-erosion** (closer to `apply_cut_hard`). The default k=10 is
+constant. To close the soft/hard gap we want k HIGH at the final iteration so the
+optimized trajectory is less biased toward over-carving — lifting deployable
+hard dice AND likely soft dice (less gouge + less residual-region over-erosion).
+
+The dead-lever note "k≤2 saturates, gradients vanish" is the LOW-k failure
+(very smooth). High-k has its own failure (softmax→one-hot → gradient
+concentrates/vanishes), so there is a sweet spot. `--k-anneal`/`--k-init`/
+`--k-final` exist but are NOT swept at lr=1e-3 and NOT in the dead list.
+Shape-blind (k is a global SDF smoothness param). This is a *less-biased soft
+objective* — frontier candidate #1.
 
 ## Plan
 
 1. **Baseline** (this run's reference): exact protocol command, sphere, lr=1e-3,
-   soft train dice. Expect ~0.85.
-2. `--k-anneal --k-init 10 --k-final 3` (gentle sharpen) vs baseline.
-3. Sweep `--k-final` ∈ {5, 3, 2, 1.5} (k_final=2 is the floor before gradient
-   death; k-anneal lets us approach it late without the fixed-low death).
-4. If k-anneal helps soft dice AND hard viz dice, also test on box/pyramid/cyl
-   for generality.
-5. Pivot if needed: if k-anneal is dead, try a **hard-carve-aware loss**
-   (compute_loss on a sharpened stock while apply_cut stays soft for gradient
-   flow) — decouples gradient path from objective, the deeper version of the
-   same idea.
+   k=10 constant, soft train dice. Expect ~0.85. (RUNNING on GPU 0.)
+2. `--k-anneal --k-init 10 --k-final 30` (sharpen late) vs baseline.
+3. Sweep `--k-final` ∈ {20, 30, 50, 80} with k_init=10; also try k_init=5 (more
+   early exploration) → k_final=30.
+4. If a k_final helps soft dice, re-seed ≥3× and also read hard viz dice
+   (`--stages train,trunc,viz`) to confirm the gap actually closes.
+5. Generality: run the winning k-anneal config on box/pyramid/cylinder.
+6. Pivot if dead: **hard-carve-aware loss** — keep `apply_cut` soft (gradient
+   path) but evaluate `compute_loss` on a separately-sharpened stock replica, so
+   the objective is less biased without killing gradients.
 
 ## Notes
 
