@@ -35,6 +35,26 @@ All crash-safe runs: `holder_overlap=0`, trunc trims only genuine near-collision
 (cyl 19 steps @ 0.15mm; sphere/box holder-clear runs byte-identical pre/post
 trunc — verified `trajectory.untruncated.npy == trajectory.npy`).
 
+## Size robustness (1in → 1.5in stock, proportional target)
+
+The method **generalizes** across stock sizes (crash-safe, best@iter0 init-peak
+pattern holds for sphere/cyl/box; opt-helps for pyramid), but absolute dice
+**drops with larger stock** because the fixed 25mm tool spans less of it
+(≈1.0 stock-heights at 1in → 0.66 at 1.5in). The drop is **shape-dependent**:
+
+| shape    | 1in    | 1.5in  | Δ      | crash-safe? | notes |
+|----------|--------|--------|--------|-------------|-------|
+| box      | 0.892  | 0.884  | -0.008 | yes (1.69mm) | z-invariant square orbit carves full-height sides → size-robust |
+| cyl      | 0.916  | 0.842  | -0.074 | yes (1.69mm) | curved side; wider annulus at 1.5in less fully covered |
+| sphere   | 0.819  | 0.705  | -0.114 | yes (1.69mm) | 3D interior; tool spans less → more lower-interior unreachable |
+| pyramid  | 0.457  | 0.431  | -0.026 | yes (10.6mm) | already ceiling-limited; barely changes |
+| **mean** | **0.771** | **0.716** | -0.055 | | |
+
+Takeaway: flat/z-invariant surfaces (box) are size-robust; curved/3D surfaces
+(sphere, cyl) lose dice as the tool-to-stock ratio falls. The 1.5in runs are
+crash-safe by construction (trunc no-trim, holder_overlap=0). Eval stage OOMs
+on the 76³ grid (known) but viz produces the canonical carved-vs-target Dice.
+
 ## What changed in the sim (recap)
 
 - **Z-floor clamp** (`--z-floor-epsilon-mm`, default 1.0mm): executed tool BASE
