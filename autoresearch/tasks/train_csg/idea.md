@@ -277,14 +277,51 @@ method generalize to:
   carving (harder: the tool must reach INTO a bowl without gouging the rim).
 
 Both are shape-blind to the optimizer (the loss/sim see only the target SDF
-field `φ_tgt`; no shape-name branching). The repo ships
-`run_combined_shapes.sh` which runs them at the OLD operating point (25mm tool,
-raster_fine, w_len, k=10, m=256). **I am testing them with the NEW winning
-config (50mm tool + k-anneal k150, m=128) plus k=10 50mm baselines**, to confirm
-the method transfers to combined CSG — the strongest generality claim.
+field `φ_tgt`; no shape-name branching).
 
-**In flight**: hole_k150_t50_s1 (GPU9). Queued: sphere_hole k10 50mm baseline,
-sphere_bowl {k10, k150} 50mm × seeds (launch when 75mm batch frees GPUs).
+### sphere_hole FIRST RESULT (random init, m=128, k150, 50mm): dice 0.223 — HARD FAILURE
+
+| config | dice | carved vox | target vox | resid | gouge |
+|--------|------|-----------|-----------|-------|-------|
+| hole random m128 k150 t50 s1 | **0.223** | 42371 | 8528 | 0.188 | 0.058 |
+
+The optimizer MASSIVELY over-carves (42371 vs 8528 target voxels) — it fills the
+hole region (which should remain solid) while still leaving 18.8% residual
+uncarved target. **The through-hole topology is undiscoverable from random init
++ 128 steps**: the tool would need to plunge vertically through the sphere
+center (carving the central cylinder) while leaving the sphere shell — a
+topology the gradient from a soft-union carve cannot find. Dice flat at ~0.21
+from iter 1000→5000 (stuck, not learning).
+
+### sphere_hole investigation (running)
+Repo ships `run_combined_shapes.sh` using the OLD operating point (25mm tool,
+raster_fine init, w_len 0.03, k=10, m=256) for these shapes. Testing whether
+**raster_fine init** (pre-covers the part with a boustrophedon, may naturally
+include hole-plunging passes) + **m=256** (more steps for plunges) fixes it:
+- hole_rf_m256_k10 (repo baseline, 25mm)
+- hole_rf_m256_k150_t50 (my method + raster_fine, 50mm)
+- bowl_rf_m256_k150_t50 + bowl_rf_m256_k10 (sphere_bowl, both methods)
+
+Bowl starts healthier (~0.42 early vs hole's ~0.12) — concave interior is
+easier than a through-hole.
+
+### 75mm-tool RESULT: SATURATED (dead lever)
+
+| shape | 50mm k150 | 75mm k150 |
+|-------|-----------|-----------|
+| sphere | 0.830 | 0.832 |
+| pyramid | 0.796 | 0.797 |
+| cylinder | 0.895 | 0.894 |
+
+75mm = 50mm within seed noise. Tool length saturates at 50mm for the 1in stock
+(consistent with prior zlayer run). **50mm is the sweet spot; 75mm is a dead
+lever.** Cylinder seed3 = 0.893 → cyl mean (s1,s3) ~0.894, s2=0.840 was the
+outlier.
+
+### 2in-stock ratio test (still training, ~2h)
+2in cube + 100mm tool (same tool-to-stock ratio as 1in/50mm), sphere r=22.86mm.
+At iter ~975: k150=0.644 vs k10=0.547 (+0.097) — **k-anneal win SCALES to the
+larger absolute scenario** (the gap is consistent with the 1in result).
 
 ## Mid-run k-sweep signal (sphere, seed 1, ~iter 1500)
 
