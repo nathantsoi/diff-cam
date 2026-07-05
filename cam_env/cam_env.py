@@ -24,6 +24,8 @@ class CamEnvDiff(gym.Env):
         work_volume_in=(16.0, 12.0, 10.0),
         stock_origin_in=None,
         target_radius_mm=None,
+        target_sdf_path: Optional[str] = None,
+        target_sdf_array: Optional[np.ndarray] = None,
     ):
         """
         Args:
@@ -31,7 +33,7 @@ class CamEnvDiff(gym.Env):
                 (used only when ``voxel_size_mm`` is None).
             max_steps: int, maximum number of steps per episode
             k_init: float, initial value for reward shaping parameter K
-            target_shape: str or None, if specified should be one of ["cylinder", "box", "sphere"].
+            target_shape: str or None, if specified should be one of ["cylinder", "box", "sphere", "grid"].
             render_mode: str or None, if "human" will render with Taichi GUI. If "rgb_array", will return RGB arrays from render() instead. If None, no rendering.
             stock_size_in: (x, y, z) stock box in inches -- the normalized cube.
             voxel_size_mm: physical voxel edge (mm); the sub-mm precision knob.
@@ -58,6 +60,8 @@ class CamEnvDiff(gym.Env):
             else float(inch_to_mm(0.9 / 2.0))
         )
         self.target_height = float(inch_to_mm(0.9))  # cylinder/pyramid height (mm)
+        self.target_sdf_path = target_sdf_path
+        self.target_sdf_array = target_sdf_array
         self.tool_start = [0.5, 0.5, 1.0]   # normalized [0,1]
         self.render_mode = render_mode
 
@@ -142,6 +146,8 @@ class CamEnvDiff(gym.Env):
             voxel_size_mm=self.voxel_size_mm,
             work_volume_in=self.work_volume_in,
             stock_origin_in=self.stock_origin_in,
+            target_sdf_path=self.target_sdf_path,
+            target_sdf_array=self.target_sdf_array,
         )
         self.simulator.tool_radius[None] = self.tool_radius
         self.simulator.tool_height[None] = self.tool_height
@@ -154,13 +160,14 @@ class CamEnvDiff(gym.Env):
 
         self.simulator.init_stock()
 
-        self.simulator.set_target_params(
-            radius_mm=self.target_radius, height_mm=self.target_height,
-            half_size_mm=self.target_radius, center=(0.5, 0.5, 0.5))
+        if self.target_shape != "grid":
+            self.simulator.set_target_params(
+                radius_mm=self.target_radius, height_mm=self.target_height,
+                half_size_mm=self.target_radius, center=(0.5, 0.5, 0.5))
+            self.simulator.bake_target_grid()
         self.simulator.tool_radius[None] = self.tool_radius   # mm
         self.simulator.tool_height[None] = self.tool_height   # mm
         self.simulator.holder_radius[None] = self.holder_radius
-        self.simulator.bake_target_grid()
         self.simulator.set_target_volume()
 
         self.simulator.reconstruct_positions(0)

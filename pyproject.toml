@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["cam_env*", "simulator*", "algorithms*", "cam*", "eval*"]
+include = ["cam_env*", "simulator*", "algorithms*", "cam*", "eval*", "utils*"]
 
 [tool.pytest.ini_options]
 # Only collect the unit-test suite under tests/. The repo-root test_perf.py and

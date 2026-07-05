@@ -43,6 +43,8 @@ class CSGSimulatorDelta:
         feed_ipm=10.0,
         safe_distance_in=0.1,
         enforce_speed_limits=True,
+        target_sdf_path=None,
+        target_sdf_array=None,
     ):
         """Differentiable CSG simulator over a small STOCK box placed inside a
         larger machine work volume.
@@ -386,9 +388,9 @@ class CSGSimulatorDelta:
         self.use_saved_init[None] = 0
 
         # ---- Target ----
-        target_options = ["box", "cylinder", "sphere", "pyramid"]
+        target_options = ["box", "cylinder", "sphere", "pyramid", "grid"]
         if target_shape is None:
-            target_shape = random.choice(target_options)
+            target_shape = random.choice(target_options[:-1])  # avoid random grid select without parameters
         self.target_shape = target_shape
         self.target_params = {}
         self.target_volume = ti.field(dtype=ti.f32, shape=())
@@ -415,6 +417,26 @@ class CSGSimulatorDelta:
         # through-hole cylinder in "sphere_hole" and the subtracted sphere in
         # "sphere_bowl". 0 disables (plain shapes ignore it).
         self.tsub_vox = ti.field(dtype=ti.f32, shape=()); self.tsub_vox[None] = 0.0
+
+        # If it is a grid target, load the target grid data
+        if self.target_shape == "grid":
+            grid_array = None
+            if target_sdf_array is not None:
+                grid_array = target_sdf_array
+            elif target_sdf_path is not None:
+                data = np.load(target_sdf_path)
+                if "sdf" not in data:
+                    raise ValueError(f"Target NPZ file {target_sdf_path} does not contain 'sdf' array.")
+                grid_array = data["sdf"]
+            else:
+                raise ValueError("For target_shape='grid', either target_sdf_path or target_sdf_array must be provided.")
+
+            if grid_array.shape != (resolution, resolution, resolution):
+                raise ValueError(
+                    f"Target grid shape {grid_array.shape} does not match resolution {(resolution, resolution, resolution)}"
+                )
+
+            self.target.from_numpy(grid_array.astype(np.float32))
 
         # ---- Loss ----
         self.loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
@@ -477,6 +499,8 @@ class CSGSimulatorDelta:
             # tsub_vox field (set by set_target_params), not here.
             self.target_params["radius"] = ti.field(dtype=ti.f32, shape=())
             self.target_params["center"] = ti.Vector.field(3, dtype=ti.f32, shape=())
+        elif self.target_shape == "grid":
+            pass
         else:
             raise ValueError(f"Unsupported target shape: {self.target_shape}")
 
@@ -634,6 +658,41 @@ class CSGSimulatorDelta:
         return outside + inside
 
     @ti.func
+    def interpolate_target(self, p):
+        """Trilinear lookup into self.target field."""
+        p_grid = p * self.resolution - 0.5
+        x0 = ti.cast(ti.floor(p_grid.x), ti.i32)
+        y0 = ti.cast(ti.floor(p_grid.y), ti.i32)
+        z0 = ti.cast(ti.floor(p_grid.z), ti.i32)
+        x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
+        tx, ty, tz = p_grid.x - x0, p_grid.y - y0, p_grid.z - z0
+
+        R = self.resolution
+        x0 = ti.max(0, ti.min(R - 1, x0))
+        x1 = ti.max(0, ti.min(R - 1, x1))
+        y0 = ti.max(0, ti.min(R - 1, y0))
+        y1 = ti.max(0, ti.min(R - 1, y1))
+        z0 = ti.max(0, ti.min(R - 1, z0))
+        z1 = ti.max(0, ti.min(R - 1, z1))
+
+        c000 = self.target[x0, y0, z0]
+        c100 = self.target[x1, y0, z0]
+        c010 = self.target[x0, y1, z0]
+        c110 = self.target[x1, y1, z0]
+        c001 = self.target[x0, y0, z1]
+        c101 = self.target[x1, y0, z1]
+        c011 = self.target[x0, y1, z1]
+        c111 = self.target[x1, y1, z1]
+
+        c00 = c000 * (1 - tx) + c100 * tx
+        c10 = c010 * (1 - tx) + c110 * tx
+        c01 = c001 * (1 - tx) + c101 * tx
+        c11 = c011 * (1 - tx) + c111 * tx
+        c0 = c00 * (1 - ty) + c10 * ty
+        c1 = c01 * (1 - ty) + c11 * ty
+        return c0 * (1 - tz) + c1 * tz
+
+    @ti.func
     def target_sdf(self, p):
         """Target shape SDF (voxels) — branches resolved at compile time.
 
@@ -642,7 +701,9 @@ class CSGSimulatorDelta:
         d = 0.0
         pv = self._vox(p)
 
-        if ti.static(self.target_shape == "sphere"):
+        if ti.static(self.target_shape == "grid"):
+            d = self.interpolate_target(p)
+        elif ti.static(self.target_shape == "sphere"):
             d = sphere_sdf(
                 pv,
                 self._vox(self.target_params["center"][None]),
@@ -772,11 +833,25 @@ class CSGSimulatorDelta:
 
     @ti.kernel
     def bake_target_grid(self):
+<<<<<<< HEAD
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             self.target[i, j, k] = self.target_sdf(p)
+=======
+        if ti.static(self.target_shape != "grid"):
+            for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
+                p = ti.Vector(
+                    [
+                        (i + 0.5) * self.dx,
+                        (j + 0.5) * self.dx,
+                        (k + 0.5) * self.dx,
+                    ]
+                )
+
+                self.target[i, j, k] = self.target_sdf(p)
+>>>>>>> 8371308 (STEP to SDF changes)
 
     # ========================================================================
     # Forward pass: reconstruct positions → init → carving → loss
@@ -1601,8 +1676,13 @@ class CSGSimulatorDelta:
 
     @ti.func
     def target_normal(self, p):
+<<<<<<< HEAD
         """Analytic-ish normal of target via central differences on target_sdf."""
         eps = 1.5 / self.resolution  # ~1.5 voxels in normalized coords
+=======
+        """Approximate surface normal of target via central differences on target_sdf."""
+        eps = self.dx * 1.5
+>>>>>>> 8371308 (STEP to SDF changes)
         dx = ti.Vector([eps, 0.0, 0.0])
         dy = ti.Vector([0.0, eps, 0.0])
         dz = ti.Vector([0.0, 0.0, eps])
@@ -1728,6 +1808,14 @@ class CSGSimulatorDelta:
                     elif d == d_target:
                         mat_color = ti.Vector([0.5, 0.5, 1.0])  # light blue target
                         norm = self.target_normal(p)
+                        # Voxel-checker shading for grid targets only
+                        if ti.static(self.target_shape == "grid"):
+                            grid_p = p * float(self.resolution)
+                            cx = int(grid_p.x) % 2
+                            cy = int(grid_p.y) % 2
+                            cz = int(grid_p.z) % 2
+                            if (cx + cy + cz) % 2 == 0:
+                                mat_color = mat_color * 0.8
 
                     light_dir = ti.Vector([1.0, 1.0, 1.0]).normalized()
                     diffuse = ti.max(0.0, norm.dot(light_dir))
