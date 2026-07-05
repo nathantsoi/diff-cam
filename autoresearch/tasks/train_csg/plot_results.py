@@ -55,6 +55,11 @@ def main():
         "cead72f": "crash-safe zlayer z_bot=floor",
         "a7c99d9": "holder-clear zlayer (sphere/cyl/box)",
         "ba75e01": "pyramid crash-safe (drop deep-plunge)",
+        "0f3cd28": "pyramid 2D annulus boustrophedon",
+        "e289834": "pyramid 2D boust low->high + per-lvl cap",
+        "76390bb": "pyramid coarse grid + full-row cap (0.457)",
+        "8ad260e": "pyramid ring-annulus (regress)",
+        "1456fb4": "pyramid dense-ring+holder-margin (regress)",
     }
 
     cmap = plt.get_cmap("tab10")

@@ -105,6 +105,13 @@ tuning problem.
 - Direct face-hugging ring (radius `s_safe` per zb): REGRESSES to 0.402 — low-zb
   placement triggers holder collision → trunc trims 357 steps. Crash-safety, not
   geometry, is the binding constraint at low zb.
+- Dense ring (308pts, full budget) + `--holder-margin 0.045`: REGRESSES to 0.389.
+  The ring places tools at a SINGLE radius per zb, leaving the inter-radius bands
+  uncarved; the coarse grid's MULTI-radius (rc 0.25 + 0.375) covers a wider band
+  per pass and wins. `holder_margin` did NOT prevent the trunc trim — the soft
+  barrier (weight 50) is overpowered by the residual loss (still min clr 0.021mm).
+  The crash-safe pyramid ceiling is **0.457** (coarse 7pt grid, confirmed across 3
+  ring variants all worse).
 - `--no-z-floor --no-trunc` recovers 0.9306 sphere / 0.8166 pyramid but with
   `holder_overlap` in the millions — physically infeasible, a real crash.
 
