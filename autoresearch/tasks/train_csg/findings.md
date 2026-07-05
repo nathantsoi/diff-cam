@@ -104,6 +104,15 @@ smaller stock helps every shape (geometry shrinks into the tool's reach); a
 longer tool helps only shapes whose ceiling is *below* (sphere) not *beside*
 (pyramid), and only when the stock exceeds the default tool.
 
+**Tool length SATURATES at ~2× stock height (confirmed):** 1in sphere @25mm
+→0.819, @50mm→0.840 (+0.021), @75mm→0.8396 (+0.000). A 75mm tool (ratio 2.95)
+rides higher (min clr 50mm) but reaches **no more** stock than 50mm — the
+equator ceiling is **tool-length-independent once the base is high enough** to
+reach the lower-interior from above. **0.840 is the genuine 1in sphere ceiling
+for any tool ≥50mm.** The practical takeaway holds: use a tool ~2× the stock
+height (not more) to recover the lower-interior; beyond that, diminishing
+returns are exactly zero.
+
 **The tool-to-stock RATIO is the primary driver (confirmed):** 1.5in@50mm and
 0.75in@25mm have the same ratio (1.31) and give ~the same sphere dice (0.828 vs
 0.843) — a small absolute-size residual remains (init params tuned for 1in don't
@@ -256,7 +265,8 @@ articulated holder) lifts it.
 - A **tool-aware zlayer init** for a longer tool was tested and does NOT help:
   the 50mm train dice is identical to 25mm (the gain is crash-safety, not
   reachability), and doubled revs regress to 0.652 (gouge). 0.840 is the
-  1in+50mm sphere ceiling.
+  1in+50mm sphere ceiling. **An extreme 75mm tool (ratio 2.95) also gives 0.8396
+  — saturates at 50mm; 0.840 is the ceiling for any tool ≥50mm.**
 - The `holder_margin` soft barrier (weight 50) is overpowered by the residual
   loss; a higher weight or a hard holder clamp (analogous to the z-floor) would
   let face-hugging low-zb inits survive trunc — untested.
