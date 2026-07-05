@@ -74,6 +74,14 @@ sloped-face inner band becomes partially reachable and best@iter0 returns
 helps (best@iter15). The crash-safe ceilings are fundamentally reachability
 ceilings set by the fixed 25mm tool vs the stock height.
 
+**Confirmed directly via tool length**: a 1in sphere with a 50mm tool (2× stock
+height) raises viz dice 0.819 → 0.840, crash-safe (min clr 25mm, no trim). The
+gain is modest because the zlayer init (tuned for the 25mm tool) does not
+exploit the longer reach — `z_holder_clear` goes negative (deeper descent
+possible) but the init geometry is unchanged. **The init, not the tool length
+alone, is the bottleneck.** A tool-aware init that descends to the deeper
+`z_holder_clear` floor when the tool is longer is the untested lever.
+
 ## What changed in the sim (recap)
 
 - **Z-floor clamp** (`--z-floor-epsilon-mm`, default 1.0mm): executed tool BASE
