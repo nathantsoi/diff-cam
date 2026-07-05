@@ -102,6 +102,13 @@ smaller stock helps every shape (geometry shrinks into the tool's reach); a
 longer tool helps only shapes whose ceiling is *below* (sphere) not *beside*
 (pyramid), and only when the stock exceeds the default tool.
 
+**The tool-to-stock RATIO is the primary driver (confirmed):** 1.5in@50mm and
+0.75in@25mm have the same ratio (1.31) and give ~the same sphere dice (0.828 vs
+0.843) — a small absolute-size residual remains (init params tuned for 1in don't
+perfectly transfer). The 50mm tool recovers most of the 1.5in dice drop
+(0.705→0.828). **Practical takeaway: at larger stock, use a proportionally
+longer tool to maintain the ratio and recover dice.**
+
 ## What changed in the sim (recap)
 
 - **Z-floor clamp** (`--z-floor-epsilon-mm`, default 1.0mm): executed tool BASE
@@ -208,14 +215,17 @@ articulated holder) lifts it.
 
 ## Still open
 
-- A **shorter tool** is worse (less reach). A **longer tool** reaches deeper but
-  gouges (full-height carve through the body). No tool_height recovers the slab
-  crash-free at a fixed stock size.
-- The crash-safe ceilings are **tool-to-stock-ratio limited**, not absolute: the
+- The crash-safe ceilings are **tool-to-stock-ratio limited** (confirmed): the
   pyramid rises 0.431→0.457→0.556 and the sphere 0.705→0.819→0.843 as the stock
-  shrinks 1.5→1→0.75in (tool 25mm fixed). Recovering ≥0.8 crash-free at 1in would
-  require a relatively taller tool (scenario change) or an articulated holder —
+  shrinks 1.5→1→0.75in (25mm tool). The ratio theory is verified — 1.5in@50mm
+  (ratio 1.31) ≈ 0.75in@25mm (ratio 1.31) → 0.828 vs 0.843. Recovering ≥0.9
+  crash-free at 1in would require a relatively taller tool (a 50mm tool only
+  reaches 0.840; the init doesn't fully exploit it) or an articulated holder —
   out of scope for this sim.
+- A **tool-aware zlayer init** (descend to the deeper `z_holder_clear` floor when
+  the tool is longer, while keeping the base high to avoid the equator-gouge) is
+  the untested lever to fully exploit a longer tool — the 50mm tool only gained
+  +0.02 with the 25mm-tuned init.
 - The `holder_margin` soft barrier (weight 50) is overpowered by the residual
   loss; a higher weight or a hard holder clamp (analogous to the z-floor) would
   let face-hugging low-zb inits survive trunc — untested.
