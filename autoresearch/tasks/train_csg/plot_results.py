@@ -51,6 +51,10 @@ def main():
         "2bf863b": "pyramid 4-phase (below-disk recovery)",
         "08d6f14": "sphere osc resonance + cyl osc",
         "7e31dfa": "sphere T-scaling + determinism",
+        "3230c17": "toolholder-collision sim baseline",
+        "cead72f": "crash-safe zlayer z_bot=floor",
+        "a7c99d9": "holder-clear zlayer (sphere/cyl/box)",
+        "ba75e01": "pyramid crash-safe (drop deep-plunge)",
     }
 
     cmap = plt.get_cmap("tab10")
@@ -60,11 +64,13 @@ def main():
         "keep": "o",
         "discard": "x",
         "crash": "v",
+        "regress": "D",
     }
     status_label = {
         "keep": "keep",
         "discard": "discard",
         "crash": "crash",
+        "regress": "regress",
     }
 
     fig, ax = plt.subplots(figsize=(16, 7))
@@ -81,7 +87,7 @@ def main():
             marker=marker,
             s=70 if status == "keep" else 45,
             edgecolors="black",
-            linewidths=0.6 if status == "keep" else 0.0,
+            linewidths=0.6 if status in ("keep", "regress") else 0.0,
             label=status_label[status],
             zorder=3,
         )

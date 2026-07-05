@@ -1,0 +1,242 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 640" width="1000" height="640">
+  <defs>
+    <!-- Gradients for Phase Headers -->
+    <linearGradient id="grad-init" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7" />
+      <stop offset="100%" stop-color="#0369a1" />
+    </linearGradient>
+    <linearGradient id="grad-loop" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#2563eb" />
+      <stop offset="100%" stop-color="#1d4ed8" />
+    </linearGradient>
+    <linearGradient id="grad-eval" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7c3aed" />
+      <stop offset="100%" stop-color="#6d28d9" />
+    </linearGradient>
+    <linearGradient id="grad-deploy" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#047857" />
+    </linearGradient>
+    
+    <!-- Card Shadow -->
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#0f172a" flood-opacity="0.08" />
+    </filter>
+
+    <!-- Arrow Markers -->
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#3b82f6" />
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#8b5cf6" />
+    </marker>
+    <marker id="arrow-green" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#10b981" />
+    </marker>
+    <marker id="arrow-dark" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#475569" />
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1000" height="640" fill="#f8fafc" rx="12" />
+  <rect x="10" y="10" width="980" height="620" fill="none" stroke="#e2e8f0" stroke-width="2" rx="10" />
+
+  <!-- Title & Subtitle -->
+  <text x="500" y="42" font-family="sans-serif" font-size="22" font-weight="700" fill="#0f172a" text-anchor="middle">GradMill: Optimization, Evaluation &amp; Deployment Loop (train_csg)</text>
+  <text x="500" y="64" font-family="sans-serif" font-size="13" font-weight="500" fill="#64748b" text-anchor="middle">Differentiable CSG Simulation, Best-Checkpoint Selection, and Collision-Safe Post-Processing</text>
+
+  <!-- COLUMN 1: SETUP & INIT -->
+  <g transform="translate(20, 85)">
+    <!-- Column Background -->
+    <rect width="220" height="530" fill="#f0f9ff" stroke="#bae6fd" stroke-width="1.5" rx="10" />
+    <!-- Header -->
+    <rect width="220" height="42" fill="url(#grad-init)" rx="10" />
+    <path d="M 0 32 L 220 32 L 220 42 L 0 42 Z" fill="url(#grad-init)" />
+    <text x="110" y="26" font-family="sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">Phase 1: Setup &amp; Init</text>
+    
+    <!-- Card 1 -->
+    <rect x="12" y="56" width="196" height="100" fill="#ffffff" stroke="#e0f2fe" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="78" font-family="sans-serif" font-size="13" font-weight="700" fill="#0369a1">Geometry-Informed Init</text>
+    <text x="22" y="98" font-family="sans-serif" font-size="11" fill="#334155">z-level finishing / raster</text>
+    <text x="22" y="114" font-family="sans-serif" font-size="11" fill="#475569">Encodes machining domain</text>
+    <text x="22" y="130" font-family="sans-serif" font-size="11" font-weight="600" fill="#0284c7">Sets deployable optimum</text>
+
+    <!-- Card 2 -->
+    <rect x="12" y="168" width="196" height="96" fill="#ffffff" stroke="#e0f2fe" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="190" font-family="sans-serif" font-size="13" font-weight="700" fill="#0369a1">Canonical Tool Start</text>
+    <text x="22" y="210" font-family="monospace" font-size="12" font-weight="600" fill="#0f172a">x_0 = (0.5, 0.5, 1.0)</text>
+    <text x="22" y="228" font-family="sans-serif" font-size="11" fill="#475569">Fixed above stock center</text>
+    <text x="22" y="244" font-family="sans-serif" font-size="11" fill="#475569">Ensures consistent eval</text>
+
+    <!-- Card 3 -->
+    <rect x="12" y="276" width="196" height="106" fill="#ffffff" stroke="#e0f2fe" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="298" font-family="sans-serif" font-size="13" font-weight="700" fill="#0369a1">Stock &amp; Target SDFs</text>
+    <text x="22" y="318" font-family="sans-serif" font-size="11" fill="#334155">Stock: 3D Voxel Grid (32³)</text>
+    <text x="22" y="334" font-family="sans-serif" font-size="11" fill="#334155">Target: Analytic SDF</text>
+    <text x="22" y="350" font-family="sans-serif" font-size="11" fill="#475569">Pointwise eval (no target</text>
+    <text x="22" y="366" font-family="sans-serif" font-size="11" fill="#475569">discretization error)</text>
+
+    <!-- Card 4 -->
+    <rect x="12" y="394" width="196" height="120" fill="#ffffff" stroke="#e0f2fe" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="416" font-family="sans-serif" font-size="13" font-weight="700" fill="#0369a1">Adam &amp; Param Setup</text>
+    <text x="22" y="436" font-family="sans-serif" font-size="11" fill="#334155">Variables: Displacements δ_t</text>
+    <text x="22" y="452" font-family="sans-serif" font-size="11" font-weight="600" fill="#0f172a">Learning Rate: 1e-3</text>
+    <text x="22" y="468" font-family="sans-serif" font-size="11" fill="#475569">Prevents basin overshoot</text>
+    <text x="22" y="484" font-family="sans-serif" font-size="11" fill="#475569">Optional k-anneal / warmup</text>
+  </g>
+
+  <!-- ARROW 1: Init to Loop -->
+  <g transform="translate(240, 350)">
+    <line x1="0" y1="0" x2="22" y2="0" stroke="#3b82f6" stroke-width="2.5" marker-end="url(#arrow-blue)" />
+    <text x="11" y="-8" font-family="sans-serif" font-size="11" font-weight="600" fill="#2563eb" text-anchor="middle">Start</text>
+  </g>
+
+  <!-- COLUMN 2: ITERATIVE LOOP -->
+  <g transform="translate(268, 85)">
+    <!-- Column Background -->
+    <rect width="220" height="530" fill="#eff6ff" stroke="#bfdbfe" stroke-width="1.5" rx="10" />
+    <!-- Header -->
+    <rect width="220" height="42" fill="url(#grad-loop)" rx="10" />
+    <path d="M 0 32 L 220 32 L 220 42 L 0 42 Z" fill="url(#grad-loop)" />
+    <text x="110" y="26" font-family="sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">Phase 2: Differentiable Loop</text>
+    <text x="110" y="38" font-family="sans-serif" font-size="10" font-weight="500" fill="#bfdbfe" text-anchor="middle">Iterations 0 ... N_iters-1</text>
+    
+    <!-- Card 1 -->
+    <rect x="12" y="56" width="196" height="106" fill="#ffffff" stroke="#dbeafe" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="78" font-family="sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Speed &amp; Z-Floor Gating</text>
+    <text x="22" y="98" font-family="sans-serif" font-size="11" fill="#334155">Interleaved with carving</text>
+    <text x="22" y="114" font-family="sans-serif" font-size="11" fill="#475569">Feed/Rapid speed-limit clip</text>
+    <text x="22" y="130" font-family="sans-serif" font-size="11" font-weight="600" fill="#b91c1c">Z-Floor Epsilon Clamp</text>
+    <text x="22" y="146" font-family="sans-serif" font-size="11" fill="#475569">Prevents deep holder plunge</text>
+
+    <!-- Card 2 -->
+    <rect x="12" y="174" width="196" height="106" fill="#ffffff" stroke="#dbeafe" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="196" font-family="sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Taichi Autodiff Tape</text>
+    <text x="22" y="216" font-family="monospace" font-size="11" fill="#0f172a">with ti.ad.Tape(loss):</text>
+    <text x="22" y="234" font-family="sans-serif" font-size="11" fill="#334155">Unrolls T cuts jointly</text>
+    <text x="22" y="250" font-family="sans-serif" font-size="11" fill="#475569">Smooth Boolean Union:</text>
+    <text x="22" y="266" font-family="monospace" font-size="11" fill="#2563eb">smooth_max(Φ, -φ_tool; k)</text>
+
+    <!-- Card 3 -->
+    <rect x="12" y="292" width="196" height="96" fill="#ffffff" stroke="#dbeafe" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="314" font-family="sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Terminal Soft Loss</text>
+    <text x="22" y="334" font-family="sans-serif" font-size="11" fill="#334155">Evaluated on final soft Φ_T</text>
+    <text x="22" y="350" font-family="monospace" font-size="11" fill="#0f172a">L_geom = w_gouge*gouge²</text>
+    <text x="22" y="366" font-family="monospace" font-size="11" fill="#0f172a">       + w_res*residual²</text>
+
+    <!-- Card 4 -->
+    <rect x="12" y="400" width="196" height="114" fill="#ffffff" stroke="#dbeafe" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="422" font-family="sans-serif" font-size="13" font-weight="700" fill="#1d4ed8">Backprop &amp; Adam Step</text>
+    <text x="22" y="442" font-family="sans-serif" font-size="11" fill="#334155">Gradients ∂L/∂δ flow to all δ_t</text>
+    <text x="22" y="458" font-family="sans-serif" font-size="11" font-weight="600" fill="#b45309">Grad L2 Norm Clip (≤ 0.5)</text>
+    <text x="22" y="474" font-family="sans-serif" font-size="11" fill="#475569">Stabilizes training &amp; peaks</text>
+    <text x="22" y="490" font-family="sans-serif" font-size="11" fill="#475569">Adam updates displacements</text>
+  </g>
+
+  <!-- ARROW 2: Loop to Eval -->
+  <g transform="translate(488, 220)">
+    <line x1="0" y1="0" x2="22" y2="0" stroke="#8b5cf6" stroke-width="2.5" marker-end="url(#arrow-purple)" />
+    <text x="11" y="-8" font-family="sans-serif" font-size="11" font-weight="600" fill="#7c3aed" text-anchor="middle">Every K Iters</text>
+    <text x="11" y="14" font-family="sans-serif" font-size="10" fill="#64748b" text-anchor="middle">(default K=10)</text>
+  </g>
+
+  <!-- FEEDBACK ARROW: Eval back to Loop -->
+  <g transform="translate(488, 510)">
+    <path d="M 28 0 L -8 0" fill="none" stroke="#3b82f6" stroke-width="2" stroke-dasharray="4,4" marker-end="url(#arrow-blue)" />
+    <text x="10" y="-8" font-family="sans-serif" font-size="11" font-weight="600" fill="#2563eb" text-anchor="middle">Next Iteration</text>
+  </g>
+
+  <!-- COLUMN 3: PERIODIC EXACT EVALUATION -->
+  <g transform="translate(516, 85)">
+    <!-- Column Background -->
+    <rect width="220" height="530" fill="#faf5ff" stroke="#e9d5ff" stroke-width="1.5" rx="10" />
+    <!-- Header -->
+    <rect width="220" height="42" fill="url(#grad-eval)" rx="10" />
+    <path d="M 0 32 L 220 32 L 220 42 L 0 42 Z" fill="url(#grad-eval)" />
+    <text x="110" y="26" font-family="sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">Phase 3: Exact Eval &amp; Save</text>
+    
+    <!-- Card 1 -->
+    <rect x="12" y="56" width="196" height="106" fill="#ffffff" stroke="#f3e8ff" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="78" font-family="sans-serif" font-size="13" font-weight="700" fill="#6d28d9">Canonical Reset &amp; Carve</text>
+    <text x="22" y="98" font-family="sans-serif" font-size="11" fill="#334155">Reset start to canonical x_0</text>
+    <text x="22" y="114" font-family="sans-serif" font-size="11" font-weight="600" fill="#0f172a">Exact Boolean Carve:</text>
+    <text x="22" y="130" font-family="monospace" font-size="11" fill="#6d28d9">max(Φ_hard, -φ_sharp)</text>
+    <text x="22" y="146" font-family="sans-serif" font-size="11" fill="#475569">No soft smoothing bias</text>
+
+    <!-- Card 2 -->
+    <rect x="12" y="174" width="196" height="96" fill="#ffffff" stroke="#f3e8ff" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="196" font-family="sans-serif" font-size="13" font-weight="700" fill="#6d28d9">Deployable Metrics</text>
+    <text x="22" y="216" font-family="sans-serif" font-size="11" fill="#334155">Score remaining vs target</text>
+    <text x="22" y="232" font-family="sans-serif" font-size="11" font-weight="600" fill="#0f172a">• Dice Coefficient (Overlap)</text>
+    <text x="22" y="248" font-family="sans-serif" font-size="11" fill="#475569">• Average Surface Dist (ASD)</text>
+    <text x="22" y="264" font-family="sans-serif" font-size="11" fill="#475569">• 95th Hausdorff (HD95)</text>
+
+    <!-- Card 3 -->
+    <rect x="12" y="282" width="196" height="96" fill="#ffffff" stroke="#f3e8ff" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="304" font-family="sans-serif" font-size="13" font-weight="700" fill="#6d28d9">Best-Checkpoint Check</text>
+    <text x="22" y="324" font-family="sans-serif" font-size="11" fill="#334155">Soft loss degrades hard Dice</text>
+    <text x="22" y="340" font-family="sans-serif" font-size="11" fill="#334155">due to over-erosion gap</text>
+    <text x="22" y="358" font-family="sans-serif" font-size="12" font-weight="700" fill="#7c3aed">Is Dice_hard &gt; Best Dice?</text>
+
+    <!-- Card 4 -->
+    <rect x="12" y="390" width="196" height="124" fill="#ffffff" stroke="#f3e8ff" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="22" y="412" font-family="sans-serif" font-size="13" font-weight="700" fill="#6d28d9">Snapshot Pre-Step Memory</text>
+    <text x="22" y="432" font-family="sans-serif" font-size="11" font-weight="600" fill="#059669">Save positions, deltas &amp; dict</text>
+    <text x="22" y="448" font-family="sans-serif" font-size="11" font-weight="700" fill="#b91c1c">NO Re-Eval at Training End:</text>
+    <text x="22" y="464" font-family="sans-serif" font-size="11" fill="#475569">GPU atomic-add reduction</text>
+    <text x="22" y="480" font-family="sans-serif" font-size="11" fill="#475569">has ±0.01-0.05 variance.</text>
+    <text x="22" y="496" font-family="sans-serif" font-size="11" fill="#475569">Report saved exact numbers.</text>
+  </g>
+
+  <!-- ARROW 3: Eval to Deploy -->
+  <g transform="translate(736, 350)">
+    <line x1="0" y1="0" x2="22" y2="0" stroke="#10b981" stroke-width="2.5" marker-end="url(#arrow-green)" />
+    <text x="11" y="-8" font-family="sans-serif" font-size="11" font-weight="600" fill="#059669" text-anchor="middle">After N Iters</text>
+    <text x="11" y="14" font-family="sans-serif" font-size="10" fill="#64748b" text-anchor="middle">Deploy Best</text>
+  </g>
+
+  <!-- COLUMN 4: POST-PROCESS & DEPLOY -->
+  <g transform="translate(764, 85)">
+    <!-- Column Background -->
+    <rect width="216" height="530" fill="#ecfdf5" stroke="#a7f3d0" stroke-width="1.5" rx="10" />
+    <!-- Header -->
+    <rect width="216" height="42" fill="url(#grad-deploy)" rx="10" />
+    <path d="M 0 32 L 216 32 L 216 42 L 0 42 Z" fill="url(#grad-deploy)" />
+    <text x="108" y="26" font-family="sans-serif" font-size="14" font-weight="700" fill="#ffffff" text-anchor="middle">Phase 4: Deploy Pipeline</text>
+    
+    <!-- Card 1 -->
+    <rect x="10" y="56" width="196" height="114" fill="#ffffff" stroke="#d1fae5" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="20" y="78" font-family="sans-serif" font-size="13" font-weight="700" fill="#047857">Collision Truncation</text>
+    <text x="20" y="96" font-family="monospace" font-size="11" fill="#065f46">stage: trunc</text>
+    <text x="20" y="114" font-family="sans-serif" font-size="11" fill="#334155">Step-by-step clearance check</text>
+    <text x="20" y="130" font-family="sans-serif" font-size="11" font-weight="600" fill="#b91c1c">Safety backstop against crash</text>
+    <text x="20" y="146" font-family="sans-serif" font-size="11" fill="#475569">Truncate path 1.0mm before</text>
+    <text x="20" y="160" font-family="sans-serif" font-size="11" fill="#475569">any holder/stock contact</text>
+
+    <!-- Card 2 -->
+    <rect x="10" y="182" width="196" height="100" fill="#ffffff" stroke="#d1fae5" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="20" y="204" font-family="sans-serif" font-size="13" font-weight="700" fill="#047857">G-Code Export</text>
+    <text x="20" y="222" font-family="monospace" font-size="11" fill="#065f46">stage: export</text>
+    <text x="20" y="240" font-family="sans-serif" font-size="11" fill="#334155">Emit Haas / RS274 NC code</text>
+    <text x="20" y="256" font-family="sans-serif" font-size="11" fill="#475569">Auto-matches args.json</text>
+    <text x="20" y="272" font-family="sans-serif" font-size="11" fill="#475569">Applies G54 work origin</text>
+
+    <!-- Card 3 -->
+    <rect x="10" y="294" width="196" height="100" fill="#ffffff" stroke="#d1fae5" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="20" y="316" font-family="sans-serif" font-size="13" font-weight="700" fill="#047857">Round-Trip Verification</text>
+    <text x="20" y="334" font-family="monospace" font-size="11" fill="#065f46">stage: eval (--gcode)</text>
+    <text x="20" y="352" font-family="sans-serif" font-size="11" fill="#334155">Re-import machine G-code</text>
+    <text x="20" y="368" font-family="sans-serif" font-size="11" fill="#475569">Execute G-code carve in sim</text>
+    <text x="20" y="384" font-family="sans-serif" font-size="11" font-weight="600" fill="#047857">Verify round-trip fidelity</text>
+
+    <!-- Card 4 -->
+    <rect x="10" y="406" width="196" height="108" fill="#ffffff" stroke="#d1fae5" stroke-width="1.5" rx="8" filter="url(#shadow)" />
+    <text x="20" y="428" font-family="sans-serif" font-size="13" font-weight="700" fill="#047857">Diagnostic Figure</text>
+    <text x="20" y="446" font-family="monospace" font-size="11" fill="#065f46">stage: viz</text>
+    <text x="20" y="464" font-family="sans-serif" font-size="11" fill="#334155">Render 6-panel summary</text>
+    <text x="20" y="480" font-family="sans-serif" font-size="11" fill="#475569">WCS vs Normalized frames,</text>
+    <text x="20" y="496" font-family="sans-serif" font-size="11" fill="#475569">sim-vs-target &amp; G-code carves,</text>
+    <text x="20" y="506" font-family="sans-serif" font-size="11" font-weight="600" fill="#047857">metrics.json output</text>
+  </g>
+</svg>
