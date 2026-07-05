@@ -52,6 +52,7 @@ def _build_sim(args_path):
     target_shape = a.get("target_shape", "sphere")
     radius_mm = float(a.get("target_radius_mm", 11.43))
     height_mm = float(a.get("target_height_mm", 22.86))
+    sub_radius_mm = a.get("target_sub_radius_mm")  # combined CSG shapes; None -> default
     workspace_in = tuple(a.get("workspace_in", (16.0, 12.0, 10.0)))
     tool_radius_mm = float(a.get("tool_radius_mm", 3.175))
     tool_height_mm = float(a.get("tool_height_mm", 25.0))
@@ -74,7 +75,8 @@ def _build_sim(args_path):
     sim.holder_radius[None] = inch_to_mm(2.5 / 2.0)
     sim.holder_height[None] = float(sim.work_volume_mm[2])
     sim.set_target_params(radius_mm=radius_mm, height_mm=height_mm,
-                          half_size_mm=radius_mm, center=(0.5, 0.5, 0.5))
+                          half_size_mm=radius_mm, center=(0.5, 0.5, 0.5),
+                          sub_radius_mm=sub_radius_mm)
     sim.bake_target_grid()
     sim.set_target_volume()
     # Disable the z-floor here: we are measuring the AS-COMMANDED trajectory's

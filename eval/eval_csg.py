@@ -368,7 +368,8 @@ def main():
     ap.add_argument("--voxel-size-mm", type=float, default=VOXEL_SIZE_MM,
                     help="physical voxel edge (mm) for carving/scoring -- the sub-mm precision knob")
     ap.add_argument("--target-shape", type=str, default=TARGET_SHAPE,
-                    choices=["sphere", "cylinder", "box", "pyramid"],
+                    choices=["sphere", "cylinder", "box", "pyramid",
+                             "sphere_hole", "sphere_bowl"],
                     help="target part shape (must match what the trajectory was optimized for)")
     ap.add_argument("--num-runs", type=int, default=10,
                     help="episodes per checkpoint (checkpoint mode)")

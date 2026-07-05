@@ -73,6 +73,34 @@ def sample_tool_start(args, stock_z_mm):
     return np.array([x, y, z], dtype=np.float32)
 
 
+def target_cross_section_radii(sim):
+    """Shape-agnostic per-z target cross-section radius profile (normalized).
+
+    Reads the baked target SDF grid (``sim.target``) -- the actual carved
+    geometry, NOT any shape name or shape parameter -- so it generalizes to any
+    target including unseen combined-CSG shapes. Returns a ``(Nz,)`` array where
+    entry k is the max distance from the stock center (0.5, 0.5) among voxels
+    INSIDE the target (SDF < 0) at z-slice k, or 0 if that slice has no target
+    voxels. The shell/zlayer inits use this to orbit just outside the target
+    surface without gouging it, with no task-specific metadata.
+    """
+    tgt = sim.target.to_numpy()                          # (Nx, Ny, Nz)
+    Nx, Ny, Nz = tgt.shape
+    xs = (np.arange(Nx) + 0.5) / Nx - 0.5                # normalized x offset from center
+    ys = (np.arange(Ny) + 0.5) / Ny - 0.5
+    R = np.sqrt(xs[:, None] ** 2 + ys[None, :] ** 2)     # (Nx, Ny) dist from center
+    inside = tgt <= 0.0                                  # (Nx, Ny, Nz) target occupancy
+    # max R among inside voxels per z-slice; -1 sentinel where none are inside.
+    r_cross = np.where(inside, R[:, :, None], -1.0).max(axis=(0, 1))
+    return np.clip(r_cross, 0.0, None)                   # (Nz,)
+
+
+def _r_cross_at(r_cross, z):
+    """Sample the cross-section radius profile at normalized height z."""
+    k = int(np.clip(z * len(r_cross), 0, len(r_cross) - 1))
+    return float(r_cross[k])
+
+
 @dataclass
 class Args:
     exp_name: str = "train_csg"
@@ -111,9 +139,9 @@ class Args:
     # Optimization
     iters: int = 5000
     """number of Adam iterations. i5000 is the sweet spot within the 15-min budget:
-    transient dice peaks appear LATER as iters grow (sphere @530->@2450; pyramid
-    @680->@1590), so longer runs surface higher peaks. i8000 gives no further gain
-    and breaks the budget; i1000 under-samples the peak."""
+    transient dice peaks appear LATER as iters grow, so longer runs surface
+    higher peaks. i8000 gives no further gain and breaks the budget; i1000
+    under-samples the peak."""
     learning_rate: float = 5e-3
     """Adam learning rate (optimum: 5e-3; 3e-3 neutral, 7e-3 diverges at dt0.5)"""
     anneal_lr: bool = False
@@ -127,29 +155,29 @@ class Args:
     """half-range of the uniform random init for per-step displacements (0.02 and 0.1 both hurt)"""
     init_mode: str = "random"
     """trajectory init: 'random', 'raster', 'raster_fine', 'raster_fine_wide',
-    'spiral', 'shell', or 'zlayer' (z-level descent that pre-clears the sphere
+    'spiral', 'shell', or 'zlayer' (z-level descent that pre-clears the target
     exterior layer by layer, using the tall tool's vertical extent). 'raster_fine'
     is a clipping-aware fine boustrophedon (per-step <= feed cap) that survives
     the speed clip; 'raster_fine_wide' spans the full target envelope (0.05-0.95)
-    instead of the inner 0.20-0.80 core. The coarse structured inits
-    (raster/spiral/shell/zlayer) fail via speed-limit clipping."""
+    instead of the inner 0.20-0.80 core. 'shell'/'zlayer' derive the target
+    surface from the baked SDF grid (shape-agnostic -- no task metadata). The
+    coarse structured inits (raster/spiral/shell/zlayer) fail via speed-limit
+    clipping."""
     zlayer_revs: float = 12.0
-    """zlayer init: angular revolutions over the full z descent. Geometry search
-    found revs=18 (+osc=9, margin=0.005) reaches hard dice ~0.854 unclipped vs
-    0.779 at default 12; the win is the init geometry, preserved by
+    """zlayer init: angular revolutions over the full z descent. Higher revs =
+    denser annulus coverage; the win is the init geometry, preserved by
     best-checkpoint saving (soft optimization collapses it)."""
     zlayer_osc: float = 3.0
     """zlayer init: radial oscillation cycles (r_safe -> r_outer) over the
-    descent. Higher = denser annulus coverage; ~9 is the sweet spot."""
+    descent. Higher = denser annulus coverage."""
     zlayer_margin: float = 0.03
-    """zlayer init: normalized gap between sphere surface + r_tool and the
+    """zlayer init: normalized gap between the target surface + r_tool and the
     tool-center orbit. Tighter (0.005-0.015) leaves less residual surface waste
     without gouging (tool inner edge still clears the part)."""
     grad_clip: float = 0.5
     """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
-    transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5 is
-    the sweet spot (0.5 default for pyramid/box/cylinder, 0.4 marginally better for
-    sphere). 0.0 caps dice ~0.56 via the unstable peak."""
+    transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5
+    is the sweet spot. 0.0 caps dice via the unstable peak."""
 
     # CamEnvDiff / CSG specific (mirrors csg_ppo)
     resolution: int = 32
@@ -158,7 +186,10 @@ class Args:
     """trajectory length T (number of tool motions). m=128 optimal at dt<=0.45;
     m=160 optimal at dt=0.5; m>=192 NaNs (SDF overflow); m=144 slightly worse than 128."""
     target_shape: str = "sphere"
-    """target shape: 'box', 'cylinder', 'sphere', 'pyramid'"""
+    """target shape name (selects the CSG primitive the simulator carves toward).
+    The optimizer itself is shape-agnostic: it reads only the baked target SDF
+    grid, so any supported shape -- including combined-CSG shapes and unseen
+    additions -- trains without per-shape code or metadata."""
     k_init: float = 10.0
     """initial smoothness parameter for the smooth-min/max SDF ops"""
     k_anneal: bool = False
@@ -191,11 +222,12 @@ class Args:
     z_floor_epsilon_mm: float = 1.0
     """allowed tool-base travel below the part bottom, in mm. The floor is
     part_bottom_z - epsilon/stock_z_mm; the executed base z is clamped to it.
-    The crash-free floor (holder bottom >= stock top) is roughly
+    part_bottom_z is read shape-agnostically from the baked target SDF grid
+    (lowest solid voxel), so it is correct for any target including combined-CSG
+    shapes. The crash-free floor (holder bottom >= stock top) is roughly
     1 - tool_height/stock_z ~= 0.016 for the default tool/stock, i.e. epsilon
-    must keep the floor >= ~0 (for the default 0.9in sphere, part_bottom_z ~=
-    0.018 so epsilon <= ~0.5mm is fully safe; epsilon=1.0 carves a hair below
-    the part and relies on truncate_collision as the backstop)."""
+    must keep the floor >= ~0; epsilon=1.0 carves a hair below the part and
+    relies on truncate_collision as the backstop."""
     enforce_z_floor: bool = True
     """clamp the executed tool base z to the z-floor (disable to recover the
     unbounded deep-plunge behaviour; truncate_collision then catches the crash)"""
@@ -302,9 +334,15 @@ class Args:
 
     # Units & speed limits (enforced by per-step clipping in the simulator)
     target_radius_mm: float = 11.43
-    """target sphere/cylinder radius (or box/pyramid half-size) in mm (default 0.9 in diameter)"""
+    """target feature radius / half-size in mm (default 0.9 in diameter). Passed
+    to the simulator to DEFINE the target; not read by the optimizer."""
     target_height_mm: float = 22.86
-    """target cylinder/pyramid height in mm (default 0.9 in); ignored for sphere/box"""
+    """target feature height in mm (default 0.9 in). Passed to the simulator to
+    DEFINE the target; not read by the optimizer."""
+    target_sub_radius_mm: float = 9.525
+    """sub-primitive radius in mm for combined-CSG targets (default 0.375 in =
+    0.75 in diameter). Passed to the simulator to DEFINE the target; not read
+    by the optimizer."""
     tool_radius_mm: float = 3.175
     """cutter radius in mm (default 1/4" end mill)"""
     tool_height_mm: float = 25.0
@@ -314,7 +352,7 @@ class Args:
     lever: at low dt (0.12/0.01) the swept-cylinder tool is speed-limited -- its
     z-range clips to 0.72-1.0 and it cannot descend/traverse the exterior, capping dice
     at ~0.56 regardless of loss or capacity. dt=0.45 advances ~1 voxel/step so the tool
-    covers the part (sphere 0.56->0.85, pyramid ->0.90). Sweet spot dt in [0.42,0.5]."""
+    covers the part. Sweet spot dt in [0.42,0.5]."""
     rapid_ipm: float = 500.0
     """max traverse speed (inches/min) when clear of the stock"""
     feed_ipm: float = 10.0
@@ -531,7 +569,8 @@ def main():
     sim.set_target_params(radius_mm=args.target_radius_mm,
                           height_mm=args.target_height_mm,
                           half_size_mm=args.target_radius_mm,
-                          center=(0.5, 0.5, 0.5))
+                          center=(0.5, 0.5, 0.5),
+                          sub_radius_mm=args.target_sub_radius_mm)
     sim.tool_radius[None] = args.tool_radius_mm
     sim.tool_height[None] = args.tool_height_mm
     # Tool holder: 2.5 inch diameter cylinder above the cutter (mm; default).
@@ -556,14 +595,14 @@ def main():
     # --- Z-floor: clamp the executed tool BASE z so the holder (which rides
     # above the base by tool_height) cannot plunge into the remaining stock.
     # Floor = part_bottom_z - epsilon_mm/stock_z_mm, in normalized [0,1].
-    # Shape-specific part bottom (matches set_target_params geometry):
-    #   sphere/box        -> 0.5 - radius_mm / stock_z_mm
-    #   cylinder/pyramid  -> 0.5 - height_mm / (2 * stock_z_mm)
+    # Shape-agnostic part bottom z: query the baked target SDF grid directly
     stock_z_mm = float(args.stock_size_in[2]) * inch_to_mm(1.0)
-    if args.target_shape in ("cylinder", "pyramid"):
-        part_bottom_z = 0.5 - args.target_height_mm / (2.0 * stock_z_mm)
-    else:  # sphere / box (radius/half-size spans from center)
-        part_bottom_z = 0.5 - args.target_radius_mm / stock_z_mm
+    sdf_grid = sim.target.to_numpy()
+    solid_voxels = np.where(sdf_grid <= 0.0)[2]
+    if len(solid_voxels) > 0:
+        part_bottom_z = float(solid_voxels.min()) / float(sdf_grid.shape[2])
+    else:
+        part_bottom_z = 0.0
     z_floor = part_bottom_z - args.z_floor_epsilon_mm / stock_z_mm
     sim.z_floor[None] = float(z_floor)
     sim.enforce_z_floor[None] = 1 if args.enforce_z_floor else 0
@@ -705,24 +744,25 @@ def main():
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
     elif args.init_mode == "shell":
-        # Helix that orbits JUST OUTSIDE the target sphere surface while
-        # descending through the stock. The tool center rides at
-        # r_sphere(z) + tool_radius + margin, so its inner edge clears the
-        # exterior annulus without gouging the part (a full-cross-section raster
-        # passes through the sphere and gouges it). Sphere-specific.
+        # Descending helix that orbits JUST OUTSIDE the target surface. The
+        # orbit radius at each z is the target's cross-section radius at that z
+        # (read shape-agnostically from the baked SDF grid) + tool radius +
+        # margin, so the tool's inner edge clears the exterior annulus without
+        # gouging the part. Deriving the surface from the grid (not from a shape
+        # name / shape-specific surface formula) generalizes to any target,
+        # including combined-CSG and unseen shapes.
         n = T - 1
         stock_mm = args.stock_size_in[0] * 25.4
-        r_sp = args.target_radius_mm / stock_mm          # normalized sphere radius
-        r_tool = args.tool_radius_mm / stock_mm          # normalized tool radius
+        r_tool = args.tool_radius_mm / stock_mm
         margin = 0.02
         revs = 8.0
         z_top, z_bot = 0.95, 0.05
+        r_cross = target_cross_section_radii(sim)
         positions = np.zeros((n, 3), dtype=np.float32)
         for t in range(n):
             frac = t / max(1, n - 1)
             z = z_top + (z_bot - z_top) * frac
-            rs = math.sqrt(max(0.0, r_sp * r_sp - (z - 0.5) * (z - 0.5)))
-            r_orbit = rs + r_tool + margin
+            r_orbit = _r_cross_at(r_cross, z) + r_tool + margin
             phase = 2.0 * np.pi * revs * frac
             positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
             positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
@@ -731,20 +771,18 @@ def main():
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
     elif args.init_mode == "zlayer":
-        # Z-level finishing descent: the tool is a tall vertical cylinder
-        # (height ~= stock) whose tool_pos.z is its BASE, extending upward by h.
-        # Descending the base from above the stock down past the bottom means each
-        # layer's tool only reaches DOWN to its base, so a high base never touches
-        # the equator and can safely carve the top interior exterior at small
-        # radius. The orbit radius oscillates from a surface-offset safe radius
-        # out to the cube wall, sweeping the waste ANNULUS at every z (a real CNC
-        # z-level finishing pattern). Shape-aware safe radius:
-        #   sphere   -> r_sphere(z_eq) + r_tool + margin  (varies with z)
-        #   cylinder -> r_cyl + r_tool + margin           (z-invariant)
-        #   box/pyramid -> r_tool + margin                (full annulus heuristic)
+        # Z-level finishing descent: the tool is a tall vertical cylinder whose
+        # tool_pos.z is its BASE, extending upward by h. Descending the base
+        # from above the stock down past the bottom means each layer's tool only
+        # reaches DOWN to its base, so a high base never touches the equator and
+        # can safely carve the top interior exterior at small radius. The orbit
+        # radius oscillates from a surface-offset safe radius (target
+        # cross-section at the equator-closest z the tool reaches, read shape-
+        # agnostically from the baked SDF grid + r_tool + margin) out to the
+        # cube wall, sweeping the waste annulus at every z (a real CNC z-level
+        # finishing pattern). Generalizes to any target -- no shape names.
         n = T - 1
         stock_mm = args.stock_size_in[0] * 25.4
-        r_sp = args.target_radius_mm / stock_mm
         r_tool = args.tool_radius_mm / stock_mm
         margin = args.zlayer_margin
         revs = args.zlayer_revs
@@ -763,10 +801,13 @@ def main():
         # reach the lower-interior waste (below equator, inside r_equator),
         # which is the new crash-safe ceiling.
         stock_z_mm = args.stock_size_in[2] * 25.4
-        if args.target_shape in ("cylinder", "pyramid"):
-            _part_bottom_z = 0.5 - args.target_height_mm / (2.0 * stock_z_mm)
-        else:
-            _part_bottom_z = 0.5 - args.target_radius_mm / stock_z_mm
+        # Shape-agnostic part-bottom z: lowest solid voxel in the baked target
+        # grid (correct for any target, including combined-CSG shapes -- mirrors
+        # the sim z_floor computed in main()).
+        _sdf_grid = sim.target.to_numpy()
+        _solid = np.where(_sdf_grid <= 0.0)[2]
+        _part_bottom_z = (float(_solid.min()) / float(_sdf_grid.shape[2])
+                          if len(_solid) else 0.0)
         _z_floor = _part_bottom_z - args.z_floor_epsilon_mm / stock_z_mm
         # Also keep the holder (bottom = base + tool_height) >= 1mm above the
         # stock top so the trunc stage never trims trailing low-base steps (the
@@ -777,127 +818,25 @@ def main():
         _z_holder_clear = 1.0 + _clr_norm - _tool_h_norm + 0.01
         z_bot = max(z_bot, _z_floor + 0.005, _z_holder_clear)
         r_outer = 0.5 + r_tool
-        if args.target_shape == "pyramid":
-            # 4-phase gouge-free path (tool extends UP from base, spans
-            # [base, base+h], h~=stock): (1) above-disk boustrophedon (base in
-            # [apex, 0.95], tool carves z>apex); (2) beside square-annulus orbit
-            # (base descends apex->base_z, orbit at pyramid_half(base)+r_tool);
-            # (3) safe-radius descent (base base_z->below-phase base at
-            # r=widest+r_tool, clears the below-annulus); (4) below-disk
-            # boustrophedon at FIXED base = base_z-1-margin so the tool top
-            # (=base+h) sits at base_z-margin < pyramid base -> carves the whole
-            # below-slab without gouging. forward_hard uses tool_sdf_sharp only
-            # (no holder carve), so the wide holder above the tool does not cut.
-            # Reaches ~0.82 hard dice unclipped vs 0.43 raster_fine baseline.
-            h = args.target_height_mm / stock_mm
-            base_z = 0.5 - 0.5 * h
-            apex = base_z + h
-            # Crash-safe descent floor: the tool BASE must stay above z_holder_clear
-            # (else the holder breaches the 1mm stock-top clearance and the trunc
-            # stage trims trailing steps) AND above z_floor (else the sim clamps
-            # the executed base and the full-height tool gouges the pyramid body).
-            # The old 4-phase path plunged the base to z_base_below = base_z-1-margin
-            # ~= -0.955 to carve the below-pyramid slab; that deep plunge is now
-            # forbidden, so the bottom slab [0, base_z] is unreachable crash-free
-            # -- the crash-safe ceiling (mirrors the sphere lower-interior wedge).
-            z_descent_bot = max(base_z, _z_holder_clear, _z_floor + 0.005)
-            n_above = int(n * 0.18)
-            n_beside = n - n_above
-            xs = np.linspace(0.12, 0.88, 7)
-            ys = np.linspace(0.12, 0.88, 7)
-            pos = []
-            # 1. above-disk boustrophedon (base in [0.95, apex+0.02]; carves top slab)
-            for z in np.linspace(0.95, apex + 0.02, 4):
-                for j, y in enumerate(ys):
-                    row_xs = xs if j % 2 == 0 else xs[::-1]
-                    for x in row_xs:
-                        pos.append([float(x), float(y), float(z)])
-                        if len(pos) >= n_above:
-                            break
-                    if len(pos) >= n_above:
-                        break
-                if len(pos) >= n_above:
-                    break
-            while len(pos) < n_above:
-                pos.append(pos[-1])
-            # 2. Descending 2D annulus boustrophedon. At each z-level zb the tool
-            #    rasters the square annulus OUTSIDE the pyramid cross-section
-            #    (half-size hp(zb)) in xy; the tool spans [zb, zb+h] so each pass
-            #    carves that annulus at every z >= zb. Iterate zb LOW -> HIGH and
-            #    CAP points per z-level: the low-zb passes (thin outer ring, few
-            #    grid points) carve the FULL stock height, so they must be visited
-            #    first; without a cap the high-zb levels (wide annulus, many points)
-            #    consume the whole budget and only the top band ever gets carved.
-            #    The inner band hugging the sloped face is unreachable crash-free
-            #    (tool low enough to reach z0 has too large a pyramid at its base to
-            #    hug the face without gouging) -- the crash-safe ceiling, mirrors
-            #    the sphere lower-interior wedge.
-            # Grid spacing ~2*r_tool so adjacent tool disks just touch (full 2D
-            # fill, no angular gaps); per-level cap >= one full grid pass so every
-            # level's annulus is actually rastered (a cap below one row left only
-            # the first few rows carved -> middle layers stood ~100% uncarved).
-            grid = np.linspace(r_tool, 1.0 - r_tool, 7)
-            n_zlvl = 10
-            per_level = max(20, n_beside // n_zlvl)
-            target2 = n_above + n_beside
-            for zi in range(n_zlvl):
-                if len(pos) >= target2:
-                    break
-                # low -> high: zi=0 is z_descent_bot (full-height outer ring)
-                zb = z_descent_bot + (apex - z_descent_bot) * (zi / max(1, n_zlvl - 1))
-                hp = r_sp * (1.0 - (zb - base_z) / h) if base_z <= zb <= apex else 0.0
-                s_safe = hp + r_tool + margin
-                emitted = 0
-                for j, y in enumerate(grid):
-                    if emitted >= per_level or len(pos) >= target2:
-                        break
-                    row = grid if j % 2 == 0 else grid[::-1]
-                    for x in row:
-                        if max(abs(x - 0.5), abs(y - 0.5)) + r_tool < s_safe:
-                            continue
-                        pos.append([float(x), float(y), float(zb)])
-                        emitted += 1
-                        if emitted >= per_level or len(pos) >= target2:
-                            break
-            positions = np.array(pos[:n], dtype=np.float32)
-            if len(positions) < n:
-                positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])
-        else:
-            positions = np.zeros((n, 3), dtype=np.float32)
-            for t in range(n):
-                frac = t / max(1, n - 1)
-                zb = z_top + (z_bot - z_top) * frac          # base descends through stock
-                if args.target_shape == "sphere":
-                    # equator-closest in-stock z the tool reaches (in [zb, zb+h])
-                    zhi = zb + 1.0
-                    if zb > 0.5:
-                        z_eq = zb
-                    elif zhi < 0.5:
-                        z_eq = zhi
-                    else:
-                        z_eq = 0.5
-                    rs = math.sqrt(max(0.0, r_sp * r_sp - (z_eq - 0.5) * (z_eq - 0.5)))
-                    r_safe = rs + r_tool + margin
-                elif args.target_shape == "cylinder":
-                    r_safe = r_sp + r_tool + margin          # constant radius
-                else:
-                    # box: orbit JUST OUTSIDE the box faces (square radius
-                    # r_sp + r_tool + margin) to remove the face slivers
-                    # [0, 0.045] without gouging the box (starts at 0.05).
-                    r_safe = r_sp + r_tool + margin
-                # oscillate orbit radius to cover the annulus out to the cube wall
-                r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
-                phase = 2.0 * math.pi * revs * frac
-                if args.target_shape == "box":
-                    # square orbit (matches the box cross-section)
-                    cx, cy = math.cos(phase), math.sin(phase)
-                    m = max(abs(cx), abs(cy))
-                    positions[t, 0] = 0.5 + r_orbit * cx / m
-                    positions[t, 1] = 0.5 + r_orbit * cy / m
-                else:
-                    positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
-                    positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
-                positions[t, 2] = zb
+        r_cross = target_cross_section_radii(sim)
+        positions = np.zeros((n, 3), dtype=np.float32)
+        for t in range(n):
+            frac = t / max(1, n - 1)
+            zb = z_top + (z_bot - z_top) * frac          # base descends through stock
+            # equator-closest in-stock z the tool reaches (tool spans [zb, zb+1])
+            zhi = zb + 1.0
+            if zb > 0.5:
+                z_eq = zb
+            elif zhi < 0.5:
+                z_eq = zhi
+            else:
+                z_eq = 0.5
+            r_safe = _r_cross_at(r_cross, z_eq) + r_tool + margin
+            r_orbit = r_safe + (r_outer - r_safe) * (0.5 + 0.5 * math.sin(2.0 * np.pi * osc * frac))
+            phase = 2.0 * np.pi * revs * frac
+            positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
+            positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
+            positions[t, 2] = zb
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)

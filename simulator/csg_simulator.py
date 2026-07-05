@@ -411,6 +411,10 @@ class CSGSimulatorDelta:
         self.thy_vox = ti.field(dtype=ti.f32, shape=()); self.thy_vox[None] = 0.0
         self.thz_vox = ti.field(dtype=ti.f32, shape=()); self.thz_vox[None] = 0.0
         self.tbase_vox = ti.field(dtype=ti.f32, shape=()); self.tbase_vox[None] = 0.0
+        # Sub-primitive radius (voxels) for combined CSG shapes: the
+        # through-hole cylinder in "sphere_hole" and the subtracted sphere in
+        # "sphere_bowl". 0 disables (plain shapes ignore it).
+        self.tsub_vox = ti.field(dtype=ti.f32, shape=()); self.tsub_vox[None] = 0.0
 
         # ---- Loss ----
         self.loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
@@ -465,19 +469,32 @@ class CSGSimulatorDelta:
             )
             self.target_params["height"] = ti.field(dtype=ti.f32, shape=())
             self.target_params["center"] = ti.Vector.field(3, dtype=ti.f32, shape=())
+        elif self.target_shape in ("sphere_hole", "sphere_bowl"):
+            # Combined CSG shapes: a 0.9in stock sphere (radius+center, same
+            # fields as the plain sphere) with a 0.75in sub-primitive subtracted
+            # (a through-hole cylinder for sphere_hole; a lower hemisphere for
+            # sphere_bowl). The sub-primitive radius lives in the scalar
+            # tsub_vox field (set by set_target_params), not here.
+            self.target_params["radius"] = ti.field(dtype=ti.f32, shape=())
+            self.target_params["center"] = ti.Vector.field(3, dtype=ti.f32, shape=())
         else:
             raise ValueError(f"Unsupported target shape: {self.target_shape}")
 
     def set_target_params(self, radius_mm=None, height_mm=None, half_size_mm=None,
-                          center=(0.5, 0.5, 0.5)):
+                          center=(0.5, 0.5, 0.5), sub_radius_mm=None):
         """Set whichever target params exist for the current shape (in mm).
 
         Shape-agnostic so callers don't need to branch: ``radius_mm`` feeds
-        sphere/cylinder radius, ``height_mm`` feeds cylinder/pyramid height,
-        ``half_size_mm`` feeds the box half-size / pyramid base half-size (scalar
-        broadcast to a cube), and ``center`` is the normalized [0,1] centre where
-        the shape defines one. Keys absent for the shape are skipped, so e.g. a
-        cylinder (no ``center``) won't raise.
+        sphere/cylinder radius, ``half_size_mm`` feeds the box half-size / pyramid
+        base half-size (scalar broadcast to a cube), and ``center`` is the
+        normalized [0,1] centre where the shape defines one. Keys absent for the
+        shape are skipped, so e.g. a cylinder (no ``center``) won't raise.
+
+        ``sub_radius_mm`` feeds the SUB-PRIMITIVE radius for the combined CSG
+        shapes (the through-hole cylinder in ``sphere_hole``; the subtracted
+        sphere in ``sphere_bowl``). Defaults to 0.375 in (9.525 mm) -- half of
+        the 0.75 in feature -- when omitted, so callers (eval, env reset) that
+        don't pass it still get the spec'd 0.75 in sub-primitive.
         """
         tp = self.target_params
         if "radius" in tp and radius_mm is not None:
@@ -510,6 +527,11 @@ class CSGSimulatorDelta:
             self.thy_vox[None] = hs[1]
             self.thz_vox[None] = hs[2]
             self.tbase_vox[None] = hs[0]
+        # Sub-primitive radius for combined CSG shapes (default 0.375 in =
+        # 9.525 mm, the 0.75 in feature halved). Stored in voxels for the SDF.
+        if sub_radius_mm is None:
+            sub_radius_mm = 9.525  # mm (0.75 in / 2)
+        self.tsub_vox[None] = float(sub_radius_mm) / self.v
 
     # ========================================================================
     # SDFs  (all distances in VOXELS; cubic voxels make this isotropic)
@@ -642,6 +664,31 @@ class CSGSimulatorDelta:
             half_base = self.target_params["base_half_size"][None].x / self.v
             cv = self._vox(self.target_params["center"][None])
             d = pyramid_sdf(pv, cv.x, cv.y, cv.z - 0.5 * height, half_base, height)
+        elif ti.static(self.target_shape == "sphere_hole"):
+            # Stock sphere with a concentric through-hole cylinder subtracted
+            # along Z. The cylinder is UNBOUNDED in z (no z-clamp): the smooth
+            # max with the sphere SDF bounds the hole to the sphere, so the
+            # cylinder only needs to exceed the sphere's z-extent -- an infinite
+            # cylinder is the cleanest through-hole. Sub-primitive radius
+            # (0.75in/2) from tsub_vox.
+            r_vox = self.target_params["radius"][None] / self.v
+            cv = self._vox(self.target_params["center"][None])
+            d_sphere = (pv - cv).norm() - r_vox
+            d_hole = ti.Vector([pv.x - cv.x, pv.y - cv.y]).norm() - self.tsub_vox[None]
+            d = ti.max(d_sphere, -d_hole)
+        elif ti.static(self.target_shape == "sphere_bowl"):
+            # Stock sphere with the LOWER hemisphere of a concentric 0.75in
+            # sphere subtracted (z below center) -- a bowl whose cavity opens
+            # upward at the equator. Subtraction region R = sub-sphere ∩ {z <=
+            # center.z}; the lower half-space SDF is (pv.z - cv.z) (negative
+            # below the equator); d_R = max(sub_sphere_sdf, pv.z - cv.z); bowl
+            # = max(sphere_sdf, -d_R).
+            r_vox = self.target_params["radius"][None] / self.v
+            cv = self._vox(self.target_params["center"][None])
+            d_sphere = (pv - cv).norm() - r_vox
+            d_sub = (pv - cv).norm() - self.tsub_vox[None]
+            d_below = pv.z - cv.z  # <0 below the equator (inside lower half)
+            d = ti.max(d_sphere, -ti.max(d_sub, d_below))
         return d
 
     @ti.func
@@ -674,6 +721,19 @@ class CSGSimulatorDelta:
             dy = ti.abs(pv.y - cv.y) - allowed
             d_sides = ti.max(dx, dy)
             d = ti.max(d_bottom, ti.max(d_top, d_sides))
+        elif ti.static(self.target_shape == "sphere_hole"):
+            # Autodiff-safe mirror of the sphere_hole branch in target_sdf.
+            r_vox = self.tr_vox[None]
+            d_sphere = (pv - cv).norm() - r_vox
+            d_hole = ti.Vector([pv.x - cv.x, pv.y - cv.y]).norm() - self.tsub_vox[None]
+            d = ti.max(d_sphere, -d_hole)
+        elif ti.static(self.target_shape == "sphere_bowl"):
+            # Autodiff-safe mirror of the sphere_bowl branch in target_sdf.
+            r_vox = self.tr_vox[None]
+            d_sphere = (pv - cv).norm() - r_vox
+            d_sub = (pv - cv).norm() - self.tsub_vox[None]
+            d_below = pv.z - cv.z  # <0 below the equator (inside lower half)
+            d = ti.max(d_sphere, -ti.max(d_sub, d_below))
         return d
 
     @ti.kernel

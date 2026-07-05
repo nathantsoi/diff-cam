@@ -255,11 +255,16 @@ def main():
     ap.add_argument("--stock-origin-in", type=float, nargs=3, default=None,
                     metavar=("X", "Y", "Z"), help="G54 = stock top-centre in machine inches")
     ap.add_argument("--target-shape", default="sphere",
-                    choices=("sphere", "cylinder", "box", "pyramid"))
+                    choices=("sphere", "cylinder", "box", "pyramid",
+                             "sphere_hole", "sphere_bowl"))
     ap.add_argument("--target-radius-mm", type=float, default=11.43,
                     help="sphere/cylinder radius, or box/pyramid half-size (mm)")
     ap.add_argument("--target-height-mm", type=float, default=22.86,
                     help="cylinder/pyramid height (mm; ignored for sphere/box)")
+    ap.add_argument("--target-sub-radius-mm", type=float, default=9.525,
+                    help="sub-primitive radius (mm) for the combined CSG shapes "
+                         "sphere_hole / sphere_bowl (default 0.375in = 0.75in "
+                         "diameter; ignored for plain shapes)")
     ap.add_argument("--dt", type=float, default=0.45,
                     help="seconds per simulator step. THE decisive lever: at low dt "
                          "(0.12/0.01) the tool is speed-limited and cannot traverse "
@@ -346,6 +351,7 @@ def main():
             "--target_shape", args.target_shape,
             "--target_radius_mm", str(args.target_radius_mm),
             "--target_height_mm", str(args.target_height_mm),
+            "--target_sub_radius_mm", str(args.target_sub_radius_mm),
             "--dt", str(args.dt),
             "--k_init", str(args.k_init),
             "--feed_ipm", str(args.feed_ipm),

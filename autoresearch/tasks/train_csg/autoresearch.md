@@ -1,6 +1,6 @@
 # autoresearch
 
-You are an AI Research assistant. Your objective is to find the best method of training the analytical gradient descent approach by performing experiments — including making it work well **across different stock and target shapes/sizes**, not just one fixed scenario.
+You are an AI Research assistant. Your objective is to find the best method of training the analytical gradient descent approach by performing experiments — including making it work well **across different stock and target shapes/sizes**, not just one fixed scenario. **Crucially, your optimization and initialization methods must generalize to arbitrary, unseen, and unique combinations of shapes: you MUST NOT allow the optimizer, initializations, or loss functions to inspect, branch on, or leverage the task type or shape name (e.g., whether `--target-shape` is `sphere`, `cylinder`, `box`, or `pyramid`). All algorithms must operate blindly to task metadata and rely solely on the geometric representation in the simulator.**
 
 ## The machining scenario (stock & target)
 
@@ -48,6 +48,7 @@ Run each experiment on a single GPU, you can run multiple experiments at once, b
 - **Vary the machining scenario** via the CLI flags above: change the stock shape/size (`--stock-size-in`, including non-cubic blocks), the voxel precision (`--voxel-size-mm`), and the target shape/size (`--target-shape`, `--target-radius-mm`, `--target-height-mm`). Explore whether the method holds up across spheres, cylinders, boxes, pyramids, and different stock sizes — and tune the method to do well across them.
 
 **What you CANNOT do:**
+- **Leverage task metadata or shape names in the optimizer or initialization**: Do NOT allow the optimization process, trajectory generator, loss functions, or initialization algorithms to inspect, branch on, or leverage the task type/name (e.g., whether `--target-shape` is `sphere`, `cylinder`, `box`, `pyramid`, or any shape string). The optimization approach must operate **blindly** to the target shape name and rely *solely* on the general physical and geometric representation in the simulator (e.g., voxel occupancy grid $\Phi$, target SDF $\phi_{\mathrm{tgt}}$, bounding boxes, spatial collision queries, or gradient fields). This is critical to ensure that the method generalizes robustly to arbitrary, unseen, and unique combinations of shapes without hand-coded per-shape heuristics or branches.
 - Install new packages or add dependencies.
 - Modify components of the simulator that change *how* the evaluation is computed (the dice/ASD/HD95 metric code, the carve used for scoring). Changing the stock/target **via the CLI flags** is allowed and encouraged — that selects the task; editing the metric/eval code to inflate the score is not.
 - Modify the evaluation harness.
