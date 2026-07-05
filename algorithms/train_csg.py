@@ -768,7 +768,14 @@ def main():
         else:
             _part_bottom_z = 0.5 - args.target_radius_mm / stock_z_mm
         _z_floor = _part_bottom_z - args.z_floor_epsilon_mm / stock_z_mm
-        z_bot = max(z_bot, _z_floor + 0.005)
+        # Also keep the holder (bottom = base + tool_height) >= 1mm above the
+        # stock top so the trunc stage never trims trailing low-base steps (the
+        # holder is wide -- 2.5in -- so within 1mm of the stock it is flagged).
+        # base + tool_h_norm >= 1 + clearance_norm  =>  base >= 1 + clr - tool_h.
+        _tool_h_norm = args.tool_height_mm / stock_z_mm
+        _clr_norm = 1.0 / stock_z_mm  # matches --collision-clearance-mm default
+        _z_holder_clear = 1.0 + _clr_norm - _tool_h_norm + 0.01
+        z_bot = max(z_bot, _z_floor + 0.005, _z_holder_clear)
         r_outer = 0.5 + r_tool
         if args.target_shape == "pyramid":
             # 4-phase gouge-free path (tool extends UP from base, spans
