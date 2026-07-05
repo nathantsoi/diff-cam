@@ -333,6 +333,38 @@ to carve it.
 (low-k explore — but grad ~1e-4 already vanishing, likely dead); hole k150 s2;
 bowl k10 50mm baseline (isolate k vs tool-length).
 
+### sphere_bowl MULTI-SEED CONFIRMED (k150 t50, rf, m=256)
+
+| seed | dice | viz | trunc |
+|------|------|-----|-------|
+| 1 | 0.659 | 0.659 | FULL |
+| 2 | 0.660 | 0.660 | FULL |
+| 3 | 0.657 | 0.657 | FULL |
+| **mean** | **0.659 ± 0.001** | | |
+
+vs k10 50mm baseline 0.443 (≈ k10 25mm 0.418 — tool-length-independent; **k
+dominates**). **k-anneal +0.216 on sphere_bowl, fully deployable, reproducible.**
+
+### sphere_hole PHYSICAL LIMIT diagnosed (NOT a method failure!)
+
+The default sphere_hole geometry is **physically infeasible** with the default
+tool: shell thickness = sphere_r(11.43) − hole_r(9.525) = **1.905mm** < tool
+radius **3.175mm**. Any plunge through the 9.525mm-radius hole gouges the
+1.905mm shell — impossible to carve cleanly. This is a tool-to-feature ratio
+limit (analogous to the reachability ceiling), NOT an optimizer limit. The
+over-carve (44746 vs 8528 vox) is the tool gouging the shell, not a discovery
+failure. k-anneal still helps within the limit (k150 0.283 > k10 0.131).
+
+**Fair test (in flight)** — make the geometry feasible:
+- `tool-radius-mm 1.5` (1.5 < 1.905 shell) with default hole — does the method
+  carve it cleanly?
+- `target-sub-radius-mm 6.0` (shell = 11.43−6 = 5.43mm > tool 3.175) with
+  default tool — feasible shell.
+- Both as k150 t50 + a k10 t50 tr1.5 baseline (isolate k effect on feasible
+  geometry).
+- Also: bowl k150 t50 m=128 random (does bowl work without rf/m256, like single
+  shapes?), hole k150 t50 sub6 m=128 random.
+
 | shape | 50mm k150 | 75mm k150 |
 |-------|-----------|-----------|
 | sphere | 0.830 | 0.832 |
