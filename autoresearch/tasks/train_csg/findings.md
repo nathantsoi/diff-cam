@@ -74,11 +74,13 @@ pattern is a symptom of a marginal init, not a pyramid invariant.
 
 **Confirmed directly via tool length**: a 1in sphere with a 50mm tool (2× stock
 height) raises viz dice 0.819 → 0.840, crash-safe (min clr 25mm, no trim). The
-gain is modest because the zlayer init (tuned for the 25mm tool) does not
-exploit the longer reach — `z_holder_clear` goes negative (deeper descent
-possible) but the init geometry is unchanged. **The init, not the tool length
-alone, is the bottleneck.** A tool-aware init that descends to the deeper
-`z_holder_clear` floor when the tool is longer is the untested lever.
+gain is a **crash-safety gain, not a reachability gain**: the 50mm train dice
+(0.8396) is *identical* to the 25mm train dice (cead72f, 0.8396) — the longer
+tool reaches no more stock. But the 25mm aggressive init (train 0.840) suffered
+a 55-step trunc trim → viz 0.821; the 50mm holder rides higher so the same init
+survives trunc untrimmed → viz 0.840. Retuning the init for the 50mm tool does
+NOT help (doubled revs → 0.652, gouge): revs180 is optimal and 0.840 is the
+1in+50mm ceiling. **The init, not the tool length, is the bottleneck.**
 
 **Deep z-floor + long tool REGRESSES (re-confirms the ceiling)**: 50mm tool
 with `--z-floor-epsilon-mm 25` (floor -0.934) → viz 0.394, gouge 0.891, optimizer
@@ -222,10 +224,10 @@ articulated holder) lifts it.
   crash-free at 1in would require a relatively taller tool (a 50mm tool only
   reaches 0.840; the init doesn't fully exploit it) or an articulated holder —
   out of scope for this sim.
-- A **tool-aware zlayer init** (descend to the deeper `z_holder_clear` floor when
-  the tool is longer, while keeping the base high to avoid the equator-gouge) is
-  the untested lever to fully exploit a longer tool — the 50mm tool only gained
-  +0.02 with the 25mm-tuned init.
+- A **tool-aware zlayer init** for a longer tool was tested and does NOT help:
+  the 50mm train dice is identical to 25mm (the gain is crash-safety, not
+  reachability), and doubled revs regress to 0.652 (gouge). 0.840 is the
+  1in+50mm sphere ceiling.
 - The `holder_margin` soft barrier (weight 50) is overpowered by the residual
   loss; a higher weight or a hard holder clamp (analogous to the z-floor) would
   let face-hugging low-zb inits survive trunc — untested.
