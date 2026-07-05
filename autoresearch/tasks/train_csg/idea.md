@@ -573,6 +573,17 @@ shape-blind improvement. Pyramid +0.016, box +0.022, sphere +0.016, cyl +0.004.
 100mm tool (same tool-to-stock ratio). Tests whether the full method (k-anneal
 + loss-shift) scales to a larger absolute scenario. ~2.8h.
 
+### loss-shift FINE SWEEP (-0.3 / -0.5 / -0.7) — -0.5 confirmed sweet spot
+
+| shift | pyramid | sphere |
+|-------|---------|--------|
+| -0.3 | 0.810 | 0.838 |
+| **-0.5** | **0.817** | **0.840** |
+| -0.7 | 0.815 | 0.840 |
+
+-0.5 and -0.7 both optimal; -0.3 slightly worse. **-0.5 is the sweet spot**
+(principled value ~0.236; -0.5 is close, robust). Operating point unchanged.
+
 | shape | 50mm k150 | 75mm k150 |
 |-------|-----------|-----------|
 | sphere | 0.830 | 0.832 |
