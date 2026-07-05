@@ -305,7 +305,33 @@ include hole-plunging passes) + **m=256** (more steps for plunges) fixes it:
 Bowl starts healthier (~0.42 early vs hole's ~0.12) — concave interior is
 easier than a through-hole.
 
-### 75mm-tool RESULT: SATURATED (dead lever)
+### COMBINED-SHAPES RESULT (rf init, m=256)
+
+| shape | k10 25mm | k150 50mm | Δ | carved vox | target vox | trunc |
+|-------|----------|-----------|---|-----------|-----------|-------|
+| sphere_bowl | 0.418 (viz) | **0.659** | **+0.241** | 69442 | 35049 | FULL (both) |
+| sphere_hole | 0.131 | 0.283 | +0.152 | 44746 | 8528 | FULL |
+
+**sphere_bowl: k-anneal wins, fully deployable (+0.241, viz=train, NO trunc).**
+The concave bowl interior is carveable — the gradient can find "remove the
+lower-hemisphere material" because it's a connected removal reachable from
+above. k-anneal's sharper objective aligns the gradient with hard coverage.
+
+**sphere_hole: STILL HARD (0.283 best).** Over-carves the hole region (44746 vs
+8528 target voxels — 5× too much). The through-hole requires the tool to plunge
+VERTICALLY through the sphere center while leaving the shell — a topology the
+soft-union gradient cannot discover from any init tested (random, raster_fine).
+k10 25mm is worst (0.131, 120212 vox — catastrophic over-carve). k-anneal helps
+(+0.152) but the topology limit dominates. This is a genuine method frontier:
+**gradient descent through a soft union cannot represent "leave a hole"** — the
+union monotonically removes material, so re-adding the hole column requires the
+tool to NEVER carve there, but the loss (residual) rewards carving everywhere
+target is absent, and the hole interior IS target-absent → the gradient pushes
+to carve it.
+
+**In flight**: bowl k150 re-seeds s2/s3 (confirm +0.24); hole k_init5/k_final50
+(low-k explore — but grad ~1e-4 already vanishing, likely dead); hole k150 s2;
+bowl k10 50mm baseline (isolate k vs tool-length).
 
 | shape | 50mm k150 | 75mm k150 |
 |-------|-----------|-----------|
