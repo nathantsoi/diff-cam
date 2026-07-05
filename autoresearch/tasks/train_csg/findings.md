@@ -265,17 +265,22 @@ articulated holder) lifts it.
 - Crash-safe pyramid `holder_overlap=0`, trunc no-trim (min clearance 21mm) —
   the path is genuinely collision-free; the loss is purely the unreachable waste.
 - **NON-DETERMINISM at 1.5in pyramid (important caveat):** the 1.5in pyramid
-  optimization is run-to-run NON-deterministic — same config/seed, the init is
-  deterministic (iter0=0.319 reproducibly) but the optimizer trajectory diverges
-  (original 25-iter gave best@iter20 0.431; a re-run gave best@iter10 0.328; a
-  200-iter gave 0.344). The original 0.431 was a lucky high-variance run; the
-  true 1.5in ceiling is ~0.33–0.35 (two runs agree) with ~0.1 variance. **The 1in
-  pyramid IS deterministic** — independent 100-iter and 200-iter runs agree to 4
-  decimals at iter80 (0.5171), so the 1in 0.526 ceiling is solid. The 0.75in is
-  init-determined (best@iter0, deterministic). Treat 1.5in pyramid numbers as
-  ±0.05; single-run 1.5in comparisons are unreliable. Likely cause: the larger
-  1.5in grid amplifies CUDA atomic-add non-determinism in the gradient, and the
-  rough 1.5in loss landscape makes the optimizer path-sensitive.
+  optimization varies ~0.1 across GPU-state regimes — same config/seed/code, the
+  init is deterministic (iter0=0.319 reproducibly) but the optimizer trajectory
+  diverges (original 25-iter gave best@iter20 0.431; two re-runs gave 0.328 @iter10
+  IDENTICALLY; a 200-iter gave 0.344). Consecutive runs agree exactly (regime-
+  stable), but cross-regime varies ~0.1 (CUDA atomic scheduling). The true 1.5in
+  ceiling is ~0.33–0.43; single-run 1.5in comparisons are unreliable. **The 1in
+  pyramid IS regime-robust** — independent 100-iter and 200-iter runs (different
+  times) agree to 4 decimals at iter80 (0.5171), so the 1in 0.526 ceiling is
+  solid. The 0.75in is init-determined (best@iter0). Likely cause: the rough 1.5in
+  loss landscape makes the optimizer path-sensitive to atomic-add noise.
+- **Sphere 0.819 ceiling CONFIRMED solid (not under-optimized):** a 200-iter
+  sphere run gives best@iter0 0.819 (opt collapses: 0.819→0.55 @iter20→slow
+  recovery 0.607 @iter199, never approaching 0.819). Unlike the pyramid (which
+  had hidden opt headroom: 0.457→0.526), the sphere's init IS its ceiling. The
+  opt-helps pattern is genuinely **pyramid-specific (1in only)**; sphere/cyl/box
+  are init-determined (best@iter0, opt hurts even at 200 iters).
 - **Training-barrier vs trunc-threshold mismatch**: the holder collision barrier
   (`holder_margin`, default 0.0) only prevents holder *penetration* during
   training (`holder_overlap=0`), but `truncate-collision` requires *1.0mm
