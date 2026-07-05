@@ -74,6 +74,11 @@ Redesign attempts (all crash-safe):
 - Coarser grid (7pts, spacing ~2·r_tool) + higher per-level cap: **0.4570**.
 - Pure-init (`--iters 1`): 0.4019 → optimization HELPS pyramid
   (0.40→0.457, best@iter15), unlike sphere/cyl/box.
+- Direct ring-annulus on `s_safe` (face-hug at every zb): **0.402 — regression**.
+  Better face-hugging geometry, but placing tools at low zb lets the optimizer
+  push the base below holder-clear → the wide 2.5in holder breaches the stock-top
+  clearance (min clr 0.021mm) → trunc trims 357/512 trailing steps. The
+  coarse-grid init (0.457) stays holder-clear (min clr 18mm, no trim). Reverted.
 
 **Diagnostic** (`_diag_pyramid.py`, per-z target retention on the carved stock):
 the trajectory **under-carves** — only ~17% of waste removed (85321 waste voxels
@@ -97,6 +102,9 @@ tuning problem.
   reachability, not density). 0.4159 → 0.4102.
 - 1D orbit vs 2D boustrophedon for the pyramid annulus: same ~0.42 (the
   reachable outer annulus is captured either way; the inner band is unreachable).
+- Direct face-hugging ring (radius `s_safe` per zb): REGRESSES to 0.402 — low-zb
+  placement triggers holder collision → trunc trims 357 steps. Crash-safety, not
+  geometry, is the binding constraint at low zb.
 - `--no-z-floor --no-trunc` recovers 0.9306 sphere / 0.8166 pyramid but with
   `holder_overlap` in the millions — physically infeasible, a real crash.
 
@@ -109,6 +117,14 @@ tuning problem.
   opt collapses it. The pyramid soft loss is partially correlated with hard dice.
 - Crash-safe pyramid `holder_overlap=0`, trunc no-trim (min clearance 21mm) —
   the path is genuinely collision-free; the loss is purely the unreachable waste.
+- **Training-barrier vs trunc-threshold mismatch**: the holder collision barrier
+  (`holder_margin`, default 0.0) only prevents holder *penetration* during
+  training (`holder_overlap=0`), but `truncate-collision` requires *1.0mm
+  clearance*. With margin=0 the optimizer legally brings the holder to ~0.02mm
+  of the stock, then trunc trims trailing steps. Set `--holder-margin ~0.04`
+  (1mm/stock) so the barrier engages at the trunc threshold; the optimizer then
+  keeps the holder ≥1mm clear. This is what lets low-zb (face-hugging) inits
+  survive trunc instead of being decimated.
 
 ## Still open
 

@@ -207,6 +207,13 @@ def main():
                     help="disable the z-floor clamp during training (recover the "
                          "unbounded deep-plunge behaviour; --truncate-collision then "
                          "catches the resulting crash)")
+    ap.add_argument("--holder-margin", type=float, default=0.0,
+                    help="holder standoff (unit-cube length) for the training "
+                         "collision barrier: the barrier engages when stock comes "
+                         "within this distance of the holder. Set ~0.04 (1mm/stock) "
+                         "to match --collision-clearance-mm so the optimizer keeps "
+                         "the holder >=1mm clear and --truncate-collision does not "
+                         "trim trailing near-collisions. Forwarded to train_csg.")
     ap.add_argument("--truncate-collision", action="store_true", default=True,
                     help="after training, truncate the trajectory at the first "
                          "holder/stock collision (stop a clearance margin before it). "
@@ -329,6 +336,7 @@ def main():
             "--zlayer_margin", str(args.zlayer_margin),
             "--z_floor_epsilon_mm", str(args.z_floor_epsilon_mm),
             "--enforce_z_floor" if not args.no_z_floor else "--no-enforce_z_floor",
+            "--holder_margin", str(args.holder_margin),
             "--headless",
         ]
         if not args.no_save_model:
