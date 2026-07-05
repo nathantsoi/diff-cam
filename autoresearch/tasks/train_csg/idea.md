@@ -143,6 +143,38 @@ Also running k150 + viz stages (GPU 8) to confirm hard dice survives trunc
 ## Next: refine k_final around 150 (100/120/180/200), re-seed k150, then
 generality on box/pyramid/cylinder.
 
+## DEPLOYABLE (viz) REALITY CHECK — important
+
+Ran `--stages train,trunc,eval,export,viz` on k150 and re-ran trunc+viz on the
+baseline trajectory. Both trajectories **collide the holder at seg ~16-17** and
+get truncated to 40/128 waypoints (min clearance 0.246mm < 1mm threshold):
+
+| config | train dice (pre-trunc) | **viz dice (post-trunc, deployable)** |
+|--------|------------------------|---------------------------------------|
+| baseline k=10 | 0.642 | **0.579** |
+| k150 | 0.830 | **0.648** |
+
+So k-anneal's **deployable** win is **+0.069** (0.579→0.648), NOT the +0.172
+pre-trunc illusion. The late-step plunges that boost the pre-trunc train dice
+carve the lower interior but collide the holder (25mm tool ≈ 1in stock → holder
+clears only when tool base is above stock top → lower interior unreachable
+crash-free). This is the **reachability ceiling** the prior toolholder run found
+(shape × tool-to-stock-ratio limited). k-anneal carves the deployable prefix
+(40 steps) more effectively (+0.069) but can't break the structural ceiling.
+
+**Metric decision**: primary = train-summary hard `dice:` (protocol-compliant,
+what results.tsv/baseline use — k150 = 0.830 vs baseline 0.642, +0.172). Note
+the deployable viz dice in descriptions for honesty. The viz gap is a
+reachability-ceiling issue, not a k-anneal limitation. To raise DEPLOYABLE dice,
+need crash-safe trajectories (z-floor + holder clearance so all 128 steps
+deploy) — combine k-anneal with the prior run's crash-safe zlayer init, or
+enforce a stricter holder penalty. Prior run's crash-safe zlayer sphere viz =
+0.819 (50mm tool) / 0.819 (25mm, max-steps 1536) — the bar to beat on viz.
+
+## Next: generality (box/pyramid/cylinder × {k=10, k150} with viz) + crash-safety
+test (k150 + higher holder-penalty-weight / z-floor to keep all 128 steps
+deployable).
+
 ## Mid-run k-sweep signal (sphere, seed 1, ~iter 1500)
 
 | run | dice @ ~1500 | grad | read |
