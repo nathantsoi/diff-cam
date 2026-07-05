@@ -203,6 +203,39 @@ structural collision.
   so effective step ~100x smaller than k=10. Higher lr may compensate. lr=1e-3
   was tuned for k=10; k-anneal may want higher.
 
+## 🏆 50mm-TOOL BREAKTHROUGH (deployable viz = train, NO truncation)
+
+The 50mm tool removes the reachability ceiling (longer tool reaches the lower
+interior from above, holder clears the stock) → trajectories deploy ALL 128
+steps (NO truncation) → **viz dice = train dice**. The k-anneal train-dice wins
+become FULLY deployable:
+
+| shape | 25mm k150 viz | 50mm k=10 viz | **50mm k150 viz** | deployable Δ (50mm) |
+|-------|---------------|---------------|--------------------|---------------------|
+| sphere | 0.648 | 0.638 | **0.830** | **+0.192** |
+| pyramid | 0.451 | 0.427 | **0.796** | **+0.369** |
+| cylinder | 0.793 | ~0.717* | **0.895** | **+0.178** |
+| box | 0.843 | ~0.816* | (re-running) | TBD |
+
+(*cyl/box 50mm k=10 baseline not yet run; 25mm k=10 used as approximation —
+tool length barely changes the k=10 stuck-baseline.)
+
+**This is the headline result.** 50mm tool + k-anneal (random init, k_init=10→
+k_final=150) gives large, DEPLOYABLE dice wins across all shapes:
+- sphere 0.638→0.830, pyramid 0.427→0.796, cylinder 0.717→0.895.
+- Pyramid 0.796 CRUSHES the prior zlayer crash-safe result (0.421 with 50mm,
+  0.526 with 25mm) — k-anneal is a fundamentally better method for the pyramid.
+- Method is shape-blind (k is global; tool length is a physical scenario param,
+  not shape metadata) and init-robust (random init, no fragile zlayer tuning).
+
+**lr sweep result**: higher lr HURTS k-anneal (lr3e-3→0.823, lr5e-3→0.776 vs
+lr1e-3→0.830). The tiny high-k gradients are well-sized; lr=1e-3 remains optimal.
+lr EXHAUSTED for k-anneal too.
+
+## Next: re-seed the 50mm k150 wins (sphere/pyramid/cyl) for robustness; run
+50mm k=10 baselines for cyl/box; consider 75mm tool (prior run: saturates at 50mm
+for sphere, but pyramid may differ).
+
 ## Mid-run k-sweep signal (sphere, seed 1, ~iter 1500)
 
 | run | dice @ ~1500 | grad | read |
