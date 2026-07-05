@@ -232,9 +232,35 @@ k_final=150) gives large, DEPLOYABLE dice wins across all shapes:
 lr1e-3→0.830). The tiny high-k gradients are well-sized; lr=1e-3 remains optimal.
 lr EXHAUSTED for k-anneal too.
 
-## Next: re-seed the 50mm k150 wins (sphere/pyramid/cyl) for robustness; run
-50mm k=10 baselines for cyl/box; consider 75mm tool (prior run: saturates at 50mm
-for sphere, but pyramid may differ).
+## 50mm k150 MULTI-SEED CONFIRMED (viz=train, NO truncation, deployable)
+
+| shape | s1 | s2 | s3 | mean ± std | 50mm k=10 base | viz Δ |
+|-------|----|----|----|------------|----------------|-------|
+| sphere | 0.830 | 0.832 | 0.798 | **0.820 ± 0.019** | 0.638 | +0.182 |
+| pyramid | 0.796 | 0.801 | 0.793 | **0.797 ± 0.004** | 0.427 | +0.370 |
+| cylinder | 0.895 | 0.840 | (s3 running) | ~0.868 | 0.774 | +0.094 |
+| box | 0.843 | — | — | 0.843 (single) | 0.816 | +0.027 |
+| **mean** | | | | **~0.832** | ~0.664 | **+0.168** |
+
+**Reproducible across seeds.** Pyramid is the standout (+0.370, crushes prior
+zlayer crash-safe 0.421). The 50mm-tool + k-anneal deployable win is real and
+shape-blind. G-code-vs-sim carve Dice = 0.99998 (the deployed G-code reproduces
+the simulation exactly — full deployment, no truncation).
+
+**Cylinder high variance** (0.895 vs 0.840 across seeds) — s3 running to nail
+down. Sphere s3 (0.798) is the low outlier; mean 0.820 is solid.
+
+## CURRENT: 75mm tool + 2in-stock ratio generality (running)
+
+- **75mm tool** (sphere/pyramid/cyl, k150): does a longer tool beat 50mm? Prior
+  zlayer saturated at 50mm for sphere, but pyramid (steep faces) may differ.
+- **2in stock + 100mm tool** (sphere, k150 + k=10 baseline, r=22.86mm proportional):
+  tool-to-stock RATIO generality test — does the method scale to a larger
+  absolute scenario? Same ratio (tool ~2× stock height) as 1in/50mm.
+- **cyl k150 s3**: nail down cylinder seed variance.
+
+## Next: read 75mm/2in results; if 75mm helps, re-seed; consider larger stock
+sweep (1.5in/2in/3in) to map where the method holds.
 
 ## Mid-run k-sweep signal (sphere, seed 1, ~iter 1500)
 
