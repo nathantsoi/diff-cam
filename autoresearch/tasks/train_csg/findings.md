@@ -55,6 +55,12 @@ Takeaway: flat/z-invariant surfaces (box) are size-robust; curved/3D surfaces
 crash-safe by construction (trunc no-trim, holder_overlap=0). Eval stage OOMs
 on the 76³ grid (known) but viz produces the canonical carved-vs-target Dice.
 
+The trend is **monotonic in stock size** (sphere tested at 3 sizes): 0.843 /
+0.819 / 0.705 at 0.75in / 1in / 1.5in. At 0.75in the 25mm tool is *taller* than
+the 19mm stock (z-floor dips below the part bottom, -0.0025), so the
+lower-interior wedge becomes partially reachable → dice rises above the 1in
+ceiling. Larger stock → tool spans less → more interior unreachable.
+
 ## What changed in the sim (recap)
 
 - **Z-floor clamp** (`--z-floor-epsilon-mm`, default 1.0mm): executed tool BASE
