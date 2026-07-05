@@ -405,6 +405,47 @@ Bowl works without raster_fine/m256 (−0.047), like the single shapes — the b
 concavity is gradient-reachable from random init. **k-anneal transfers to
 sphere_bowl across init modes.**
 
+### HIGH-k RESULT — DECISIVE (k500/k1000 on sub6 hole + sphere regression)
+
+| config | train | viz | gap |
+|--------|-------|-----|-----|
+| hole sub6 k150 | 0.683 | 0.237 | 0.45 |
+| hole sub6 k500 | 0.695 | 0.228 | 0.47 |
+| hole sub6 k1000 | 0.671 | 0.217 | 0.45 |
+| sphere k150 | 0.830 | 0.830 | 0 |
+| sphere k500 | 0.778 | 0.778 | 0 |
+| sphere k1000 | 0.771 | 0.771 | 0 |
+
+**Two conclusive findings:**
+
+1. **High-k does NOT close the narrow-hole soft/hard gap.** k500/k1000 leave the
+   train→viz gap at ~0.45 (even slightly wider). At ANY finite k the soft-union
+   over-erosion (~log(2)/k per step × 256 steps) accumulates enough to fill a
+   narrow (6mm) negative feature during the soft training forward, while the
+   hard carve correctly leaves it solid. **k-anneal alone CANNOT handle narrow
+   negative features.** This is the hard limit of the k-anneal lever.
+
+2. **High-k HURTS positive features.** sphere k500=0.778, k1000=0.771 vs
+   k150=0.830 — extreme k causes gradient death (softmax→one-hot, gradient
+   concentrates/vanishes), monotonic degradation. **k150 is the sweet spot for
+   positive features; k>150 is a dead lever.**
+
+**CONCLUSION — the k-anneal method is fully characterized:**
+- ✅ Positive features (convex/convexo-concave solids: sphere, box, pyramid,
+  cylinder, sphere_bowl concavity): k-anneal k150 + 50mm tool gives large
+  deployable wins (sphere +0.19, pyramid +0.37, cyl +0.09, bowl +0.22), fully
+  deployable (viz=train), shape-blind, init-robust, reproducible across seeds.
+- ❌ Narrow negative features (through-holes, slots thinner than ~the soft-union
+  over-erosion depth): k-anneal cannot keep them open — the soft training
+  forward fills them. The fix is the documented pivot #6: a **hard-carve-aware
+  loss** (evaluate `compute_loss` on a separately-sharpened/hard stock replica
+  while keeping `apply_cut` soft for the gradient path), so the optimizer is
+  penalized for hole-filling. This is the clear direction for the next run.
+
+**sphere_bowl m=128 multi-seed**: s1 0.612, s2 0.645 → mean 0.628 ± 0.016.
+Bowl is robust without raster_fine/m256 (concavity gradient-reachable from
+random init, like single shapes).
+
 | shape | 50mm k150 | 75mm k150 |
 |-------|-----------|-----------|
 | sphere | 0.830 | 0.832 |
