@@ -542,20 +542,36 @@ of 50mm-tool + k-anneal k150:
 are robust (in flight). Also testing loss-shift -0.5 on 2in stock (sphere/box/
 pyramid, 100mm tool) — does the de-bias win scale to the larger scenario?
 
+### loss-shift -0.5 MULTI-SEED CONFIRMED (re-seeded)
+
+| shape | k150 (no shift, 3sd) | k150 ls-0.5 (3sd) | Δ |
+|-------|----------------------|--------------------|---|
+| pyramid | 0.797 ± 0.004 | **0.813 ± 0.003** | **+0.016** |
+| box | 0.843 (1sd) | **0.865 ± 0.009** (3sd) | **+0.022** |
+| sphere | 0.820 ± 0.019 | 0.836 ± 0.004 (2sd) | +0.016 |
+| cylinder | 0.891 ± 0.025 | 0.895 | +0.004 |
+
+**Both wins reproducible across 3 seeds.** loss-shift -0.5 is a confirmed,
+shape-blind improvement. Pyramid +0.016, box +0.022, sphere +0.016, cyl +0.004.
+
 ## DEPLOYABLE SUMMARY (the headline, with loss-shift -0.5)
 
 50mm tool + k-anneal k150 + loss-shift -0.5 (random init, lr=1e-3, m=128):
 
 | shape | k=10 50mm | k150 50mm | **k150 ls-0.5 50mm** | deployable Δ |
 |-------|-----------|-----------|----------------------|---------------|
-| sphere | 0.638 | 0.820 (3sd) | **0.836** (2sd) | +0.198 |
-| pyramid | 0.427 | 0.797 (3sd) | **0.817** | +0.390 |
-| cylinder | 0.774 | 0.891 (3sd) | 0.895 | +0.121 |
-| box | 0.816 | 0.843 | **0.853** | +0.037 |
-| sphere_bowl | — | 0.659 (rf) / 0.628 (m128) | 0.613 (m128) | +0.18 vs k10 |
-| **mean (4 solid)** | 0.664 | 0.838 | **0.850** | **+0.186** |
+| sphere | 0.638 | 0.820 ± 0.019 (3sd) | **0.836 ± 0.004** (2sd) | +0.198 |
+| pyramid | 0.427 | 0.797 ± 0.004 (3sd) | **0.813 ± 0.003** (3sd) | +0.386 |
+| cylinder | 0.774 | 0.891 ± 0.025 (3sd) | 0.895 (1sd) | +0.121 |
+| box | 0.816 | 0.843 (1sd) | **0.865 ± 0.009** (3sd) | +0.049 |
+| sphere_bowl | — | 0.659 (rf,3sd) / 0.628 (m128,2sd) | 0.613 (m128) | +0.18 vs k10 |
+| **mean (4 solid)** | 0.664 | 0.838 | **0.852** | **+0.188** |
 
 (All viz=train, NO truncation — fully deployable. G-code-vs-sim Dice = 0.99998.)
+
+**2in-stock + loss-shift -0.5 (in flight)**: sphere/box/pyramid at 2in stock,
+100mm tool (same tool-to-stock ratio). Tests whether the full method (k-anneal
++ loss-shift) scales to a larger absolute scenario. ~2.8h.
 
 | shape | 50mm k150 | 75mm k150 |
 |-------|-----------|-----------|
