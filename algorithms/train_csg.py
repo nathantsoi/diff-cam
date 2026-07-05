@@ -823,36 +823,37 @@ def main():
             # 2. Descending 2D annulus boustrophedon. At each z-level zb the tool
             #    rasters the square annulus OUTSIDE the pyramid cross-section
             #    (half-size hp(zb)) in xy; the tool spans [zb, zb+h] so each pass
-            #    carves that annulus at every z >= zb. Descending extends the carve
-            #    downward, and because hp(zb) shrinks as zb rises, higher passes
-            #    reach the inner annulus that lower passes cannot. This is a 2D
-            #    raster fill of the REACHABLE waste -- a 1D orbit (the old phase)
-            #    left ~83% of the waste standing (one tube = measure zero in 2D).
+            #    carves that annulus at every z >= zb. Iterate zb LOW -> HIGH and
+            #    CAP points per z-level: the low-zb passes (thin outer ring, few
+            #    grid points) carve the FULL stock height, so they must be visited
+            #    first; without a cap the high-zb levels (wide annulus, many points)
+            #    consume the whole budget and only the top band ever gets carved.
             #    The inner band hugging the sloped face is unreachable crash-free
-            #    (a tool low enough to reach z0 has too large a pyramid at its base
-            #    to hug the face without gouging) -- the crash-safe ceiling, mirrors
+            #    (tool low enough to reach z0 has too large a pyramid at its base to
+            #    hug the face without gouging) -- the crash-safe ceiling, mirrors
             #    the sphere lower-interior wedge.
             grid = np.linspace(r_tool, 1.0 - r_tool, 13)
-            n_zlvl = 10
+            n_zlvl = 12
+            per_level = max(8, n_beside // n_zlvl)
             target2 = n_above + n_beside
-            done = False
             for zi in range(n_zlvl):
-                if done:
+                if len(pos) >= target2:
                     break
-                zb = apex + (z_descent_bot - apex) * (zi / max(1, n_zlvl - 1))
+                # low -> high: zi=0 is z_descent_bot (full-height outer ring)
+                zb = z_descent_bot + (apex - z_descent_bot) * (zi / max(1, n_zlvl - 1))
                 hp = r_sp * (1.0 - (zb - base_z) / h) if base_z <= zb <= apex else 0.0
                 s_safe = hp + r_tool + margin
+                emitted = 0
                 for j, y in enumerate(grid):
-                    if done:
+                    if emitted >= per_level or len(pos) >= target2:
                         break
                     row = grid if j % 2 == 0 else grid[::-1]
                     for x in row:
-                        # skip points whose tool disk would breach the pyramid at zb
                         if max(abs(x - 0.5), abs(y - 0.5)) + r_tool < s_safe:
                             continue
                         pos.append([float(x), float(y), float(zb)])
-                        if len(pos) >= target2:
-                            done = True
+                        emitted += 1
+                        if emitted >= per_level or len(pos) >= target2:
                             break
             positions = np.array(pos[:n], dtype=np.float32)
             if len(positions) < n:
