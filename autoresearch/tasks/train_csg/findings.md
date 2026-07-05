@@ -202,6 +202,11 @@ articulated holder) lifts it.
   +0.003 — **coverage was NOT the issue**; the smaller tool genuinely carves no
   more reachable area even with 2× the passes. Definitive: **the 1/4" end mill
   is optimal**, and tool radius is dead neither at fixed nor doubled steps.
+- **Tool radius LARGER** (1/2" r=6.35mm, 1in box): viz 0.850 vs 0.892 — also
+  regression. A bigger cutter **rounds the box's sharp corners** (corner-radius
+  effect) → loses dice. **Tool radius is dead from BOTH directions**: smaller
+  hurts sphere/pyramid (coverage + band-narrowing insufficient), larger hurts box
+  (corner radius). The 1/4" end mill is the sweet spot across all shapes.
 - Higher-T coverage for pyramid (revs/osc/T): does NOT help (ceiling is
   reachability, not density). 0.4159 → 0.4102.
 - 1D orbit vs 2D boustrophedon for the pyramid annulus: same ~0.42 (the
