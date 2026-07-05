@@ -234,6 +234,19 @@ class CSGSimulatorDelta:
         self.w_gouge[None] = 2.0
         self.w_residual[None] = 1.0
 
+        # De-biased (hard-carve-aware) loss shift. The soft ``apply_cut``
+        # (smooth_max union) over-erodes by ~log(2)/kv per cut vs the hard
+        # ``ti.max`` carve, so the soft stock_d is biased NEGATIVE (too carved)
+        # and the soft loss is satisfied before the HARD carve actually reaches
+        # the target -- the soft/hard gap that fills narrow negative features
+        # (holes). Adding ``loss_shift`` to stock_d before the loss sigmoid
+        # shifts the loss's view back toward the (less-eroded) hard stock, so
+        # the optimizer targets the deployable hard carve. Default 0 = off (no
+        # behavior change). A principled value is ~log(2)*k_ref/k_final (the
+        # single-cut over-erosion in voxel units at the final sharpness).
+        self.loss_shift = ti.field(dtype=ti.f32, shape=())
+        self.loss_shift[None] = 0.0
+
         # Air-cut penalty: a per-step term that fires when the swept tool occupies
         # EMPTY stock (tool inside, no remaining material). This is what "cutting
         # air" costs -- the optimizer is charged for every step the cutter spends
@@ -996,7 +1009,7 @@ class CSGSimulatorDelta:
             stock_d = self.stock[T, i, j, k]
             target_d = self.target_sdf(p)
 
-            sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
+            sa = ti.max(-50.0, ti.min(50.0, (stock_d + self.loss_shift[None]) * scale))
             ta = ti.max(-50.0, ti.min(50.0, target_d * scale))
             stock_occ = 1.0 / (1.0 + ti.exp(sa))
             target_occ = 1.0 / (1.0 + ti.exp(ta))
