@@ -112,6 +112,34 @@ soft ≈0.85 but HARD ≈0.55. So:
 - k80 re-seeds: s1 0.734, s2 0.753, s3 0.730 @ ~iter 1800-1960 — reproducible
   across seeds (not a seed-1 fluke).
 
+## k80 multi-seed (confirmed reproducible)
+
+| seed | dice |
+|------|------|
+| 1 | 0.784 |
+| 2 | 0.821 |
+| 3 | 0.795 |
+| **mean** | **0.800 ± 0.016** |
+
+vs baseline (k=10) hard dice 0.635 best-ckpt (sustained ~0.55). k80 is
+**+0.165 over baseline, reproducibly** (3 seeds, all > baseline's best). The
+win is real, not seed-1 luck.
+
+## Batch-2 finals (sphere, hard dice)
+
+| config | dice |
+|--------|------|
+| op_base (rf+w_len+w_step, k=10) | 0.635 |
+| op_k50 | 0.775 |
+| op_k80 | 0.788 (≈ rand_k80 — OP vs random ~same, k dominates) |
+| rand_k250 | 0.773 (too high, inverts) |
+| **rand_k150** | **0.830** (best, single seed) |
+
+Sweet spot k_final ∈ [100, 150]. Batch 3 sweeping 100/120/180/200 + k150
+re-seeds s2/s3 + k_init=40→150 (faster early climb, was 0.681 @ iter 109).
+Also running k150 + viz stages (GPU 8) to confirm hard dice survives trunc
+(deployable post-trunc metric).
+
 ## Next: refine k_final around 150 (100/120/180/200), re-seed k150, then
 generality on box/pyramid/cylinder.
 
