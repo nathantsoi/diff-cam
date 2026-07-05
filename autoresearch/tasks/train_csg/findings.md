@@ -57,18 +57,18 @@ trunc — verified `trajectory.untruncated.npy == trajectory.npy`).
 ## Size robustness (0.75in / 1in / 1.5in stock, proportional target)
 
 The method **generalizes** across stock sizes (crash-safe, best@iter0 init-peak
-pattern holds for all shapes at 0.75in; opt-helps for the 1in pyramid only),
-and dice is **monotonically decreasing in stock size for ALL 4 shapes** — the
-fixed 25mm tool spans more of a smaller stock (1.31 stock-heights at 0.75in →
-0.66 at 1.5in), so more interior is reachable:
+pattern holds for all shapes at 0.75in; opt-helps for the 1in pyramid only at
+adequate iters), and dice is **monotonically decreasing in stock size for ALL 4
+shapes** — the fixed 25mm tool spans more of a smaller stock (1.31 stock-heights
+at 0.75in → 0.66 at 1.5in), so more interior is reachable:
 
-| shape    | 0.75in | 1in    | 1.5in  | crash-safe? | notes |
-|----------|--------|--------|--------|-------------|-------|
-| box      | 0.937  | 0.892  | 0.884  | yes | z-invariant square orbit; most size-robust (Δ-0.05 full range) |
-| cyl      | 0.933  | 0.916  | 0.842  | yes | curved side; moderate |
-| sphere   | 0.843  | 0.819  | 0.705  | yes | 3D interior; largest swing (Δ-0.14) |
-| pyramid  | 0.556  | 0.457  | 0.431  | yes | ceiling-limited; opt-helps only at 1in |
-| **mean** | **0.817** | **0.771** | **0.716** | | |
+| shape    | 0.75in | 1in    | 1.5in        | crash-safe? | notes |
+|----------|--------|--------|--------------|-------------|-------|
+| box      | 0.937  | 0.892  | 0.884        | yes | z-invariant square orbit; most size-robust (Δ-0.05 full range) |
+| cyl      | 0.933  | 0.916  | 0.842        | yes | curved side; moderate |
+| sphere   | 0.843  | 0.819  | 0.705        | yes | 3D interior; largest swing (Δ-0.14) |
+| pyramid  | 0.546  | 0.526  | ~0.34 ±0.05  | yes | ceiling-limited; opt-HELPS at 1in (0.40→0.526 @200-iter); 1.5in NON-deterministic (see methodology); 0.75in best@iter0 |
+| **mean** | **0.816** | **0.788** | **~0.693** | | (pyramid revised: 0.556→0.546, 0.457→0.526, 0.431→~0.34) |
 
 Takeaway: the crash-safe ceilings are **reachability ceilings set by the
 tool-to-stock ratio**. Flat/z-invariant surfaces (box) are most robust; curved/3D
@@ -264,6 +264,18 @@ articulated holder) lifts it.
   × max-steps × stock size), not a pyramid invariant.
 - Crash-safe pyramid `holder_overlap=0`, trunc no-trim (min clearance 21mm) —
   the path is genuinely collision-free; the loss is purely the unreachable waste.
+- **NON-DETERMINISM at 1.5in pyramid (important caveat):** the 1.5in pyramid
+  optimization is run-to-run NON-deterministic — same config/seed, the init is
+  deterministic (iter0=0.319 reproducibly) but the optimizer trajectory diverges
+  (original 25-iter gave best@iter20 0.431; a re-run gave best@iter10 0.328; a
+  200-iter gave 0.344). The original 0.431 was a lucky high-variance run; the
+  true 1.5in ceiling is ~0.33–0.35 (two runs agree) with ~0.1 variance. **The 1in
+  pyramid IS deterministic** — independent 100-iter and 200-iter runs agree to 4
+  decimals at iter80 (0.5171), so the 1in 0.526 ceiling is solid. The 0.75in is
+  init-determined (best@iter0, deterministic). Treat 1.5in pyramid numbers as
+  ±0.05; single-run 1.5in comparisons are unreliable. Likely cause: the larger
+  1.5in grid amplifies CUDA atomic-add non-determinism in the gradient, and the
+  rough 1.5in loss landscape makes the optimizer path-sensitive.
 - **Training-barrier vs trunc-threshold mismatch**: the holder collision barrier
   (`holder_margin`, default 0.0) only prevents holder *penetration* during
   training (`holder_overlap=0`), but `truncate-collision` requires *1.0mm
