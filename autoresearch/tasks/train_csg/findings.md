@@ -247,8 +247,12 @@ articulated holder) lifts it.
 - `--no-z-floor --no-trunc` recovers 0.9306 sphere / 0.8166 pyramid but with
   `holder_overlap` in the millions — physically infeasible, a real crash.
 - Higher holder penalty weight (500, 10× default) + margin 0.04 on the pyramid:
-  REGRESSES to 0.417 (over-constrains optimizer, pushes holder away). Default
-  weight 50 is optimal — the champion's moves don't violate clearance.
+  CLEAN re-test @512 @200-iter = 0.5255 vs default 0.5258 — **NO EFFECT** (diff
+  0.0003, curves identical). The barrier is INERT for the champion: the opt's
+  improving moves don't violate clearance (min clr 5.7mm ≈ default 5.8mm), so the
+  barrier never binds. [The earlier "regresses to 0.417" was a wrong-baseline
+  artifact — 0.417 was the 1536 baseline, not a regression.] Default weight 50 /
+  margin 0 is optimal; the holder barrier is a dead lever at the correct config.
 
 ## Methodology notes
 
@@ -305,10 +309,10 @@ articulated holder) lifts it.
   — saturates at 50mm; 0.840 is the ceiling for any tool ≥50mm.**
 - The `holder_margin` soft barrier (weight 50) is overpowered by the residual
   loss — but raising it does NOT help (see dead lever above): a 10× barrier
-  (weight 500 + margin 0.04) REGRESSES the pyramid to 0.417 (over-constrains the
-  optimizer, pushes the holder away). Default weight 50 / margin 0 is optimal.
+  (weight 500 + margin 0.04) @512 @200-iter = 0.5255 vs default 0.5258 — NO
+  EFFECT (inert). The barrier never binds because the champion's opt moves don't
+  violate clearance (min clr 5.7mm). Default weight 50 / margin 0 is optimal.
   The face-hugging-low-zb path stays closed because of **coverage geometry**
   (single-radius bands), not the barrier weight. A hard holder clamp (analogous
   to the z-floor) remains untested but would only recover the dead ring variants
-  to ~0.42, still below the 0.457 coarse-grid champion — not a path to beating
-  the ceiling.
+  to ~0.42, still below the 0.526 champion — not a path to beating the ceiling.
