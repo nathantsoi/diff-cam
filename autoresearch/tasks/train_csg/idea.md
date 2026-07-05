@@ -446,6 +446,45 @@ sphere_bowl across init modes.**
 Bowl is robust without raster_fine/m256 (concavity gradient-reachable from
 random init, like single shapes).
 
+## DE-BIASED LOSS (`--loss-shift`) — implemented & tested
+
+Implemented a minimal hard-carve-aware loss lever: add `loss_shift` to `stock_d`
+before the loss sigmoid in `compute_loss` (one field + one add, default 0 = off,
+no regression risk). Motivation: the soft `apply_cut` over-erodes by
+~log(2)/kv per cut, so the soft stock is biased NEGATIVE (too carved); shifting
+stock_d should de-bias the loss toward the hard carve.
+
+### loss-shift +UP RESULT (shift = +0.24, +0.5, +1.0) — WRONG DIRECTION
+
+| config | train | viz | carved vox |
+|--------|-------|-----|-----------|
+| hole sub6 (no shift) | 0.683 | 0.237 | 57317 |
+| hole sub6 shift +0.24 | 0.682 | 0.243 | 58785 |
+| hole sub6 shift +0.50 | 0.656 | 0.232 | 63116 |
+| hole sub6 shift +1.00 | 0.615 | 0.215 | 70332 |
+| sphere shift +0.24 | 0.824 | 0.824 | — |
+| sphere shift +0.50 | 0.815 | 0.815 | — |
+
+**Shift +UP does NOT close the gap and INCREASES over-carve** (carved voxels
+57317→70332 monotonically with shift). The viz stays flat (0.243 vs 0.237).
+Reasoning: shifting stock_d UP makes the loss think the stock is LESS carved
+than the soft forward shows → it pushes the optimizer to carve MORE → worsens
+the over-carve/gouge. **The +direction is wrong.** Sphere mild regression
+(0.830→0.815) confirms it just adds carve bias.
+
+### loss-shift -DOWN test (in flight) — the correct direction?
+
+The soft forward OVER-erodes (fills the narrow hole with carved voxels). So the
+loss should see the hole region as OVER-carved and be PENALIZED for filling it.
+That means shifting stock_d DOWN (more negative → stock_occ higher → the loss
+"sees" more remaining material in the hole → residual low, gouge... actually
+the hole is target-absent so over-carving there is neither residual nor gouge —
+it's UNPENALIZED). **This reveals the deeper issue**: the current loss
+(residual + gouge) has NO term penalizing carving in target-absent interior
+regions (the hole interior is target-absent AND stock-was-present → carving it
+is "free" loss-wise). A loss-shift cannot fix this because the hole interior
+contributes ~0 to the loss either way. Testing -0.24/-0.5/-1.0 to confirm.
+
 | shape | 50mm k150 | 75mm k150 |
 |-------|-----------|-----------|
 | sphere | 0.830 | 0.832 |
