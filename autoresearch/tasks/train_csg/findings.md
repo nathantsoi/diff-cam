@@ -90,14 +90,17 @@ interior *from above* (spanning [base, base+1.97], mostly above the stock)
 without the orbit clearing the equator. **A tool spanning the equator must orbit
 outside it** — the fundamental reachability ceiling, independent of tool length.
 
-**Tool length is shape-dependent**: a 50mm tool raises the 1in sphere
-(0.819→0.840, lower-interior wedge reachable from above) but does NOT help the
-1in pyramid (0.457→0.421, slight regress). The pyramid's sloped-face inner band
-is *alongside* the slope, not below it — a longer tool reaching down from above
-gains nothing; only a side approach reaches it, and that gouges. So smaller
-stock helps every shape (the geometry shrinks into the tool's reach), but a
-longer tool helps only shapes whose ceiling is *below* (sphere), not *beside*
-(pyramid).
+**Tool length is shape-dependent AND saturates**: a 50mm tool raises the 1in
+sphere (0.819→0.840, lower-interior wedge reachable from above) but does NOT
+help the 1in pyramid (0.457→0.421, slight regress). The pyramid's sloped-face
+inner band is *alongside* the slope, not below it — a longer tool reaching down
+from above gains nothing; only a side approach reaches it, and that gouges.
+And the 50mm tool at 0.75in is **byte-identical** to the 25mm tool (viz 0.84264,
+same carved-voxel count): once the tool is taller than the stock (25mm > 19mm),
+the lower-interior is already reachable and extra length adds nothing. So:
+smaller stock helps every shape (geometry shrinks into the tool's reach); a
+longer tool helps only shapes whose ceiling is *below* (sphere) not *beside*
+(pyramid), and only when the stock exceeds the default tool.
 
 ## What changed in the sim (recap)
 
