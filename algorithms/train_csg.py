@@ -750,6 +750,25 @@ def main():
         revs = args.zlayer_revs
         osc = args.zlayer_osc
         z_top, z_bot = 0.95, -0.95
+        # Crash-safe floor: the tool BASE must stay above z_floor so the holder
+        # (riding above the base by tool_height ~= stock height) cannot plunge
+        # into the remaining stock -- a real machine crash the new collision
+        # handling enforces. The deep plunge to z_bot=-0.95 was the old zlayer's
+        # mechanism for carving the lower exterior (it put the tool's z-range
+        # below the equator); it is now forbidden, so stop the descent at the
+        # floor. (Mirrors the sim z_floor computed at line ~567.) The radius
+        # scheduling below already uses the equator radius for base in
+        # [z_floor, 0.5] (z_eq clamps to 0.5), so the lower region carves the
+        # equator annulus [r_sphere_equator, 0.5] -- crash-free but it cannot
+        # reach the lower-interior waste (below equator, inside r_equator),
+        # which is the new crash-safe ceiling.
+        stock_z_mm = args.stock_size_in[2] * 25.4
+        if args.target_shape in ("cylinder", "pyramid"):
+            _part_bottom_z = 0.5 - args.target_height_mm / (2.0 * stock_z_mm)
+        else:
+            _part_bottom_z = 0.5 - args.target_radius_mm / stock_z_mm
+        _z_floor = _part_bottom_z - args.z_floor_epsilon_mm / stock_z_mm
+        z_bot = max(z_bot, _z_floor + 0.005)
         r_outer = 0.5 + r_tool
         if args.target_shape == "pyramid":
             # 4-phase gouge-free path (tool extends UP from base, spans
