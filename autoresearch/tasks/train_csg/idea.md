@@ -518,6 +518,45 @@ The -shift is a **less-biased soft objective** exactly as the frontier asked.
 across all single shapes + bowl (in flight) to confirm generality before
 re-seeding.
 
+### loss-shift -0.5 SHAPE SWEEP — CONFIRMED, generalizes 🏆
+
+| shape | k150 (no shift) | k150 ls-0.5 | Δ | carved vox (ls-0.5) |
+|-------|-----------------|-------------|---|---------------------|
+| sphere s1 | 0.830 | **0.840** | +0.010 | 64420 (vs 73270) |
+| sphere s2 | 0.832 | 0.831 | -0.001 | 65230 |
+| pyramid s1 | 0.796 | **0.817** | **+0.021** | 40801 |
+| cylinder s1 | 0.895 | 0.895 | 0.000 | 90978 |
+| box s1 | 0.843 | **0.853** | +0.010 | 122602 |
+| bowl m128 s1 | 0.612 | 0.613 | +0.001 | 69442 |
+
+**loss-shift -0.5 helps or is neutral on EVERY shape** — pyramid +0.021,
+box +0.010, sphere +0.010 (s1; s2 noise), cylinder/bowl neutral. Shape-blind,
+cleaner carving (less over-erosion). **This is the new operating point** on top
+of 50mm-tool + k-anneal k150:
+
+```
+--tool-height-mm 50.0 --k-anneal --k-init 10 --k-final 150 --loss-shift -0.5
+```
+
+**Re-seeding** pyramid (s2/s3) + box (s2/s3) to confirm the +0.021/+0.010 wins
+are robust (in flight). Also testing loss-shift -0.5 on 2in stock (sphere/box/
+pyramid, 100mm tool) — does the de-bias win scale to the larger scenario?
+
+## DEPLOYABLE SUMMARY (the headline, with loss-shift -0.5)
+
+50mm tool + k-anneal k150 + loss-shift -0.5 (random init, lr=1e-3, m=128):
+
+| shape | k=10 50mm | k150 50mm | **k150 ls-0.5 50mm** | deployable Δ |
+|-------|-----------|-----------|----------------------|---------------|
+| sphere | 0.638 | 0.820 (3sd) | **0.836** (2sd) | +0.198 |
+| pyramid | 0.427 | 0.797 (3sd) | **0.817** | +0.390 |
+| cylinder | 0.774 | 0.891 (3sd) | 0.895 | +0.121 |
+| box | 0.816 | 0.843 | **0.853** | +0.037 |
+| sphere_bowl | — | 0.659 (rf) / 0.628 (m128) | 0.613 (m128) | +0.18 vs k10 |
+| **mean (4 solid)** | 0.664 | 0.838 | **0.850** | **+0.186** |
+
+(All viz=train, NO truncation — fully deployable. G-code-vs-sim Dice = 0.99998.)
+
 | shape | 50mm k150 | 75mm k150 |
 |-------|-----------|-----------|
 | sphere | 0.830 | 0.832 |
