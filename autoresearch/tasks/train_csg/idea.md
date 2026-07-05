@@ -365,6 +365,46 @@ failure. k-anneal still helps within the limit (k150 0.283 > k10 0.131).
 - Also: bowl k150 t50 m=128 random (does bowl work without rf/m256, like single
   shapes?), hole k150 t50 sub6 m=128 random.
 
+### sphere_hole FEASIBLE-GEOMETRY RESULT — the soft/hard gap on narrow features
+
+| config | train dice | **viz dice** | carved vox | target vox |
+|--------|-----------|--------------|-----------|-----------|
+| hole k10 t50 tr1.5 (default hole) | 0.129 | 0.129 | 123104 | 8528 |
+| hole k150 t50 tr1.5 (default hole) | 0.282 | 0.282 | 47551 | 8528 |
+| hole k150 t50 sub6 m256 (feasible shell) | **0.683** | **0.237** | 57317 | 8528 |
+| hole k150 t50 sub6 m128 (random) | 0.664 | 0.215 | 58367 | 8528 |
+
+**Two distinct failure modes, both real:**
+
+1. **Default hole (sub9.525, shell 1.905mm)**: even with feasible tool_r=1.5,
+   viz stuck at 0.282. The hole is WIDE (9.525mm radius) relative to the sphere
+   (11.43mm) → the shell is a thin ring → any tool path that carves the
+   through-hole also gouges the thin shell. Topology + thin-shell limit.
+
+2. **Smaller hole (sub6, shell 5.43mm > tool)**: train dice 0.683 but **viz
+   0.237** — a 0.45 SOFT/HARD GAP. The soft `apply_cut` (k=150) still
+   over-erodes ~log(2)/150 per step × 256 steps; this over-erosion FILLS the
+   6mm-radius hole in the soft forward (high train dice) but the hard carve
+   correctly leaves the hole solid (low viz). **k=150 is not sharp enough for
+   narrow negative features** — the soft-union excess, negligible for big
+   shapes, accumulates enough to close a narrow hole.
+
+**This is the frontier k-anneal cannot fully close**: high k reduces but cannot
+eliminate the soft-union over-erosion, and for narrow negative features (holes,
+slots) the residual over-erosion fills the feature. The fix would be the
+documented pivot #6: a **hard-carve-aware loss** (evaluate `compute_loss` on a
+separately-sharpened stock replica while keeping `apply_cut` soft for gradients)
+— so the optimizer SEES the hole-filling and is penalized. OR k_final >> 150
+(maybe 500-1000) for narrow features, at the cost of gradient death. This is the
+clearest direction for the next run.
+
+### sphere_bowl m=128 random RESULT
+
+bowl k150 t50 m128 random = **0.612** (viz=train, NO trunc) vs rf/m256 0.659.
+Bowl works without raster_fine/m256 (−0.047), like the single shapes — the bowl
+concavity is gradient-reachable from random init. **k-anneal transfers to
+sphere_bowl across init modes.**
+
 | shape | 50mm k150 | 75mm k150 |
 |-------|-----------|-----------|
 | sphere | 0.830 | 0.832 |
