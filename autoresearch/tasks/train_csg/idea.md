@@ -88,6 +88,33 @@ seed2/seed3 of k80 running on GPU 7/9 to confirm.
 beat 0.85? Also testing k_final=150/250 (push higher, since k80 was still
 climbing monotonically at iter 3500).
 
+## METRIC RESOLUTION (critical)
+
+The documented 0.85 sphere ceiling is **SOFT dice** (the jul1 run's eval used
+the soft `forward`). The CURRENT code (autoresearch HEAD `16b6e44`) evals with
+`sim.forward_hard(T)` (line 990) — i.e. the reported `dice:` is now **HARD
+carve dice** (the honest, deployable metric). At k=10 the soft/hard gap is ~0.30:
+soft ≈0.85 but HARD ≈0.55. So:
+
+- op_base (raster_fine + w_len + w_step, k=10): dice @ iter 0 = **0.525**, stays
+  ~0.55 — the raster_fine init does NOT give 0.85 on the current (hard-dice)
+  code; the old 0.85 was soft dice. k=10 soft optimization cannot lift hard dice
+  (gradient biased by over-erosion).
+- k-anneal to high k is **closing the soft/hard gap**: it makes the training
+  `apply_cut` sharpen toward the hard eval, so the optimizer targets HARD
+  coverage. rand_k150 trajectory: 0.549→0.671→0.756→0.798→**0.812** @ iter 2000
+  (still climbing) — HARD dice approaching the old soft ceiling, a real
+  deployable-dice win. This is exactly the documented #1 frontier.
+- k150 (0.812 @ 2000) > k250 (0.769 @ 2000): sweet spot ~100-200, inverts higher.
+- op_k80 (0.734 @ 1962) ≈ rand_k80 s1 (0.734 @ 1962): k-anneal is INIT-ROBUST
+  (OP vs random barely matters; k dominates). Simplifies: can drop the fragile
+  raster_fine/w_len/w_step machinery and use bare random + k-anneal.
+- k80 re-seeds: s1 0.734, s2 0.753, s3 0.730 @ ~iter 1800-1960 — reproducible
+  across seeds (not a seed-1 fluke).
+
+## Next: refine k_final around 150 (100/120/180/200), re-seed k150, then
+generality on box/pyramid/cylinder.
+
 ## Mid-run k-sweep signal (sphere, seed 1, ~iter 1500)
 
 | run | dice @ ~1500 | grad | read |
