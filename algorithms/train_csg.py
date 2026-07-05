@@ -792,18 +792,22 @@ def main():
             h = args.target_height_mm / stock_mm
             base_z = 0.5 - 0.5 * h
             apex = base_z + h
-            r_safe_max = r_sp + r_tool + margin
-            z_base_below = base_z - 1.0 - margin           # tool top = base_z - margin < pyramid base
+            # Crash-safe descent floor: the tool BASE must stay above z_holder_clear
+            # (else the holder breaches the 1mm stock-top clearance and the trunc
+            # stage trims trailing steps) AND above z_floor (else the sim clamps
+            # the executed base and the full-height tool gouges the pyramid body).
+            # The old 4-phase path plunged the base to z_base_below = base_z-1-margin
+            # ~= -0.955 to carve the below-pyramid slab; that deep plunge is now
+            # forbidden, so the bottom slab [0, base_z] is unreachable crash-free
+            # -- the crash-safe ceiling (mirrors the sphere lower-interior wedge).
+            z_descent_bot = max(base_z, _z_holder_clear, _z_floor + 0.005)
             n_above = int(n * 0.26)
-            n_below = int(n * 0.24)
-            n_descent = max(8, int(n * 0.05))
-            n_beside = n - n_above - n_below - n_descent
+            n_term = int(n * 0.20)                       # terminal low-annulus orbit
+            n_beside = n - n_above - n_term
             xs = np.linspace(0.12, 0.88, 7)
             ys = np.linspace(0.12, 0.88, 7)
-            bx = np.linspace(0.0 + r_tool, 1.0 - r_tool, 9)
-            by = np.linspace(0.0 + r_tool, 1.0 - r_tool, 9)
             pos = []
-            # 1. above boustrophedon
+            # 1. above-disk boustrophedon (base in [0.95, apex+0.02]; carves top slab)
             for z in np.linspace(0.95, apex + 0.02, 4):
                 for j, y in enumerate(ys):
                     row_xs = xs if j % 2 == 0 else xs[::-1]
@@ -817,10 +821,13 @@ def main():
                     break
             while len(pos) < n_above:
                 pos.append(pos[-1])
-            # 2. beside square orbit
+            # 2. beside square-annulus orbit (base descends apex -> z_descent_bot;
+            #    orbit stays outside the pyramid cross-section at every z, so it
+            #    carves the waste annulus gouge-free). Replaces the old deep-plunge
+            #    phases 3-4 which are now crash-forbidden.
             for t in range(n_beside):
                 frac = t / max(1, n_beside - 1)
-                zb = apex + (base_z - apex) * frac
+                zb = apex + (z_descent_bot - apex) * frac
                 hp = r_sp * (1.0 - (zb - base_z) / h) if base_z <= zb <= apex else 0.0
                 s_safe = hp + r_tool + margin
                 s_orbit = s_safe + (r_outer - s_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
@@ -828,22 +835,18 @@ def main():
                 cx, cy = math.cos(phase), math.sin(phase)
                 m = max(abs(cx), abs(cy))
                 pos.append([0.5 + s_orbit * cx / m, 0.5 + s_orbit * cy / m, float(zb)])
-            # 3. safe-radius descent (circular; clears lower annulus)
-            for t in range(n_descent):
-                frac = t / max(1, n_descent - 1)
-                zb = base_z + (z_base_below - base_z) * frac
-                phase = 2.0 * math.pi * 3.0 * frac
-                pos.append([0.5 + r_safe_max * math.cos(phase),
-                            0.5 + r_safe_max * math.sin(phase), float(zb)])
-            # 4. below-disk boustrophedon at fixed base (tool top < pyramid base)
-            for j, y in enumerate(by):
-                row_xs = bx if j % 2 == 0 else bx[::-1]
-                for x in row_xs:
-                    pos.append([float(x), float(y), float(z_base_below)])
-                    if len(pos) >= n_above + n_beside + n_descent + n_below:
-                        break
-                if len(pos) >= n_above + n_beside + n_descent + n_below:
-                    break
+            # 3. terminal annulus orbit at the lowest reachable z (extra coverage of
+            #    the annulus just above the pyramid base -- the closest the tool can
+            #    get to the below-slab without a deep plunge).
+            for t in range(n_term):
+                frac = t / max(1, n_term - 1)
+                hp = r_sp * (1.0 - (z_descent_bot - base_z) / h) if base_z <= z_descent_bot <= apex else 0.0
+                s_safe = hp + r_tool + margin
+                s_orbit = s_safe + (r_outer - s_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
+                phase = 2.0 * math.pi * revs * frac
+                cx, cy = math.cos(phase), math.sin(phase)
+                m = max(abs(cx), abs(cy))
+                pos.append([0.5 + s_orbit * cx / m, 0.5 + s_orbit * cy / m, float(z_descent_bot)])
             positions = np.array(pos[:n], dtype=np.float32)
             if len(positions) < n:
                 positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])
