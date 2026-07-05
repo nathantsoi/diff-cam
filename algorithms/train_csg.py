@@ -190,6 +190,9 @@ class Args:
     The optimizer itself is shape-agnostic: it reads only the baked target SDF
     grid, so any supported shape -- including combined-CSG shapes and unseen
     additions -- trains without per-shape code or metadata."""
+    target_sdf_path: str | None = None
+    """path to a .npz target grid from utils/step_to_sdf.py (required when
+    --target_shape grid). The npz shape overrides --resolution/--voxel_size_mm."""
     k_init: float = 10.0
     """initial smoothness parameter for the smooth-min/max SDF ops"""
     k_anneal: bool = False
@@ -565,7 +568,8 @@ def main():
                             stock_origin_in=args.stock_origin_in, dt=args.dt,
                             rapid_ipm=args.rapid_ipm, feed_ipm=args.feed_ipm,
                             safe_distance_in=args.safe_distance_in,
-                            enforce_speed_limits=args.enforce_speed_limits)
+                            enforce_speed_limits=args.enforce_speed_limits,
+                            target_sdf_path=args.target_sdf_path)
     sim.set_target_params(radius_mm=args.target_radius_mm,
                           height_mm=args.target_height_mm,
                           half_size_mm=args.target_radius_mm,

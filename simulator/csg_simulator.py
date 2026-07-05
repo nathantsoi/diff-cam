@@ -146,6 +146,32 @@ class CSGSimulatorDelta:
         self.Nz = max(1, int(round(sz / self.v)))
         self.resolution = max(self.Nx, self.Ny, self.Nz)  # voxels on longest axis
 
+        # For grid targets, the NPZ array shape defines the voxel grid.
+        # Override Nx/Ny/Nz (and resolution) so that the stock AND target
+        # fields are allocated at the same shape as the loaded SDF.
+        if target_shape == "grid":
+            grid_array = None
+            if target_sdf_array is not None:
+                grid_array = target_sdf_array
+            elif target_sdf_path is not None:
+                data = np.load(target_sdf_path)
+                if "sdf" not in data:
+                    raise ValueError(f"Target NPZ file {target_sdf_path} does not contain 'sdf' array.")
+                grid_array = data["sdf"]
+            else:
+                raise ValueError("For target_shape='grid', either target_sdf_path or target_sdf_array must be provided.")
+            self._grid_array = grid_array.astype(np.float32)
+            gx, gy, gz = self._grid_array.shape
+            self.Nx, self.Ny, self.Nz = gx, gy, gz
+            self.resolution = max(gx, gy, gz)
+            # Recompute voxel size to match the grid
+            self.v = max(sx, sy, sz) / float(self.resolution)
+            # step_to_sdf samples distances in the normalized [0,1] cube, but
+            # every SDF in this simulator (stock, tool, loss sigmoid, renderer)
+            # measures in VOXELS — convert once at load so self.target holds
+            # the same units bake_target_grid stores for analytic shapes.
+            self._grid_array *= float(self.resolution)
+
         # Reachability: the stock (and, if its origin is known, its placement)
         # must fit inside the machine work volume. Warn rather than fail so
         # exploratory configs still run.
@@ -418,25 +444,9 @@ class CSGSimulatorDelta:
         # "sphere_bowl". 0 disables (plain shapes ignore it).
         self.tsub_vox = ti.field(dtype=ti.f32, shape=()); self.tsub_vox[None] = 0.0
 
-        # If it is a grid target, load the target grid data
+        # If it is a grid target, copy the pre-loaded array into the target field
         if self.target_shape == "grid":
-            grid_array = None
-            if target_sdf_array is not None:
-                grid_array = target_sdf_array
-            elif target_sdf_path is not None:
-                data = np.load(target_sdf_path)
-                if "sdf" not in data:
-                    raise ValueError(f"Target NPZ file {target_sdf_path} does not contain 'sdf' array.")
-                grid_array = data["sdf"]
-            else:
-                raise ValueError("For target_shape='grid', either target_sdf_path or target_sdf_array must be provided.")
-
-            if grid_array.shape != (resolution, resolution, resolution):
-                raise ValueError(
-                    f"Target grid shape {grid_array.shape} does not match resolution {(resolution, resolution, resolution)}"
-                )
-
-            self.target.from_numpy(grid_array.astype(np.float32))
+            self.target.from_numpy(self._grid_array)
 
         # ---- Loss ----
         self.loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
@@ -833,25 +843,12 @@ class CSGSimulatorDelta:
 
     @ti.kernel
     def bake_target_grid(self):
-<<<<<<< HEAD
-        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            p = ti.Vector(
-                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
-            )
-            self.target[i, j, k] = self.target_sdf(p)
-=======
         if ti.static(self.target_shape != "grid"):
-            for i, j, k in ti.ndrange(self.resolution, self.resolution, self.resolution):
+            for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
                 p = ti.Vector(
-                    [
-                        (i + 0.5) * self.dx,
-                        (j + 0.5) * self.dx,
-                        (k + 0.5) * self.dx,
-                    ]
+                    [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
                 )
-
                 self.target[i, j, k] = self.target_sdf(p)
->>>>>>> 8371308 (STEP to SDF changes)
 
     # ========================================================================
     # Forward pass: reconstruct positions → init → carving → loss
@@ -1676,13 +1673,8 @@ class CSGSimulatorDelta:
 
     @ti.func
     def target_normal(self, p):
-<<<<<<< HEAD
         """Analytic-ish normal of target via central differences on target_sdf."""
         eps = 1.5 / self.resolution  # ~1.5 voxels in normalized coords
-=======
-        """Approximate surface normal of target via central differences on target_sdf."""
-        eps = self.dx * 1.5
->>>>>>> 8371308 (STEP to SDF changes)
         dx = ti.Vector([eps, 0.0, 0.0])
         dy = ti.Vector([0.0, eps, 0.0])
         dz = ti.Vector([0.0, 0.0, eps])

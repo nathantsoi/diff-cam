@@ -6,7 +6,7 @@ import taichi as ti
 
 from utils.step_to_sdf import step_to_sdf
 from simulator.csg_simulator import CSGSimulatorDelta
-from cam_env.cam_env import CamEnv
+from cam_env.cam_env import CamEnvDiff
 
 def test_voxel_centers_and_normalization():
     # Test normalization math: centering and uniform fit with margin
@@ -72,11 +72,14 @@ def test_simulator_grid_target_loading(tmp_path):
         max_steps=10,
         target_shape="grid",
         target_sdf_path=npz_path,
+        stock_size_in=(1.0, 1.0, 1.0),
     )
 
     assert sim.target_shape == "grid"
+    # The simulator converts the npz's normalized-cube distances to VOXEL
+    # units at load (matching stock/tool SDFs and bake_target_grid).
     target_loaded = sim.target.to_numpy()
-    assert np.allclose(target_loaded, sdf_sphere)
+    assert np.allclose(target_loaded, sdf_sphere * resolution)
 
     # Compute target volume and verify matches
     sim.set_target_volume()
@@ -85,7 +88,7 @@ def test_simulator_grid_target_loading(tmp_path):
     assert np.isclose(volume, expected_volume)
 
     # Initialize environment with grid target
-    env = CamEnv(
+    env = CamEnvDiff(
         resolution=resolution,
         max_steps=10,
         target_shape="grid",
@@ -97,7 +100,7 @@ def test_simulator_grid_target_loading(tmp_path):
     # obs_dims = 3 + 2 + res^3 + res^3
     assert obs.shape[0] == 3 + 2 + resolution**3 + resolution**3
     target_obs = obs[-(resolution**3) :]
-    assert np.allclose(target_obs, sdf_sphere.ravel())
+    assert np.allclose(target_obs, sdf_sphere.ravel() * resolution)
 
 def test_occ_step_to_sdf_box(tmp_path):
     # Skip if occwl or OCC is not installed in the running environment
