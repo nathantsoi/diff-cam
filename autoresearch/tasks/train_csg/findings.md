@@ -190,6 +190,13 @@ articulated holder) lifts it.
   opt-helps (best@iter15) to opt-hurts (best@iter0): the smaller tool's loss
   landscape differs. Crash-safe (min clr 11.3mm, no trim). Dead lever — confirms
   the ceiling is set by the **slope/holder geometry**, not the cutter width.
+- **Tool radius on sphere** (1/8", 1in): viz 0.794 vs 0.819 — also regression,
+  but smaller (-0.025 vs pyramid's -0.051). The sphere's CURVED geometry makes
+  `r_tool` a larger term in its uncarvable band (vs the pyramid's linear-slope-
+  dominated band), so band-narrowing helps more — but coverage loss (smaller
+  tool, fixed 1536 steps) still dominates. **Tool radius is a dead lever across
+  both shapes**: the ceiling is set by slope/holder geometry + the fixed-step
+  coverage budget, not the cutter width.
 - Higher-T coverage for pyramid (revs/osc/T): does NOT help (ceiling is
   reachability, not density). 0.4159 → 0.4102.
 - 1D orbit vs 2D boustrophedon for the pyramid annulus: same ~0.42 (the
