@@ -31,18 +31,24 @@
 \newlabel{sec:param}{{1.3}{2}{Trajectory Parametrization}{subsection.1.3}{}}
 \@writefile{toc}{\contentsline {subsection}{\numberline {1.4}Loss Function}{2}{subsection.1.4}\protected@file@percent }
 \newlabel{sec:loss}{{1.4}{2}{Loss Function}{subsection.1.4}{}}
+\@writefile{lof}{\contentsline {figure}{\numberline {1}{\ignorespaces \textbf  {The \texttt  {train\_csg} differentiable optimization, evaluation, and early-stopping loop.} At each training iteration $i$, commanded tool displacements $\bm  {\delta }^{(i)}$ are passed through speed-limit and $z$-floor subgradient gates into the differentiable CSG carving simulator unrolled within a \texttt  {ti.ad.Tape}. Backpropagated gradients $\partial \mathcal  {L}_{\mathrm  {geom}}/\partial \bm  {\delta }$ are $\ell _2$-norm clipped to update the trajectory parameters via Adam. Periodically (every $K$ iterations), soft refinement branches to execute an exact boolean carve from the canonical tool start $\mathbf  {x}_0$, scoring deployable metrics (Dice, ASD, HD95). Whenever deployable hard Dice surpasses the historical maximum, an early-stopping authority snapshots the exact pre-step trajectory and metric dictionary into memory without end-of-training re-evaluation (circumventing GPU atomic-add reduction nondeterminism).}}{3}{figure.1}\protected@file@percent }
+\newlabel{fig:optim_eval_loop}{{1.5}{3}{The Optimization and Evaluation Loop}{figure.1}{}}
 \newlabel{eq:loss}{{6}{3}{Loss Function}{equation.1.6}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.5}Optimization}{3}{subsection.1.5}\protected@file@percent }
-\newlabel{sec:optim}{{1.5}{3}{Optimization}{subsection.1.5}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.6}The Soft/Hard Carve Gap}{3}{subsection.1.6}\protected@file@percent }
-\newlabel{sec:gap}{{1.6}{3}{The Soft/Hard Carve Gap}{subsection.1.6}{}}
-\newlabel{eq:hard-carve}{{7}{3}{The Soft/Hard Carve Gap}{equation.1.7}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.7}Geometry-Informed Initialization}{4}{subsection.1.7}\protected@file@percent }
-\newlabel{sec:init}{{1.7}{4}{Geometry-Informed Initialization}{subsection.1.7}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.8}Best-Checkpoint Selection}{5}{subsection.1.8}\protected@file@percent }
-\newlabel{sec:checkpoint}{{1.8}{5}{Best-Checkpoint Selection}{subsection.1.8}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.9}Evaluation Protocol}{5}{subsection.1.9}\protected@file@percent }
-\newlabel{sec:eval}{{1.9}{5}{Evaluation Protocol}{subsection.1.9}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.10}Summary}{5}{subsection.1.10}\protected@file@percent }
-\newlabel{sec:method-summary}{{1.10}{5}{Summary}{subsection.1.10}{}}
-\gdef \@abspage@last{5}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.5}The Optimization and Evaluation Loop}{3}{subsection.1.5}\protected@file@percent }
+\newlabel{sec:optim}{{1.5}{3}{The Optimization and Evaluation Loop}{subsection.1.5}{}}
+\@writefile{toc}{\contentsline {paragraph}{Iterative differentiable forward pass.}{3}{section*.5}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Loss backpropagation and parameter updates.}{4}{section*.6}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Periodic exact evaluation loop.}{5}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Early stopping via best-checkpoint snapshotting.}{5}{section*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.6}The Soft/Hard Carve Gap}{5}{subsection.1.6}\protected@file@percent }
+\newlabel{sec:gap}{{1.6}{5}{The Soft/Hard Carve Gap}{subsection.1.6}{}}
+\newlabel{eq:hard-carve}{{8}{5}{The Soft/Hard Carve Gap}{equation.1.8}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.7}Geometry-Informed Initialization}{6}{subsection.1.7}\protected@file@percent }
+\newlabel{sec:init}{{1.7}{6}{Geometry-Informed Initialization}{subsection.1.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.8}Best-Checkpoint Selection}{7}{subsection.1.8}\protected@file@percent }
+\newlabel{sec:checkpoint}{{1.8}{7}{Best-Checkpoint Selection}{subsection.1.8}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.9}Evaluation Protocol}{7}{subsection.1.9}\protected@file@percent }
+\newlabel{sec:eval}{{1.9}{7}{Evaluation Protocol}{subsection.1.9}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.10}Summary}{7}{subsection.1.10}\protected@file@percent }
+\newlabel{sec:method-summary}{{1.10}{7}{Summary}{subsection.1.10}{}}
+\gdef \@abspage@last{8}
