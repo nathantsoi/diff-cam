@@ -50,11 +50,69 @@ objective* — frontier candidate #1.
    path) but evaluate `compute_loss` on a separately-sharpened stock replica, so
    the objective is less biased without killing gradients.
 
+## Time budget (measured)
+
+5000 iters @ max-steps 128, voxel 0.5mm, eval-freq 10 takes ~30 min on an A6000
+(not 15). The eval `forward_hard(T)` every 10 iters is ~half the per-cycle cost
+(train forward+backward 0.22s/iter + ~2s/eval). I keep the documented config
+(iters 5000 / eval-freq 10) for comparability to the 0.85 ceiling and run 5-7
+concurrent on the free GPU farm to maintain throughput. Runs are NOT killed at
+20 min as long as they are making progress — the kill threshold is for
+runaway/stuck runs, and the protocol's own baseline command takes this long
+here.
+
+## k-sweep RESULT (sphere, seed 1, bare random init, k_init=10, 5000 iters)
+
+| k_final | dice (best ckpt) | grad regime | notes |
+|---------|------------------|-------------|-------|
+| 10 (baseline) | 0.642 | huge/oscillating (8-10) | STUCK ~0.55, best@4250 transient spike; soft-loss grad too biased to improve hard dice |
+| 20 | 0.639 | — | no help (k barely above 10) |
+| 30 | 0.712 | healthy then small | +0.070 |
+| 50 | 0.762 | small (0.02) | +0.120 |
+| **80** | **0.784** | small but recovering | **+0.142** — monotonic climb 0.549→0.784, best@4960 (sustained) |
+
+**Monotonic in k_final.** Higher k sharpens the training `apply_cut` toward the
+hard `forward_hard` eval → the soft-loss gradient aligns with the hard-dice
+metric → optimizer actually improves hard dice. The "gradient death" at high k
+(small grad norm) is HARMLESS: the sharp loss is very sensitive to tool position,
+so tiny param steps yield large dice gains. k=10's large gradients are BIG but
+BIASED (over-erosion), so they don't help hard dice.
+
+**Caveat**: baseline ran on GPU 0, k80 on GPU 3 — cross-GPU (but all identical
+A6000s; confound small vs the ±0.05 run variance and the +0.142 gap). Re-seeds
+seed2/seed3 of k80 running on GPU 7/9 to confirm.
+
+**BUT**: the bare-random baseline (0.642) is far below the documented 0.85
+(which uses the operating point: `--init-mode raster_fine --w-len 0.03
+--w-step 0.001`). Batch 2 tests k-anneal ON TOP of the operating point — does it
+beat 0.85? Also testing k_final=150/250 (push higher, since k80 was still
+climbing monotonically at iter 3500).
+
+## Mid-run k-sweep signal (sphere, seed 1, ~iter 1500)
+
+| run | dice @ ~1500 | grad | read |
+|-----|--------------|------|------|
+| baseline k=10 | 0.573 @ 2015 | ~2.5 (clipping) | slow random-init ramp |
+| k_final=30 | 0.622 @ 1486 | ~3.0 (healthy) | ahead of baseline |
+| k_final=50 | 0.654 @ 1469 | 0.02 (near-dead) | fast early, may plateau |
+| k_final=80 | 0.715 @ 1518 | 0.09 (recovering) | BEST so far, still climbing |
+
+Higher k_final climbs faster early (training forward sharpens toward the hard
+eval → better-aligned gradient) and k80's gradient is recovering, not dead.
+Open question: does k80 sustain the climb to ≥0.85, or plateau below? Finals
+will decide.
+
 ## Notes
 
-- Metric: primary = train-summary soft `dice:` (protocol-compliant, comparable
-  to documented ceilings). For promising runs also run `--stages train,trunc,viz`
-  to read the deployable hard-carve dice.
+- Metric clarification (verified in code): the in-loop eval calls
+  `sim.forward_hard(T)` (sharp max, k-INDEPENDENT) then `eval_metrics` — so the
+  reported `dice:` is already **hard-carve dice** (best checkpoint, pre-trunc),
+  comparable to the documented ~0.85 sphere ceiling. k only affects the TRAINING
+  forward (`apply_cut`, soft union) and thus the loss GRADIENT. So k-anneal is
+  purely a **gradient-bias reduction** lever: sharpening k late makes the soft
+  gradient less over-erosion-biased, better matching the hard-dice metric we
+  score. The viz stage (`--stages ...,viz`) gives the post-trunc deployable dice
+  for crash-safe runs; use it to confirm a win transfers.
 - Seed variance is ±0.04–0.05; a single run that moves <0.02 is noise. Re-seed
   wins ≥3× before believing.
 - GPUs 0,3,4,5,6,7,9 free (A6000 48GB). Use CUDA_VISIBLE_DEVICES per run.
