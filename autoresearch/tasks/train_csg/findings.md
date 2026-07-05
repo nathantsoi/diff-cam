@@ -197,6 +197,11 @@ articulated holder) lifts it.
   tool, fixed 1536 steps) still dominates. **Tool radius is a dead lever across
   both shapes**: the ceiling is set by slope/holder geometry + the fixed-step
   coverage budget, not the cutter width.
+- **Tool radius + doubled steps** (1/8", 1in sphere, 3072 steps): viz 0.797 vs
+  0.794 (1× steps) vs 0.819 (1/4"). Doubling the step budget recovered only
+  +0.003 — **coverage was NOT the issue**; the smaller tool genuinely carves no
+  more reachable area even with 2× the passes. Definitive: **the 1/4" end mill
+  is optimal**, and tool radius is dead neither at fixed nor doubled steps.
 - Higher-T coverage for pyramid (revs/osc/T): does NOT help (ceiling is
   reachability, not density). 0.4159 → 0.4102.
 - 1D orbit vs 2D boustrophedon for the pyramid annulus: same ~0.42 (the
