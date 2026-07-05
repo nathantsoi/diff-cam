@@ -226,6 +226,11 @@ def main():
                     help="safety margin (mm) for --truncate-collision: stop the "
                          "toolpath at the last segment whose holder-to-stock "
                          "clearance exceeds this")
+    ap.add_argument("--tool-height-mm", type=float, default=25.0,
+                    help="cutting-tool height (mm). The tool extends UPWARD from "
+                         "its base by this; the crash-safe reachability ceiling is "
+                         "set by tool_height/stock_z, so a taller tool reaches more "
+                         "interior crash-free. Forwarded to train_csg.")
     # --- Geometry (forwarded consistently to every stage that needs it) ---
     ap.add_argument("--stock-size-in", type=float, nargs=3, default=(1.0, 1.0, 1.0),
                     metavar=("X", "Y", "Z"), help="stock box in inches (the normalized cube)")
@@ -337,6 +342,7 @@ def main():
             "--z_floor_epsilon_mm", str(args.z_floor_epsilon_mm),
             "--enforce_z_floor" if not args.no_z_floor else "--no-enforce_z_floor",
             "--holder_margin", str(args.holder_margin),
+            "--tool_height_mm", str(args.tool_height_mm),
             "--headless",
         ]
         if not args.no_save_model:
