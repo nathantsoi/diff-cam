@@ -485,6 +485,39 @@ regions (the hole interior is target-absent AND stock-was-present → carving it
 is "free" loss-wise). A loss-shift cannot fix this because the hole interior
 contributes ~0 to the loss either way. Testing -0.24/-0.5/-1.0 to confirm.
 
+### loss-shift -DOWN RESULT — CORRECT DIRECTION, REAL WIN 🏆
+
+| config | train | viz | carved vox |
+|--------|-------|-----|-----------|
+| hole sub6 (no shift) | 0.683 | 0.237 | 57317 |
+| hole sub6 shift -0.24 | 0.707 | 0.248 | 54509 |
+| **hole sub6 shift -0.50** | **0.719** | **0.246** | 51375 |
+| hole sub6 shift -1.00 | 0.721 | 0.232 | 47152 |
+| sphere (no shift) | 0.830 | 0.830 | 73270 |
+| **sphere shift -0.50** | **0.840** | **0.840** | 64420 |
+
+**Negative loss-shift is the correct direction and a net win on BOTH positive
+and negative features:**
+- **sphere +0.010** (0.830→0.840), and CLEANER carve (64420 vs 73270 voxels —
+  less over-erosion, closer to the 50061 target). The -shift makes the loss
+  see the soft stock as MORE carved than it is → eases off carving → less
+  over-erosion → the hard carve matches the soft better → higher deployable dice.
+- **sphere_hole sub6**: train 0.683→0.719, viz 0.237→0.246, over-carve
+  57317→51375. Moves the right way but the gap persists (the structural
+  hole-interior-unpenalized issue caps it). -0.5 is the sweet spot (-1.0
+  over-corrects → under-carves → viz drops to 0.232).
+
+**Mechanism (corrected)**: the soft `apply_cut` over-erodes (stock_d biased
+NEGATIVE). Shifting stock_d DOWN (more negative) makes the loss sigmoid see the
+stock as MORE carved (stock_occ lower) → the residual (target-absent ×
+stock-occupied) drops faster → the optimizer eases off carving sooner → less
+over-erosion → the soft stock better matches the hard carve → higher HARD dice.
+The -shift is a **less-biased soft objective** exactly as the frontier asked.
+
+**`--loss-shift -0.5` is the new candidate operating-point addition.** Testing
+across all single shapes + bowl (in flight) to confirm generality before
+re-seeding.
+
 | shape | 50mm k150 | 75mm k150 |
 |-------|-----------|-----------|
 | sphere | 0.830 | 0.832 |
