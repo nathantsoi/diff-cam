@@ -832,9 +832,13 @@ def main():
             #    (tool low enough to reach z0 has too large a pyramid at its base to
             #    hug the face without gouging) -- the crash-safe ceiling, mirrors
             #    the sphere lower-interior wedge.
-            grid = np.linspace(r_tool, 1.0 - r_tool, 13)
-            n_zlvl = 12
-            per_level = max(8, n_beside // n_zlvl)
+            # Grid spacing ~2*r_tool so adjacent tool disks just touch (full 2D
+            # fill, no angular gaps); per-level cap >= one full grid pass so every
+            # level's annulus is actually rastered (a cap below one row left only
+            # the first few rows carved -> middle layers stood ~100% uncarved).
+            grid = np.linspace(r_tool, 1.0 - r_tool, 7)
+            n_zlvl = 10
+            per_level = max(20, n_beside // n_zlvl)
             target2 = n_above + n_beside
             for zi in range(n_zlvl):
                 if len(pos) >= target2:
