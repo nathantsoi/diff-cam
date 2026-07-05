@@ -20,19 +20,21 @@ sloped-face inner band) are **reachability ceilings set by the fixed 25mm tool
 vs the stock height** — not purely geometric. They are **monotonic in stock
 size**: both sphere (0.843/0.819/0.705) and pyramid (0.556/0.457/0.431) rise at
 0.75in (tool taller than stock → more interior reachable) and fall at 1.5in.
-Crash-safe pyramid improved 0.416 → 0.457 (25-iter) → 0.492 (50-iter) →
-**0.517 (100-iter, best@iter80, STILL RISING — loss still decreasing)** via a 2D
+Crash-safe pyramid improved 0.416 → 0.457 (25-iter) → 0.492 (50-iter) → 0.517
+(100-iter) → **0.526 (200-iter, best@iter199, PLATEAUING)** via a 2D
 descending-annulus boustrophedon + extended optimization. **The 25-iter "0.457
-ceiling" was severely UNDER-OPTIMIZED** — the pyramid opt does NOT plateau: it
-keeps climbing (iter15 0.453 → iter45 0.492 → iter80 0.517). Optimization
-strongly HELPS the 1in pyramid and the true ceiling is still not found at 100
-iters (200-iter pending). It hurts the 0.75in pyramid (best@iter0, like the
-sphere) — the init is strong enough at 0.75in that opt collapses it. **Max-steps
-matters**: the pyramid opt-helps at max-steps=512 (shorter trajectory, init
-marginal) but opt-COLLAPSES at max-steps=1536 (best@iter0, 0.417 — the init
-saturates the larger budget, like the sphere at 0.75in). The opt-helps pattern
-is a symptom of a marginal init (shape × max-steps × stock size), not a pyramid
-invariant.
+ceiling" was severely UNDER-OPTIMIZED** — the pyramid opt does NOT plateau early:
+it climbs iter15 0.453 → iter45 0.492 → iter80 0.517 → iter199 0.526. The huge
+gains are in the first 80 iters; beyond iter100 diminishing returns (+0.009 over
+the last 120 iters, loss 0.082 still decreasing). **The true 1in crash-safe
+pyramid ceiling is ~0.526** (vs infeasible 0.817 — the inner band remains
+partially unreachable, but the reachable annulus is now fully carved). It hurts
+the 0.75in pyramid at 25 iters (best@iter0, like the sphere) — but the 0.75in
+opt-headroom at 200 iters is under test. **Max-steps matters**: the pyramid
+opt-helps at max-steps=512 (shorter trajectory, init marginal) but opt-COLLAPSES
+at max-steps=1536 (best@iter0, 0.417 — the init saturates the larger budget, like
+the sphere at 0.75in). The opt-helps pattern is a symptom of a marginal init
+(shape × max-steps × stock size), not a pyramid invariant.
 
 ## Crash-safe per-shape results (viz carve Dice, post-trunc)
 
@@ -41,8 +43,8 @@ invariant.
 | sphere   | 0.9306           | 0.819      | 1536      | lower-interior wedge + below-part slab un-carvable without the deep plunge; best@iter0 |
 | cylinder | 0.9390           | 0.916      | 512       | z-invariant; floor barely hurts; best@iter0 |
 | box      | 0.9014           | 0.892      | 384       | square orbit at equator; floor barely hurts; best@iter0 |
-| pyramid  | 0.8166           | **0.517**  | 512       | sloped-face inner band unreachable crash-free (see below); 0.416→0.457 (25-iter) → 0.492 (50-iter) → 0.517 (100-iter, best@iter80, STILL RISING); opt-HELPS, max-steps-sensitive |
-| **mean** | **0.897**        | **~0.786** | | (pyramid revised 0.457→0.517; mean was 0.771) |
+| pyramid  | 0.8166           | **0.526**  | 512       | sloped-face inner band unreachable crash-free (see below); 0.416→0.457 (25-iter) → 0.492 (50-iter) → 0.517 (100-iter) → 0.526 (200-iter, plateauing); opt-HELPS, max-steps-sensitive |
+| **mean** | **0.897**        | **~0.788** | | (pyramid revised 0.457→0.526; mean was 0.771) |
 
 **Each shape's champion uses a different max-steps** (sphere 1536, cyl 512, box
 384, pyramid 512) — the optimal trajectory length scales with surface complexity
@@ -253,15 +255,13 @@ articulated holder) lifts it.
 
 - The viz "carved voxels: sim=N" line is the **remaining solid** count
   (`stock<0`), not removed — read accordingly.
-- Pyramid best-checkpoint is at **iter 80** at 1in @100-iter (optimization HELPS:
-  0.40 → 0.517, STILL RISING — 25-iter peaked at iter15 0.457, 50-iter at iter45
-  0.492, 100-iter at iter80 0.517, loss still decreasing), but at **iter 0** at
-  0.75in (init strong enough that opt collapses it, like the sphere) AND at 1in
-  @max-steps=1536 (0.417, init saturates the larger budget → opt collapses). The
-  opt-helps pattern is a symptom of a marginal init (shape × max-steps × stock
-  size), not a pyramid invariant — when reachability improves (smaller stock) OR
-  the trajectory budget grows (larger max-steps), the init dominates and opt
-  hurts.
+- Pyramid best-checkpoint is at **iter 199** at 1in @200-iter (optimization HELPS:
+  0.40 → 0.526, plateauing — 25-iter 0.457@iter15, 50-iter 0.492@iter45, 100-iter
+  0.517@iter80, 200-iter 0.526@iter199; huge gains in first 80 iters, diminishing
+  after), but at **iter 0** at 0.75in @25-iter (init strong → opt collapses, like
+  the sphere) AND at 1in @max-steps=1536 (0.417, init saturates the larger budget
+  → opt collapses). The opt-helps pattern is a symptom of a marginal init (shape
+  × max-steps × stock size), not a pyramid invariant.
 - Crash-safe pyramid `holder_overlap=0`, trunc no-trim (min clearance 21mm) —
   the path is genuinely collision-free; the loss is purely the unreachable waste.
 - **Training-barrier vs trunc-threshold mismatch**: the holder collision barrier
