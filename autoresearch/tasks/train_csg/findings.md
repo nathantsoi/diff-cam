@@ -205,22 +205,21 @@ articulated holder) lifts it.
 - **Voxel resolution** (0.4mm vs 0.5mm, 1in sphere): viz 0.818 vs 0.819 —
   identical within noise. The crash-safe ceiling is **geometric (reachability),
   not quantization-limited** — finer voxels reach no more stock. Dead lever.
-- **Tool radius** (1/8" r=1.5875mm vs 1/4" r=3.175mm, 1in pyramid): viz 0.406
-  vs 0.457 — **regression**. The uncarvable band is `[hp(z), hp(zb)+r_tool]`,
-  whose width `(hp(zb)-hp(z)) + r_tool` is dominated by the **slope term**
-  `(hp(zb)-hp(z))`, not `r_tool` — halving the cutter barely shrinks the band,
-  while the smaller tool carves less per pass at fixed max-steps (coverage loss
-  outweighs the marginal band-narrowing). Also flips the 1in pyramid from
-  opt-helps (best@iter15) to opt-hurts (best@iter0): the smaller tool's loss
-  landscape differs. Crash-safe (min clr 11.3mm, no trim). Dead lever — confirms
-  the ceiling is set by the **slope/holder geometry**, not the cutter width.
-- **Tool radius on sphere** (1/8", 1in): viz 0.794 vs 0.819 — also regression,
-  but smaller (-0.025 vs pyramid's -0.051). The sphere's CURVED geometry makes
-  `r_tool` a larger term in its uncarvable band (vs the pyramid's linear-slope-
-  dominated band), so band-narrowing helps more — but coverage loss (smaller
-  tool, fixed 1536 steps) still dominates. **Tool radius is a dead lever across
-  both shapes**: the ceiling is set by slope/holder geometry + the fixed-step
-  coverage budget, not the cutter width.
+- **Tool radius** (1/8" r=1.5875mm vs 1/4" r=3.175mm, 1in pyramid, CLEAN re-test
+  @512 @200-iter vs the 0.526 baseline): viz 0.453 vs 0.526 — **regression**
+  (-0.073). The smaller tool is worse even with full opt: worse init (iter0 0.370
+  vs 0.401), earlier/lower peak (best@iter40 0.453 vs best@iter199 0.526), opt
+  collapses after iter40. The uncarvable band `[hp(z), hp(zb)+r_tool]` width is
+  dominated by the **slope term** `(hp(zb)-hp(z))`, not `r_tool` — halving the
+  cutter barely shrinks the band, while the smaller tool carves less per pass
+  (coverage loss + worse init dominates). [The earlier 1/8" pyramid test at
+  max-steps=1536 (0.406) used the wrong baseline; this 512 @200-iter is the valid
+  verdict.] Crash-safe (min clr 12.5mm, no trim). Dead lever.
+- **Tool radius on sphere** (1/8", 1in, @1536): viz 0.794 vs 0.819 — also
+  regression (-0.025). The sphere's CURVED geometry makes `r_tool` a larger term
+  in its uncarvable band, so band-narrowing helps more — but coverage loss still
+  dominates. **Tool radius is a dead lever across both shapes**: the ceiling is
+  set by slope/holder geometry + coverage, not the cutter width.
 - **Tool radius + doubled steps** (1/8", 1in sphere, 3072 steps): viz 0.797 vs
   0.794 (1× steps) vs 0.819 (1/4"). Doubling the step budget recovered only
   +0.003 — **coverage was NOT the issue**; the smaller tool genuinely carves no
