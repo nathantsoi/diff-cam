@@ -801,9 +801,8 @@ def main():
             # forbidden, so the bottom slab [0, base_z] is unreachable crash-free
             # -- the crash-safe ceiling (mirrors the sphere lower-interior wedge).
             z_descent_bot = max(base_z, _z_holder_clear, _z_floor + 0.005)
-            n_above = int(n * 0.26)
-            n_term = int(n * 0.20)                       # terminal low-annulus orbit
-            n_beside = n - n_above - n_term
+            n_above = int(n * 0.18)
+            n_beside = n - n_above
             xs = np.linspace(0.12, 0.88, 7)
             ys = np.linspace(0.12, 0.88, 7)
             pos = []
@@ -821,32 +820,40 @@ def main():
                     break
             while len(pos) < n_above:
                 pos.append(pos[-1])
-            # 2. beside square-annulus orbit (base descends apex -> z_descent_bot;
-            #    orbit stays outside the pyramid cross-section at every z, so it
-            #    carves the waste annulus gouge-free). Replaces the old deep-plunge
-            #    phases 3-4 which are now crash-forbidden.
-            for t in range(n_beside):
-                frac = t / max(1, n_beside - 1)
-                zb = apex + (z_descent_bot - apex) * frac
+            # 2. Descending 2D annulus boustrophedon. At each z-level zb the tool
+            #    rasters the square annulus OUTSIDE the pyramid cross-section
+            #    (half-size hp(zb)) in xy; the tool spans [zb, zb+h] so each pass
+            #    carves that annulus at every z >= zb. Descending extends the carve
+            #    downward, and because hp(zb) shrinks as zb rises, higher passes
+            #    reach the inner annulus that lower passes cannot. This is a 2D
+            #    raster fill of the REACHABLE waste -- a 1D orbit (the old phase)
+            #    left ~83% of the waste standing (one tube = measure zero in 2D).
+            #    The inner band hugging the sloped face is unreachable crash-free
+            #    (a tool low enough to reach z0 has too large a pyramid at its base
+            #    to hug the face without gouging) -- the crash-safe ceiling, mirrors
+            #    the sphere lower-interior wedge.
+            grid = np.linspace(r_tool, 1.0 - r_tool, 13)
+            n_zlvl = 10
+            target2 = n_above + n_beside
+            done = False
+            for zi in range(n_zlvl):
+                if done:
+                    break
+                zb = apex + (z_descent_bot - apex) * (zi / max(1, n_zlvl - 1))
                 hp = r_sp * (1.0 - (zb - base_z) / h) if base_z <= zb <= apex else 0.0
                 s_safe = hp + r_tool + margin
-                s_orbit = s_safe + (r_outer - s_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
-                phase = 2.0 * math.pi * revs * frac
-                cx, cy = math.cos(phase), math.sin(phase)
-                m = max(abs(cx), abs(cy))
-                pos.append([0.5 + s_orbit * cx / m, 0.5 + s_orbit * cy / m, float(zb)])
-            # 3. terminal annulus orbit at the lowest reachable z (extra coverage of
-            #    the annulus just above the pyramid base -- the closest the tool can
-            #    get to the below-slab without a deep plunge).
-            for t in range(n_term):
-                frac = t / max(1, n_term - 1)
-                hp = r_sp * (1.0 - (z_descent_bot - base_z) / h) if base_z <= z_descent_bot <= apex else 0.0
-                s_safe = hp + r_tool + margin
-                s_orbit = s_safe + (r_outer - s_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
-                phase = 2.0 * math.pi * revs * frac
-                cx, cy = math.cos(phase), math.sin(phase)
-                m = max(abs(cx), abs(cy))
-                pos.append([0.5 + s_orbit * cx / m, 0.5 + s_orbit * cy / m, float(z_descent_bot)])
+                for j, y in enumerate(grid):
+                    if done:
+                        break
+                    row = grid if j % 2 == 0 else grid[::-1]
+                    for x in row:
+                        # skip points whose tool disk would breach the pyramid at zb
+                        if max(abs(x - 0.5), abs(y - 0.5)) + r_tool < s_safe:
+                            continue
+                        pos.append([float(x), float(y), float(zb)])
+                        if len(pos) >= target2:
+                            done = True
+                            break
             positions = np.array(pos[:n], dtype=np.float32)
             if len(positions) < n:
                 positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])
