@@ -262,6 +262,30 @@ down. Sphere s3 (0.798) is the low outlier; mean 0.820 is solid.
 ## Next: read 75mm/2in results; if 75mm helps, re-seed; consider larger stock
 sweep (1.5in/2in/3in) to map where the method holds.
 
+## COMBINED CSG SHAPES (the generality test the protocol stresses)
+
+The simulator supports **combined CSG targets** (not just single primitives) —
+exactly the "arbitrary, unseen combinations of shapes" the protocol demands the
+method generalize to:
+
+- **`sphere_hole`** — stock sphere (r=11.43mm) with a concentric through-hole
+  cylinder (sub-r=9.525mm) subtracted along Z: `target = sphere ∩ ¬cylinder`.
+  Tests whether the optimizer can carve the sphere AND leave a clean hole.
+- **`sphere_bowl`** — stock sphere with the lower hemisphere of a concentric
+  0.75in sub-sphere removed (cavity opens upward at the equator):
+  `target = sphere ∩ ¬(sub_sphere ∩ {z ≤ center})`. Tests concave-interior
+  carving (harder: the tool must reach INTO a bowl without gouging the rim).
+
+Both are shape-blind to the optimizer (the loss/sim see only the target SDF
+field `φ_tgt`; no shape-name branching). The repo ships
+`run_combined_shapes.sh` which runs them at the OLD operating point (25mm tool,
+raster_fine, w_len, k=10, m=256). **I am testing them with the NEW winning
+config (50mm tool + k-anneal k150, m=128) plus k=10 50mm baselines**, to confirm
+the method transfers to combined CSG — the strongest generality claim.
+
+**In flight**: hole_k150_t50_s1 (GPU9). Queued: sphere_hole k10 50mm baseline,
+sphere_bowl {k10, k150} 50mm × seeds (launch when 75mm batch frees GPUs).
+
 ## Mid-run k-sweep signal (sphere, seed 1, ~iter 1500)
 
 | run | dice @ ~1500 | grad | read |
