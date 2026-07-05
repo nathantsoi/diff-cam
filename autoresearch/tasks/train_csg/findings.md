@@ -82,6 +82,16 @@ possible) but the init geometry is unchanged. **The init, not the tool length
 alone, is the bottleneck.** A tool-aware init that descends to the deeper
 `z_holder_clear` floor when the tool is longer is the untested lever.
 
+**Deep z-floor + long tool REGRESSES (re-confirms the ceiling)**: 50mm tool
+with `--z-floor-epsilon-mm 25` (floor -0.934) → viz 0.394, gouge 0.891, optimizer
+stuck. Letting the base plunge deep makes the 50mm tool span the *whole* stock,
+so its orbit must clear the equator's max radius (0.578 > stock half 0.5 →
+outside the stock) → it gouges the equator. The winning 50mm config keeps the
+base **high** (default z-floor, floor 0.011): the tool reaches the lower
+interior *from above* (spanning [base, base+1.97], mostly above the stock)
+without the orbit clearing the equator. **A tool spanning the equator must orbit
+outside it** — the fundamental reachability ceiling, independent of tool length.
+
 ## What changed in the sim (recap)
 
 - **Z-floor clamp** (`--z-floor-epsilon-mm`, default 1.0mm): executed tool BASE
