@@ -232,6 +232,9 @@ articulated holder) lifts it.
   ring variants all worse).
 - `--no-z-floor --no-trunc` recovers 0.9306 sphere / 0.8166 pyramid but with
   `holder_overlap` in the millions — physically infeasible, a real crash.
+- Higher holder penalty weight (500, 10× default) + margin 0.04 on the pyramid:
+  REGRESSES to 0.417 (over-constrains optimizer, pushes holder away). Default
+  weight 50 is optimal — the champion's moves don't violate clearance.
 
 ## Methodology notes
 
@@ -270,3 +273,12 @@ articulated holder) lifts it.
 - The `holder_margin` soft barrier (weight 50) is overpowered by the residual
   loss; a higher weight or a hard holder clamp (analogous to the z-floor) would
   let face-hugging low-zb inits survive trunc — untested.
+- **RESOLVED (dead lever):** a 10× holder barrier (weight 500 + margin 0.04
+  matching the trunc threshold) on the 1in pyramid REGRESSES to 0.417 (vs 0.457).
+  The higher weight **over-constrains** the optimizer (best@iter0 0.417 vs
+  default best@iter15 0.457) and pushes the holder *away* (min clr 11.7mm, not
+  close) — the heavy penalty makes face-hugging too costly. The champion's
+  improving moves don't violate clearance anyway (default min clr 18mm, barrier
+  not binding). The face-hugging-low-zb path stays closed because of **coverage
+  geometry** (single-radius bands, a confirmed dead lever), not the barrier
+  weight. Default weight 50 / margin 0 is optimal.

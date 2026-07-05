@@ -214,6 +214,13 @@ def main():
                          "to match --collision-clearance-mm so the optimizer keeps "
                          "the holder >=1mm clear and --truncate-collision does not "
                          "trim trailing near-collisions. Forwarded to train_csg.")
+    ap.add_argument("--holder-penalty-weight", type=float, default=50.0,
+                    help="weight of the holder/stock collision barrier during "
+                         "training (default 50). The default is overpowered by the "
+                         "residual loss, so the optimizer can bring the holder to "
+                         "~0.02mm of the stock and --truncate-collision then trims. "
+                         "Raising this (e.g. 500) + --holder-margin ~0.04 lets "
+                         "face-hugging low-zb inits survive trunc. Forwarded to train_csg.")
     ap.add_argument("--truncate-collision", action="store_true", default=True,
                     help="after training, truncate the trajectory at the first "
                          "holder/stock collision (stop a clearance margin before it). "
@@ -349,6 +356,7 @@ def main():
             "--z_floor_epsilon_mm", str(args.z_floor_epsilon_mm),
             "--enforce_z_floor" if not args.no_z_floor else "--no-enforce_z_floor",
             "--holder_margin", str(args.holder_margin),
+            "--holder_penalty_weight", str(args.holder_penalty_weight),
             "--tool_height_mm", str(args.tool_height_mm),
             "--tool_radius_mm", str(args.tool_radius_mm),
             "--headless",
