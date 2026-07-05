@@ -181,6 +181,15 @@ articulated holder) lifts it.
 - **Voxel resolution** (0.4mm vs 0.5mm, 1in sphere): viz 0.818 vs 0.819 —
   identical within noise. The crash-safe ceiling is **geometric (reachability),
   not quantization-limited** — finer voxels reach no more stock. Dead lever.
+- **Tool radius** (1/8" r=1.5875mm vs 1/4" r=3.175mm, 1in pyramid): viz 0.406
+  vs 0.457 — **regression**. The uncarvable band is `[hp(z), hp(zb)+r_tool]`,
+  whose width `(hp(zb)-hp(z)) + r_tool` is dominated by the **slope term**
+  `(hp(zb)-hp(z))`, not `r_tool` — halving the cutter barely shrinks the band,
+  while the smaller tool carves less per pass at fixed max-steps (coverage loss
+  outweighs the marginal band-narrowing). Also flips the 1in pyramid from
+  opt-helps (best@iter15) to opt-hurts (best@iter0): the smaller tool's loss
+  landscape differs. Crash-safe (min clr 11.3mm, no trim). Dead lever — confirms
+  the ceiling is set by the **slope/holder geometry**, not the cutter width.
 - Higher-T coverage for pyramid (revs/osc/T): does NOT help (ceiling is
   reachability, not density). 0.4159 → 0.4102.
 - 1D orbit vs 2D boustrophedon for the pyramid annulus: same ~0.42 (the

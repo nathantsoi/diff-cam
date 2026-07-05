@@ -231,6 +231,13 @@ def main():
                          "its base by this; the crash-safe reachability ceiling is "
                          "set by tool_height/stock_z, so a taller tool reaches more "
                          "interior crash-free. Forwarded to train_csg.")
+    ap.add_argument("--tool-radius-mm", type=float, default=3.175,
+                    help="cutter radius in mm (default 1/4\" end mill). A SMALLER "
+                         "cutter shrinks the unreachable inner band "
+                         "[hp(z), hp(zb)+r_tool] -- directly attacking the "
+                         "reachability ceiling of sloped/curved surfaces -- at the "
+                         "cost of less material removed per pass (needs more steps). "
+                         "Forwarded to train_csg, trunc, and viz (all read tool_radius_mm).")
     # --- Geometry (forwarded consistently to every stage that needs it) ---
     ap.add_argument("--stock-size-in", type=float, nargs=3, default=(1.0, 1.0, 1.0),
                     metavar=("X", "Y", "Z"), help="stock box in inches (the normalized cube)")
@@ -343,6 +350,7 @@ def main():
             "--enforce_z_floor" if not args.no_z_floor else "--no-enforce_z_floor",
             "--holder_margin", str(args.holder_margin),
             "--tool_height_mm", str(args.tool_height_mm),
+            "--tool_radius_mm", str(args.tool_radius_mm),
             "--headless",
         ]
         if not args.no_save_model:
