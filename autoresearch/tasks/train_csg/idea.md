@@ -175,6 +175,34 @@ enforce a stricter holder penalty. Prior run's crash-safe zlayer sphere viz =
 test (k150 + higher holder-penalty-weight / z-floor to keep all 128 steps
 deployable).
 
+## GENERALITY RESULT (25mm tool, 1in stock, train / viz deployable)
+
+| shape | k=10 train/viz | k150 train/viz | train Δ | viz Δ |
+|-------|----------------|----------------|---------|-------|
+| sphere | 0.642 / 0.579 | 0.830 / 0.648 | +0.188 | +0.069 |
+| box | 0.816 / 0.816 | 0.843 / 0.843 | +0.027 | +0.027 (crash-safe, no gap) |
+| pyramid | 0.425 / 0.425 | 0.799 / 0.451 | +0.374 | +0.026 |
+| cylinder | 0.802 / 0.717 | 0.895 / 0.793 | +0.093 | +0.076 |
+| **mean** | | | **+0.170** | **+0.050** |
+
+k-anneal is shape-blind and helps ALL shapes on train dice (large, esp. pyramid
++0.374). Viz (deployable) wins are modest because the aggressive k-anneal
+trajectories collide the holder at seg ~16-17 → truncated to 40/128 waypoints
+(reachability ceiling: 25mm tool ≈ 1in stock). Box is the exception (z-invariant,
+crash-safe, viz = train). Higher holder-penalty-weight (500) did NOT enforce
+crash-safety (viz 0.649 = k150's 0.648) — the soft penalty can't prevent the
+structural collision.
+
+## CURRENT EXPERIMENTS (running)
+
+- **50mm tool** (6 runs): longer tool reaches lower interior from above → holder
+  clears → full 128 steps deploy → viz should approach train. Prior run got
+  sphere viz 0.840 with 50mm + zlayer; testing 50mm + k-anneal (random init) on
+  sphere/box/pyramid/cyl. If viz ≈ train, this is the deployable win.
+- **lr sweep** (k150 + lr 3e-3 / 5e-3): at high k, grad norm is tiny (0.005-0.2),
+  so effective step ~100x smaller than k=10. Higher lr may compensate. lr=1e-3
+  was tuned for k=10; k-anneal may want higher.
+
 ## Mid-run k-sweep signal (sphere, seed 1, ~iter 1500)
 
 | run | dice @ ~1500 | grad | read |
