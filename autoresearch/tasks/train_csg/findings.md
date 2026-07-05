@@ -50,6 +50,31 @@ the sphere at 0.75in). The opt-helps pattern is a symptom of a marginal init
 384, pyramid 512) — the optimal trajectory length scales with surface complexity
 / reachability. Comparisons MUST hold max-steps fixed per shape.
 
+## Best method (synthesis)
+
+The best GradMill training method is **shape-aware** (init geometry + iter
+budget + best-checkpoint), all under the crash-safe z-floor/trunc pipeline:
+
+- **Init:** shape-aware zlayer coverage init (above-disk boustrophedon +
+  descending-annulus for the pyramid). The init GEOMETRY is the win for
+  sphere/cyl/box; for the 1in pyramid the init is marginal and opt does the
+  heavy lifting.
+- **Iter budget is shape-dependent (the key method finding):**
+  - sphere / cyl / box / 0.75in-pyramid: **best@iter0** — the init IS the
+    ceiling; opt COLLAPSES it (sphere 0.819→0.55 @200-iter, never recovers). Use
+    FEW iters (1–5) + best-checkpoint saving.
+  - 1in pyramid: **best@iter199** — opt HELPS a lot (0.40→0.526); use 200+
+    iters + best-checkpoint. The 25-iter budget truncated this prematurely
+    (0.457). ~12min for 200 iters (near the 15min practical limit).
+  - 1.5in pyramid: regime-variance (~0.33–0.43), single runs unreliable.
+- **best-checkpoint saving is essential** (prevents opt-collapse from
+  dominating): always eval at the best-train-dice iter, not the final iter.
+- **max-steps is shape-dependent** (sphere 1536, cyl 512, box 384, pyramid 512);
+  tune per shape.
+- **Crash-safe by construction:** `holder_overlap=0`, trunc no-trim (or genuine
+  near-collision trim). The z-floor clamp + holder-clear z_bot keep the path
+  collision-free; the residual loss is purely unreachable waste.
+
 All crash-safe runs: `holder_overlap=0`, trunc trims only genuine near-collisions
 (cyl 19 steps @ 0.15mm; sphere/box holder-clear runs byte-identical pre/post
 trunc — verified `trajectory.untruncated.npy == trajectory.npy`).
