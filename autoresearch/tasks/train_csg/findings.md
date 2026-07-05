@@ -178,6 +178,9 @@ articulated holder) lifts it.
 
 ## Dead levers confirmed / added
 
+- **Voxel resolution** (0.4mm vs 0.5mm, 1in sphere): viz 0.818 vs 0.819 —
+  identical within noise. The crash-safe ceiling is **geometric (reachability),
+  not quantization-limited** — finer voxels reach no more stock. Dead lever.
 - Higher-T coverage for pyramid (revs/osc/T): does NOT help (ceiling is
   reachability, not density). 0.4159 → 0.4102.
 - 1D orbit vs 2D boustrophedon for the pyramid annulus: same ~0.42 (the
