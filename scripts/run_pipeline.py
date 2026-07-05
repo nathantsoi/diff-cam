@@ -207,6 +207,20 @@ def main():
                     help="disable the z-floor clamp during training (recover the "
                          "unbounded deep-plunge behaviour; --truncate-collision then "
                          "catches the resulting crash)")
+    ap.add_argument("--holder-margin", type=float, default=0.0,
+                    help="holder standoff (unit-cube length) for the training "
+                         "collision barrier: the barrier engages when stock comes "
+                         "within this distance of the holder. Set ~0.04 (1mm/stock) "
+                         "to match --collision-clearance-mm so the optimizer keeps "
+                         "the holder >=1mm clear and --truncate-collision does not "
+                         "trim trailing near-collisions. Forwarded to train_csg.")
+    ap.add_argument("--holder-penalty-weight", type=float, default=50.0,
+                    help="weight of the holder/stock collision barrier during "
+                         "training (default 50). The default is overpowered by the "
+                         "residual loss, so the optimizer can bring the holder to "
+                         "~0.02mm of the stock and --truncate-collision then trims. "
+                         "Raising this (e.g. 500) + --holder-margin ~0.04 lets "
+                         "face-hugging low-zb inits survive trunc. Forwarded to train_csg.")
     ap.add_argument("--truncate-collision", action="store_true", default=True,
                     help="after training, truncate the trajectory at the first "
                          "holder/stock collision (stop a clearance margin before it). "
@@ -219,6 +233,18 @@ def main():
                     help="safety margin (mm) for --truncate-collision: stop the "
                          "toolpath at the last segment whose holder-to-stock "
                          "clearance exceeds this")
+    ap.add_argument("--tool-height-mm", type=float, default=25.0,
+                    help="cutting-tool height (mm). The tool extends UPWARD from "
+                         "its base by this; the crash-safe reachability ceiling is "
+                         "set by tool_height/stock_z, so a taller tool reaches more "
+                         "interior crash-free. Forwarded to train_csg.")
+    ap.add_argument("--tool-radius-mm", type=float, default=3.175,
+                    help="cutter radius in mm (default 1/4\" end mill). A SMALLER "
+                         "cutter shrinks the unreachable inner band "
+                         "[hp(z), hp(zb)+r_tool] -- directly attacking the "
+                         "reachability ceiling of sloped/curved surfaces -- at the "
+                         "cost of less material removed per pass (needs more steps). "
+                         "Forwarded to train_csg, trunc, and viz (all read tool_radius_mm).")
     # --- Geometry (forwarded consistently to every stage that needs it) ---
     ap.add_argument("--stock-size-in", type=float, nargs=3, default=(1.0, 1.0, 1.0),
                     metavar=("X", "Y", "Z"), help="stock box in inches (the normalized cube)")
@@ -329,6 +355,10 @@ def main():
             "--zlayer_margin", str(args.zlayer_margin),
             "--z_floor_epsilon_mm", str(args.z_floor_epsilon_mm),
             "--enforce_z_floor" if not args.no_z_floor else "--no-enforce_z_floor",
+            "--holder_margin", str(args.holder_margin),
+            "--holder_penalty_weight", str(args.holder_penalty_weight),
+            "--tool_height_mm", str(args.tool_height_mm),
+            "--tool_radius_mm", str(args.tool_radius_mm),
             "--headless",
         ]
         if not args.no_save_model:

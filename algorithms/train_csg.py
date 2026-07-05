@@ -750,6 +750,32 @@ def main():
         revs = args.zlayer_revs
         osc = args.zlayer_osc
         z_top, z_bot = 0.95, -0.95
+        # Crash-safe floor: the tool BASE must stay above z_floor so the holder
+        # (riding above the base by tool_height ~= stock height) cannot plunge
+        # into the remaining stock -- a real machine crash the new collision
+        # handling enforces. The deep plunge to z_bot=-0.95 was the old zlayer's
+        # mechanism for carving the lower exterior (it put the tool's z-range
+        # below the equator); it is now forbidden, so stop the descent at the
+        # floor. (Mirrors the sim z_floor computed at line ~567.) The radius
+        # scheduling below already uses the equator radius for base in
+        # [z_floor, 0.5] (z_eq clamps to 0.5), so the lower region carves the
+        # equator annulus [r_sphere_equator, 0.5] -- crash-free but it cannot
+        # reach the lower-interior waste (below equator, inside r_equator),
+        # which is the new crash-safe ceiling.
+        stock_z_mm = args.stock_size_in[2] * 25.4
+        if args.target_shape in ("cylinder", "pyramid"):
+            _part_bottom_z = 0.5 - args.target_height_mm / (2.0 * stock_z_mm)
+        else:
+            _part_bottom_z = 0.5 - args.target_radius_mm / stock_z_mm
+        _z_floor = _part_bottom_z - args.z_floor_epsilon_mm / stock_z_mm
+        # Also keep the holder (bottom = base + tool_height) >= 1mm above the
+        # stock top so the trunc stage never trims trailing low-base steps (the
+        # holder is wide -- 2.5in -- so within 1mm of the stock it is flagged).
+        # base + tool_h_norm >= 1 + clearance_norm  =>  base >= 1 + clr - tool_h.
+        _tool_h_norm = args.tool_height_mm / stock_z_mm
+        _clr_norm = 1.0 / stock_z_mm  # matches --collision-clearance-mm default
+        _z_holder_clear = 1.0 + _clr_norm - _tool_h_norm + 0.01
+        z_bot = max(z_bot, _z_floor + 0.005, _z_holder_clear)
         r_outer = 0.5 + r_tool
         if args.target_shape == "pyramid":
             # 4-phase gouge-free path (tool extends UP from base, spans
@@ -766,18 +792,21 @@ def main():
             h = args.target_height_mm / stock_mm
             base_z = 0.5 - 0.5 * h
             apex = base_z + h
-            r_safe_max = r_sp + r_tool + margin
-            z_base_below = base_z - 1.0 - margin           # tool top = base_z - margin < pyramid base
-            n_above = int(n * 0.26)
-            n_below = int(n * 0.24)
-            n_descent = max(8, int(n * 0.05))
-            n_beside = n - n_above - n_below - n_descent
+            # Crash-safe descent floor: the tool BASE must stay above z_holder_clear
+            # (else the holder breaches the 1mm stock-top clearance and the trunc
+            # stage trims trailing steps) AND above z_floor (else the sim clamps
+            # the executed base and the full-height tool gouges the pyramid body).
+            # The old 4-phase path plunged the base to z_base_below = base_z-1-margin
+            # ~= -0.955 to carve the below-pyramid slab; that deep plunge is now
+            # forbidden, so the bottom slab [0, base_z] is unreachable crash-free
+            # -- the crash-safe ceiling (mirrors the sphere lower-interior wedge).
+            z_descent_bot = max(base_z, _z_holder_clear, _z_floor + 0.005)
+            n_above = int(n * 0.18)
+            n_beside = n - n_above
             xs = np.linspace(0.12, 0.88, 7)
             ys = np.linspace(0.12, 0.88, 7)
-            bx = np.linspace(0.0 + r_tool, 1.0 - r_tool, 9)
-            by = np.linspace(0.0 + r_tool, 1.0 - r_tool, 9)
             pos = []
-            # 1. above boustrophedon
+            # 1. above-disk boustrophedon (base in [0.95, apex+0.02]; carves top slab)
             for z in np.linspace(0.95, apex + 0.02, 4):
                 for j, y in enumerate(ys):
                     row_xs = xs if j % 2 == 0 else xs[::-1]
@@ -791,33 +820,45 @@ def main():
                     break
             while len(pos) < n_above:
                 pos.append(pos[-1])
-            # 2. beside square orbit
-            for t in range(n_beside):
-                frac = t / max(1, n_beside - 1)
-                zb = apex + (base_z - apex) * frac
+            # 2. Descending 2D annulus boustrophedon. At each z-level zb the tool
+            #    rasters the square annulus OUTSIDE the pyramid cross-section
+            #    (half-size hp(zb)) in xy; the tool spans [zb, zb+h] so each pass
+            #    carves that annulus at every z >= zb. Iterate zb LOW -> HIGH and
+            #    CAP points per z-level: the low-zb passes (thin outer ring, few
+            #    grid points) carve the FULL stock height, so they must be visited
+            #    first; without a cap the high-zb levels (wide annulus, many points)
+            #    consume the whole budget and only the top band ever gets carved.
+            #    The inner band hugging the sloped face is unreachable crash-free
+            #    (tool low enough to reach z0 has too large a pyramid at its base to
+            #    hug the face without gouging) -- the crash-safe ceiling, mirrors
+            #    the sphere lower-interior wedge.
+            # Grid spacing ~2*r_tool so adjacent tool disks just touch (full 2D
+            # fill, no angular gaps); per-level cap >= one full grid pass so every
+            # level's annulus is actually rastered (a cap below one row left only
+            # the first few rows carved -> middle layers stood ~100% uncarved).
+            grid = np.linspace(r_tool, 1.0 - r_tool, 7)
+            n_zlvl = 10
+            per_level = max(20, n_beside // n_zlvl)
+            target2 = n_above + n_beside
+            for zi in range(n_zlvl):
+                if len(pos) >= target2:
+                    break
+                # low -> high: zi=0 is z_descent_bot (full-height outer ring)
+                zb = z_descent_bot + (apex - z_descent_bot) * (zi / max(1, n_zlvl - 1))
                 hp = r_sp * (1.0 - (zb - base_z) / h) if base_z <= zb <= apex else 0.0
                 s_safe = hp + r_tool + margin
-                s_orbit = s_safe + (r_outer - s_safe) * (0.5 + 0.5 * math.sin(2.0 * math.pi * osc * frac))
-                phase = 2.0 * math.pi * revs * frac
-                cx, cy = math.cos(phase), math.sin(phase)
-                m = max(abs(cx), abs(cy))
-                pos.append([0.5 + s_orbit * cx / m, 0.5 + s_orbit * cy / m, float(zb)])
-            # 3. safe-radius descent (circular; clears lower annulus)
-            for t in range(n_descent):
-                frac = t / max(1, n_descent - 1)
-                zb = base_z + (z_base_below - base_z) * frac
-                phase = 2.0 * math.pi * 3.0 * frac
-                pos.append([0.5 + r_safe_max * math.cos(phase),
-                            0.5 + r_safe_max * math.sin(phase), float(zb)])
-            # 4. below-disk boustrophedon at fixed base (tool top < pyramid base)
-            for j, y in enumerate(by):
-                row_xs = bx if j % 2 == 0 else bx[::-1]
-                for x in row_xs:
-                    pos.append([float(x), float(y), float(z_base_below)])
-                    if len(pos) >= n_above + n_beside + n_descent + n_below:
+                emitted = 0
+                for j, y in enumerate(grid):
+                    if emitted >= per_level or len(pos) >= target2:
                         break
-                if len(pos) >= n_above + n_beside + n_descent + n_below:
-                    break
+                    row = grid if j % 2 == 0 else grid[::-1]
+                    for x in row:
+                        if max(abs(x - 0.5), abs(y - 0.5)) + r_tool < s_safe:
+                            continue
+                        pos.append([float(x), float(y), float(zb)])
+                        emitted += 1
+                        if emitted >= per_level or len(pos) >= target2:
+                            break
             positions = np.array(pos[:n], dtype=np.float32)
             if len(positions) < n:
                 positions = np.vstack([positions, np.tile(positions[-1:], (n - len(positions), 1))])

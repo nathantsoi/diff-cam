@@ -132,20 +132,45 @@ regularizers (path-length, jerk, air-cut, contour-hug). These were explored and
 ultimately disabled (Sec.~\ref{sec:gap}), as they trade off the geometry
 objective without improving the deployable metric.
 
-\subsection{Optimization}
+\subsection{The Optimization and Evaluation Loop}
 \label{sec:optim}
 
-Each iteration pushes the current displacements into the simulator, runs the
-differentiable forward pass inside \texttt{ti.ad.Tape}, reads the resulting
-$\partial\mathcal{L}/\partial\boldsymbol{\delta}$, and takes an Adam step. The
-per-iteration gradient $\ell_2$-norm is clipped to a threshold (default $0.5$)
-to stabilize optimization. The learning rate is the most sensitive hyperparameter
-(Adam, $1\!\times\!10^{-3}$): higher rates overshoot the carving basin and
-degrade dice, while lower rates underfit within the compute budget.
+The training and evaluation lifecycle of \texttt{train\_csg} is structured as an interleaved regime of differentiable surrogate optimization, periodic exact geometric verification, and post-processing safety enforcement (summarized in Fig.~\ref{fig:optim_eval_loop}). Rather than treating simulation and evaluation as disjoint phases, our framework tightly couples them to navigate the non-convex, constrained trajectory space while guarding against surrogate-driven degradation.
 
-\emph{The simulator gradients are thus computed and followed at every
-iteration.} The remainder of this section explains why following them, alone, is
-insufficient, and how the method is structured around that fact.
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\linewidth]{optimization_evaluation_loop}
+  \caption{\textbf{The \texttt{train\_csg} differentiable optimization, evaluation, and early-stopping loop.} At each training iteration $i$, commanded tool displacements $\boldsymbol{\delta}^{(i)}$ are passed through speed-limit and $z$-floor subgradient gates into the differentiable CSG carving simulator unrolled within a \texttt{ti.ad.Tape}. Backpropagated gradients $\partial\mathcal{L}_{\mathrm{geom}}/\partial\boldsymbol{\delta}$ are $\ell_2$-norm clipped to update the trajectory parameters via Adam. Periodically (every $K$ iterations), soft refinement branches to execute an exact boolean carve from the canonical tool start $\mathbf{x}_0$, scoring deployable metrics (Dice, ASD, HD95). Whenever deployable hard Dice surpasses the historical maximum, an early-stopping authority snapshots the exact pre-step trajectory and metric dictionary into memory without end-of-training re-evaluation (circumventing GPU atomic-add reduction nondeterminism).}
+  \label{fig:optim_eval_loop}
+\end{figure*}
+
+\paragraph{Iterative differentiable forward pass.}
+At each training iteration $i \in \{0, \dots, N_{\mathrm{iters}}-1\}$, the current PyTorch displacement parameters $\boldsymbol{\delta}^{(i)} \in \mathbb{R}^{(T-1) \times 3}$ are transferred to Taichi field tensors. The forward simulation unrolls inside a \texttt{ti.ad.Tape(loss=sim.loss)} context over $T$ discrete tool positions. To ensure that optimized trajectories strictly respect physical machine dynamics, position reconstruction and carving are interleaved with two hard subgradient gating functions:
+\begin{enumerate}\itemsep0pt
+  \item \textbf{Kinematic speed clipping:} Commanded displacements $\boldsymbol{\delta}_t$ exceeding the kinematic regime limit (cutting feed rate $\mathbf{v}_{\mathrm{feed}}$ when proximal to stock, or rapid traverse $\mathbf{v}_{\mathrm{rapid}}$ when clear) are magnitude-scaled along their commanded vector to saturate exactly at the velocity ceiling.
+  \item \textbf{Z-floor collision clamping:} To prevent catastrophic toolholder plunges into remaining workpiece material, the executed tool base altitude $z_{\mathrm{base}}(t)$ is bounded from below by a safety floor $z_{\mathrm{floor}} = z_{\mathrm{part\_bottom}} - \epsilon / L_z$ (default margin $\epsilon = 1.0\,\mathrm{mm}$). Because the wider toolholder surmounts the flutes at height $h$, clamping the base altitude ensures the non-cutting spindle assembly remains strictly elevated above the machined envelope.
+\end{enumerate}
+Both constraints act as exact subgradient gates: gradients flow unimpeded through active interior displacements, but drop to zero across clamped bounds, projecting the optimization trajectory onto the feasible kinematic and collision-free subspace. Once tool positions are reconstructed, each step updates the soft stock scalar field via the log-sum-exp smooth boolean union (Eq.~\ref{eq:soft-carve}), accumulating into the terminal soft occupancy field $\Phi_T$.
+
+\paragraph{Loss backpropagation and parameter updates.}
+The terminal geometry objective $\mathcal{L}_{\mathrm{geom}}$ (Eq.~\ref{eq:loss}) is evaluated over the soft occupancy fields $o_{\mathrm{stock}}$ and $o_{\mathrm{tgt}}$. Backpropagation through the unrolled \texttt{ti.ad.Tape} computes the exact analytic gradient $\mathbf{g}^{(i)} = \nabla_{\boldsymbol{\delta}} \mathcal{L}_{\mathrm{geom}}(\boldsymbol{\delta}^{(i)})$. Because constructive solid geometry operations introduce sharp local curvature across workpiece boundaries, unconstrained gradient steps can induce severe numerical oscillation or NaN divergence when tool boundaries graze thin features. We mitigate this by applying an $\ell_2$-norm clipping operator across the full trajectory gradient:
+\begin{equation}
+  \tilde{\mathbf{g}}^{(i)} = \begin{cases}
+    \mathbf{g}^{(i)}, & \text{if } \|\mathbf{g}^{(i)}\|_2 \le c_{\mathrm{grad}}, \\
+    c_{\mathrm{grad}} \frac{\mathbf{g}^{(i)}}{\|\mathbf{g}^{(i)}\|_2}, & \text{otherwise},
+  \end{cases}
+\end{equation}
+with threshold $c_{\mathrm{grad}} = 0.5$. Parameters are updated via Adam ($\beta_1=0.9, \beta_2=0.999$) at a constant learning rate of $\alpha = 1 \times 10^{-3}$. Empirically, the learning rate is the single most decisive optimization hyperparameter: aggressive rates ($\alpha \ge 5 \times 10^{-3}$) overshoot the narrow carving basin, causing transient Dice peaks that rapidly degrade into over-eroded solutions, whereas conservative rates ($\alpha \le 5 \times 10^{-4}$) underfit within the allocated compute budget. When specified, secondary curriculum schedules modify the energy landscape dynamically: smoothness annealing linearly ramps the log-sum-exp sharpness $k$ from exploratory ($k_{\mathrm{init}}$) to high-fidelity ($k_{\mathrm{final}}$) regimes, while loss weight warmup keeps auxiliary trajectory regularizers (e.g., proximity penalties) gated at zero during early iterations so that primary volume removal is established before path polishing commences.
+
+\paragraph{Periodic exact evaluation loop.}
+Every $K$ iterations (default $K=10$ or $25$) and at the final training epoch, the optimization loop pauses soft refinement to execute an exact verification pass. To guarantee that evaluation scores reflect a true deployable machining program without contamination from stochastic training exploration (such as random start-position jitter or state-bank restarts), the tool origin is explicitly reset to the canonical position $\mathbf{x}_0 = (0.5, 0.5, 1.0)$. The simulator then executes an exact boolean carve (Eq.~\ref{eq:hard-carve}) using the sharp tool SDF $\phi_{\mathrm{tool}}^{\mathrm{sharp}}$, completely bypassing log-sum-exp over-erosion. The resulting hard remaining material $\Phi_T^{\mathrm{hard}}$ is evaluated against the target part to compute deployable metrics: the volumetric Dice coefficient, Average Surface Distance (ASD), and 95th-percentile Hausdorff Distance (HD95).
+
+\paragraph{Early stopping via best-checkpoint snapshotting.}
+Because soft loss minimization systematically over-erodes and diverges from deployable boolean Dice over time (Sec.~\ref{sec:gap}), the evaluation loop continuously monitors hard Dice. Whenever the measured deployable Dice surpasses the historical maximum ($o_{\mathrm{dice}}^{(i)} > o_{\mathrm{best}}$), an early-stopping authority directly takes an in-memory snapshot of the pre-step tool positions, commanded displacements $\boldsymbol{\delta}^{(i)}$, and exact metric dictionaries. Crucially, our protocol \emph{never re-evaluates} restored parameters at the conclusion of training: because GPU atomic-add reductions during voxel grid rasterization introduce non-deterministic floating-point associativity variance ($\pm 0.01\text{--}0.05$ Dice variance across identical runs), re-running the forward simulator on restored weights would yield a slightly perturbed score. Directly archiving the snapshotted trajectory and its co-measured metrics ensures absolute reporting integrity.
+
+Following training, the snapshotted best checkpoint enters a post-processing safety backstop (\texttt{trunc} stage). The trajectory is hard-carved step-by-step to query holder-to-stock clearance across all remaining workpiece voxels. If any path segment exhibits imminent toolholder collision, the trajectory is cleanly truncated a safety margin ($1.0\,\mathrm{mm}$) prior to contact. The resulting collision-free path is exported to machine-ready NC G-code (\texttt{export} stage) and validated via round-trip execution and rendering (\texttt{eval} and \texttt{viz} stages).
+
+\emph{The simulator gradients are thus computed and followed at every iteration.} The remainder of this section explains why following them, alone, is insufficient, and how the method is structured around that fact.
 
 \subsection{The Soft/Hard Carve Gap}
 \label{sec:gap}
