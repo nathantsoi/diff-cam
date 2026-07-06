@@ -45,7 +45,8 @@ Unless stated otherwise, the method uses
 \label{sec:main-result}
 
 Table~\ref{tab:main} reports the deployable Dice of the full method against the
-fixed-$k$ ($k{=}10$) baseline on the $1~\mathrm{in}$ stock. The shape-blind
+fixed-$k$ ($k{=}10$) baseline on the $1~\mathrm{in}$ stock, with the initial
+(iteration-0) Dice of the random trajectory as a reference. The shape-blind
 method raises mean deployable Dice from $0.664$ to $0.877$ ($+0.213$), with the
 largest gains on the shapes where the fixed-$k$ surrogate most badly misleads the
 optimizer (sphere $+0.19$, pyramid $+0.39$). Cylinder and box, which have
@@ -53,23 +54,26 @@ $z$-invariant cross-sections and thus a softer structural ceiling, already
 scored near $0.8$ at $k{=}10$ and gain correspondingly less. The two composite
 CSG targets (through-hole sphere, concave bowl) are reported separately in
 Sec.~\ref{sec:composite}, as their negative features require distinct
-geometry.
+geometry. The iteration-0 Dice is the deployable Dice of the initial random
+trajectory before any gradient step; it is $k$-independent (the hard carve used
+for evaluation does not depend on $k$), so it is the same for the base and full
+columns and reflects only how much of the part the random init happens to cover.
 
 \begin{table}[t]
   \centering
-  \caption{Deployable Dice (3-seed mean $\pm$ std) on the $1~\mathrm{in}$ stock. \emph{Base}: $k{=}10$, $h{=}50~\mathrm{mm}$, random init. \emph{Full}: + \texttt{k-anneal} ($k_{\mathrm{final}}{=}150$) + \texttt{loss-shift} ($\Delta{=}-0.5$).}
+  \caption{Deployable Dice (3-seed mean $\pm$ std) on the $1~\mathrm{in}$ stock. \emph{Init}: iteration-0 random trajectory (pre-optimization, $k$-independent). \emph{Base}: $k{=}10$, $h{=}50~\mathrm{mm}$, random init. \emph{Full}: + \texttt{k-anneal} ($k_{\mathrm{final}}{=}150$) + \texttt{loss-shift} ($\Delta{=}-0.5$).}
   \label{tab:main}
   \small
-  \begin{tabular}{lcc c}
+  \begin{tabular}{lccc c}
     \toprule
-    Shape & Base ($k{=}10$) & Full method & $\Delta$ \\
+    Shape & Init (iter 0) & Base ($k{=}10$) & Full method & $\Delta$ \\
     \midrule
-    Sphere   & 0.638 & $\mathbf{0.826 \pm 0.018}$ & $+0.188$ \\
-    Pyramid  & 0.427 & $\mathbf{0.813 \pm 0.003}$ & $+0.386$ \\
-    Cylinder & 0.774 & $\mathbf{0.905 \pm 0.010}$ & $+0.131$ \\
-    Box      & 0.816 & $\mathbf{0.865 \pm 0.009}$ & $+0.049$ \\
+    Sphere   & 0.550 & 0.638 & $\mathbf{0.826 \pm 0.018}$ & $+0.188$ \\
+    Pyramid  & 0.386 & 0.427 & $\mathbf{0.813 \pm 0.003}$ & $+0.386$ \\
+    Cylinder & 0.707 & 0.774 & $\mathbf{0.905 \pm 0.010}$ & $+0.131$ \\
+    Box      & 0.803 & 0.816 & $\mathbf{0.865 \pm 0.009}$ & $+0.049$ \\
     \midrule
-    Mean     & 0.664 & $\mathbf{0.877}$           & $+0.213$ \\
+    Mean     & 0.612 & 0.664 & $\mathbf{0.877}$           & $+0.213$ \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -178,16 +182,16 @@ indication that a hole or cavity is present.
 
 \begin{table}[t]
   \centering
-  \caption{Composite CSG targets, $1~\mathrm{in}$ stock. Deployable Dice (viz $=$ train, no truncation). \emph{Base}: $k{=}10$, $h{=}50~\mathrm{mm}$. \emph{Full}: + \texttt{k-anneal} + \texttt{loss-shift} $\Delta{=}-0.5$.}
+  \caption{Composite CSG targets, $1~\mathrm{in}$ stock. Deployable Dice (viz $=$ train, no truncation). \emph{Init}: iteration-0 random trajectory (pre-optimization, $k$-independent). \emph{Base}: $k{=}10$, $h{=}50~\mathrm{mm}$. \emph{Full}: + \texttt{k-anneal} + \texttt{loss-shift} $\Delta{=}-0.5$.}
   \label{tab:composite}
   \small
-  \begin{tabular}{lcc c l}
+  \begin{tabular}{lccc c l}
     \toprule
-    Target & Base ($k{=}10$) & Full method & $\Delta$ & Note \\
+    Target & Init (iter 0) & Base ($k{=}10$) & Full method & $\Delta$ & Note \\
     \midrule
-    Concave bowl (\texttt{sphere\_bowl}), $T{=}128$ & 0.443 & $\mathbf{0.634 \pm 0.030}$ & $+0.191$ & 3 seeds; ls neutral \\
-    Concave bowl (\texttt{sphere\_bowl}), $T{=}256$ & 0.451 & $\mathbf{0.659 \pm 0.001}$ & $+0.208$ & 3 seeds; denser path \\
-    Through-hole sphere (\texttt{sphere\_hole})$^\dagger$ & --- & $0.246$ & --- & open frontier \\
+    Concave bowl (\texttt{sphere\_bowl}), $T{=}128$ & 0.415 & 0.443 & $\mathbf{0.634 \pm 0.030}$ & $+0.191$ & 3 seeds; ls neutral \\
+    Concave bowl (\texttt{sphere\_bowl}), $T{=}256$ & 0.451 & 0.451 & $\mathbf{0.659 \pm 0.001}$ & $+0.208$ & 3 seeds; denser path \\
+    Through-hole sphere (\texttt{sphere\_hole})$^\dagger$ & 0.401 & --- & $0.246$ & --- & open frontier \\
     \bottomrule
   \end{tabular}\\
   \small $^\dagger$feasible-shell geometry; see text.
@@ -211,10 +215,13 @@ The through-hole sphere is the open frontier. With the default geometry the
 through-hole shell ($1.9~\mathrm{mm}$) is thinner than the tool
 ($3.175~\mathrm{mm}$), physically infeasible; we therefore evaluate on a
 feasible-shell variant (sub-radius $9.525~\mathrm{mm}$). Even so, the soft
-optimum trains to $\approx 0.72$ Dice but deploys at only $\approx 0.25$: at any
-finite $k$, soft-union over-erosion fills the narrow negative feature, so the
-loss cannot penalize the hole interior --- the optimizer has no gradient signal
-for the hole wall. Loss-shift helps marginally ($0.237 \to 0.246$) by reducing
+optimum trains to $\approx 0.72$ Dice but deploys at only $\approx 0.25$:
+at any finite $k$, soft-union over-erosion fills the narrow negative feature, so
+the loss cannot penalize the hole interior --- the optimizer has no gradient
+signal for the hole wall. Strikingly, optimization \emph{degrades} the
+deployable Dice from the iteration-0 value of $0.401$ to $0.246$: the random
+init carves a tentative hole, but following the over-erosion-biased gradient
+fills it back in. Loss-shift helps marginally ($0.237 \to 0.246$) by reducing
 over-carve around the hole, but the hole interior remains structurally
 unpenalized. This is the limit of pure soft-loss methods: a topology-aware or
 hard-carve-in-the-loop loss term would be required to close it, which we leave
