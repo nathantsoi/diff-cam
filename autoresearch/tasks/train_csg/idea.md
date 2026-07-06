@@ -628,3 +628,24 @@ will decide.
 - Seed variance is ±0.04–0.05; a single run that moves <0.02 is noise. Re-seed
   wins ≥3× before believing.
 - GPUs 0,3,4,5,6,7,9 free (A6000 48GB). Use CUDA_VISIBLE_DEVICES per run.
+
+## Waypoint-count sweep: m256 + full operating point (ls-0.5) — DONE, DISCARD
+
+Tested whether more waypoints (256 vs 128) stacks with the loss-shift de-bias.
+All single-seed, k150 t50 ls-0.5:
+
+| shape | m128 ls-0.5 | m256 ls-0.5 | delta |
+|-------|-------------|-------------|-------|
+| sphere | 0.840 | 0.783 | −0.057 |
+| pyramid | 0.813 | 0.857 | +0.044 |
+| box | 0.865 | 0.853 | −0.012 |
+| cylinder | 0.895 | 0.810 | −0.085 |
+| **mean** | **0.852** | **0.826** | **−0.026** |
+
+**m256 is WORSE on average.** More parameters (256 waypoints) overfit/diverge
+on the simpler shapes (sphere, cyl, box) — only pyramid (4 sloped faces, more
+geometry to cover) benefits. Because the win is shape-dependent (not blind),
+m256 is NOT a general improvement. **m=128 stands as the general default.**
+This is a useful negative result: the method's generality constraint is
+respected — waypoint count is not a free lever, it trades complexity for
+stability.
