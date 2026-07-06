@@ -138,6 +138,20 @@ def main():
                     help="half-range of the uniform random init for per-step displacements")
     ap.add_argument("--init-mode", default="random", choices=("random", "raster", "raster_fine", "raster_fine_wide", "spiral", "shell", "zlayer"),
                     help="trajectory init mode")
+    ap.add_argument("--method", default="delta", choices=("delta", "sweep"),
+                    help="optimization method: 'delta' (per-step displacements, "
+                         "sequential soft carve) or 'sweep' (B-spline control "
+                         "points, one-shot swept-volume carve; simulator/sweep.py)")
+    ap.add_argument("--n-ctrl", type=int, default=40,
+                    help="sweep: number of B-spline control points")
+    ap.add_argument("--sweep-init", default="raster", choices=("raster", "helix", "random"),
+                    help="sweep: init reference path fitted by the control points")
+    ap.add_argument("--w-feed", type=float, default=30.0,
+                    help="sweep: feed-cap penalty weight on sampled steps")
+    ap.add_argument("--w-broad", type=float, default=0.0,
+                    help="sweep: non-saturating residual attraction weight (0 = off)")
+    ap.add_argument("--sigma-broad", type=float, default=4.0,
+                    help="sweep: distance scale (voxels) of the attraction term")
     ap.add_argument("--w-gouge", type=float, default=4.0,
                     help="loss weight on cutting INTO the part (barrier)")
     ap.add_argument("--w-residual", type=float, default=1.0,
@@ -331,6 +345,12 @@ def main():
             "--lr_decay_frac", str(args.lr_decay_frac),
             "--init_scale", str(args.init_scale),
             "--init_mode", args.init_mode,
+            "--method", args.method,
+            "--n_ctrl", str(args.n_ctrl),
+            "--sweep_init", args.sweep_init,
+            "--w_feed", str(args.w_feed),
+            "--w_broad", str(args.w_broad),
+            "--sigma_broad", str(args.sigma_broad),
             "--w_gouge", str(args.w_gouge),
             "--w_residual", str(args.w_residual),
             "--grad_clip", str(args.grad_clip),

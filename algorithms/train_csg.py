@@ -179,6 +179,30 @@ class Args:
     transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5
     is the sweet spot. 0.0 caps dice via the unstable peak."""
 
+    # --- Spline-swept-volume method (method="sweep"; see simulator/sweep.py) ---
+    method: str = "delta"
+    """optimization method: 'delta' (per-step displacements through the
+    sequential soft carve — the original GradMill) or 'sweep' (cubic B-spline
+    control points through the one-shot swept-volume carve: the final geometry
+    is max(stock0, -min_s seg_sdf), order-independent and hard, so training
+    optimizes a near-unbiased surrogate of the hard-carve dice)."""
+    n_ctrl: int = 40
+    """sweep: number of B-spline control points (path capacity knob)"""
+    sweep_init: str = "raster"
+    """sweep: init reference path the control points are least-squares fitted
+    to: 'raster' (boustrophedon over the target bbox), 'helix', or 'random'.
+    Shape-agnostic (reads only the baked target SDF grid's bounding box)."""
+    w_feed: float = 30.0
+    """sweep: weight of the feed-cap penalty relu(step_speed - feed_speed)^2 on
+    the sampled path (keeps every step within the feed clip so the evaluator's
+    speed clipping is a no-op and the swept model matches the hard carve)"""
+    w_broad: float = 0.0
+    """sweep: weight of the non-saturating residual attraction term
+    relu(d_swept)^2 on uncut waste voxels (SDF-valued, so material far from the
+    swept tube still pulls the nearest segment; 0 disables)"""
+    sigma_broad: float = 4.0
+    """sweep: distance scale (voxels) normalizing the attraction term"""
+
     # CamEnvDiff / CSG specific (mirrors csg_ppo)
     resolution: int = 32
     """voxel grid resolution per axis"""
@@ -653,7 +677,53 @@ def main():
     # sim.tool_start (which load_saved_init set to the same saved position).
     if saved_tool_start is not None:
         tool_start = saved_tool_start
-    if args.init_mode == "raster_fine":
+
+    # --- Sweep method: B-spline control points over the one-shot swept carve ---
+    # The optimizable parameters are the control points P[1:] (P[0] pinned to
+    # the tool start so the sampled path X = B @ P begins at the canonical
+    # start). The swept-volume loss lives in simulator/sweep.py; the torch side
+    # holds only the basis matmul and the path regularizers, so grad_P is one
+    # matmul away from the Taichi path gradient.
+    sweep = None
+    if args.method == "sweep":
+        from simulator.sweep import (SweepCarve, bspline_basis,
+                                     init_reference_path, fit_control_points)
+        from cam.units import ipm_to_mm_per_s
+        sweep = SweepCarve(sim, n_points=T)
+        sweep.w_broad[None] = args.w_broad
+        sweep.sigma_broad[None] = args.sigma_broad
+        B_np = bspline_basis(args.n_ctrl, T)
+        X_ref = init_reference_path(sim, tool_start, T, mode=args.sweep_init,
+                                    seed=args.seed)
+        P_init = fit_control_points(B_np, X_ref)
+        P_init[0] = tool_start
+        B_t = torch.from_numpy(B_np)                       # (T, K)
+        P0_const = torch.tensor(tool_start, dtype=torch.float32).unsqueeze(0)
+        L_mm_t = torch.tensor([sim.Lx, sim.Ly, sim.Lz], dtype=torch.float32)
+        feed_mm_s = float(ipm_to_mm_per_s(args.feed_ipm))
+        z_floor_t = torch.tensor(float(z_floor), dtype=torch.float32)
+        params = torch.tensor(P_init[1:], requires_grad=True)  # (K-1, 3)
+        opt = torch.optim.Adam([params], lr=args.learning_rate)
+        print(f"[sweep] K={args.n_ctrl} control points, T={T} samples, "
+              f"init={args.sweep_init}, feed cap {feed_mm_s * args.dt:.2f} mm/step",
+              flush=True)
+
+        def sweep_path():
+            """Sampled path X (T,3) as a torch tensor differentiable in params."""
+            return B_t @ torch.cat([P0_const, params], dim=0)
+
+        def sweep_load_sim(X_det):
+            """Push the sampled path into the sim (deltas + canonical start)."""
+            full = torch.zeros((T, 3), dtype=torch.float32)
+            full[:T - 1] = X_det[1:] - X_det[:-1]
+            sim.tool_start[None] = ti.Vector([float(X_det[0, 0]),
+                                              float(X_det[0, 1]),
+                                              float(X_det[0, 2])])
+            sim.tool_delta.from_torch(full)
+
+    if args.method == "sweep":
+        pass  # control points built above; the delta init chain is skipped
+    elif args.init_mode == "raster_fine":
         # Clipping-aware fine boustrophedon: a 3D zigzag whose EVERY per-step
         # displacement is <= the feed speed cap (feed_speed*dt, ~0.075 normalized
         # at dt=0.45), so the simulator's per-step speed clip does NOT destroy
@@ -860,8 +930,9 @@ def main():
         init[1:] = np.diff(positions, axis=0)
     else:
         init = np.random.uniform(-args.init_scale, args.init_scale, size=(T - 1, 3)).astype(np.float32)
-    params = torch.tensor(init, requires_grad=True)
-    opt = torch.optim.Adam([params], lr=args.learning_rate)
+    if args.method != "sweep":
+        params = torch.tensor(init, requires_grad=True)
+        opt = torch.optim.Adam([params], lr=args.learning_rate)
 
     from tqdm import tqdm
     last_video_iter, last_eval_iter = -1, -1
@@ -935,29 +1006,53 @@ def main():
                     span = max(1, args.iters - warm_start)
                     sim.w_traj_prox[None] = args.w_traj_prox * ((it - warm_start) / span)
 
-            # Push current displacements into Taichi, then forward+backward.
-            # With restart_from_state, each iteration either starts fresh (optionally
-            # from a random tool_start) or restores a saved mid-cut state and carves
-            # only the tail [t0, T). The restored prefix is a detached constant, so
-            # only the carved tail receives gradient this iteration; Adam leaves the
-            # prefix untouched (standard stochastic per-slice optimization).
-            sim.tool_delta.from_torch(params.detach())
             t0 = 0
-            if args.restart_from_state and state_bank and np.random.random() < args.p_restart:
-                state = state_bank[np.random.randint(len(state_bank))]
-                t0 = int(state["t"])
-                sim.restore_state(state, t0)
-                with ti.ad.Tape(loss=sim.loss):
-                    sim.forward_from(t0, T)
+            if args.method == "sweep":
+                # Swept-volume forward/backward: sample the spline, regularize
+                # the path in torch (feed cap + z-floor barriers), get the
+                # swept-carve loss gradient from Taichi, and pull both back to
+                # the control points through the basis matrix.
+                if params.grad is not None:
+                    params.grad.zero_()
+                X = sweep_path()                            # (T, 3), diff in params
+                step_mm = (X[1:] - X[:-1]) * L_mm_t
+                speed = step_mm.norm(dim=1) / args.dt        # mm/s per step
+                feed_pen = torch.relu(speed - feed_mm_s).pow(2).mean()
+                zfloor_pen = torch.relu(z_floor_t - X[:, 2]).pow(2).mean()
+                reg_loss = args.w_feed * feed_pen + 100.0 * zfloor_pen
+                reg_loss.backward()
+                X_det = X.detach()
+                ti_loss, grad_X = sweep.loss_and_grad(X_det.numpy())
+                grad = params.grad + (B_t.T @ torch.from_numpy(grad_X))[1:]
+                loss = ti_loss + float(reg_loss)
+                grad_norm = float(grad.norm().item())
+                sim.loss[None] = loss  # keep the summary's loss field honest
+                # Keep the sim loaded with the current path so the eval below
+                # (forward_hard from the sampled start) scores this iterate.
+                sweep_load_sim(X_det)
             else:
-                if args.random_tool_start:
-                    sim.tool_start[None] = ti.Vector(list(sample_tool_start(args, sim.Lz)))
-                with ti.ad.Tape(loss=sim.loss):
-                    sim.forward(T)
+                # Push current displacements into Taichi, then forward+backward.
+                # With restart_from_state, each iteration either starts fresh (optionally
+                # from a random tool_start) or restores a saved mid-cut state and carves
+                # only the tail [t0, T). The restored prefix is a detached constant, so
+                # only the carved tail receives gradient this iteration; Adam leaves the
+                # prefix untouched (standard stochastic per-slice optimization).
+                sim.tool_delta.from_torch(params.detach())
+                if args.restart_from_state and state_bank and np.random.random() < args.p_restart:
+                    state = state_bank[np.random.randint(len(state_bank))]
+                    t0 = int(state["t"])
+                    sim.restore_state(state, t0)
+                    with ti.ad.Tape(loss=sim.loss):
+                        sim.forward_from(t0, T)
+                else:
+                    if args.random_tool_start:
+                        sim.tool_start[None] = ti.Vector(list(sample_tool_start(args, sim.Lz)))
+                    with ti.ad.Tape(loss=sim.loss):
+                        sim.forward(T)
 
-            grad = sim.tool_delta.grad.to_torch()[:T - 1]  # (T-1, 3)
-            loss = float(sim.loss[None])
-            grad_norm = float(grad.norm().item())
+                grad = sim.tool_delta.grad.to_torch()[:T - 1]  # (T-1, 3)
+                loss = float(sim.loss[None])
+                grad_norm = float(grad.norm().item())
 
             if math.isnan(loss) or math.isnan(grad_norm) or torch.isnan(grad).any():
                 prior_it = max(0, it - 1)
@@ -1001,7 +1096,9 @@ def main():
                 # mid-cut state, re-run a canonical full forward from the fixed
                 # CANONICAL_TOOL_START so dice is comparable across iters and
                 # the best-checkpoint snapshot reflects a deployable trajectory.
-                if args.random_tool_start or t0 != 0:
+                # (Not for sweep: params are control points, not deltas, and the
+                # sim was already loaded with the sampled path this iteration.)
+                if args.method != "sweep" and (args.random_tool_start or t0 != 0):
                     sim.tool_start[None] = ti.Vector(list(CANONICAL_TOOL_START))
                     sim.tool_delta.from_torch(params.detach())
                     sim.loss[None] = 0.0
@@ -1077,8 +1174,13 @@ def main():
                     step=it,
                 )
         # --- Update simulator state to the final optimized model ---
-        deltas = params.detach().numpy()
-        sim.tool_delta.from_torch(params.detach())
+        if args.method == "sweep":
+            X_final = sweep_path().detach()
+            deltas = (X_final[1:] - X_final[:-1]).numpy()
+            sweep_load_sim(X_final)
+        else:
+            deltas = params.detach().numpy()
+            sim.tool_delta.from_torch(params.detach())
         # Evaluate/save from the canonical start so the reported dice and the
         # saved trajectory correspond to a single deployable initial condition
         # (training may have randomized the start or restarted from saved states).
@@ -1224,7 +1326,8 @@ def main():
 
         # Final interactive replay.
         if gui is not None and gui.running:
-            sim.tool_delta.from_torch(params.detach())
+            if args.method != "sweep":  # sweep: sim already holds the final path
+                sim.tool_delta.from_torch(params.detach())
             sim.forward_hard(T)
             render_trajectory_live(sim, gui, T, label="final")
     finally:
