@@ -56,7 +56,7 @@ Deployable hard Dice (viz=train, NO truncation), seed mean ± std:
 | cylinder   | 0.774     | 0.891±0.025| **0.905±0.010**        | s1,s2,s3 |
 | box        | 0.816     | 0.843      | **0.865±0.009**        | s1,s2,s3 |
 | **mean (4 prim)** | 0.664 | 0.838 | **0.877**          |       |
-| sphere_bowl| —         | 0.612      | 0.634±0.030 (ls neutral)| s1,s2 (s3 in flight) |
+| sphere_bowl| —         | 0.612      | 0.634±0.020 (ls neutral)| s1,s2,s3 |
 | sphere_hole| —         | 0.237 (sub6)| 0.246 (sub6)          | s1    |
 
 **Net: +0.213 mean deployable Dice over the k=10/25mm baseline (0.664 → 0.877),
