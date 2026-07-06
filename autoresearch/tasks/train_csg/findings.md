@@ -55,11 +55,11 @@ Deployable hard Dice (viz=train, NO truncation), seed mean ± std:
 | pyramid    | 0.427     | 0.797±0.004| **0.813±0.003**        | s1,s2,s3 |
 | cylinder   | 0.774     | 0.891±0.025| **0.905±0.010**        | s1,s2,s3 |
 | box        | 0.816     | 0.843      | **0.865±0.009**        | s1,s2,s3 |
-| **mean (4 prim)** | 0.664 | 0.838 | **0.877**          |       |
+| **mean (4 prim)** | 0.664 | 0.838 | **0.852**          |       |
 | sphere_bowl| —         | 0.612      | 0.634±0.020 (ls neutral)| s1,s2,s3 |
 | sphere_hole| —         | 0.237 (sub6)| 0.246 (sub6)          | s1    |
 
-**Net: +0.213 mean deployable Dice over the k=10/25mm baseline (0.664 → 0.877),
+**Net: +0.188 mean deployable Dice over the k=10/25mm baseline (0.664 → 0.852),
 fully deployable (viz = train, no truncation).** loss-shift adds ~+0.014 mean
 on top of k-anneal; its main value is de-biasing, reproducible across seeds.
 
@@ -89,17 +89,28 @@ unpenalized. This is the limit of pure soft-loss methods; closing it needs a
 hard-carve-aware loss term or a topology-aware penalty (future work).
 
 Scaling: 2in stock + 100mm tool (same tool-to-stock ratio) confirms k-anneal
-scales to the larger absolute scenario. **Sphere 2in k150 ls-0.5 = 0.774**
-(deployable, viz=train, no truncation) vs 2in k10 ~0.55 → k-anneal+loss-shift
-delivers +0.22, matching the 1in pattern (k-anneal is the dominant lever and
-transfers across absolute scale). The gap to 1in sphere (0.826) is the larger
-tool-to-stock ratio, not a method failure. Box/pyramid 2in still in flight.
+scales to the larger absolute scenario. Deployable Dice (viz=train, no
+truncation), seed mean ± std:
+
+| shape (2in) | k=10 base | **k150 ls-0.5** | seeds |
+|-------------|-----------|------------------|-------|
+| sphere      | ~0.55     | **0.758 ± 0.012** | s1,s2,s3 |
+| box         | —         | **0.927**         | s1,s3 |
+| pyramid     | —         | **0.577 ± 0.002** | s1,s2,s3 |
+
+vs 2in k10 ~0.55 (sphere) → k-anneal+loss-shift delivers +0.22 on sphere,
+matching the 1in pattern (k-anneal is the dominant lever and transfers across
+absolute scale). The gap to 1in sphere (0.826) is the larger tool-to-stock
+ratio, not a method failure. Box 2in (0.927) *beats* 1in (0.865): its
+z-invariant cross-section scales well and the larger stock gives finer relative
+resolution. Pyramid 2in (0.577 < 1in 0.813) is harder — more sloped surface at
+the same tool-to-stock ratio.
 
 ## Artifacts
 
-- `results.tsv` (UNTRACKED, 95 rows) — every experiment, full command + status.
+- `results.tsv` (UNTRACKED, 107 rows) — every experiment, full command + status.
 - `results_plot.png` — progress panel (running best) + generality panel
   (best dice per shape × method-family, 1in stock). Regenerate via
   `python plot_results.py`.
 - `idea.md` — running research log (all hypotheses, sweeps, diagnoses).
-- Runs grouped in `runs/jul5-anneal-gap/` for the web UI (88+ runs).
+- Runs grouped in `runs/jul5-anneal-gap/` for the web UI (107 runs).

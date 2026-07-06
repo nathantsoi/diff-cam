@@ -90,7 +90,7 @@ Base configuration on the $1~\mathrm{in}$ stock, with the iteration-0 Dice of th
 random trajectory as a reference (Sec.~\ref{sec:setup}, Configurations). Because
 Base and Full share every component except the two surrogate corrections, the
 $\Delta$ column isolates their effect. The shape-blind method raises mean
-deployable Dice from $0.664$ to $0.877$ ($+0.213$), with the largest gains on the
+deployable Dice from $0.664$ to $0.852$ ($+0.188$), with the largest gains on the
 shapes where the fixed-$k$ surrogate most badly misleads the optimizer (sphere
 $+0.19$, pyramid $+0.39$). Cylinder and box, which have $z$-invariant
 cross-sections and thus a softer structural ceiling, already scored near $0.8$ at
@@ -98,7 +98,7 @@ $k{=}10$ and gain correspondingly less. Two observations bear on the
 methodological contrast: (i) Base itself moves the init only modestly ($+0.052$
 mean, $0.612 \to 0.664$) --- plain soft-surrogate optimization largely treads
 water because its gradient is misaligned with the deployable metric; (ii) Full
-adds $+0.213$ on top of Base, so the gain is attributable to the surrogate
+adds $+0.188$ on top of Base, so the gain is attributable to the surrogate
 corrections (annealing $k$ and de-biasing the loss), not to the optimization
 machinery, which is already present in Base. The two composite CSG targets
 (through-hole sphere, concave bowl) are reported separately in
@@ -118,7 +118,7 @@ Sec.~\ref{sec:composite}, as their negative features require distinct geometry.
     Cylinder & 0.707 & 0.774 & $\mathbf{0.905 \pm 0.010}$ & $+0.131$ \\
     Box      & 0.803 & 0.816 & $\mathbf{0.865 \pm 0.009}$ & $+0.049$ \\
     \midrule
-    Mean     & 0.612 & 0.664 & $\mathbf{0.877}$           & $+0.213$ \\
+    Mean     & 0.612 & 0.664 & $\mathbf{0.852}$           & $+0.188$ \\
     \bottomrule
   \end{tabular}
 \end{table}
@@ -280,14 +280,34 @@ where it does not (narrow negative topology).
 To confirm the method scales beyond the $1~\mathrm{in}$ scenario, we run the full
 operating point on a $2~\mathrm{in}^3$ stock with a proportionally scaled
 $h{=}100~\mathrm{mm}$ tool (same tool-to-stock reachability ratio) and a
-$22.86~\mathrm{mm}$-radius target. The $k$-anneal win transfers: sphere at
-$k{=}10$ stalls at $\approx 0.55$, whereas the full method (seed 1) reaches
-deployable Dice $0.774$ (viz $=$ train, no truncation) --- a $+0.22$ gain that
-matches the $1~\mathrm{in}$ pattern, indicating the method is not tuned to a
-single absolute scale. The residual gap to the $1~\mathrm{in}$ sphere ($0.826$)
-is attributable to the larger tool-to-stock ratio at $2~\mathrm{in}$, not to a
-method failure. Box and pyramid at $2~\mathrm{in}$ are in progress at the time of
-writing.
+$22.86~\mathrm{mm}$-radius target. Table~\ref{tab:scaling} reports the
+deployable Dice (viz $=$ train, no truncation) over seeds. The $k$-anneal win
+transfers: sphere at $k{=}10$ stalls at $\approx 0.55$, whereas the full method
+reaches $0.758 \pm 0.012$ --- a $+0.22$ gain that matches the $1~\mathrm{in}$
+pattern, indicating the method is not tuned to a single absolute scale. The
+residual gap to the $1~\mathrm{in}$ sphere ($0.826$) is attributable to the
+larger tool-to-stock ratio at $2~\mathrm{in}$, not to a method failure. Box
+scales the best of the four: its $z$-invariant cross-section gains from the
+finer relative resolution of the larger stock, reaching $0.927$ and exceeding
+the $1~\mathrm{in}$ box ($0.865$). Pyramid is the hardest at $2~\mathrm{in}$
+($0.577 \pm 0.002$): more sloped surface at the same tool-to-stock ratio leaves
+less reachable margin.
+
+\begin{table}[t]
+  \centering
+  \caption{Scaling to $2~\mathrm{in}^3$ stock, $h{=}100~\mathrm{mm}$ tool (same tool-to-stock ratio). Deployable Dice (viz $=$ train, no truncation), seed mean $\pm$ std.}
+  \label{tab:scaling}
+  \small
+  \begin{tabular}{lcc}
+    \toprule
+    Shape ($2~\mathrm{in}$) & Base ($k{=}10$) & Full method \\
+    \midrule
+    Sphere   & $\approx 0.55$ & $0.758 \pm 0.012$ (3 seeds) \\
+    Box      & ---            & $0.927$ (2 seeds) \\
+    Pyramid  & ---            & $0.577 \pm 0.002$ (3 seeds) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
 
 \subsection{Negative Results and Dead Levers}
 \label{sec:negative}
@@ -304,7 +324,7 @@ For completeness, Table~\ref{tab:negative} records the configurations that did
     \toprule
     Configuration & Mean Dice & Finding \\
     \midrule
-    \textbf{Full method ($T{=}128$)} & \textbf{0.877} & operating point \\
+    \textbf{Full method ($T{=}128$)} & \textbf{0.852} & operating point \\
     $T{=}256$ waypoints             & 0.826 & shape-dependent: helps pyramid ($+0.04$), hurts sphere/cyl/box; not a blind win \\
     $k_{\mathrm{final}}{=}500$      & $<0.841$ & high-$k$ hurts positive features; does not close narrow-hole gap \\
     $k_{\mathrm{final}}{=}1000$     & $<0.841$ & gap persists/widens; $k$-anneal cannot close narrow-hole gap alone \\

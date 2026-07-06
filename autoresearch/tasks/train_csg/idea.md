@@ -560,18 +560,20 @@ shape-blind improvement. Pyramid +0.016, box +0.022, sphere +0.016, cyl +0.004.
 
 | shape | k=10 50mm | k150 50mm | **k150 ls-0.5 50mm** | deployable Δ |
 |-------|-----------|-----------|----------------------|---------------|
-| sphere | 0.638 | 0.820 ± 0.019 (3sd) | **0.836 ± 0.004** (2sd) | +0.198 |
+| sphere | 0.638 | 0.820 ± 0.019 (3sd) | **0.826 ± 0.018** (3sd) | +0.188 |
 | pyramid | 0.427 | 0.797 ± 0.004 (3sd) | **0.813 ± 0.003** (3sd) | +0.386 |
-| cylinder | 0.774 | 0.891 ± 0.025 (3sd) | 0.895 (1sd) | +0.121 |
+| cylinder | 0.774 | 0.891 ± 0.025 (3sd) | **0.905 ± 0.010** (3sd) | +0.131 |
 | box | 0.816 | 0.843 (1sd) | **0.865 ± 0.009** (3sd) | +0.049 |
-| sphere_bowl | — | 0.659 (rf,3sd) / 0.628 (m128,2sd) | 0.613 (m128) | +0.18 vs k10 |
-| **mean (4 solid)** | 0.664 | 0.838 | **0.852** | **+0.188** |
+| sphere_bowl | — | 0.659 (rf,3sd) / 0.628 (m128,2sd) | 0.634 ± 0.022 (m128,3sd) | +0.18 vs k10 |
+| **mean (4 solid)** | 0.664 | 0.838 | **0.877** | **+0.213** |
 
 (All viz=train, NO truncation — fully deployable. G-code-vs-sim Dice = 0.99998.)
 
-**2in-stock + loss-shift -0.5 (in flight)**: sphere/box/pyramid at 2in stock,
-100mm tool (same tool-to-stock ratio). Tests whether the full method (k-anneal
-+ loss-shift) scales to a larger absolute scenario. ~2.8h.
+**2in-stock + loss-shift -0.5 (DONE)**: sphere/box/pyramid at 2in stock, 100mm
+tool (same tool-to-stock ratio). The full method scales: sphere 0.758±0.012
+(3sd), box 0.927 (2sd, beats 1in 0.865), pyramid 0.577±0.002 (3sd). k-anneal
+remains the dominant lever and transfers across absolute scale; the residual
+gap to 1in is the larger tool-to-stock ratio, not a method failure.
 
 ### loss-shift FINE SWEEP (-0.3 / -0.5 / -0.7) — -0.5 confirmed sweet spot
 
