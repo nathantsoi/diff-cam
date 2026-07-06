@@ -59,4 +59,22 @@ swept volume is computed in one shot**:
   found (`LD_LIBRARY_PATH=/usr/lib/wsl/lib`, libcuda.so not in ldconfig cache).
 - Baseline delta sphere run started (killed once by session restart; relaunched).
 - Web-research agent on VCPP/differentiable swept volumes relaunched (first one
-  was killed by the session restart).
+  was killed by the session restart). Report received — validates the design:
+  swept SDF as min-over-time + hard-argmin envelope gradients (Sellán 2021,
+  SVSDF TOG 2024), one-sided ReLU² hinge losses with gouge weight annealed UP
+  (implicit neural process planning, arXiv 2511.17578), B-spline control-point
+  difference bounds for feed constraints (EGO-planner lineage), and the key
+  warning that saturated-sigmoid coverage losses have vanishing gradients →
+  adopted an SDF-valued attraction term (`w_broad`: relu(d_tool)² on uncut
+  waste voxels, gated by stock_occ so it dies once cut).
+- **Implemented** `--method sweep` (commit f8babcc): `simulator/sweep.py`
+  (SweepCarve: argmin pass + autodiff loss pass; B-spline basis; shape-agnostic
+  raster/helix inits fitted by least squares), train_csg integration (torch
+  Adam on control points, feed-cap + z-floor penalties in torch, eval through
+  the untouched forward_hard/eval_metrics path), run_pipeline forwarding.
+- **Tests** (tests/sweep_test.py, all pass + full suite 39 passed):
+  - Swept carve == sequential hard carve: **0/15625 voxels differ** — the
+    one-shot union reproduces the evaluator's geometry exactly.
+  - Autodiff vs finite differences: meaningful-magnitude grads match within
+    0.1–3%; sub-1e-4 entries are f32 FD noise (documented in test).
+  - Basis partition-of-unity/endpoint pinning; init fit starts at tool start.

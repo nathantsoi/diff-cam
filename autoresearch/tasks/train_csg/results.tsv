@@ -1,1 +1,2 @@
 commit	dice	memory_gb	status	description	command
+1a383b7	0.642627	0.3	keep	baseline delta sphere (lr1e-3, hard-dice eval, peak@i1840~13min; 5000i took 34.7min on this GPU)	uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --learning-rate 1e-3 --grad-clip 0.5 --eval-freq 10

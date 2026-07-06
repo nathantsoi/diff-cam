@@ -146,8 +146,8 @@ def main():
                     help="sweep: number of B-spline control points")
     ap.add_argument("--sweep-init", default="raster", choices=("raster", "helix", "random"),
                     help="sweep: init reference path fitted by the control points")
-    ap.add_argument("--w-feed", type=float, default=30.0,
-                    help="sweep: feed-cap penalty weight on sampled steps")
+    ap.add_argument("--w-feed", type=float, default=5.0,
+                    help="sweep: feed-cap penalty weight (dimensionless excess) on sampled steps")
     ap.add_argument("--w-broad", type=float, default=0.0,
                     help="sweep: non-saturating residual attraction weight (0 = off)")
     ap.add_argument("--sigma-broad", type=float, default=4.0,

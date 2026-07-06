@@ -192,10 +192,12 @@ class Args:
     """sweep: init reference path the control points are least-squares fitted
     to: 'raster' (boustrophedon over the target bbox), 'helix', or 'random'.
     Shape-agnostic (reads only the baked target SDF grid's bounding box)."""
-    w_feed: float = 30.0
-    """sweep: weight of the feed-cap penalty relu(step_speed - feed_speed)^2 on
-    the sampled path (keeps every step within the feed clip so the evaluator's
-    speed clipping is a no-op and the swept model matches the hard carve)"""
+    w_feed: float = 5.0
+    """sweep: weight of the feed-cap penalty relu(speed/cap - 1)^2 (dimensionless
+    excess) on the sampled path -- keeps every step within the feed clip so the
+    evaluator's speed clipping is a no-op and the swept model matches the hard
+    carve. Only needs to hold at convergence; moderate weights beat huge ones
+    (a huge weight drowns the geometry gradient early)."""
     w_broad: float = 0.0
     """sweep: weight of the non-saturating residual attraction term
     relu(d_swept)^2 on uncut waste voxels (SDF-valued, so material far from the
@@ -1017,7 +1019,9 @@ def main():
                 X = sweep_path()                            # (T, 3), diff in params
                 step_mm = (X[1:] - X[:-1]) * L_mm_t
                 speed = step_mm.norm(dim=1) / args.dt        # mm/s per step
-                feed_pen = torch.relu(speed - feed_mm_s).pow(2).mean()
+                # Dimensionless excess (fraction of the cap) so w_feed trades
+                # off against the O(0.1-1) geometry loss on a sane scale.
+                feed_pen = torch.relu(speed / feed_mm_s - 1.0).pow(2).mean()
                 zfloor_pen = torch.relu(z_floor_t - X[:, 2]).pow(2).mean()
                 reg_loss = args.w_feed * feed_pen + 100.0 * zfloor_pen
                 reg_loss.backward()
