@@ -119,14 +119,60 @@ $\mathbf{x}_{t+1} = \mathbf{x}_t + \mathrm{clip}(\boldsymbol{\delta}_t)$.
 The parameters are stored as a PyTorch tensor with
 \texttt{requires\_grad=True} and optimized by Adam.
 
-\paragraph{Random initialization.}
-The displacements are initialized as small i.i.d.\ Gaussian perturbations
-($\boldsymbol{\delta}_t \sim \mathcal{N}(0, \sigma_{\mathrm{init}}^2 \mathbf{I})$,
-$\sigma_{\mathrm{init}}{=}0.05$) around the canonical start. No geometric prior
-about the target is injected: the initialization is the same for a sphere, a
-pyramid, or a through-hole sphere. The burden of discovering the part geometry is
-placed entirely on the gradient, which is what motivates the surrogate-correction
-mechanisms of Sec.~\ref{sec:gap}.
+\paragraph{Initialization modes.}
+The framework provides a family of initialization modes for the displacement
+parameters, which we describe here because the choice is consequential to the
+shape-blindness claim. The modes split into three classes:
+
+\begin{enumerate}\itemsep0pt
+  \item \textbf{Random} (\texttt{init\_mode=random}, the default): the
+        displacements are drawn i.i.d.\ uniformly,
+        $\boldsymbol{\delta}_t \sim \mathcal{U}[-\sigma_{\mathrm{init}},\, \sigma_{\mathrm{init}}]^3$
+        with $\sigma_{\mathrm{init}}{=}0.05$, around the canonical start. No
+        geometric prior about the target is injected.
+  \item \textbf{Structured raster/spiral} (\texttt{raster}, \texttt{raster\_fine},
+        \texttt{raster\_fine\_wide}, \texttt{spiral}): analytic toolpaths --- a
+        boustrophedon (zigzag) sweep over the cross-section at descending
+        $z$-levels, or a descending spiral. These inject a machining prior (the
+        tool pre-covers the part envelope) but are \emph{geometry-agnostic}: the
+        path shape is fixed and does not read the target. The coarse variants
+        (\texttt{raster}, \texttt{spiral}) fail in practice because their
+        per-step displacements exceed the feed speed cap and are magnitude-clipped
+        by the constraint of Sec.~\ref{sec:simulator}, destroying the intended
+        path; the \texttt{raster\_fine} variants are constructed so every step is
+        within the cap.
+  \item \textbf{Surface-following} (\texttt{shell}, \texttt{zlayer}): a
+        descending helix / $z$-level finishing orbit whose radius at each $z$
+        tracks the target's cross-section, so the cutter orbits just outside the
+        part surface and sweeps the waste annulus without gouging. Crucially, the
+        surface is read \emph{shape-agnostically} from the baked target SDF grid:
+        the per-$z$ cross-section radius is computed as the maximum in-plane
+        distance from the stock center among voxels with
+        $\phi_{\mathrm{tgt}} < 0$ at that slice, with no reference to any shape
+        name or shape parameter. This generalizes to any target, including
+        combined-CSG and unseen shapes.
+\end{enumerate}
+
+All three classes are shape-blind under our definition: none reads the shape
+label. They differ in \emph{how much} geometric prior they inject, from none
+(random) to a full surface-following path derived from the SDF field.
+
+\paragraph{Operating-point choice: random.}
+The final operating point uses the \texttt{random} initialization for the
+primitive targets. This is the most conservative shape-blind choice --- it
+injects no prior whatsoever --- and is selected because, once the surrogate
+corrections of Sec.~\ref{sec:gap} are active, the initialization basin is no
+longer decisive: with $k$-anneal enabled, a structured \texttt{raster\_fine}
+init and a \texttt{random} init converge to comparable deployable Dice (e.g.\
+sphere seed~1: $0.788$ vs $0.784$ at $k_{\mathrm{final}}{=}80$; the gap is within
+seed noise and $k$-anneal dominates). Placing the burden of geometry discovery
+on the (de-biased) gradient, rather than on the init, is what makes the method
+truly shape-blind: the same configuration trains a sphere, a pyramid, or a
+through-hole sphere with no modification. The surface-following inits remain
+available as a shape-blind alternative when the random basin is insufficient
+(e.g.\ for the concave-bowl combined-CSG target, where \texttt{raster\_fine}
+lifts Dice by $\sim 0.03$ over random at the same budget), but they are not
+required for the primitives.
 
 \subsection{Loss Function}
 \label{sec:loss}

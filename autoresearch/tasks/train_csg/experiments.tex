@@ -99,6 +99,36 @@ de-biasing loss shift adds a further $+0.013$ mean by compensating the residual
 over-erosion. The two surrogate corrections are complementary: $k$-anneal
 \emph{reduces} the per-union bias; loss-shift \emph{cancels} what remains.
 
+\subsection{Initialization-Mode Ablation}
+\label{sec:init-ablation}
+
+Table~\ref{tab:init} confirms the operating-point choice of random
+initialization (Sec.~\ref{sec:param}). Without $k$-anneal, the structured
+\texttt{raster\_fine} init helps over random (it pre-covers the part envelope,
+giving the optimizer a better starting basin when the surrogate itself is
+misleading). With $k$-anneal, the gap collapses: the de-biased gradient discovers
+the geometry from a random start just as well, so the structured prior becomes
+redundant for the primitives. We therefore adopt random as the shape-blind
+default. The surface-following \texttt{raster\_fine} init is retained only for
+the concave-bowl combined-CSG target, where it lifts Dice by $\sim 0.03$ over
+random at equal waypoint budget.
+
+\begin{table}[t]
+  \centering
+  \caption{Initialization mode, $1~\mathrm{in}$ sphere, seed 1. Deployable Dice. With $k$-anneal active, random matches the structured init.}
+  \label{tab:init}
+  \small
+  \begin{tabular}{lcc}
+    \toprule
+    Init mode & $k{=}10$ (no anneal) & $k$-anneal $k_{\mathrm{final}}{=}80$ \\
+    \midrule
+    Random (\texttt{random})         & 0.642 & 0.784 \\
+    Structured (\texttt{raster\_fine}) & 0.635 & 0.788 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+
 \subsection{Loss-Shift Sign and Magnitude}
 \label{sec:lossshift-ablation}
 
