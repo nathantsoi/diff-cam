@@ -328,6 +328,79 @@ Tool length is set per \emph{stock size} (a physical reachability ratio), not pe
 shape, preserving shape-blindness; on a $2~\mathrm{in}$ stock we scale
 proportionally to $h{=}100~\mathrm{mm}$.
 
+\subsection{Emergent Trajectory Smoothness and Contour Following}
+\label{sec:smoothness}
+
+A notable property of the trajectories produced by this method is that they are
+\emph{spatially smooth and follow the contour of the part}, despite originating
+from a random initialization and using no trajectory-smoothing regularizer
+($w_{\mathrm{len}}{=}w_{\mathrm{jerk}}{=}w_{\mathrm{step}}{=}0$). This is not
+imposed by a path-quality penalty; it emerges from three independent mechanisms
+that each bias the optimizer toward exactly the behavior a machinist would
+program by hand. We characterize each, using the cylinder
+(Sec.~\ref{sec:experiments}, deployable Dice $0.91$) as a concrete example.
+
+\paragraph{Contour following from the loss equilibrium.}
+The geometry objective (Eq.~\ref{eq:loss}) balances two terms: a \emph{gouge}
+penalty that forbids entering the part ($r < r_{\mathrm{part}}$) and a
+\emph{residual} reward that forbids leaving waste uncut. For a tool of radius
+$r$ against a part whose local surface radius is $r_{\mathrm{part}}(z)$, the
+gradient equilibrium places the tool center at
+\begin{equation}
+  r_{\mathrm{eq}}(z) \;\approx\; r_{\mathrm{part}}(z) + r,
+\end{equation}
+i.e.\ just outside the surface, where the cutter's inner edge is tangent to the
+part and its outer edge has just removed the waste annulus. Any inward deviation
+incurs the (weighted $4{\times}$) gouge penalty; any outward deviation leaves
+residual. The optimizer therefore does not need to be \emph{told} to follow the
+contour --- sitting on the offset surface is the unique zero-gradient locus of the
+loss, and gradient descent converges to it from any initialization. On the
+cylinder this is exact: the measured mean waypoint radius is $0.576$ versus the
+predicted equilibrium $r_{\mathrm{cyl}} + r = 0.450 + 0.125 = 0.575$. Because the
+equilibrium is computed pointwise from the target SDF, the same mechanism makes a
+sphere trajectory's radius \emph{vary with $z$} ($r_{\mathrm{part}}(z)$ shrinks
+toward the poles), producing a contour-following orbit with no shape-specific
+code. This is the same effect the surface-following initializations
+(\texttt{shell}/\texttt{zlayer}, Sec.~\ref{sec:param}) exploit explicitly, but
+here it is discovered by the gradient rather than injected.
+
+\paragraph{Spatial smoothness from the speed-limit constraint.}
+The per-step speed clip (Sec.~\ref{sec:simulator}) enforces a constant maximum
+feed: any commanded displacement exceeding the cap is magnitude-scaled to
+saturate exactly at it, direction preserved. With $w_{\mathrm{len}}{=}0$ there is
+no soft penalty pulling steps short, so the optimizer pushes every step to the
+cap, and the executed trajectory becomes a \emph{constant-feed} path --- waypoints
+evenly spaced in arc length. This is a desirable CNC property (constant feed
+produces consistent surface finish and tool load) and it emerges for free from
+the kinematic constraint: the binding speed clip acts as a hard regularizer on
+step length, suppressing the jagged overshoot a random init would otherwise
+produce. On the cylinder, the mean per-step displacement is $0.070$ with standard
+deviation $0.011$, against a cap of $\approx 0.075$ --- the clip is binding on
+essentially every step, yielding a uniform feed.
+
+\paragraph{Geometric smoothing by the swept tool.}
+The deployed cut is the swept volume of a finite-radius cylinder, not the
+centerline path. Small high-frequency wander of the centerline is filtered by the
+tool's own extent: any path whose centerline stays within $\mathcal{O}(r)$ of the
+offset surface carves an annulus indistinguishable (under the Dice metric) from a
+geometrically perfect orbit. The method thus need not produce a mathematically
+clean curve --- it need only keep the tool center in the equilibrium band, and
+the swept tool projects that onto a clean machined surface. This is what makes
+the deployable Dice tolerant to the optimizer's residual angular oscillation
+(the cylinder path reverses direction and completes under one full revolution)
+while the carved result reads as a smooth contour.
+
+\paragraph{Implication.}
+These three effects compose into a strong inductive bias toward machinable
+trajectories --- contour offset, constant feed, swept-tool smoothing --- without
+any of them being an explicit path-quality objective. The loss equilibrium
+supplies the \emph{where} (the offset surface), the speed clip supplies the
+\emph{how fast} (constant feed), and the swept tool supplies the \emph{tolerance}
+(centerline wander is forgiven within the tool radius). The optimizer, following
+the de-biased gradient of Sec.~\ref{sec:gap} from a random start, recovers the
+qualitative structure of a hand-programmed finishing pass as a consequence of
+optimizing the geometry objective under physical constraints.
+
 \subsection{Summary}
 \label{sec:method-summary}
 

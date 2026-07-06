@@ -50,40 +50,46 @@
 \@writefile{toc}{\contentsline {paragraph}{Mechanism 2: de-biasing loss shift (\texttt  {loss-shift}).}{7}{section*.13}\protected@file@percent }
 \newlabel{eq:loss-shift}{{10}{7}{Mechanism 2: de-biasing loss shift (\texttt {loss-shift})}{equation.1.10}{}}
 \@writefile{toc}{\contentsline {paragraph}{Mechanism 3: tool-length / reachability correction.}{8}{section*.14}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {1.7}Summary}{8}{subsection.1.7}\protected@file@percent }
-\newlabel{sec:method-summary}{{1.7}{8}{Summary}{subsection.1.7}{}}
-\@writefile{toc}{\contentsline {section}{\numberline {2}Experiments}{8}{section.2}\protected@file@percent }
-\newlabel{sec:experiments}{{2}{8}{Experiments}{section.2}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Setup}{8}{subsection.2.1}\protected@file@percent }
-\newlabel{sec:setup}{{2.1}{8}{Setup}{subsection.2.1}{}}
-\@writefile{toc}{\contentsline {paragraph}{Shapes.}{8}{section*.15}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Scenario.}{8}{section*.16}\protected@file@percent }
-\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Deployable Dice (3-seed mean $\pm $ std) on the $1\nobreakspace  {}\mathrm  {in}$ stock. \emph  {Base}: $k{=}10$, $h{=}50\nobreakspace  {}\mathrm  {mm}$, random init. \emph  {Full}: + \texttt  {k-anneal} ($k_{\mathrm  {final}}{=}150$) + \texttt  {loss-shift} ($\Delta {=}-0.5$).}}{9}{table.1}\protected@file@percent }
-\newlabel{tab:main}{{1}{9}{Deployable Dice (3-seed mean $\pm $ std) on the $1~\mathrm {in}$ stock. \emph {Base}: $k{=}10$, $h{=}50~\mathrm {mm}$, random init. \emph {Full}: + \texttt {k-anneal} ($k_{\mathrm {final}}{=}150$) + \texttt {loss-shift} ($\Delta {=}-0.5$)}{table.1}{}}
-\@writefile{toc}{\contentsline {paragraph}{Metric.}{9}{section*.17}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Operating point.}{9}{section*.18}\protected@file@percent }
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Main Result}{9}{subsection.2.2}\protected@file@percent }
-\newlabel{sec:main-result}{{2.2}{9}{Main Result}{subsection.2.2}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Ablation: Closing the Soft/Hard Gap}{9}{subsection.2.3}\protected@file@percent }
-\newlabel{sec:ablation}{{2.3}{9}{Ablation: Closing the Soft/Hard Gap}{subsection.2.3}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Cumulative ablation, $1\nobreakspace  {}\mathrm  {in}$ stock, seed 1. Each row adds one mechanism. Deployable Dice (viz $=$ train when untruncated).}}{10}{table.2}\protected@file@percent }
-\newlabel{tab:ablation}{{2}{10}{Cumulative ablation, $1~\mathrm {in}$ stock, seed 1. Each row adds one mechanism. Deployable Dice (viz $=$ train when untruncated)}{table.2}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Initialization mode, $1\nobreakspace  {}\mathrm  {in}$ sphere, seed 1. Deployable Dice. With $k$-anneal active, random matches the structured init.}}{10}{table.3}\protected@file@percent }
-\newlabel{tab:init}{{3}{10}{Initialization mode, $1~\mathrm {in}$ sphere, seed 1. Deployable Dice. With $k$-anneal active, random matches the structured init}{table.3}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Initialization-Mode Ablation}{10}{subsection.2.4}\protected@file@percent }
-\newlabel{sec:init-ablation}{{2.4}{10}{Initialization-Mode Ablation}{subsection.2.4}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Loss-Shift Sign and Magnitude}{10}{subsection.2.5}\protected@file@percent }
-\newlabel{sec:lossshift-ablation}{{2.5}{10}{Loss-Shift Sign and Magnitude}{subsection.2.5}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.6}Combined-CSG Targets}{10}{subsection.2.6}\protected@file@percent }
-\newlabel{sec:combined}{{2.6}{10}{Combined-CSG Targets}{subsection.2.6}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Loss-shift sweep on the through-hole sphere (seed 1). Deployable viz Dice and over-carved voxel count (carved minus target).}}{11}{table.4}\protected@file@percent }
-\newlabel{tab:lossshift}{{4}{11}{Loss-shift sweep on the through-hole sphere (seed 1). Deployable viz Dice and over-carved voxel count (carved minus target)}{table.4}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Combined-CSG targets, $1\nobreakspace  {}\mathrm  {in}$ stock. Deployable Dice.}}{11}{table.5}\protected@file@percent }
-\newlabel{tab:combined}{{5}{11}{Combined-CSG targets, $1~\mathrm {in}$ stock. Deployable Dice}{table.5}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.7}Scaling to Larger Stock}{11}{subsection.2.7}\protected@file@percent }
-\newlabel{sec:scaling}{{2.7}{11}{Scaling to Larger Stock}{subsection.2.7}{}}
-\@writefile{toc}{\contentsline {subsection}{\numberline {2.8}Negative Results and Dead Levers}{11}{subsection.2.8}\protected@file@percent }
-\newlabel{sec:negative}{{2.8}{11}{Negative Results and Dead Levers}{subsection.2.8}{}}
-\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Negative results. None improves mean deployable Dice; each is shape-dependent or saturated.}}{12}{table.6}\protected@file@percent }
-\newlabel{tab:negative}{{6}{12}{Negative results. None improves mean deployable Dice; each is shape-dependent or saturated}{table.6}{}}
-\gdef \@abspage@last{12}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.7}Emergent Trajectory Smoothness and Contour Following}{8}{subsection.1.7}\protected@file@percent }
+\newlabel{sec:smoothness}{{1.7}{8}{Emergent Trajectory Smoothness and Contour Following}{subsection.1.7}{}}
+\@writefile{toc}{\contentsline {paragraph}{Contour following from the loss equilibrium.}{8}{section*.15}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Spatial smoothness from the speed-limit constraint.}{9}{section*.16}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Geometric smoothing by the swept tool.}{9}{section*.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Implication.}{9}{section*.18}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.8}Summary}{9}{subsection.1.8}\protected@file@percent }
+\newlabel{sec:method-summary}{{1.8}{9}{Summary}{subsection.1.8}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {2}Experiments}{10}{section.2}\protected@file@percent }
+\newlabel{sec:experiments}{{2}{10}{Experiments}{section.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.1}Setup}{10}{subsection.2.1}\protected@file@percent }
+\newlabel{sec:setup}{{2.1}{10}{Setup}{subsection.2.1}{}}
+\@writefile{toc}{\contentsline {paragraph}{Shapes.}{10}{section*.19}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Scenario.}{10}{section*.20}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Metric.}{10}{section*.21}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Operating point.}{10}{section*.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.2}Main Result}{10}{subsection.2.2}\protected@file@percent }
+\newlabel{sec:main-result}{{2.2}{10}{Main Result}{subsection.2.2}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {1}{\ignorespaces Deployable Dice (3-seed mean $\pm $ std) on the $1\nobreakspace  {}\mathrm  {in}$ stock. \emph  {Base}: $k{=}10$, $h{=}50\nobreakspace  {}\mathrm  {mm}$, random init. \emph  {Full}: + \texttt  {k-anneal} ($k_{\mathrm  {final}}{=}150$) + \texttt  {loss-shift} ($\Delta {=}-0.5$).}}{11}{table.1}\protected@file@percent }
+\newlabel{tab:main}{{1}{11}{Deployable Dice (3-seed mean $\pm $ std) on the $1~\mathrm {in}$ stock. \emph {Base}: $k{=}10$, $h{=}50~\mathrm {mm}$, random init. \emph {Full}: + \texttt {k-anneal} ($k_{\mathrm {final}}{=}150$) + \texttt {loss-shift} ($\Delta {=}-0.5$)}{table.1}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {2}{\ignorespaces Cumulative ablation, $1\nobreakspace  {}\mathrm  {in}$ stock, seed 1. Each row adds one mechanism. Deployable Dice (viz $=$ train when untruncated).}}{11}{table.2}\protected@file@percent }
+\newlabel{tab:ablation}{{2}{11}{Cumulative ablation, $1~\mathrm {in}$ stock, seed 1. Each row adds one mechanism. Deployable Dice (viz $=$ train when untruncated)}{table.2}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.3}Ablation: Closing the Soft/Hard Gap}{11}{subsection.2.3}\protected@file@percent }
+\newlabel{sec:ablation}{{2.3}{11}{Ablation: Closing the Soft/Hard Gap}{subsection.2.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.4}Initialization-Mode Ablation}{11}{subsection.2.4}\protected@file@percent }
+\newlabel{sec:init-ablation}{{2.4}{11}{Initialization-Mode Ablation}{subsection.2.4}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {3}{\ignorespaces Initialization mode, $1\nobreakspace  {}\mathrm  {in}$ sphere, seed 1. Deployable Dice. With $k$-anneal active, random matches the structured init.}}{12}{table.3}\protected@file@percent }
+\newlabel{tab:init}{{3}{12}{Initialization mode, $1~\mathrm {in}$ sphere, seed 1. Deployable Dice. With $k$-anneal active, random matches the structured init}{table.3}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {4}{\ignorespaces Loss-shift sweep on the through-hole sphere (seed 1). Deployable viz Dice and over-carved voxel count (carved minus target).}}{12}{table.4}\protected@file@percent }
+\newlabel{tab:lossshift}{{4}{12}{Loss-shift sweep on the through-hole sphere (seed 1). Deployable viz Dice and over-carved voxel count (carved minus target)}{table.4}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.5}Loss-Shift Sign and Magnitude}{12}{subsection.2.5}\protected@file@percent }
+\newlabel{sec:lossshift-ablation}{{2.5}{12}{Loss-Shift Sign and Magnitude}{subsection.2.5}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.6}Combined-CSG Targets}{12}{subsection.2.6}\protected@file@percent }
+\newlabel{sec:combined}{{2.6}{12}{Combined-CSG Targets}{subsection.2.6}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {5}{\ignorespaces Combined-CSG targets, $1\nobreakspace  {}\mathrm  {in}$ stock. Deployable Dice.}}{13}{table.5}\protected@file@percent }
+\newlabel{tab:combined}{{5}{13}{Combined-CSG targets, $1~\mathrm {in}$ stock. Deployable Dice}{table.5}{}}
+\@writefile{lot}{\contentsline {table}{\numberline {6}{\ignorespaces Negative results. None improves mean deployable Dice; each is shape-dependent or saturated.}}{13}{table.6}\protected@file@percent }
+\newlabel{tab:negative}{{6}{13}{Negative results. None improves mean deployable Dice; each is shape-dependent or saturated}{table.6}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.7}Scaling to Larger Stock}{13}{subsection.2.7}\protected@file@percent }
+\newlabel{sec:scaling}{{2.7}{13}{Scaling to Larger Stock}{subsection.2.7}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {2.8}Negative Results and Dead Levers}{13}{subsection.2.8}\protected@file@percent }
+\newlabel{sec:negative}{{2.8}{13}{Negative Results and Dead Levers}{subsection.2.8}{}}
+\gdef \@abspage@last{13}
