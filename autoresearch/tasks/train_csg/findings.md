@@ -89,8 +89,11 @@ unpenalized. This is the limit of pure soft-loss methods; closing it needs a
 hard-carve-aware loss term or a topology-aware penalty (future work).
 
 Scaling: 2in stock + 100mm tool (same tool-to-stock ratio) confirms k-anneal
-scales to the larger absolute scenario (sphere 2in k150 ls-0.5 mid-run ~0.77
-vs k10 ~0.55). Finals in flight.
+scales to the larger absolute scenario. **Sphere 2in k150 ls-0.5 = 0.774**
+(deployable, viz=train, no truncation) vs 2in k10 ~0.55 → k-anneal+loss-shift
+delivers +0.22, matching the 1in pattern (k-anneal is the dominant lever and
+transfers across absolute scale). The gap to 1in sphere (0.826) is the larger
+tool-to-stock ratio, not a method failure. Box/pyramid 2in still in flight.
 
 ## Artifacts
 
