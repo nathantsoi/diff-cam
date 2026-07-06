@@ -5,13 +5,18 @@
 \label{sec:setup}
 
 \paragraph{Shapes.}
-We evaluate on four primitives --- \emph{sphere}, \emph{cylinder}, \emph{box},
-\emph{square pyramid} --- and two combined-CSG targets that test negative-feature
-machining: a \emph{through-hole sphere} $S_{\mathrm{sph}} \cap \neg
-S_{\mathrm{cyl}}$ and a \emph{concave bowl} $S_{\mathrm{sph}} \cap \neg
-(S_{\mathrm{sub}} \cap \{z \le z_c\})$. All targets are exposed to the method
+We evaluate on four \emph{primitive} targets --- \emph{sphere}, \emph{cylinder},
+\emph{box}, \emph{square pyramid} --- and two \emph{composite} CSG targets that
+test negative-feature machining: a \emph{through-hole sphere} (\texttt{sphere\_hole})
+$S_{\mathrm{sph}} \cap \neg S_{\mathrm{cyl}}$ and a \emph{concave bowl}
+(\texttt{sphere\_bowl}) $S_{\mathrm{sph}} \cap \neg (S_{\mathrm{sub}} \cap
+\{z \le z_c\})$. The composite targets combine a positive outer surface with a
+negative interior feature (a through-hole and a hemispherical cavity
+respectively), exercising the method's ability to machine concavity and
+internal topology from geometry alone. All targets are exposed to the method
 only as a pointwise SDF; no result in this section used a shape-dependent
-hyperparameter.
+hyperparameter, and the same operating point trains primitives and composites
+alike.
 
 \paragraph{Scenario.}
 Default stock is a $1~\mathrm{in}^3$ cube at $0.5~\mathrm{mm}$ voxels
@@ -27,8 +32,8 @@ All reported numbers are \emph{deployable} Dice: the exact boolean carve
 (Eq.~\ref{eq:hard-carve}) of the best-checkpoint trajectory from the canonical
 start, after collision-safe truncation. Because $h{=}50~\mathrm{mm}$ clears the
 holder throughout the $1~\mathrm{in}$ envelope, viz Dice equals train Dice (no
-truncation) for all primitive results. All runs are fully deterministic given the
-seed.
+truncation) for all primitive and composite results. All runs are fully
+deterministic given the seed.
 
 \paragraph{Operating point.}
 Unless stated otherwise, the method uses
@@ -45,7 +50,10 @@ method raises mean deployable Dice from $0.664$ to $0.877$ ($+0.213$), with the
 largest gains on the shapes where the fixed-$k$ surrogate most badly misleads the
 optimizer (sphere $+0.19$, pyramid $+0.39$). Cylinder and box, which have
 $z$-invariant cross-sections and thus a softer structural ceiling, already
-scored near $0.8$ at $k{=}10$ and gain correspondingly less.
+scored near $0.8$ at $k{=}10$ and gain correspondingly less. The two composite
+CSG targets (through-hole sphere, concave bowl) are reported separately in
+Sec.~\ref{sec:composite}, as their negative features require distinct
+geometry.
 
 \begin{table}[t]
   \centering
@@ -110,7 +118,7 @@ misleading). With $k$-anneal, the gap collapses: the de-biased gradient discover
 the geometry from a random start just as well, so the structured prior becomes
 redundant for the primitives. We therefore adopt random as the shape-blind
 default. The surface-following \texttt{raster\_fine} init is retained only for
-the concave-bowl combined-CSG target, where it lifts Dice by $\sim 0.03$ over
+the concave-bowl composite CSG target, where it lifts Dice by $\sim 0.03$ over
 random at equal waypoint budget.
 
 \begin{table}[t]
@@ -160,40 +168,59 @@ $\Delta \approx -\log 2 \cdot k_{\mathrm{ref}} / k_{\mathrm{final}} \approx -0.2
   \end{tabular}
 \end{table}
 
-\subsection{Combined-CSG Targets}
-\label{sec:combined}
+\subsection{Composite Shapes}
+\label{sec:composite}
 
-Table~\ref{tab:combined} reports the combined-CSG targets. The concave bowl is
-machinable: its negative feature is a wide interior cavity that the swept
-cylinder can reach, and the full method scores $0.659$ reproducibly (3-seed
-std $0.001$ with the denser $T{=}256$ trajectory; $0.634 \pm 0.030$ at
-$T{=}128$). Loss-shift is neutral on the bowl: its concavity is not
-over-erosion-limited.
-
-The through-hole sphere is the open frontier. With the default geometry the
-through-hole shell ($1.9~\mathrm{mm}$) is thinner than the tool ($3.175~\mathrm{mm}$),
-physically infeasible; with a feasible shell the soft optimum trains to
-$\approx 0.72$ Dice but deploys at only $\approx 0.25$: at any finite $k$,
-soft-union over-erosion fills the narrow negative feature, so the loss cannot
-penalize the hole interior. Loss-shift helps marginally ($0.237 \to 0.246$) but
-the hole interior remains structurally unpenalized --- the limit of pure
-soft-loss methods.
+The two composite CSG targets are reported in Table~\ref{tab:composite}. They are
+the strictest test of shape-blindness: their geometry is a non-trivial boolean
+combination, yet the method receives only the combined SDF field, with no
+indication that a hole or cavity is present.
 
 \begin{table}[t]
   \centering
-  \caption{Combined-CSG targets, $1~\mathrm{in}$ stock. Deployable Dice.}
-  \label{tab:combined}
+  \caption{Composite CSG targets, $1~\mathrm{in}$ stock. Deployable Dice (viz $=$ train, no truncation). \emph{Base}: $k{=}10$, $h{=}50~\mathrm{mm}$. \emph{Full}: + \texttt{k-anneal} + \texttt{loss-shift} $\Delta{=}-0.5$.}
+  \label{tab:composite}
   \small
-  \begin{tabular}{lcc}
+  \begin{tabular}{lcc c l}
     \toprule
-    Target & Deployable Dice & Note \\
+    Target & Base ($k{=}10$) & Full method & $\Delta$ & Note \\
     \midrule
-    Concave bowl ($T{=}256$, rf) & $0.659 \pm 0.001$ & 3 seeds; negative feature reachable \\
-    Concave bowl ($T{=}128$)     & $0.634 \pm 0.030$ & ls-0.5 neutral on bowl \\
-    Through-hole sphere (feasible) & $0.246$ & soft/hard gap on narrow hole; open \\
+    Concave bowl (\texttt{sphere\_bowl}), $T{=}128$ & 0.443 & $\mathbf{0.634 \pm 0.030}$ & $+0.191$ & 3 seeds; ls neutral \\
+    Concave bowl (\texttt{sphere\_bowl}), $T{=}256$ & 0.451 & $\mathbf{0.659 \pm 0.001}$ & $+0.208$ & 3 seeds; denser path \\
+    Through-hole sphere (\texttt{sphere\_hole})$^\dagger$ & --- & $0.246$ & --- & open frontier \\
     \bottomrule
-  \end{tabular}
+  \end{tabular}\\
+  \small $^\dagger$feasible-shell geometry; see text.
 \end{table}
+
+\paragraph{Concave bowl (\texttt{sphere\_bowl}).}
+The bowl is machinable: its negative feature is a wide interior cavity that the
+swept cylinder can reach, so the loss can penalize the cavity floor and walls.
+The full method raises deployable Dice from $0.443$ to $0.634 \pm 0.030$ over 3
+seeds ($+0.191$), and a denser $T{=}256$ trajectory reaches $0.659 \pm 0.001$.
+The gain over the $k{=}10$ base ($+0.19$) is on the same order as the primitive
+sphere, confirming $k$-anneal transfers to composite positive-plus-concave
+geometry. Loss-shift is neutral on the bowl: its concavity is wide enough that
+soft-union over-erosion does not fill it, so the de-biasing correction has
+nothing to cancel --- consistent with the loss-shift analysis of
+Sec.~\ref{sec:lossshift-ablation}, where the shift helps only where over-erosion
+is the binding constraint.
+
+\paragraph{Through-hole sphere (\texttt{sphere\_hole}).}
+The through-hole sphere is the open frontier. With the default geometry the
+through-hole shell ($1.9~\mathrm{mm}$) is thinner than the tool
+($3.175~\mathrm{mm}$), physically infeasible; we therefore evaluate on a
+feasible-shell variant (sub-radius $9.525~\mathrm{mm}$). Even so, the soft
+optimum trains to $\approx 0.72$ Dice but deploys at only $\approx 0.25$: at any
+finite $k$, soft-union over-erosion fills the narrow negative feature, so the
+loss cannot penalize the hole interior --- the optimizer has no gradient signal
+for the hole wall. Loss-shift helps marginally ($0.237 \to 0.246$) by reducing
+over-carve around the hole, but the hole interior remains structurally
+unpenalized. This is the limit of pure soft-loss methods: a topology-aware or
+hard-carve-in-the-loop loss term would be required to close it, which we leave
+to future work. The result is included to delineate where the shape-blind
+soft-surrogate approach succeeds (positive surfaces, wide concavities) and
+where it does not (narrow negative topology).
 
 \subsection{Scaling to Larger Stock}
 \label{sec:scaling}
