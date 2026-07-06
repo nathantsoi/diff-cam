@@ -202,6 +202,11 @@ class Args:
     k_final: float = 10.0
     """final smoothness k when --k-anneal is on (ramped linearly from k_init)."""
 
+    loss_shift: float = 0.0
+    """de-biased (hard-carve-aware) loss: add this to stock_d before the loss
+    sigmoid to compensate soft-union over-erosion (~log(2)*k_ref/k_final at the
+    final sharpness) so the loss targets the deployable HARD carve. 0 = off."""
+
     # Loss balancing (objective vs. safety barriers; see CSGSimulatorDelta)
     w_residual: float = 1.0
     """weight on leftover material outside the part -- the objective that REWARDS cutting"""
@@ -579,6 +584,7 @@ def main():
     # Loss balancing: objective (residual) vs. safety barriers (gouge, holder).
     sim.w_residual[None] = args.w_residual
     sim.w_gouge[None] = args.w_gouge
+    sim.loss_shift[None] = args.loss_shift
     sim.holder_penalty_weight[None] = args.holder_penalty_weight
     sim.holder_margin[None] = args.holder_margin
     # Trajectory regularizers (air-cut + jerk); 0 = disabled.

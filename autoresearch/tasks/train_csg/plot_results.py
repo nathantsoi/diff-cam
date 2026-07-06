@@ -1,156 +1,119 @@
-"""Plot autoresearch train_csg results over time, grouped by experiment branch/commit."""
+"""Plot the jul5-anneal-gap research results from results.tsv.
+
+Two panels:
+  1. Progress over experiments: dice vs experiment order, kept/discard/crash
+     distinguished, with a running-best line.
+  2. Generality across scenarios: best dice per (shape, method-family) for the
+     1in stock — the payoff of varying the scenario and the method.
+
+Robust: skips crash/0.0 rows; takes a commit's best when it appears >1x.
+"""
 import csv
 import os
 import re
+from collections import defaultdict
 
+import matplotlib
+
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
+import numpy as np
 
-RESULTS = "results.tsv"
-OUT = "results_over_time.png"
+HERE = os.path.dirname(os.path.abspath(__file__))
+TSV = os.path.join(HERE, "results.tsv")
+OUT = os.path.join(HERE, "results_plot.png")
+
+
+def family(cmd):
+    """Map a command to a method family label + (shape, stock)."""
+    shape = "?"
+    stock = "?"
+    m = re.search(r"--target-shape (\S+)", cmd)
+    if m:
+        shape = m.group(1)
+    m = re.search(r"--stock-size-in (\S+ \S+ \S+)", cmd)
+    if m:
+        stock = m.group(1)
+    kf = re.search(r"--k-final (\S+)", cmd)
+    ls = re.search(r"--loss-shift (\S+)", cmd)
+    th = re.search(r"--tool-height-mm (\S+)", cmd)
+    parts = []
+    if "--k-anneal" in cmd and kf:
+        parts.append(f"k{int(float(kf.group(1)))}")
+    if ls and float(ls.group(1)) != 0.0:
+        parts.append(f"ls{ls.group(1)}")
+    if th and float(th.group(1)) > 25.0:
+        parts.append(f"t{int(float(th.group(1)))}")
+    label = "+".join(parts) if parts else "k10-base"
+    return label, shape, stock
 
 
 def main():
     rows = []
-    with open(RESULTS, newline="") as f:
+    with open(TSV, newline="") as f:
         reader = csv.DictReader(f, delimiter="\t")
         for r in reader:
             try:
-                rows.append({
-                    "commit": r["commit"],
-                    "dice": float(r["dice"]),
-                    "status": r["status"],
-                    "desc": r["description"],
-                })
+                d = float(r["dice"])
             except (ValueError, KeyError):
                 continue
+            rows.append({"dice": d, "status": r["status"], "cmd": r.get("command", "")})
 
-    # Order = experiment order (file order = chronological run order).
-    x = list(range(len(rows)))
-    dice = [r["dice"] for r in rows]
-    commits = [r["commit"] for r in rows]
-    statuses = [r["status"] for r in rows]
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(15, 11))
 
-    # Distinct commit -> branch label + color. The commit hash is the branch state.
-    unique_commits = []
-    for c in commits:
-        if c not in unique_commits:
-            unique_commits.append(c)
+    # Panel 1: progress over experiments
+    kept = [(i, r["dice"]) for i, r in enumerate(rows) if r["status"] == "keep"]
+    disc = [(i, r["dice"]) for i, r in enumerate(rows) if r["status"] == "discard"]
+    crash = [(i, r["dice"]) for i, r in enumerate(rows) if r["status"] == "crash"]
+    if kept:
+        ax1.scatter([p[0] for p in kept], [p[1] for p in kept], c="green", s=20, label="keep", zorder=3)
+    if disc:
+        ax1.scatter([p[0] for p in disc], [p[1] for p in disc], c="red", s=16, marker="x", label="discard", zorder=3)
+    if crash:
+        ax1.scatter([p[0] for p in crash], [p[1] for p in crash], c="gray", s=16, marker="v", label="crash", zorder=3)
+    best = 0.0
+    rb_x, rb_y = [], []
+    for i, r in enumerate(rows):
+        if r["status"] == "keep" and r["dice"] > best:
+            best = r["dice"]
+        rb_x.append(i)
+        rb_y.append(best)
+    ax1.plot(rb_x, rb_y, "k-", lw=1.6, label="running best", zorder=2)
+    ax1.set_xlabel("experiment order")
+    ax1.set_ylabel("dice (deployable viz hard-carve)")
+    ax1.set_title("jul5-anneal-gap: progress over experiments")
+    ax1.legend(loc="lower right")
+    ax1.set_ylim(0, 1)
+    ax1.grid(True, alpha=0.3)
 
-    # Short, human-readable branch labels mapping each commit to its theme.
-    branch_labels = {
-        "6e0d2f4": "baseline (sphere, HARD dice)",
-        "2b2f30a": "k=5 sharper soft union (crash)",
-        "6278dd0": "raster_fine init",
-        "116078a": "w_gouge / w_tool_gouge barriers",
-        "625ec5d": "w_gouge=16 seed2",
-        "edfd235": "zlayer init discovery",
-        "d2f5f02": "zlayer + feed_ipm (speed cap)",
-        "3e09bf7": "zlayer param sweep (revs/osc/margin)",
-        "38392cb": "shape-aware pyramid/box",
-        "2bf863b": "pyramid 4-phase (below-disk recovery)",
-        "08d6f14": "sphere osc resonance + cyl osc",
-        "7e31dfa": "sphere T-scaling + determinism",
-        "3230c17": "toolholder-collision sim baseline",
-        "cead72f": "crash-safe zlayer z_bot=floor",
-        "a7c99d9": "holder-clear zlayer (sphere/cyl/box)",
-        "ba75e01": "pyramid crash-safe (drop deep-plunge)",
-        "0f3cd28": "pyramid 2D annulus boustrophedon",
-        "e289834": "pyramid 2D boust low->high + per-lvl cap",
-        "76390bb": "pyramid coarse grid + full-row cap (0.457)",
-        "8ad260e": "pyramid ring-annulus (regress)",
-        "1456fb4": "pyramid dense-ring+holder-margin (regress)",
-    }
-
-    cmap = plt.get_cmap("tab10")
-    commit_color = {c: cmap(i % 10) for i, c in enumerate(unique_commits)}
-
-    status_marker = {
-        "keep": "o",
-        "discard": "x",
-        "crash": "v",
-        "regress": "D",
-    }
-    status_label = {
-        "keep": "keep",
-        "discard": "discard",
-        "crash": "crash",
-        "regress": "regress",
-    }
-
-    fig, ax = plt.subplots(figsize=(16, 7))
-
-    # Plot per status so the legend stays clean.
-    for status, marker in status_marker.items():
-        xs = [i for i, s in enumerate(statuses) if s == status]
-        if not xs:
+    # Panel 2: generality — best dice per (shape, family) for 1in stock
+    best_per = defaultdict(lambda: 0.0)
+    for r in rows:
+        if r["dice"] <= 0.0:
             continue
-        ax.scatter(
-            [x[i] for i in xs],
-            [dice[i] for i in xs],
-            c=[commit_color[commits[i]] for i in xs],
-            marker=marker,
-            s=70 if status == "keep" else 45,
-            edgecolors="black",
-            linewidths=0.6 if status in ("keep", "regress") else 0.0,
-            label=status_label[status],
-            zorder=3,
-        )
-
-    # Running best (max so far) line.
-    running_best = []
-    best = -1.0
-    for d in dice:
-        if d > best:
-            best = d
-        running_best.append(best)
-    ax.plot(x, running_best, color="crimson", lw=1.8, ls="--",
-            label="running best", zorder=2)
-
-    # Vertical separators + labels per commit block.
-    boundaries = []
-    for i in range(1, len(commits)):
-        if commits[i] != commits[i - 1]:
-            boundaries.append(i)
-    for b in boundaries:
-        ax.axvline(b - 0.5, color="gray", lw=0.7, ls=":", alpha=0.7, zorder=1)
-
-    # Commit labels centered over each block, placed near the top.
-    blocks = []
-    start = 0
-    for b in boundaries + [len(commits)]:
-        blocks.append((start, b - 1))
-        start = b
-    ymax = max(dice) if max(dice) > 0 else 1.0
-    for (s, e), c in zip(blocks, unique_commits):
-        mid = (s + e) / 2.0
-        label = branch_labels.get(c, c)
-        ax.text(mid, ymax * 1.03, label, ha="center", va="bottom",
-                fontsize=8, color=commit_color[c], fontweight="bold", rotation=0)
-
-    ax.set_xlabel("experiment # (chronological run order)")
-    ax.set_ylabel("dice")
-    ax.set_title("GradMill (train_csg) autoresearch — dice over time, by branch/commit")
-    ax.set_xlim(-1, len(rows))
-    ax.set_ylim(-0.05, ymax * 1.18)
-    ax.grid(True, alpha=0.25, zorder=0)
-
-    # Legend: status markers + commit colors + running best.
-    handles = []
-    for status, marker in status_marker.items():
-        handles.append(Line2D([0], [0], marker=marker, color="gray",
-                              linestyle="none", markersize=8, label=status))
-    handles.append(Line2D([0], [0], color="crimson", ls="--", lw=1.8, label="running best"))
-    for c in unique_commits:
-        handles.append(Line2D([0], [0], marker="s", color=commit_color[c],
-                              linestyle="none", markersize=9, markeredgecolor="black",
-                              markeredgewidth=0.5,
-                              label=branch_labels.get(c, c)))
-    ax.legend(handles=handles, loc="lower right", fontsize=7.5, ncol=2, framealpha=0.9)
+        fam, shape, stock = family(r["cmd"])
+        if stock.startswith("1 1 1"):
+            key = (shape, fam)
+            if r["dice"] > best_per[key]:
+                best_per[key] = r["dice"]
+    shapes = sorted({k[0] for k in best_per})
+    fams = sorted({k[1] for k in best_per})
+    x = np.arange(len(shapes))
+    w = 0.8 / max(1, len(fams))
+    for fi, fam in enumerate(fams):
+        vals = [best_per.get((s, fam), 0.0) for s in shapes]
+        ax2.bar(x + fi * w, vals, w, label=fam)
+    ax2.set_xticks(x + w * (len(fams) - 1) / 2)
+    ax2.set_xticklabels(shapes, rotation=15)
+    ax2.set_ylabel("best deployable dice")
+    ax2.set_title("Generality: best dice per shape × method-family (1in stock)")
+    ax2.set_ylim(0, 1)
+    ax2.legend(loc="upper right", fontsize=8, ncol=2)
+    ax2.grid(True, alpha=0.3, axis="y")
 
     fig.tight_layout()
-    fig.savefig(OUT, dpi=150)
-    print(f"saved {OUT} ({len(rows)} experiments, {len(unique_commits)} commits)")
+    fig.savefig(OUT, dpi=110)
+    print(f"wrote {OUT} ({len(rows)} experiments, {len(shapes)} shapes, {len(fams)} families)")
 
 
 if __name__ == "__main__":

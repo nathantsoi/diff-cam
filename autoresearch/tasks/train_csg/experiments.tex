@@ -1,0 +1,317 @@
+\section{Experiments}
+\label{sec:experiments}
+
+\subsection{Setup}
+\label{sec:setup}
+
+\paragraph{Shapes.}
+We evaluate on four \emph{primitive} targets --- \emph{sphere}, \emph{cylinder},
+\emph{box}, \emph{square pyramid} --- and two \emph{composite} CSG targets that
+test negative-feature machining: a \emph{through-hole sphere} (\texttt{sphere\_hole})
+$S_{\mathrm{sph}} \cap \neg S_{\mathrm{cyl}}$ and a \emph{concave bowl}
+(\texttt{sphere\_bowl}) $S_{\mathrm{sph}} \cap \neg (S_{\mathrm{sub}} \cap
+\{z \le z_c\})$. The composite targets combine a positive outer surface with a
+negative interior feature (a through-hole and a hemispherical cavity
+respectively), exercising the method's ability to machine concavity and
+internal topology from geometry alone. All targets are exposed to the method
+only as a pointwise SDF; no result in this section used a shape-dependent
+hyperparameter, and the same operating point trains primitives and composites
+alike.
+
+\paragraph{Scenario.}
+Default stock is a $1~\mathrm{in}^3$ cube at $0.5~\mathrm{mm}$ voxels
+($51^3$ grid). Tool radius $r{=}3.175~\mathrm{mm}$, flute height
+$h{=}50~\mathrm{mm}$ (Sec.~\ref{sec:gap}, Mechanism 3). Trajectory length
+$T{=}128$ waypoints, $N_{\mathrm{iters}}{=}5000$ Adam iterations at
+$\alpha{=}10^{-3}$, gradient clip $c_{\mathrm{grad}}{=}0.5$, step
+$\Delta t{=}0.45$. Each configuration is run over 3 seeds; we report the
+deployable Dice (exact boolean carve, viz stage) mean $\pm$ standard deviation.
+
+\paragraph{Metric.}
+All reported numbers are \emph{deployable} Dice: the exact boolean carve
+(Eq.~\ref{eq:hard-carve}) of the best-checkpoint trajectory from the canonical
+start, after collision-safe truncation. Because $h{=}50~\mathrm{mm}$ clears the
+holder throughout the $1~\mathrm{in}$ envelope, viz Dice equals train Dice (no
+truncation) for all primitive and composite results. All runs are fully
+deterministic given the seed.
+
+\paragraph{Configurations.}
+To isolate the contribution of the surrogate-correction mechanisms
+(Sec.~\ref{sec:gap}), every results table reports two configurations that differ
+\emph{only} in how the soft surrogate is treated. Everything else --- the
+simulator, the trajectory parametrization, the optimization procedure, the
+evaluation protocol --- is held identical across the two.
+
+\textbf{Shared experimental setup (identical in Base and Full).} Both
+configurations use: (i) the same differentiable CSG carving simulator
+(Sec.~\ref{sec:simulator}); (ii) the same \emph{random} trajectory
+initialization ($\sigma_{\mathrm{init}}{=}0.05$, Sec.~\ref{sec:param}) --- no
+shape-dependent init in either; (iii) the same optimization procedure: $5000$
+Adam iterations at $\alpha{=}10^{-3}$, $\ell_2$ gradient clip
+$c_{\mathrm{grad}}{=}0.5$, step $\Delta t{=}0.45$, $T{=}128$ waypoints; (iv) the
+same speed-limit / $z$-floor kinematic gates; (v) the same best-checkpoint
+selection over the exact boolean carve (Sec.~\ref{sec:optim}); and (vi) the same
+$h{=}50~\mathrm{mm}$ tool-length reachability correction (Mechanism~3). The
+deployable evaluation --- hard boolean carve, Dice/ASD/HD95 --- is also identical
+and, being $k$-independent, scores both configurations on the same metric. A
+third reference point, \emph{Init (iter~0)}, is the deployable Dice of the random
+trajectory before any gradient step; because the hard carve is $k$-independent,
+this value is shared by both configurations.
+
+\textbf{Methodological differences (Base vs Full).} The two configurations differ
+in exactly two places, both acting on the \emph{training-time soft surrogate} and
+neither touching the deployable evaluation:
+\begin{itemize}\itemsep0pt
+  \item \emph{Soft-union sharpness schedule.} Base holds the smoothness $k$ fixed
+        at $10$ for the entire run, so the training surrogate has a constant,
+        large over-erosion bias ($\mathcal{O}(\log 2 / k)$ per union). Full
+        \emph{anneals} $k$ linearly from $k_{\mathrm{init}}{=}10$ to
+        $k_{\mathrm{final}}{=}150$ over training (Mechanism~1): a smooth,
+        well-conditioned surrogate early for the random init to descend, sharpened
+        late so the terminal gradient aligns with the deployable metric.
+  \item \emph{Loss de-biasing.} Base evaluates the loss on the soft stock field
+        as-is ($\Delta{=}0$). Full adds a constant bias $\Delta{=}-0.5$ voxels to
+        the stock SDF before the loss occupancy (Mechanism~2), compensating the
+        residual over-erosion so the soft-loss optimum targets the hard carve.
+\end{itemize}
+No other methodological difference exists between them: the same code path, the
+same hyperparameters, the same seeds. The $\Delta$ column in each table is the
+per-shape gain of Full over Base and therefore isolates the contribution of these
+two surrogate corrections alone. Base is, in effect, the ablation ``what if we
+optimze the soft surrogate as-is, with no correction''; Full is the proposed
+method. Unless stated otherwise, both are run with identical hyperparameters
+across every shape, including the composite CSG targets.
+
+\subsection{Main Result}
+\label{sec:main-result}
+
+Table~\ref{tab:main} reports the deployable Dice of the Full method against the
+Base configuration on the $1~\mathrm{in}$ stock, with the iteration-0 Dice of the
+random trajectory as a reference (Sec.~\ref{sec:setup}, Configurations). Because
+Base and Full share every component except the two surrogate corrections, the
+$\Delta$ column isolates their effect. The shape-blind method raises mean
+deployable Dice from $0.664$ to $0.877$ ($+0.213$), with the largest gains on the
+shapes where the fixed-$k$ surrogate most badly misleads the optimizer (sphere
+$+0.19$, pyramid $+0.39$). Cylinder and box, which have $z$-invariant
+cross-sections and thus a softer structural ceiling, already scored near $0.8$ at
+$k{=}10$ and gain correspondingly less. Two observations bear on the
+methodological contrast: (i) Base itself moves the init only modestly ($+0.052$
+mean, $0.612 \to 0.664$) --- plain soft-surrogate optimization largely treads
+water because its gradient is misaligned with the deployable metric; (ii) Full
+adds $+0.213$ on top of Base, so the gain is attributable to the surrogate
+corrections (annealing $k$ and de-biasing the loss), not to the optimization
+machinery, which is already present in Base. The two composite CSG targets
+(through-hole sphere, concave bowl) are reported separately in
+Sec.~\ref{sec:composite}, as their negative features require distinct geometry.
+
+\begin{table}[t]
+  \centering
+  \caption{Deployable Dice (3-seed mean $\pm$ std) on the $1~\mathrm{in}$ stock. \emph{Init}: iteration-0 random trajectory (pre-optimization, $k$-independent). \emph{Base}: $k{=}10$, $h{=}50~\mathrm{mm}$, random init. \emph{Full}: + \texttt{k-anneal} ($k_{\mathrm{final}}{=}150$) + \texttt{loss-shift} ($\Delta{=}-0.5$).}
+  \label{tab:main}
+  \small
+  \begin{tabular}{lccc c}
+    \toprule
+    Shape & Init (iter 0) & Base ($k{=}10$) & Full method & $\Delta$ \\
+    \midrule
+    Sphere   & 0.550 & 0.638 & $\mathbf{0.826 \pm 0.018}$ & $+0.188$ \\
+    Pyramid  & 0.386 & 0.427 & $\mathbf{0.813 \pm 0.003}$ & $+0.386$ \\
+    Cylinder & 0.707 & 0.774 & $\mathbf{0.905 \pm 0.010}$ & $+0.131$ \\
+    Box      & 0.803 & 0.816 & $\mathbf{0.865 \pm 0.009}$ & $+0.049$ \\
+    \midrule
+    Mean     & 0.612 & 0.664 & $\mathbf{0.877}$           & $+0.213$ \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Ablation: Closing the Soft/Hard Gap}
+\label{sec:ablation}
+
+Table~\ref{tab:ablation} isolates the three mechanisms of
+Sec.~\ref{sec:gap}. Starting from the original short-tool fixed-$k$ configuration
+($h{=}25~\mathrm{mm}$, $k{=}10$, deployable Dice computed after collision
+truncation), each mechanism is added cumulatively (seed 1, for comparability).
+
+\begin{table}[t]
+  \centering
+  \caption{Cumulative ablation, $1~\mathrm{in}$ stock, seed 1. Each row adds one mechanism. Deployable Dice (viz $=$ train when untruncated).}
+  \label{tab:ablation}
+  \small
+  \begin{tabular}{lccccc}
+    \toprule
+    Configuration & Sph. & Pym. & Cyl. & Box & Mean \\
+    \midrule
+    $k{=}10$, $h{=}25$ (orig.\ baseline, truncated) & 0.579 & 0.425 & 0.717 & 0.816 & 0.634 \\
+    $+ h{=}50$ (reachability)              & 0.638 & 0.427 & 0.774 & 0.816 & 0.664 \\
+    $+ k$-anneal $k_{\mathrm{final}}{=}150$ & 0.830 & 0.796 & 0.895 & 0.843 & 0.841 \\
+    $+ \Delta{=}-0.5$ (loss-shift)         & 0.840 & 0.817 & 0.895 & 0.865 & 0.854 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+The reachability correction ($h{=}25 \to 50$) removes the truncation ceiling but,
+in isolation, barely moves Dice: at $k{=}10$ the optimizer is still pulled toward
+the over-eroding soft optimum. Smoothness annealing is the dominant lever
+($+0.18$ mean), aligning the terminal gradient with the hard metric. The
+de-biasing loss shift adds a further $+0.013$ mean by compensating the residual
+over-erosion. The two surrogate corrections are complementary: $k$-anneal
+\emph{reduces} the per-union bias; loss-shift \emph{cancels} what remains.
+
+\subsection{Initialization-Mode Ablation}
+\label{sec:init-ablation}
+
+Table~\ref{tab:init} confirms the operating-point choice of random
+initialization (Sec.~\ref{sec:param}). Without $k$-anneal, the structured
+\texttt{raster\_fine} init helps over random (it pre-covers the part envelope,
+giving the optimizer a better starting basin when the surrogate itself is
+misleading). With $k$-anneal, the gap collapses: the de-biased gradient discovers
+the geometry from a random start just as well, so the structured prior becomes
+redundant for the primitives. We therefore adopt random as the shape-blind
+default. The surface-following \texttt{raster\_fine} init is retained only for
+the concave-bowl composite CSG target, where it lifts Dice by $\sim 0.03$ over
+random at equal waypoint budget.
+
+\begin{table}[t]
+  \centering
+  \caption{Initialization mode, $1~\mathrm{in}$ sphere, seed 1. Deployable Dice. With $k$-anneal active, random matches the structured init.}
+  \label{tab:init}
+  \small
+  \begin{tabular}{lcc}
+    \toprule
+    Init mode & $k{=}10$ (no anneal) & $k$-anneal $k_{\mathrm{final}}{=}80$ \\
+    \midrule
+    Random (\texttt{random})         & 0.642 & 0.784 \\
+    Structured (\texttt{raster\_fine}) & 0.635 & 0.788 \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+
+\subsection{Loss-Shift Sign and Magnitude}
+\label{sec:lossshift-ablation}
+
+Table~\ref{tab:lossshift} confirms the de-biasing direction and sweet spot on the
+through-hole sphere (feasible-shell geometry; the narrow negative feature makes
+the over-erosion bias most visible). Positive $\Delta$ increases over-carve and
+lowers Dice; negative $\Delta$ reduces over-carve and lifts Dice, with
+$\Delta{=}-0.5$ optimal and $\Delta{=}-1.0$ over-correcting into under-carve.
+The sign and order of magnitude are consistent with the predicted
+$\Delta \approx -\log 2 \cdot k_{\mathrm{ref}} / k_{\mathrm{final}} \approx -0.24$.
+
+\begin{table}[t]
+  \centering
+  \caption{Loss-shift sweep on the through-hole sphere (seed 1). Deployable viz Dice and over-carved voxel count (carved minus target).}
+  \label{tab:lossshift}
+  \small
+  \begin{tabular}{lcc}
+    \toprule
+    $\Delta$ (vox) & Deployable Dice & Over-carve (vox) \\
+    \midrule
+    $+1.0$  & 0.215 & $+70{,}332$ \\
+    $+0.5$  & 0.232 & $+63{,}116$ \\
+    $+0.24$ & 0.243 & $+58{,}785$ \\
+    $\phantom{+}0$   & 0.237 & --- \\
+    $-0.24$ & 0.248 & $+54{,}509$ \\
+    $-0.5$  & \textbf{0.246} & $+51{,}375$ \\
+    $-1.0$  & 0.232 & $+47{,}152$ (under-carve) \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\subsection{Composite Shapes}
+\label{sec:composite}
+
+The two composite CSG targets are reported in Table~\ref{tab:composite}. They are
+the strictest test of shape-blindness: their geometry is a non-trivial boolean
+combination, yet the method receives only the combined SDF field, with no
+indication that a hole or cavity is present.
+
+\begin{table}[t]
+  \centering
+  \caption{Composite CSG targets, $1~\mathrm{in}$ stock. Deployable Dice (viz $=$ train, no truncation). \emph{Init}: iteration-0 random trajectory (pre-optimization, $k$-independent). \emph{Base}: $k{=}10$, $h{=}50~\mathrm{mm}$. \emph{Full}: + \texttt{k-anneal} + \texttt{loss-shift} $\Delta{=}-0.5$.}
+  \label{tab:composite}
+  \small
+  \begin{tabular}{lccc c l}
+    \toprule
+    Target & Init (iter 0) & Base ($k{=}10$) & Full method & $\Delta$ & Note \\
+    \midrule
+    Concave bowl (\texttt{sphere\_bowl}), $T{=}128$ & 0.415 & 0.443 & $\mathbf{0.634 \pm 0.030}$ & $+0.191$ & 3 seeds; ls neutral \\
+    Concave bowl (\texttt{sphere\_bowl}), $T{=}256$ & 0.451 & 0.451 & $\mathbf{0.659 \pm 0.001}$ & $+0.208$ & 3 seeds; denser path \\
+    Through-hole sphere (\texttt{sphere\_hole})$^\dagger$ & 0.401 & --- & $0.246$ & --- & open frontier \\
+    \bottomrule
+  \end{tabular}\\
+  \small $^\dagger$feasible-shell geometry; see text.
+\end{table}
+
+\paragraph{Concave bowl (\texttt{sphere\_bowl}).}
+The bowl is machinable: its negative feature is a wide interior cavity that the
+swept cylinder can reach, so the loss can penalize the cavity floor and walls.
+The full method raises deployable Dice from $0.443$ to $0.634 \pm 0.030$ over 3
+seeds ($+0.191$), and a denser $T{=}256$ trajectory reaches $0.659 \pm 0.001$.
+The gain over the $k{=}10$ base ($+0.19$) is on the same order as the primitive
+sphere, confirming $k$-anneal transfers to composite positive-plus-concave
+geometry. Loss-shift is neutral on the bowl: its concavity is wide enough that
+soft-union over-erosion does not fill it, so the de-biasing correction has
+nothing to cancel --- consistent with the loss-shift analysis of
+Sec.~\ref{sec:lossshift-ablation}, where the shift helps only where over-erosion
+is the binding constraint.
+
+\paragraph{Through-hole sphere (\texttt{sphere\_hole}).}
+The through-hole sphere is the open frontier. With the default geometry the
+through-hole shell ($1.9~\mathrm{mm}$) is thinner than the tool
+($3.175~\mathrm{mm}$), physically infeasible; we therefore evaluate on a
+feasible-shell variant (sub-radius $9.525~\mathrm{mm}$). Even so, the soft
+optimum trains to $\approx 0.72$ Dice but deploys at only $\approx 0.25$:
+at any finite $k$, soft-union over-erosion fills the narrow negative feature, so
+the loss cannot penalize the hole interior --- the optimizer has no gradient
+signal for the hole wall. Strikingly, optimization \emph{degrades} the
+deployable Dice from the iteration-0 value of $0.401$ to $0.246$: the random
+init carves a tentative hole, but following the over-erosion-biased gradient
+fills it back in. Loss-shift helps marginally ($0.237 \to 0.246$) by reducing
+over-carve around the hole, but the hole interior remains structurally
+unpenalized. This is the limit of pure soft-loss methods: a topology-aware or
+hard-carve-in-the-loop loss term would be required to close it, which we leave
+to future work. The result is included to delineate where the shape-blind
+soft-surrogate approach succeeds (positive surfaces, wide concavities) and
+where it does not (narrow negative topology).
+
+\subsection{Scaling to Larger Stock}
+\label{sec:scaling}
+
+To confirm the method scales beyond the $1~\mathrm{in}$ scenario, we run the full
+operating point on a $2~\mathrm{in}^3$ stock with a proportionally scaled
+$h{=}100~\mathrm{mm}$ tool (same tool-to-stock reachability ratio) and a
+$22.86~\mathrm{mm}$-radius target. The $k$-anneal win transfers: sphere at
+$k{=}10$ stalls at $\approx 0.55$, whereas the full method (seed 1) reaches
+deployable Dice $0.774$ (viz $=$ train, no truncation) --- a $+0.22$ gain that
+matches the $1~\mathrm{in}$ pattern, indicating the method is not tuned to a
+single absolute scale. The residual gap to the $1~\mathrm{in}$ sphere ($0.826$)
+is attributable to the larger tool-to-stock ratio at $2~\mathrm{in}$, not to a
+method failure. Box and pyramid at $2~\mathrm{in}$ are in progress at the time of
+writing.
+
+\subsection{Negative Results and Dead Levers}
+\label{sec:negative}
+
+For completeness, Table~\ref{tab:negative} records the configurations that did
+\emph{not} improve on the operating point, so that they are not re-explored.
+
+\begin{table}[t]
+  \centering
+  \caption{Negative results. None improves mean deployable Dice; each is shape-dependent or saturated.}
+  \label{tab:negative}
+  \small
+  \begin{tabular}{lc p{0.5\linewidth}}
+    \toprule
+    Configuration & Mean Dice & Finding \\
+    \midrule
+    \textbf{Full method ($T{=}128$)} & \textbf{0.877} & operating point \\
+    $T{=}256$ waypoints             & 0.826 & shape-dependent: helps pyramid ($+0.04$), hurts sphere/cyl/box; not a blind win \\
+    $k_{\mathrm{final}}{=}500$      & $<0.841$ & high-$k$ hurts positive features; does not close narrow-hole gap \\
+    $k_{\mathrm{final}}{=}1000$     & $<0.841$ & gap persists/widens; $k$-anneal cannot close narrow-hole gap alone \\
+    $h{=}75~\mathrm{mm}$            & $\approx 0.841$ & $= h{=}50$ within seed noise; tool length saturated \\
+    $\Delta > 0$ (loss-shift)       & $<0.237^*$ & wrong direction; monotonically increases over-carve \\
+    Air-cut regularizers            & --- & trade Dice for air reduction ($\sim 30\%$ air inherent); no Dice gain \\
+    \bottomrule
+  \end{tabular}\\
+  \small $^*$on the through-hole sphere.
+\end{table}

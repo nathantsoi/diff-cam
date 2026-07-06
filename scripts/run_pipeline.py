@@ -131,6 +131,10 @@ def main():
                          "late). Continuation method; may beat any fixed k.")
     ap.add_argument("--k-final", type=float, default=10.0,
                     help="final k when --k-anneal is on.")
+    ap.add_argument("--loss-shift", type=float, default=0.0,
+                    help="de-biased (hard-carve-aware) loss: add to stock_d before the loss "
+                         "sigmoid to compensate soft-union over-erosion (~log(2)*k_ref/k_final) "
+                         "so the loss targets the deployable HARD carve. 0 = off.")
     ap.add_argument("--lr-decay-frac", type=float, default=0.0,
                     help="fraction of iters (at the end) over which LR decays to 0 "
                          "(dead lever on current API; best-checkpoint saving subsumes it)")
@@ -328,6 +332,7 @@ def main():
             "--learning_rate", str(args.learning_rate),
             "--k_init", str(args.k_init),
             "--k_final", str(args.k_final),
+            "--loss_shift", str(args.loss_shift),
             "--lr_decay_frac", str(args.lr_decay_frac),
             "--init_scale", str(args.init_scale),
             "--init_mode", args.init_mode,
