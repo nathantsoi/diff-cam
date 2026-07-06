@@ -61,12 +61,16 @@ class CSGSimulatorDelta:
         ``(Nx, Ny, Nz)`` chosen so every voxel is a physical CUBE of side ``v``
         mm; all internal SDF distances are measured in **voxels** (isotropic).
 
-        stock_size_in : (x, y, z) stock box in inches (REQUIRED; the normalized
-                        cube spans this box). ``stock_size_mm`` is the mm form
+        stock_size_in : (x, y, z) stock box in inches (the normalized cube
+                        spans this box). ``stock_size_mm`` is the mm form
                         (scalar accepted as a cube) and takes precedence.
+                        REQUIRED, except for grid targets loaded from an NPZ
+                        (utils/step_to_sdf.py), whose stock box -- the part's
+                        bounding box plus padding by default -- is used.
         voxel_size_mm : physical voxel edge (mm) -- the sub-mm precision knob.
                         If omitted, ``resolution`` voxels span the stock's
-                        LONGEST axis instead.
+                        LONGEST axis instead. Grid targets override both with
+                        the NPZ's own grid shape / voxel size.
         work_volume_in: (x, y, z) machine envelope in inches (toolhead limits).
         stock_origin_in: work origin (G54) = the stock's TOP-CENTRE in machine
                         coords (inches). Used for export/validation only.
@@ -109,8 +113,38 @@ class CSGSimulatorDelta:
         else:
             self.work_volume_mm = np.asarray([float(c) for c in work_volume_mm], dtype=np.float64)
 
-        # Stock box -> mm (REQUIRED). The normalized box [0,1]^3 spans this box,
-        # and ONLY this box is voxelized.
+        # Grid targets: load the SDF array (and, for NPZs, the stock box +
+        # voxel size it was sampled over) BEFORE resolving the stock box, so
+        # the NPZ supplies the physical dimensions by default. Grid SDF values
+        # are signed distances in MILLIMETRES (utils/step_to_sdf.py format);
+        # NPZs without physical dimensions are rejected -- regenerate them.
+        grid_stock_size_mm = None   # (3,) mm, from the NPZ
+        grid_voxel_size_mm = None   # mm per voxel, from the NPZ
+        if target_shape == "grid":
+            if target_sdf_array is not None:
+                grid_array = np.asarray(target_sdf_array)
+            elif target_sdf_path is not None:
+                data = np.load(target_sdf_path)
+                if "sdf" not in data:
+                    raise ValueError(f"Target NPZ file {target_sdf_path} does not contain 'sdf' array.")
+                if "stock_size_mm" not in data or "voxel_size_mm" not in data:
+                    raise ValueError(
+                        f"Target NPZ {target_sdf_path} has no physical dimensions "
+                        "(stock_size_mm / voxel_size_mm). Regenerate it with "
+                        "utils/step_to_sdf.py."
+                    )
+                grid_array = data["sdf"]
+                grid_stock_size_mm = np.asarray(data["stock_size_mm"], dtype=np.float64)
+                grid_voxel_size_mm = float(data["voxel_size_mm"])
+            else:
+                raise ValueError("For target_shape='grid', either target_sdf_path or target_sdf_array must be provided.")
+            self._grid_array = grid_array.astype(np.float32)
+
+        # Stock box -> mm. The normalized box [0,1]^3 spans this box, and ONLY
+        # this box is voxelized. Grid NPZs carry the stock box they were
+        # sampled over (the part's bounding box + padding by default), which is
+        # used when no explicit size is passed -- and which WINS on a conflict,
+        # because the grid's geometry is only meaningful over that exact box.
         if stock_size_mm is not None:
             if np.isscalar(stock_size_mm):
                 sx = sy = sz = float(stock_size_mm)
@@ -118,11 +152,24 @@ class CSGSimulatorDelta:
                 sx, sy, sz = (float(c) for c in stock_size_mm)
         elif stock_size_in is not None:
             sx, sy, sz = (float(inch_to_mm(c)) for c in stock_size_in)
+        elif grid_stock_size_mm is not None:
+            sx, sy, sz = (float(c) for c in grid_stock_size_mm)
         else:
             raise ValueError(
                 "stock_size_in (or stock_size_mm) is required; the normalized "
-                "cube [0,1]^3 is the stock bounding box, not the work volume"
+                "cube [0,1]^3 is the stock bounding box, not the work volume. "
+                "(Grid targets loaded from an NPZ supply it automatically.)"
             )
+        if grid_stock_size_mm is not None:
+            if not np.allclose([sx, sy, sz], grid_stock_size_mm, rtol=1e-3, atol=1e-6):
+                warnings.warn(
+                    f"stock box {[sx, sy, sz]} mm conflicts with the target NPZ's "
+                    f"stock box {grid_stock_size_mm.tolist()} mm; using the NPZ's. "
+                    "To machine from a larger stock, regenerate the NPZ with "
+                    "utils/step_to_sdf.py --stock-size-mm.",
+                    stacklevel=2,
+                )
+            sx, sy, sz = (float(c) for c in grid_stock_size_mm)
         self.Lx, self.Ly, self.Lz = sx, sy, sz          # stock box mm (x, y, z up)
 
         # Work origin (G54 offset): the stock's TOP-CENTRE in machine coords.
@@ -146,31 +193,32 @@ class CSGSimulatorDelta:
         self.Nz = max(1, int(round(sz / self.v)))
         self.resolution = max(self.Nx, self.Ny, self.Nz)  # voxels on longest axis
 
-        # For grid targets, the NPZ array shape defines the voxel grid.
-        # Override Nx/Ny/Nz (and resolution) so that the stock AND target
-        # fields are allocated at the same shape as the loaded SDF.
+        # For grid targets, the NPZ array defines the voxel grid: its shape
+        # overrides Nx/Ny/Nz (so stock AND target fields are allocated at the
+        # loaded SDF's shape) and its voxel size overrides
+        # ``voxel_size_mm``/``resolution``. Every SDF in this simulator
+        # (stock, tool, loss sigmoid, renderer) measures in VOXELS, so the
+        # loaded mm distances are converted once here to match what
+        # bake_target_grid stores for analytic shapes.
         if target_shape == "grid":
-            grid_array = None
-            if target_sdf_array is not None:
-                grid_array = target_sdf_array
-            elif target_sdf_path is not None:
-                data = np.load(target_sdf_path)
-                if "sdf" not in data:
-                    raise ValueError(f"Target NPZ file {target_sdf_path} does not contain 'sdf' array.")
-                grid_array = data["sdf"]
-            else:
-                raise ValueError("For target_shape='grid', either target_sdf_path or target_sdf_array must be provided.")
-            self._grid_array = grid_array.astype(np.float32)
             gx, gy, gz = self._grid_array.shape
             self.Nx, self.Ny, self.Nz = gx, gy, gz
             self.resolution = max(gx, gy, gz)
-            # Recompute voxel size to match the grid
-            self.v = max(sx, sy, sz) / float(self.resolution)
-            # step_to_sdf samples distances in the normalized [0,1] cube, but
-            # every SDF in this simulator (stock, tool, loss sigmoid, renderer)
-            # measures in VOXELS — convert once at load so self.target holds
-            # the same units bake_target_grid stores for analytic shapes.
-            self._grid_array *= float(self.resolution)
+            if grid_voxel_size_mm is not None:
+                self.v = grid_voxel_size_mm
+                expected = tuple(max(1, int(round(s / self.v))) for s in (sx, sy, sz))
+                if expected != (gx, gy, gz):
+                    warnings.warn(
+                        f"target NPZ grid shape {(gx, gy, gz)} does not match its "
+                        f"stock box {[sx, sy, sz]} mm at voxel size {self.v} mm "
+                        f"(expected {expected}); geometry may be distorted",
+                        stacklevel=2,
+                    )
+            else:
+                # Raw array (``target_sdf_array``): cubic voxels spanning the
+                # caller's stock box, distances in mm like the NPZ format.
+                self.v = max(sx, sy, sz) / float(self.resolution)
+            self._grid_array = self._grid_array / self.v    # mm -> voxels
 
         # Reachability: the stock (and, if its origin is known, its placement)
         # must fit inside the machine work volume. Warn rather than fail so
@@ -669,21 +717,21 @@ class CSGSimulatorDelta:
 
     @ti.func
     def interpolate_target(self, p):
-        """Trilinear lookup into self.target field."""
-        p_grid = p * self.resolution - 0.5
+        """Trilinear lookup into self.target field (per-axis, so anisotropic
+        grids from physical-units NPZs interpolate correctly)."""
+        p_grid = self._vox(p) - 0.5
         x0 = ti.cast(ti.floor(p_grid.x), ti.i32)
         y0 = ti.cast(ti.floor(p_grid.y), ti.i32)
         z0 = ti.cast(ti.floor(p_grid.z), ti.i32)
         x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
         tx, ty, tz = p_grid.x - x0, p_grid.y - y0, p_grid.z - z0
 
-        R = self.resolution
-        x0 = ti.max(0, ti.min(R - 1, x0))
-        x1 = ti.max(0, ti.min(R - 1, x1))
-        y0 = ti.max(0, ti.min(R - 1, y0))
-        y1 = ti.max(0, ti.min(R - 1, y1))
-        z0 = ti.max(0, ti.min(R - 1, z0))
-        z1 = ti.max(0, ti.min(R - 1, z1))
+        x0 = ti.max(0, ti.min(self.Nx - 1, x0))
+        x1 = ti.max(0, ti.min(self.Nx - 1, x1))
+        y0 = ti.max(0, ti.min(self.Ny - 1, y0))
+        y1 = ti.max(0, ti.min(self.Ny - 1, y1))
+        z0 = ti.max(0, ti.min(self.Nz - 1, z0))
+        z1 = ti.max(0, ti.min(self.Nz - 1, z1))
 
         c000 = self.target[x0, y0, z0]
         c100 = self.target[x1, y0, z0]
@@ -1705,7 +1753,15 @@ class CSGSimulatorDelta:
         show_target: ti.i32,
         show_tool: ti.i32,
     ):
-        """Raymarch the scene and fill raymarch_buffer with RGB."""
+        """Raymarch the scene and fill raymarch_buffer with RGB.
+
+        Rays march in DISPLAY space: physical mm scaled by 1/Lmax, so the
+        stock box spans (ax, ay, az) = (Lx, Ly, Lz)/Lmax with its longest
+        side = 1 and its true physical proportions (an anisotropic stock no
+        longer renders squashed into a cube). SDF lookups convert display
+        points to the normalized [0,1] box; the returned voxel-space
+        distances convert to display units via v/Lmax (1 voxel = v mm).
+        """
         cam_right = cam_dir.cross(cam_up).normalized()
         cam_up_actual = cam_right.cross(cam_dir).normalized()
         fov_scale = ti.tan(3.14159 / 4.0)
@@ -1714,6 +1770,11 @@ class CSGSimulatorDelta:
         aspect_ratio = float(width) / float(height)
 
         t_idx = self.current_step[None]
+
+        # Display-space constants (fixed at construction, inlined at compile).
+        Lmax = max(self.Lx, self.Ly, self.Lz)
+        box = ti.Vector([self.Lx / Lmax, self.Ly / Lmax, self.Lz / Lmax])
+        d_scale = self.v / Lmax          # voxel distance -> display distance
 
         for i, j in self.raymarch_buffer:
             u = (2.0 * (i + 0.5) / float(width) - 1.0) * aspect_ratio * fov_scale
@@ -1727,71 +1788,66 @@ class CSGSimulatorDelta:
 
             for _step in range(max_steps):
                 p = cam_pos + ray_dir * t
+                # Normalized [0,1] coordinate for the SDF lookups.
+                pn = ti.Vector([p.x / box.x, p.y / box.y, p.z / box.z])
                 d_stock = 1e6
                 d_target = 1e6
                 d_tool = 1e6
                 d_holder = 1e6
 
-                # The march runs in the normalized [0,1] box, but the SDFs now
-                # return VOXEL distances, so scale them back to normalized units
-                # (1 voxel ~= 1/resolution along the longest axis -- conservative
-                # for the others, which just means slightly smaller safe steps).
-                inv_R = 1.0 / self.resolution
-
-                # Inside the normalized box — use interpolated voxel SDFs.
+                # Inside the stock box — use interpolated voxel SDFs.
                 # Outside — fall back to an AABB so rays from the camera
                 # can still hit something on their way in.
-                inside_cube = (
+                inside_box = (
                     0.0 <= p.x
-                    and p.x <= 1.0
+                    and p.x <= box.x
                     and 0.0 <= p.y
-                    and p.y <= 1.0
+                    and p.y <= box.y
                     and 0.0 <= p.z
-                    and p.z <= 1.0
+                    and p.z <= box.z
                 )
 
-                if inside_cube:
+                if inside_box:
                     if show_stock == 1:
-                        d_stock = self.interpolate_stock(p) * inv_R
+                        d_stock = self.interpolate_stock(pn) * d_scale
                     if show_target == 1:
-                        d_target = self.target_sdf(p) * inv_R
+                        d_target = self.target_sdf(pn) * d_scale
                 else:
-                    d_box = p - ti.Vector([0.5, 0.5, 0.5])
-                    d_aabb = (
-                        ti.max(
-                            ti.abs(d_box.x), ti.max(ti.abs(d_box.y), ti.abs(d_box.z))
-                        )
-                        - 0.5
-                    )
+                    q = ti.abs(p - 0.5 * box) - 0.5 * box
+                    d_aabb = ti.max(q.x, ti.max(q.y, q.z))
                     if show_stock == 1:
                         d_stock = ti.max(d_aabb, 2e-3)
                     if show_target == 1:
                         d_target = ti.max(d_aabb, 2e-3)
 
                 if show_tool == 1:
-                    d_tool = self.tool_sdf_sharp(p, t_idx) * inv_R
-                    d_holder = self.holder_sdf_sharp(p, t_idx) * inv_R
+                    d_tool = self.tool_sdf_sharp(pn, t_idx) * d_scale
+                    d_holder = self.holder_sdf_sharp(pn, t_idx) * d_scale
 
                 d = ti.min(d_stock, ti.min(d_target, ti.min(d_tool, d_holder)))
 
                 if d < 1e-3:
                     # Hit — shade with the material whose distance dominated.
+                    # Normals come from gradients in NORMALIZED space; display
+                    # space is that space scaled per-axis by ``box``, so the
+                    # true display normal is the normalized-space gradient
+                    # divided componentwise by ``box`` (then re-normalized).
                     mat_color = ti.Vector([0.8, 0.8, 0.8])
                     norm = ti.Vector([0.0, 0.0, 1.0])
 
                     if d == d_tool:
                         mat_color = ti.Vector([1.0, 0.2, 0.2])  # red tool
-                        norm = self.tool_normal(p, t_idx)
+                        norm = self.tool_normal(pn, t_idx)
                     elif d == d_holder:
                         mat_color = ti.Vector([0.55, 0.55, 0.6])  # gray holder
-                        norm = self.holder_normal(p, t_idx)
+                        norm = self.holder_normal(pn, t_idx)
                     elif d == d_stock:
                         mat_color = ti.Vector([0.2, 0.8, 0.2])  # green stock
-                        norm = self.stock_normal(p)
+                        norm = self.stock_normal(pn)
                         # Voxel-checker shading: darken every other voxel so
                         # the discrete grid is visible. This is what gives the
                         # "voxelized" look and makes individual cuts pop.
-                        grid_p = self._vox(p)
+                        grid_p = self._vox(pn)
                         cx = int(grid_p.x) % 2
                         cy = int(grid_p.y) % 2
                         cz = int(grid_p.z) % 2
@@ -1799,15 +1855,19 @@ class CSGSimulatorDelta:
                             mat_color = mat_color * 0.8
                     elif d == d_target:
                         mat_color = ti.Vector([0.5, 0.5, 1.0])  # light blue target
-                        norm = self.target_normal(p)
+                        norm = self.target_normal(pn)
                         # Voxel-checker shading for grid targets only
                         if ti.static(self.target_shape == "grid"):
-                            grid_p = p * float(self.resolution)
+                            grid_p = self._vox(pn)
                             cx = int(grid_p.x) % 2
                             cy = int(grid_p.y) % 2
                             cz = int(grid_p.z) % 2
                             if (cx + cy + cz) % 2 == 0:
                                 mat_color = mat_color * 0.8
+
+                    norm = ti.Vector(
+                        [norm.x / box.x, norm.y / box.y, norm.z / box.z]
+                    ).normalized()
 
                     light_dir = ti.Vector([1.0, 1.0, 1.0]).normalized()
                     diffuse = ti.max(0.0, norm.dot(light_dir))
@@ -1831,10 +1891,17 @@ class CSGSimulatorDelta:
         """
         self.current_step[None] = int(t)
 
+    def display_box(self):
+        """The stock box in the renderer's DISPLAY space: (Lx, Ly, Lz)/Lmax,
+        longest side = 1, true physical proportions. Cameras should orbit
+        around ``display_box() / 2``."""
+        Lmax = max(self.Lx, self.Ly, self.Lz)
+        return np.array([self.Lx / Lmax, self.Ly / Lmax, self.Lz / Lmax])
+
     def render(
         self,
         cam_pos=(2.0, 2.0, 2.0),
-        cam_target=(0.5, 0.5, 0.5),
+        cam_target=None,
         cam_up=(0.0, 0.0, 1.0),
         show_stock=True,
         show_target=False,
@@ -1842,11 +1909,13 @@ class CSGSimulatorDelta:
     ):
         """Render the current scene into raymarch_buffer.
 
-        cam_pos: camera position in world coords.
-        cam_target: point the camera looks at.
+        cam_pos: camera position in world (display) coords.
+        cam_target: point the camera looks at; default is the stock box center.
         cam_up: world up vector.
         show_*: toggles for each layer.
         """
+        if cam_target is None:
+            cam_target = (self.display_box() / 2.0).tolist()
         cp = ti.Vector(list(cam_pos))
         ct = ti.Vector(list(cam_target))
         cu = ti.Vector(list(cam_up))

@@ -19,7 +19,7 @@ class CamEnvDiff(gym.Env):
         target_shape = "sphere",
         render_mode: Optional[str] = None,
         init_taichi: bool = True,
-        stock_size_in=(1.0, 1.0, 1.0),
+        stock_size_in=None,
         voxel_size_mm=0.5,
         work_volume_in=(16.0, 12.0, 10.0),
         stock_origin_in=None,
@@ -36,7 +36,11 @@ class CamEnvDiff(gym.Env):
             target_shape: str or None, if specified should be one of ["cylinder", "box", "sphere", "grid"].
             render_mode: str or None, if "human" will render with Taichi GUI. If "rgb_array", will return RGB arrays from render() instead. If None, no rendering.
             stock_size_in: (x, y, z) stock box in inches -- the normalized cube.
+                Default: 1 in cube for analytic targets; for grid targets the
+                stock box comes from the target NPZ (the part's bounding box
+                plus padding), preserving the STEP model's physical dimensions.
             voxel_size_mm: physical voxel edge (mm); the sub-mm precision knob.
+                Grid targets use the NPZ's own voxel size instead.
             work_volume_in: machine work volume in inches (toolhead limits).
             stock_origin_in: work origin (G54) = stock top-centre in machine inches.
             target_radius_mm: target sphere/cylinder radius (mm); defaults to a
@@ -66,6 +70,11 @@ class CamEnvDiff(gym.Env):
         self.render_mode = render_mode
 
         # Stock box (the normalized cube, voxelized) and machine work volume.
+        # Analytic targets keep the historical 1 in cube default; grid targets
+        # pass None through so the simulator takes the stock box from the
+        # target NPZ's physical dimensions.
+        if stock_size_in is None and target_shape != "grid":
+            stock_size_in = (1.0, 1.0, 1.0)
         self.stock_size_in = stock_size_in
         self.voxel_size_mm = voxel_size_mm
         self.work_volume_in = work_volume_in
@@ -114,11 +123,14 @@ class CamEnvDiff(gym.Env):
         # --- Rendering state (raymarch only) ---
         self.gui = None  # ti.GUI handle; uses the simulator's raymarch_buffer
 
-        # Orbit camera params (spherical coords around cam_center)
+        # Orbit camera params (spherical coords around cam_center). The
+        # renderer draws the stock at its true physical proportions (longest
+        # side = 1), so the orbit centers on the middle of that display box
+        # -- (0.5, 0.5, 0.5) for a cubic stock.
         self.cam_r = 2.5
         self.cam_theta = -1.57
         self.cam_phi = 1.0
-        self.cam_center = np.array([0.5, 0.5, 0.5], dtype=np.float32)
+        self.cam_center = (self.simulator.display_box() / 2.0).astype(np.float32)
 
         # Mouse state for orbit
         self.last_mouse_pos = None

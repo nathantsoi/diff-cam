@@ -28,3 +28,4 @@ wandb/
 
 # Local throwaway diagnostic scripts (not part of the repo)
 /diag_init.py
+utils/*.npz

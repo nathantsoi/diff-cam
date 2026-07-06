@@ -5,6 +5,15 @@ import time
 import numpy as np
 
 def _import_cad():
+    """Import OpenCascade bindings from either provider:
+
+    - pythonocc-core (``OCC.Core``): conda-forge only.
+    - cadquery-ocp (``OCP``): pip-installable wheel (``uv pip install cadquery-ocp``).
+
+    Returns a dict of classes and small adapters normalizing the two bindings'
+    API differences (module-level vs class-scoped enums, ``_s`` static methods,
+    ``ASCIIMode`` attribute vs ``SetASCIIMode``).
+    """
     # Attempt to locate and add the conda environment's Library\bin to DLL search path on Windows.
     # This prevents the DLL load failure for _XCAFDoc and other pythonocc C++ modules.
     if os.name == "nt":
@@ -14,57 +23,100 @@ def _import_cad():
                 os.add_dll_directory(dll_dir)
             except Exception:
                 pass
-    
+
     try:
         from OCC.Core.STEPControl import STEPControl_Reader
         from OCC.Core.IFSelect import IFSelect_RetDone
         from OCC.Core.TopAbs import TopAbs_SOLID
         from OCC.Core.TopExp import TopExp_Explorer
-        from OCC.Core.TopoDS import topods_Solid
         from OCC.Core.ShapeFix import ShapeFix_Shape
         from OCC.Core.StlAPI import StlAPI_Writer
         from OCC.Core.BRepMesh import BRepMesh_IncrementalMesh
-        from occwl.solid import Solid
-        
+        from OCC.Core.Bnd import Bnd_Box
+        try:
+            from OCC.Core.TopoDS import topods
+            to_solid = topods.Solid
+        except ImportError:
+            from OCC.Core.TopoDS import topods_Solid as to_solid
+        try:
+            from OCC.Core.BRepBndLib import brepbndlib
+            bbox_add = brepbndlib.Add
+        except ImportError:
+            from OCC.Core.BRepBndLib import brepbndlib_Add as bbox_add
+
+        def make_stl_writer():
+            writer = StlAPI_Writer()
+            writer.SetASCIIMode(False)
+            return writer
+
         return {
             "STEPControl_Reader": STEPControl_Reader,
-            "IFSelect_RetDone": IFSelect_RetDone,
+            "RetDone": IFSelect_RetDone,
             "TopAbs_SOLID": TopAbs_SOLID,
             "TopExp_Explorer": TopExp_Explorer,
-            "topods_Solid": topods_Solid,
+            "to_solid": to_solid,
             "ShapeFix_Shape": ShapeFix_Shape,
-            "StlAPI_Writer": StlAPI_Writer,
+            "make_stl_writer": make_stl_writer,
             "BRepMesh_IncrementalMesh": BRepMesh_IncrementalMesh,
-            "Solid": Solid,
+            "Bnd_Box": Bnd_Box,
+            "bbox_add": bbox_add,
+        }
+    except ImportError:
+        pass
+
+    try:
+        from OCP.STEPControl import STEPControl_Reader
+        from OCP.IFSelect import IFSelect_ReturnStatus
+        from OCP.TopAbs import TopAbs_ShapeEnum
+        from OCP.TopExp import TopExp_Explorer
+        from OCP.TopoDS import TopoDS
+        from OCP.ShapeFix import ShapeFix_Shape
+        from OCP.StlAPI import StlAPI_Writer
+        from OCP.BRepMesh import BRepMesh_IncrementalMesh
+        from OCP.Bnd import Bnd_Box
+        from OCP.BRepBndLib import BRepBndLib
+
+        def make_stl_writer():
+            writer = StlAPI_Writer()
+            writer.ASCIIMode = False
+            return writer
+
+        return {
+            "STEPControl_Reader": STEPControl_Reader,
+            "RetDone": IFSelect_ReturnStatus.IFSelect_RetDone,
+            "TopAbs_SOLID": TopAbs_ShapeEnum.TopAbs_SOLID,
+            "TopExp_Explorer": TopExp_Explorer,
+            "to_solid": TopoDS.Solid_s,
+            "ShapeFix_Shape": ShapeFix_Shape,
+            "make_stl_writer": make_stl_writer,
+            "BRepMesh_IncrementalMesh": BRepMesh_IncrementalMesh,
+            "Bnd_Box": Bnd_Box,
+            "bbox_add": BRepBndLib.Add_s,
         }
     except ImportError as e:
         raise ImportError(
-            "CAD dependencies (occwl or pythonocc-core) are missing.\n"
-            "Please ensure you are running in a conda environment where occwl is installed:\n"
-            "  conda activate diffcam-occwl"
+            "OpenCascade bindings are missing. Either activate the conda env\n"
+            "(scripts/setup_occ_env.sh creates it):\n"
+            "  conda activate diffcam-occwl\n"
+            "or install the pip wheel into the current environment:\n"
+            "  uv pip install cadquery-ocp open3d"
         ) from e
 
 def _load_step_solids(step_path, cad):
-    # Try importing occwl's load_step
-    try:
-        from occwl.io import load_step
-        return load_step(str(step_path))
-    except Exception:
-        # Fallback to direct load without occwl.io (avoids XCAFDoc DLL loading bug on Windows conda)
-        reader = cad["STEPControl_Reader"]()
-        status = reader.ReadFile(str(step_path))
-        if status != cad["IFSelect_RetDone"]:
-            raise ValueError(f"Failed to load STEP file: {step_path}")
-        reader.TransferRoots()
-        shape = reader.OneShape()
-        
-        solids = []
-        explorer = cad["TopExp_Explorer"](shape, cad["TopAbs_SOLID"])
-        while explorer.More():
-            solid_shape = cad["topods_Solid"](explorer.Current())
-            solids.append(cad["Solid"](solid_shape))
-            explorer.Next()
-        return solids
+    """Load all TopoDS_Solid shapes from a STEP file."""
+    reader = cad["STEPControl_Reader"]()
+    status = reader.ReadFile(str(step_path))
+    if status != cad["RetDone"]:
+        raise ValueError(f"Failed to load STEP file: {step_path}")
+    reader.TransferRoots()
+    shape = reader.OneShape()
+
+    solids = []
+    explorer = cad["TopExp_Explorer"](shape, cad["TopAbs_SOLID"])
+    while explorer.More():
+        solids.append(cad["to_solid"](explorer.Current()))
+        explorer.Next()
+    return solids
 
 def step_to_sdf(
     step_path,
@@ -74,29 +126,48 @@ def step_to_sdf(
     solid_indices=None,
     clip_distance=None,
     allow_non_watertight=False,
+    voxel_size_mm=None,
+    stock_size_mm=None,
 ):
     """
-    Convert a STEP file containing B-Rep solids into an SDF voxel grid.
-    
+    Convert a STEP file containing B-Rep solids into an SDF voxel grid,
+    PRESERVING the model's physical dimensions (STEP units, normally mm).
+
+    The grid spans a rectangular STOCK box that defaults to the part's
+    bounding box plus a small waste margin (``padding``), with the part
+    centered inside it. Voxels are physical cubes, so the grid is anisotropic
+    (Nx, Ny, Nz) matching the stock's aspect ratio, and SDF values are signed
+    distances in millimetres.
+
     Args:
         step_path (str): Path to the input STEP file.
         output_path (str, optional): Path to save the compressed .npz target grid.
-        resolution (int): Dimension of the voxel grid (resolution x resolution x resolution).
-        padding (float): Uniform margin fraction to scale/fit the shape inside the [0, 1]^3 stock.
+        resolution (int): Voxel count along the stock's LONGEST axis (ignored
+            when ``voxel_size_mm`` is given).
+        padding (float): Extra stock margin on every side, as a fraction of the
+            part's longest dimension. Default 0.05 (5% waste material around
+            the part); 0 makes the stock the exact part bounding box.
         solid_indices (list of int, optional): Subset of solid indices to convert.
-        clip_distance (float, optional): Maximum absolute distance to clip the output SDF values.
+        clip_distance (float, optional): Maximum absolute distance (mm) to clip the output SDF values.
         allow_non_watertight (bool): If True, process non-watertight models instead of raising a ValueError.
-        
+        voxel_size_mm (float, optional): Physical voxel edge in mm. Overrides ``resolution``.
+        stock_size_mm (float or (x, y, z), optional): Explicit stock box in mm
+            (scalar = cube). Must be at least the part's bounding box; the part
+            is centered inside. Default: the part bounding box (+ padding).
+
     Returns:
         tuple: (sdf_grid, metadata)
-            sdf_grid: np.ndarray of shape (resolution, resolution, resolution) with negative values inside.
-            metadata: dict containing transformation and source info.
+            sdf_grid: np.ndarray of shape (Nx, Ny, Nz), signed distance in mm,
+                negative inside.
+            metadata: dict containing physical dimensions and source info.
     """
     cad = _import_cad()
     import trimesh
     
     # Patch rtree Index class with pure Python/Numpy equivalent to prevent buggy C++ libspatialindex bad allocation errors on Windows
     try:
+        if os.name != "nt":
+            raise ImportError("rtree patch is Windows-only")
         import rtree
         class PurePythonRtree:
             def __init__(self, data, properties=None):
@@ -133,14 +204,13 @@ def step_to_sdf(
             raise ValueError(f"No solids remained after filtering with indices {solid_indices}")
 
     # ---- Step 1: Compute bounding box from BRep for adaptive deflection ----
-    from OCC.Core.Bnd import Bnd_Box
-    from OCC.Core.BRepBndLib import brepbndlib
-
     # Get combined bounding box across all solids BEFORE meshing
-    combined_bbox = Bnd_Box()
+    combined_bbox = cad["Bnd_Box"]()
     for solid in solids:
-        brepbndlib.Add(solid.topods_shape(), combined_bbox)
-    xmin, ymin, zmin, xmax, ymax, zmax = combined_bbox.Get()
+        cad["bbox_add"](solid, combined_bbox)
+    cmin, cmax = combined_bbox.CornerMin(), combined_bbox.CornerMax()
+    xmin, ymin, zmin = cmin.X(), cmin.Y(), cmin.Z()
+    xmax, ymax, zmax = cmax.X(), cmax.Y(), cmax.Z()
     brep_size = np.array([xmax - xmin, ymax - ymin, zmax - zmin])
     max_dim_model = float(np.max(brep_size))
 
@@ -153,21 +223,19 @@ def step_to_sdf(
     # ---- Step 2: Heal, tessellate, and validate each solid ----
     meshes = []
     for idx, solid in enumerate(solids):
-        topo_shape = solid.topods_shape()
-        fixer = cad["ShapeFix_Shape"](topo_shape)
+        fixer = cad["ShapeFix_Shape"](solid)
         fixer.SetPrecision(1e-3)
         fixer.Perform()
         healed_shape = fixer.Shape()
 
         temp_fd, temp_stl_path = tempfile.mkstemp(suffix=".stl")
         os.close(temp_fd)
-        
+
         try:
             mesh_tool = cad["BRepMesh_IncrementalMesh"](healed_shape, adaptive_deflection)
             mesh_tool.Perform()
-            
-            writer = cad["StlAPI_Writer"]()
-            writer.SetASCIIMode(False)
+
+            writer = cad["make_stl_writer"]()
             writer.Write(healed_shape, temp_stl_path)
 
             mesh = trimesh.load(temp_stl_path)
@@ -192,26 +260,46 @@ def step_to_sdf(
 
         meshes.append(mesh)
 
-    # ---- Step 3: Compute normalization transform ----
+    # ---- Step 3: Physical stock box (dimensions are KEPT, no normalization) ----
     all_vertices = np.concatenate([m.vertices for m in meshes], axis=0)
     bbox_min = all_vertices.min(axis=0)
     bbox_max = all_vertices.max(axis=0)
+    part_size = bbox_max - bbox_min
+    part_center = (bbox_min + bbox_max) / 2.0
 
-    size = bbox_max - bbox_min
-    max_dim = np.max(size)
-    scale = (1.0 - 2.0 * padding) / max_dim if max_dim > 0 else 1.0
-    center = (bbox_min + bbox_max) / 2.0
-    offset = 0.5 - center * scale
+    if stock_size_mm is not None:
+        if np.isscalar(stock_size_mm):
+            stock_size = np.full(3, float(stock_size_mm))
+        else:
+            stock_size = np.asarray([float(c) for c in stock_size_mm], dtype=np.float64)
+        if np.any(stock_size < part_size - 1e-6):
+            print(f"  WARNING: stock {stock_size.tolist()} mm is smaller than the "
+                  f"part bounding box {part_size.tolist()} mm on at least one axis; "
+                  "the part will be truncated by the stock.")
+    else:
+        # Default stock: the part's bounding box, plus an optional uniform
+        # margin (fraction of the longest part dimension) on every side.
+        pad_mm = padding * float(np.max(part_size))
+        stock_size = part_size + 2.0 * pad_mm
 
-    for m in meshes:
-        m.apply_translation(-center)
-        m.apply_scale(scale)
-        m.apply_translation([0.5, 0.5, 0.5])
+    # The part sits centered in the stock box; the grid keeps the STEP file's
+    # coordinate frame (origin at the stock's min corner).
+    grid_origin = part_center - stock_size / 2.0
 
-    # ---- Step 4: Sample SDF at voxel centers ----
-    dx = 1.0 / resolution
-    x_coords = (np.arange(resolution) + 0.5) * dx
-    grid_x, grid_y, grid_z = np.meshgrid(x_coords, x_coords, x_coords, indexing="ij")
+    # Cubic voxels: explicit physical edge, or `resolution` voxels along the
+    # stock's longest axis. Per-axis counts follow the stock's aspect ratio.
+    if voxel_size_mm is not None:
+        v = float(voxel_size_mm)
+    else:
+        v = float(np.max(stock_size)) / float(resolution)
+    Nx, Ny, Nz = (max(1, int(round(s / v))) for s in stock_size)
+    print(f"  Stock: {stock_size.tolist()} mm, voxel {v:.4f} mm -> grid ({Nx}, {Ny}, {Nz})")
+
+    # ---- Step 4: Sample SDF at voxel centers (physical mm coordinates) ----
+    x_coords = grid_origin[0] + (np.arange(Nx) + 0.5) * v
+    y_coords = grid_origin[1] + (np.arange(Ny) + 0.5) * v
+    z_coords = grid_origin[2] + (np.arange(Nz) + 0.5) * v
+    grid_x, grid_y, grid_z = np.meshgrid(x_coords, y_coords, z_coords, indexing="ij")
     query_points = np.stack([grid_x, grid_y, grid_z], axis=-1).reshape(-1, 3)
     total_points = len(query_points)
 
@@ -253,20 +341,20 @@ def step_to_sdf(
                     
         elapsed = time.time() - t_start
         print(f"  Solid {mesh_idx}: SDF sampling complete ({elapsed:.1f}s)")
-        sdfs.append(sdf_vals.reshape(resolution, resolution, resolution))
+        sdfs.append(sdf_vals.reshape(Nx, Ny, Nz))
 
     sdf_grid = np.minimum.reduce(sdfs)
 
-    # ---- Step 5: Quality validation ----
+    # ---- Step 5: Quality validation (distances in mm) ----
     min_sdf = float(sdf_grid.min())
     n_inside = int(np.sum(sdf_grid < 0))
     n_total = sdf_grid.size
     pct_inside = 100 * n_inside / n_total
 
-    print(f"  SDF stats: min={min_sdf:.6f}, inside={n_inside}/{n_total} ({pct_inside:.1f}%)")
+    print(f"  SDF stats: min={min_sdf:.4f} mm, inside={n_inside}/{n_total} ({pct_inside:.1f}%)")
 
-    if abs(min_sdf) < 2 * dx:
-        print(f"  WARNING: SDF minimum ({min_sdf:.6f}) is shallower than 2 voxels ({2*dx:.6f}).")
+    if abs(min_sdf) < 2 * v:
+        print(f"  WARNING: SDF minimum ({min_sdf:.4f} mm) is shallower than 2 voxels ({2*v:.4f} mm).")
         print(f"  The geometry may be a thin shell or the resolution ({resolution}) is too low.")
         print(f"  Consider increasing --resolution or verifying the STEP file contains solid bodies.")
 
@@ -279,19 +367,22 @@ def step_to_sdf(
         inside_mask = sdf_grid < 0
         inside_coords = np.argwhere(inside_mask)
         centroid_voxel = inside_coords.mean(axis=0)
-        centroid_normalized = (centroid_voxel + 0.5) / resolution
+        centroid_normalized = (centroid_voxel + 0.5) / np.array([Nx, Ny, Nz])
         print(f"  Interior centroid (normalized): {centroid_normalized}")
 
     if clip_distance is not None:
         sdf_grid = np.clip(sdf_grid, -clip_distance, clip_distance)
 
     metadata = {
-        "resolution": int(resolution),
+        "resolution": int(max(Nx, Ny, Nz)),
+        "grid_shape": (int(Nx), int(Ny), int(Nz)),
         "padding": float(padding),
+        "voxel_size_mm": float(v),
+        "stock_size_mm": stock_size.tolist(),
+        "grid_origin_mm": grid_origin.tolist(),
         "bbox_min": bbox_min.tolist(),
         "bbox_max": bbox_max.tolist(),
-        "scale": float(scale),
-        "offset": offset.tolist(),
+        "sdf_units": "mm",
         "source_step": os.path.basename(step_path),
         "num_solids": int(len(solids)),
         "sign_convention": "negative_inside",
@@ -301,12 +392,14 @@ def step_to_sdf(
         np.savez_compressed(
             output_path,
             sdf=sdf_grid.astype(np.float32),
-            resolution=np.array(resolution, dtype=np.int32),
+            resolution=np.array(max(Nx, Ny, Nz), dtype=np.int32),
             padding=np.array(padding, dtype=np.float32),
+            voxel_size_mm=np.array(v, dtype=np.float32),
+            stock_size_mm=stock_size.astype(np.float32),
+            grid_origin_mm=grid_origin.astype(np.float32),
             bbox_min=bbox_min.astype(np.float32),
             bbox_max=bbox_max.astype(np.float32),
-            scale=np.array(scale, dtype=np.float32),
-            offset=offset.astype(np.float32),
+            sdf_units="mm",
             source_step=os.path.basename(step_path),
             num_solids=np.array(len(solids), dtype=np.int32),
             sign_convention="negative_inside",
@@ -321,10 +414,22 @@ if __name__ == "__main__":
     parser.add_argument("input", help="Path to input .step/.stp file")
     parser.add_argument("--output", "-o", required=True, help="Path to write the target .npz grid")
     parser.add_argument(
-        "--resolution", "-r", type=int, default=64, help="Grid voxel resolution (default 64)"
+        "--resolution", "-r", type=int, default=64,
+        help="Voxel count along the stock's longest axis (default 64; ignored with --voxel-size-mm)"
     )
     parser.add_argument(
-        "--padding", "-p", type=float, default=0.05, help="Boundary padding fraction (default 0.05)"
+        "--voxel-size-mm", type=float, default=None,
+        help="Physical voxel edge in mm (overrides --resolution)"
+    )
+    parser.add_argument(
+        "--stock-size-mm", type=float, nargs="+", default=None, metavar="MM",
+        help="Explicit stock box in mm: one value (cube) or three (x y z). "
+             "Default: the part's bounding box"
+    )
+    parser.add_argument(
+        "--padding", "-p", type=float, default=0.05,
+        help="Extra stock margin per side, as a fraction of the part's longest "
+             "dimension (default 0.05; 0 = stock is the exact part bounding box)"
     )
     parser.add_argument(
         "--solid-indices",
@@ -344,6 +449,15 @@ if __name__ == "__main__":
     if args.solid_indices:
         indices = [int(x.strip()) for x in args.solid_indices.split(",")]
 
+    stock = None
+    if args.stock_size_mm is not None:
+        if len(args.stock_size_mm) == 1:
+            stock = args.stock_size_mm[0]
+        elif len(args.stock_size_mm) == 3:
+            stock = tuple(args.stock_size_mm)
+        else:
+            parser.error("--stock-size-mm takes 1 or 3 values")
+
     print(f"Loading {args.input}...")
     t0 = time.time()
     try:
@@ -355,6 +469,8 @@ if __name__ == "__main__":
             solid_indices=indices,
             clip_distance=args.clip_distance,
             allow_non_watertight=args.allow_non_watertight,
+            voxel_size_mm=args.voxel_size_mm,
+            stock_size_mm=stock,
         )
         elapsed = time.time() - t0
         print(f"Successfully converted and saved SDF to {args.output} ({elapsed:.1f}s).")

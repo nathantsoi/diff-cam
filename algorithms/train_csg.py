@@ -47,7 +47,7 @@ from algorithms.policy_video import _encode_mp4, _sdf_to_stl, raymarch_buffer_to
 
 # Fixed render camera (matches the look of the live GUI / paper figures).
 CAM_POS = (2.0, 2.0, 1.6)
-CAM_TARGET = (0.5, 0.5, 0.5)
+CAM_TARGET = None  # None -> sim.render targets the stock box center
 CAM_UP = (0.0, 0.0, 1.0)
 
 # Canonical cutter start used for eval / best-checkpoint scoring, so dice is
@@ -326,8 +326,11 @@ class Args:
     """per-iteration probability of snapshotting a mid-cut state into the bank"""
 
     # Stock box (the normalized cube, voxelized) & machine work volume
-    stock_size_in: tuple[float, float, float] = (1.0, 1.0, 1.0)
-    """stock box (x, y, z up) in inches -- the normalized cube [0,1]^3 (only this is voxelized)"""
+    stock_size_in: tuple[float, float, float] | None = None
+    """stock box (x, y, z up) in inches -- the normalized cube [0,1]^3 (only
+    this is voxelized). Default: 1 in cube for analytic targets; grid targets
+    take the stock box from the target NPZ (the part's bounding box), keeping
+    the STEP model's physical dimensions."""
     voxel_size_mm: float = 0.5
     """physical voxel edge in mm -- the sub-mm precision knob (overrides --resolution)"""
     workspace_in: tuple[float, float, float] = (16.0, 12.0, 10.0)
@@ -560,6 +563,10 @@ def main():
     # --- Simulator setup (must match CamEnvDiff.reset / eval_csg defaults) ---
     # The normalized cube is the STOCK box (default 1 in cube at 0.5 mm voxels);
     # the work volume (Mini Mill 16x12x10 in) is separate metadata. Sizes are mm.
+    # Grid targets: leave stock_size_in unset so the simulator takes the stock
+    # box (and voxel size) from the target NPZ's physical dimensions.
+    if args.stock_size_in is None and args.target_shape != "grid":
+        args.stock_size_in = (1.0, 1.0, 1.0)
     sim = CSGSimulatorDelta(resolution=args.resolution, max_steps=T, k_init=args.k_init,
                             target_shape=args.target_shape, tool_start=(0.5, 0.5, 1.0),
                             stock_size_in=args.stock_size_in,
@@ -570,6 +577,13 @@ def main():
                             safe_distance_in=args.safe_distance_in,
                             enforce_speed_limits=args.enforce_speed_limits,
                             target_sdf_path=args.target_sdf_path)
+    # Grid targets define their own physical stock box (from the NPZ); reflect
+    # the sim's actual box back into args so downstream consumers (z-floor,
+    # structured inits, G-code export) use the real dimensions.
+    if args.stock_size_in is None:
+        args.stock_size_in = (sim.Lx / 25.4, sim.Ly / 25.4, sim.Lz / 25.4)
+        print(f"[stock] from target NPZ: {sim.Lx:.2f} x {sim.Ly:.2f} x {sim.Lz:.2f} mm "
+              f"(grid {sim.Nx} x {sim.Ny} x {sim.Nz} @ {sim.v:.4f} mm/voxel)", flush=True)
     sim.set_target_params(radius_mm=args.target_radius_mm,
                           height_mm=args.target_height_mm,
                           half_size_mm=args.target_radius_mm,

@@ -1,8 +1,10 @@
 """Visualize a STEP-to-SDF target grid in the CamEnv gymnasium environment.
 
+The grid's physical dimensions (stock box, voxel size) come from the NPZ.
+
 Usage:
-    python scripts/visualize_target.py utils/extrusion.npz --resolution 128
-    python scripts/visualize_target.py utils/bowl.npz --resolution 32
+    python scripts/visualize_target.py utils/extrusion.npz
+    python scripts/visualize_target.py utils/bowl.npz
 """
 import os
 import sys
@@ -19,26 +21,17 @@ from cam_env.cam_env import CamEnvDiff
 def main():
     parser = argparse.ArgumentParser(description="Visualize a target SDF grid.")
     parser.add_argument("target_npz", help="Path to the .npz target file")
-    parser.add_argument("--resolution", "-r", type=int, default=None,
-                        help="Grid resolution (default: read from npz)")
     args = parser.parse_args()
 
-    # Read resolution from npz if not specified
     data = np.load(args.target_npz)
     sdf = data["sdf"]
-    if args.resolution is None:
-        args.resolution = sdf.shape[0]
-    print(f"Target: {args.target_npz} (resolution={args.resolution})")
-    print(f"SDF shape: {sdf.shape}, min={sdf.min():.6f}, max={sdf.max():.6f}")
-
-    if sdf.shape[0] != args.resolution:
-        print(f"WARNING: NPZ grid shape {sdf.shape} doesn't match resolution {args.resolution}")
-        print(f"Using resolution from NPZ: {sdf.shape[0]}")
-        args.resolution = sdf.shape[0]
+    print(f"Target: {args.target_npz}")
+    print(f"SDF shape: {sdf.shape}, min={sdf.min():.4f} mm, max={sdf.max():.4f} mm")
+    print(f"Stock: {np.asarray(data['stock_size_mm']).tolist()} mm "
+          f"@ {float(data['voxel_size_mm']):.4f} mm/voxel")
 
     print("Initializing environment...")
     env = CamEnvDiff(
-        resolution=args.resolution,
         max_steps=64,
         target_shape="grid",
         target_sdf_path=args.target_npz,
