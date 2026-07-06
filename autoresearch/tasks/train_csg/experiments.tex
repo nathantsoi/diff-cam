@@ -37,49 +37,70 @@ deterministic given the seed.
 
 \paragraph{Configurations.}
 To isolate the contribution of the surrogate-correction mechanisms
-(Sec.~\ref{sec:gap}), every results table reports two configurations that are
-identical except for those mechanisms:
-\begin{description}\itemsep0pt
-  \item[\emph{Base} ($k{=}10$):] the full optimization pipeline --- random
-        initialization, $5000$ Adam iterations at $\alpha{=}10^{-3}$, gradient
-        clip $c_{\mathrm{grad}}{=}0.5$, speed-limit constraint, best-checkpoint
-        selection, and $h{=}50~\mathrm{mm}$ reachability correction
-        (Sec.~\ref{sec:gap}, Mechanism~3) --- but with the soft-union sharpness
-        held \emph{fixed} at $k{=}10$ throughout training and the loss shift
-        disabled ($\Delta{=}0$). Base is plain gradient descent on the
-        as-is soft surrogate: it follows the over-erosion-biased gradient with no
-        correction.
-  \item[\emph{Full method}:] Base \emph{plus} the two surrogate corrections ---
-        smoothness annealing (\texttt{k-anneal}, $k_{\mathrm{init}}{=}10 \to
-        k_{\mathrm{final}}{=}150$, Mechanism~1) and the de-biasing loss shift
-        (\texttt{loss-shift}, $\Delta{=}-0.5$, Mechanism~2). No other change.
-\end{description}
-The $\Delta$ column is the per-shape gain of Full over Base. A third reference
-point, \emph{Init (iter~0)}, is the deployable Dice of the random trajectory
-\emph{before} any gradient step; because the hard carve used for evaluation is
-$k$-independent, this value is shared by both configurations and reflects only
-how much of the part the random init happens to cover. Base therefore quantifies
-how far plain soft-surrogate optimization moves the init, and Full quantifies the
-additional gain from correcting the surrogate. Unless stated otherwise,
-hyperparameters are identical across every shape, including the composite CSG
-targets.
+(Sec.~\ref{sec:gap}), every results table reports two configurations that differ
+\emph{only} in how the soft surrogate is treated. Everything else --- the
+simulator, the trajectory parametrization, the optimization procedure, the
+evaluation protocol --- is held identical across the two.
+
+\textbf{Shared experimental setup (identical in Base and Full).} Both
+configurations use: (i) the same differentiable CSG carving simulator
+(Sec.~\ref{sec:simulator}); (ii) the same \emph{random} trajectory
+initialization ($\sigma_{\mathrm{init}}{=}0.05$, Sec.~\ref{sec:param}) --- no
+shape-dependent init in either; (iii) the same optimization procedure: $5000$
+Adam iterations at $\alpha{=}10^{-3}$, $\ell_2$ gradient clip
+$c_{\mathrm{grad}}{=}0.5$, step $\Delta t{=}0.45$, $T{=}128$ waypoints; (iv) the
+same speed-limit / $z$-floor kinematic gates; (v) the same best-checkpoint
+selection over the exact boolean carve (Sec.~\ref{sec:optim}); and (vi) the same
+$h{=}50~\mathrm{mm}$ tool-length reachability correction (Mechanism~3). The
+deployable evaluation --- hard boolean carve, Dice/ASD/HD95 --- is also identical
+and, being $k$-independent, scores both configurations on the same metric. A
+third reference point, \emph{Init (iter~0)}, is the deployable Dice of the random
+trajectory before any gradient step; because the hard carve is $k$-independent,
+this value is shared by both configurations.
+
+\textbf{Methodological differences (Base vs Full).} The two configurations differ
+in exactly two places, both acting on the \emph{training-time soft surrogate} and
+neither touching the deployable evaluation:
+\begin{itemize}\itemsep0pt
+  \item \emph{Soft-union sharpness schedule.} Base holds the smoothness $k$ fixed
+        at $10$ for the entire run, so the training surrogate has a constant,
+        large over-erosion bias ($\mathcal{O}(\log 2 / k)$ per union). Full
+        \emph{anneals} $k$ linearly from $k_{\mathrm{init}}{=}10$ to
+        $k_{\mathrm{final}}{=}150$ over training (Mechanism~1): a smooth,
+        well-conditioned surrogate early for the random init to descend, sharpened
+        late so the terminal gradient aligns with the deployable metric.
+  \item \emph{Loss de-biasing.} Base evaluates the loss on the soft stock field
+        as-is ($\Delta{=}0$). Full adds a constant bias $\Delta{=}-0.5$ voxels to
+        the stock SDF before the loss occupancy (Mechanism~2), compensating the
+        residual over-erosion so the soft-loss optimum targets the hard carve.
+\end{itemize}
+No other methodological difference exists between them: the same code path, the
+same hyperparameters, the same seeds. The $\Delta$ column in each table is the
+per-shape gain of Full over Base and therefore isolates the contribution of these
+two surrogate corrections alone. Base is, in effect, the ablation ``what if we
+optimze the soft surrogate as-is, with no correction''; Full is the proposed
+method. Unless stated otherwise, both are run with identical hyperparameters
+across every shape, including the composite CSG targets.
 
 \subsection{Main Result}
 \label{sec:main-result}
 
 Table~\ref{tab:main} reports the deployable Dice of the Full method against the
 Base configuration on the $1~\mathrm{in}$ stock, with the iteration-0 Dice of the
-random trajectory as a reference (see Sec.~\ref{sec:setup}, Configurations). The
-shape-blind method raises mean deployable Dice from $0.664$ to $0.877$
-($+0.213$), with the largest gains on the shapes where the fixed-$k$ surrogate
-most badly misleads the optimizer (sphere $+0.19$, pyramid $+0.39$). Cylinder and
-box, which have $z$-invariant cross-sections and thus a softer structural
-ceiling, already scored near $0.8$ at $k{=}10$ and gain correspondingly less.
-Comparing against the Init column, Base itself moves the init only modestly
-($+0.052$ mean): plain soft-surrogate optimization is largely treading water
-because its gradient is misaligned with the deployable metric. The Full method
-adds $+0.213$ on top of Base --- the surrogate corrections are where the gain
-comes from, not the optimization machinery itself. The two composite CSG targets
+random trajectory as a reference (Sec.~\ref{sec:setup}, Configurations). Because
+Base and Full share every component except the two surrogate corrections, the
+$\Delta$ column isolates their effect. The shape-blind method raises mean
+deployable Dice from $0.664$ to $0.877$ ($+0.213$), with the largest gains on the
+shapes where the fixed-$k$ surrogate most badly misleads the optimizer (sphere
+$+0.19$, pyramid $+0.39$). Cylinder and box, which have $z$-invariant
+cross-sections and thus a softer structural ceiling, already scored near $0.8$ at
+$k{=}10$ and gain correspondingly less. Two observations bear on the
+methodological contrast: (i) Base itself moves the init only modestly ($+0.052$
+mean, $0.612 \to 0.664$) --- plain soft-surrogate optimization largely treads
+water because its gradient is misaligned with the deployable metric; (ii) Full
+adds $+0.213$ on top of Base, so the gain is attributable to the surrogate
+corrections (annealing $k$ and de-biasing the loss), not to the optimization
+machinery, which is already present in Base. The two composite CSG targets
 (through-hole sphere, concave bowl) are reported separately in
 Sec.~\ref{sec:composite}, as their negative features require distinct geometry.
 
