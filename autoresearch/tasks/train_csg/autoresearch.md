@@ -45,6 +45,7 @@ Run each experiment on a single GPU, you can run multiple experiments at once, b
 **What you CAN do:**
 - Modify `train_csg.py`, parameters when you call this script, and related components. Everything is fair game: model architecture, optimizer, hyperparameters, training loop, batch size, model size, max steps, etc. Importantly, if you need to implement new loss components, this will need to be done in the differentiable simulator, which is allowed.
 - Fix bugs and improve model training overall.
+- **Tune trajectory-quality levers** (new, 2026-07-06): soft loss terms `--w-time` / `--w-air-time` / `--w-break` (defaults `1e-3` each; 0 disables), composite best-checkpoint weights `--best-w-airtime` / `--best-w-time` / `--best-w-break` (defaults `0.05` each; the checkpoint `best_score = dice - best_w_airtime*air_time_norm - best_w_time*total_time_norm - best_w_break*break_prob_any` replaces pure-dice selection), and breakage-model calibration `--kc` (700), `--f-ref` (50), `--f-max` (100), `--sigma-risk` (0.5). **Calibration is required before trusting these as optimization targets** — at voxel 0.5 mm + 3.175 mm tool, per-step engagement is tiny so `fcut_max`/`engage_max`/`break_prob_*` are often all 0; lower `--f-ref`/`--f-max` to make them fire. Time (~10 s) and break ([0,1]) are scale-mismatched — tune weights per-run, don't assume the `1e-3`/`0.05` defaults are optimal. Per [[air-cut-loss-tradeoff]] ~30% air is inherent; `air_time`/`total_time` partly re-express the same air-cut tradeoff as the dead `w_air`/`w_prox` loss terms, but as *deployable* (hard) diagnostics rather than soft loss.
 - **Vary the machining scenario** via the CLI flags above: change the stock shape/size (`--stock-size-in`, including non-cubic blocks), the voxel precision (`--voxel-size-mm`), and the target shape/size (`--target-shape`, `--target-radius-mm`, `--target-height-mm`). Explore whether the method holds up across spheres, cylinders, boxes, pyramids, and different stock sizes — and tune the method to do well across them.
 
 **What you CANNOT do:**
@@ -53,7 +54,7 @@ Run each experiment on a single GPU, you can run multiple experiments at once, b
 - Modify components of the simulator that change *how* the evaluation is computed (the dice/ASD/HD95 metric code, the carve used for scoring). Changing the stock/target **via the CLI flags** is allowed and encouraged — that selects the task; editing the metric/eval code to inflate the score is not.
 - Modify the evaluation harness.
 
-**The goal is simple: get the highest dice score** — on the default scenario, and ideally robustly across the stock/target scenarios you explore (compare dice only within the same scenario). Since the time budget is fixed, you don't need to worry about training time — it's always 15 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget.
+**The goal is simple: get the highest dice score** — on the default scenario, and ideally robustly across the stock/target scenarios you explore (compare dice only within the same scenario). Since the time budget is fixed, you don't need to worry about training time — it's always 15 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget. **Secondary goal (new, lower priority than dice): keep `air_time` / `total_time` / `break_prob_any` reasonable** — a dice win that doubles `total_time` or trips `broken=1` is not a clean deployable win. The composite `best_score` already penalizes these; when reporting a win, quote `air_time`/`total_time`/`break_prob_any`/`broken` alongside dice so the deployable cost is visible.
 
 **VRAM** is a soft constraint. Some increase is acceptable for meaningful dice gains, but it should not blow up dramatically.
 
@@ -77,8 +78,19 @@ holder_overlap:    0.000000
 training_seconds:  12.340000
 peak_vram_mb:      1024.500000
 num_steps:         128
+air_time:          0.000000
+total_time:        2.980263
+break_prob_any:    0.000000
+break_prob_max:    0.000000
+fcut_max:          0.000000
+broken:            0.000000
+engage_max:        0.000000
+engage_mean:       0.000000
+best_score:        0.560100
 ---
 ```
+
+Beyond dice, three **deployable trajectory-quality measures** are now reported (added 2026-07-06): total toolpath time (`total_time`, s), air-cutting time (`air_time`, s), and tool-breakage probability (`break_prob_any` / `break_prob_max`, [0,1]). `best_score` is the composite best-checkpoint score (see "Trajectory-quality levers" below). These are **new and uncalibrated** — treat them as additional reporting axes, not yet as proven optimization targets.
 
 Note that the script outputs clean scrolling lines by default (without `tqdm` carriage-return overwriting) so that LLM harnesses like Claude Code can easily ingest logs. You can extract the key metric from the log file:
 
@@ -86,7 +98,11 @@ Note that the script outputs clean scrolling lines by default (without `tqdm` ca
 grep "^dice:" run.log
 ```
 
-Alternatively, the full summary metrics are written to JSON format inside the run directory at `runs/<run_name>/metrics.json` and a static copy is saved to `runs/latest_metrics.json`.
+The trajectory-quality metrics are not printed on the `^metric:` summary lines — read them from JSON. The full metrics (including `air_time`, `total_time`, `break_prob_any`, `break_prob_max`, `fcut_max`, `broken`, `engage_max`, `engage_mean`, `best_score`, and `final_iter_*` variants of all of these) are written to `runs/<run_name>/metrics.json` and a static copy at `runs/latest_metrics.json`. Extract them with, e.g.:
+
+```
+python -c "import json; m=json.load(open('runs/latest_metrics.json')); print({k:m[k] for k in ['dice','air_time','total_time','break_prob_any','best_score']})"
+```
 
 ## Logging results
 
@@ -102,7 +118,7 @@ commit	dice	memory_gb	status	description	command
 2. dice achieved (e.g. 0.852300) — use 0.000000 for crashes
 3. peak memory in GB, round to .1f (e.g. 1.0 — divide peak_vram_mb by 1024) — use 0.0 for crashes
 4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
+5. short text description of what this experiment tried — when a trajectory-quality measure is the *point* of the experiment or materially affects the verdict (e.g. `broken=1`, a dice win with doubled `total_time`, a `best_score` that disagrees with `dice`), call it out in the description (e.g. `cyl k-anneal (dice 0.905, air 0.21, broken=0)`). The full per-run numbers live in `metrics.json` — the TSV description is just a human reminder.
 6. the exact run command used (the full `uv run python scripts/run_pipeline.py ...` invocation, WITHOUT the `> run.log 2>&1` redirect). This captures the scenario (stock/target/voxel flags) and hyperparameters so every row is reproducible and so the plot can group by config. It must contain no literal tab characters.
 
 Example:
@@ -151,10 +167,13 @@ Generate the plot from `results.tsv` (the source of truth — it has the per-exp
 
 - **Progress over experiments**: dice on the y-axis vs. experiment order on the x-axis, with kept vs. discarded vs. crashed points distinguished, and a "running best" line so the improvement trajectory is obvious.
 - **Generality across scenarios**: since you vary the stock/target, also show the **best dice per machining scenario** (parse the stock/target flags out of the `command` column — e.g. group by `--target-shape` and `--stock-size-in`). A grouped bar chart is fine. This is the payoff of varying the scenario: it shows where the method is strong and where it struggles.
+- **Trajectory-quality panel (new)**: read `metrics.json` for each kept run and add a small panel showing `total_time`, `air_time`, and `break_prob_any` (and `broken`) alongside dice — e.g. a grouped bar or a small-multiples row keyed by run name. The point is to make deployable *cost* visible next to the dice *benefit*, since a dice win that doubles `total_time` or sets `broken=1` is not a clean win. If the measures are all 0/un-calibrated across the run, say so in the plot caption rather than plotting empty bars.
 
-Keep the script simple and robust (skip `crash` rows / `0.000000` dice where appropriate, handle a commit appearing more than once by taking its best). Then summarize the plot's takeaways in `idea.md` and in your final message. Finally, write `autoresearch/tasks/train_csg/findings.md` — the consolidated, deduplicated record of every finding from the run (task, best method, the real levers in order of impact, dead levers, methodological lessons, artifacts), drawing on `idea.md` (chronological) and `results.tsv` (numbers). This is the file the next run's `autoresearch.md` "Proven operating point" section will be built from, so be precise about configs and effect sizes. After the plot and `findings.md` exist, you may conclude.
+Keep the script simple and robust (skip `crash` rows / `0.000000` dice where appropriate, handle a commit appearing more than once by taking its best). Then summarize the plot's takeaways in `idea.md` and in your final message. Finally, write `autoresearch/tasks/train_csg/findings.md` — the consolidated, deduplicated record of every finding from the run (task, best method, the real levers in order of impact, dead levers, methodological lessons, artifacts), drawing on `idea.md` (chronological) and `results.tsv` (numbers). This is the file the next run's `autoresearch.md` "Proven operating point" section will be built from, so be precise about configs and effect sizes. **When trajectory-quality levers were tuned this run, record (a) the calibration you used for `--f-ref`/`--f-max`/`--kc`/`--sigma-risk`, (b) the `--w-time`/`--w-air-time`/`--w-break` and `--best-w-*` values that worked, and (c) the `air_time`/`total_time`/`break_prob_any`/`best_score` numbers alongside dice for the kept runs** — the next run needs these to avoid re-calibrating from scratch. After the plot and `findings.md` exist, you may conclude.
 
 ## Proven operating point & dead levers
+
+> **Trajectory-quality measures are NEW (2026-07-06) and uncalibrated.** The operating point and dead-lever list below were established *before* `air_time` / `total_time` / `break_prob_any` / `best_score` were reported or tunable. The dice numbers below remain valid, but the effect of `--w-time` / `--w-air-time` / `--w-break` / `--best-w-*` / `--f-ref` / `--f-max` / `--kc` / `--sigma-risk` on dice and on the new measures is **unexplored** — treat them as open levers, not dead. Calibrate the breakage model (`--f-ref` / `--f-max`) so `fcut_max` / `engage_max` are nonzero at the operating point before drawing conclusions about `break_prob_any`.
 
 The `ar-agd/jul1-uniform-toolpath` effort (~127 experiments; see `findings.md` and the prior `idea.md`/`results.tsv` on that branch) established the operating point below, superseding the older `jun28-decay-port` table (whose `lr=5e-3` advice is now known to be suboptimal). Most of it is baked into the code defaults (`scripts/run_pipeline.py` + `algorithms/train_csg.py`), **except `--learning-rate`** (code default is still `5e-3` — pass `1e-3` explicitly). Use this as the reference point; do not waste runs re-discovering what is already known.
 
@@ -177,6 +196,9 @@ The `ar-agd/jul1-uniform-toolpath` effort (~127 experiments; see `findings.md` a
 | `--eval-freq` | `10` | `10` ✓ | Fine cadence samples the peak. |
 | `--iters` | `5000` | `5000` ✓ | Sweet spot. iters>5000 is marginal (cyl 10k→0.9477, +0.002 at 2× compute) — coverage-capped, not iters-limited. |
 | best-checkpoint saving | on | on ✓ | At lr=1e-3 the peak is largely sustained, but keep it on (cheap insurance). No re-eval — GPU atomic-add nondeterminism gives ±0.01–0.05 run-to-run variance. |
+| `--w-time` / `--w-air-time` / `--w-break` | `1e-3` each | `1e-3` ✓ (uncalibrated) | **NEW.** Soft loss terms for `total_time` / `air_time` / `break_prob_any`. Defaults are starting points, NOT proven — scale-mismatched (time ~10 s, break [0,1]). Tune per-run. |
+| `--best-w-airtime` / `--best-w-time` / `--best-w-break` | `0.05` each | `0.05` ✓ (uncalibrated) | **NEW.** Composite best-checkpoint weights (`best_score = dice - w·air_time_norm - w·total_time_norm - w·break_prob_any`). Replaces pure-dice selection. Defaults unproven. |
+| `--kc` / `--f-ref` / `--f-max` / `--sigma-risk` | 700 / 50 / 100 / 0.5 | same ✓ (uncalibrated) | **NEW.** Breakage-model params. At voxel 0.5 mm + 3.175 mm tool these often give `fcut_max=engage_max=break_prob_*=0`; lower `--f-ref`/`--f-max` to make them fire before trusting `break_prob_any`. |
 
 **Seed variance strategy**: high run-to-run variance (±0.04–0.05) from init stochasticity + GPU atomic-add nondeterminism. **Need ≥3 (ideally ≥5) paired same-GPU seeds** to distinguish a real lever from seed-reshuffling — single-seed apparent wins overstate effect size ~2–3× (this bit the prior run on `w_step`, `w_gouge`, `dt0.5+m160`). **Dice is only comparable on the SAME GPU** (atomic-add nondeterminism); cross-GPU comparisons are confounded.
 
