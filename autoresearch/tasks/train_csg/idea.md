@@ -100,3 +100,24 @@ sampling — chord sagitta risk on tight curves; test empirically.
   (ceiling 0.9699 — at ceiling, target basically solved), **titan 0.718**
   (hard plateau from ~iter 3.6k, loss frozen, grad ~1e-3 — starvation
   signature as predicted).
+- **rrph raster_arc T832 K138 amin4: 0.9753** — beats baseline +0.007 and the
+  voxel-quantized ceiling estimate. Target solved; keep.
+- titan raster_arc T2560 dt0.9: **CUDA OOM in 15 s** — the delta sim
+  allocates a (T+1)×N³ f32 stock HISTORY (10.7 GB) that sweep training never
+  reads. VRAM caps T≈1536 on the 1.04M-voxel grid. 2-slot stock field for
+  method=sweep is the identified (unimplemented) fix.
+- extrusion crashes ×2 (logged): CUDA illegal address at T1952 (large-T
+  argmin suspect); reach-gate creates a Taichi field after materialization.
+  Both unresolved — extrusion is anyway a gouge-avoidance test (uncarved
+  stock scores 0.644 vs 0.648 ceiling).
+- **(finish-up, user-directed)** Batch3 (memory-sized titan retries) never
+  ran — session died first. Ran its key experiment as the single final run:
+  titan raster_terrain T1536 K256 dt1.5 amin4, iters sized to the 15-min
+  budget (620 @ ~1.5 s/iter; the 3500-iter version would run ~80 min).
+  Terrain init alone opens at dice 0.716 ≈ the T256 baseline's FINAL plateau.
+  **Result: 0.8189** (best @ iter 440; final-iter 0.806, evals oscillating
+  ±0.01 → converged, not budget-cut). +0.089 over baseline, 85% of the 0.965
+  ceiling; air_cut_fraction 0.24 points at retracts/2-slot-VRAM as the next
+  levers. Honesty note: 27 min wall (battery throttle → ~2.6 s/iter vs the
+  1.5 it was sized for) — over the 15-min target; kept as the campaign's
+  decisive run. findings.md + results_plot.png conclude the campaign.

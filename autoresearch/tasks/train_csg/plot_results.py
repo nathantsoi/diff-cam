@@ -18,10 +18,15 @@ from matplotlib.lines import Line2D
 RESULTS = "results.tsv"
 OUT = "results_plot.png"
 
-SPHERE_CEILING = 0.848  # 3-axis unreachable below-equator shadow (see idea.md)
+# Exact 3-axis reachability ceilings (tool-disc max-filter; see idea.md)
+CEILINGS = {"sphere": 0.848, "titan": 0.965, "rrph": 0.970,
+            "extrusion": 0.648, "bowl": 0.342}
 
 
 def scenario_of(cmd: str) -> str:
+    m = re.search(r"--target-sdf-path\s+\S*?([\w-]+)\.npz", cmd)
+    if m:
+        return m.group(1).removesuffix("_hi")
     m = re.search(r"--target-shape\s+(\w+)", cmd)
     return m.group(1) if m else "sphere"
 
@@ -126,11 +131,12 @@ def main():
                     edgecolor="black", label="sweep" if i == 0 else None)
             ax2.text(xoff, best_sweep + 0.008, f"{best_sweep:.3f}",
                      ha="center", fontsize=8)
-    if "sphere" in scenarios:
-        i = scenarios.index("sphere")
-        ax2.hlines(SPHERE_CEILING, i - 0.55, i + 0.55, color="crimson", lw=1.4,
-                   ls="--")
-        ax2.text(i - 0.55, SPHERE_CEILING - 0.03, "3-axis\nceiling",
+    for s, c in CEILINGS.items():
+        if s not in scenarios:
+            continue
+        i = scenarios.index(s)
+        ax2.hlines(c, i - 0.55, i + 0.55, color="crimson", lw=1.4, ls="--")
+        ax2.text(i - 0.55, c - 0.03, "3-axis\nceiling",
                  ha="left", va="top", fontsize=7, color="crimson")
     ax2.set_xticks(range(len(scenarios)))
     ax2.set_xticklabels(scenarios)
