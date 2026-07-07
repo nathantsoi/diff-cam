@@ -260,8 +260,11 @@ def main():
                          "cost of less material removed per pass (needs more steps). "
                          "Forwarded to train_csg, trunc, and viz (all read tool_radius_mm).")
     # --- Geometry (forwarded consistently to every stage that needs it) ---
-    ap.add_argument("--stock-size-in", type=float, nargs=3, default=(1.0, 1.0, 1.0),
-                    metavar=("X", "Y", "Z"), help="stock box in inches (the normalized cube)")
+    ap.add_argument("--stock-size-in", type=float, nargs=3, default=None,
+                    metavar=("X", "Y", "Z"),
+                    help="stock box in inches (the normalized cube). Default 1 1 1; "
+                         "for --target-shape grid the default is the NPZ's own "
+                         "physical stock box (omit to use it)")
     ap.add_argument("--voxel-size-mm", type=float, default=0.5,
                     help="physical voxel edge (mm) -- the sub-mm precision knob")
     ap.add_argument("--workspace-in", type=float, nargs=3, default=(16.0, 12.0, 10.0),
@@ -270,7 +273,10 @@ def main():
                     metavar=("X", "Y", "Z"), help="G54 = stock top-centre in machine inches")
     ap.add_argument("--target-shape", default="sphere",
                     choices=("sphere", "cylinder", "box", "pyramid",
-                             "sphere_hole", "sphere_bowl"))
+                             "sphere_hole", "sphere_bowl", "grid"))
+    ap.add_argument("--target-sdf-path", default=None,
+                    help="path to a .npz target grid from utils/step_to_sdf.py "
+                         "(required for --target-shape grid)")
     ap.add_argument("--target-radius-mm", type=float, default=11.43,
                     help="sphere/cylinder radius, or box/pyramid half-size (mm)")
     ap.add_argument("--target-height-mm", type=float, default=22.86,
@@ -326,8 +332,13 @@ def main():
         if not os.path.isdir(run_dir):
             raise SystemExit(f"--run-dir not found: {run_dir}")
 
-    # Common geometry args in each tool's own flag convention.
-    ssi = _as_list(args.stock_size_in)
+    # Common geometry args in each tool's own flag convention. Grid targets
+    # default to the NPZ's physical stock box (stock_size_in stays unset so
+    # train_csg takes the box from the target file); analytic targets keep the
+    # historical 1 in cube default.
+    if args.stock_size_in is None and args.target_shape != "grid":
+        args.stock_size_in = (1.0, 1.0, 1.0)
+    ssi = _as_list(args.stock_size_in) if args.stock_size_in is not None else None
     wsi = _as_list(args.workspace_in)
     soi = _as_list(args.stock_origin_in) if args.stock_origin_in is not None else None
 
@@ -365,7 +376,6 @@ def main():
             "--w_tool_gouge", str(args.w_tool_gouge),
             "--eval_freq", str(args.eval_freq),
             "--seed", str(args.seed),
-            "--stock_size_in", *ssi,
             "--voxel_size_mm", str(args.voxel_size_mm),
             "--workspace_in", *wsi,
             "--target_shape", args.target_shape,
@@ -387,6 +397,10 @@ def main():
             "--tool_radius_mm", str(args.tool_radius_mm),
             "--headless",
         ]
+        if ssi is not None:
+            cmd += ["--stock_size_in", *ssi]
+        if args.target_sdf_path is not None:
+            cmd += ["--target_sdf_path", args.target_sdf_path]
         if not args.no_save_model:
             cmd.append("--save_model")
         cmd.append("--track" if args.track else "--no-track")
@@ -448,13 +462,14 @@ def main():
         cmd = [
             PYTHON, "-m", "eval.eval_csg",
             "--trajectory", traj,
-            "--stock-size-in", *ssi,
             "--voxel-size-mm", str(args.voxel_size_mm),
             "--target-shape", args.target_shape,
             "--workspace-in", *wsi,
             "--gcode",
             "--post", args.post,
         ]
+        if ssi is not None:
+            cmd += ["--stock-size-in", *ssi]
         if soi is not None:
             cmd += ["--stock-origin-in", *soi]
         rc, _ = _run(cmd, "eval")
@@ -479,7 +494,9 @@ def main():
         # The exporter auto-matches runs/<run>/args.json; CLI geometry flags are
         # redundant there but harmless, and make the stage robust if args.json is
         # missing. Pass them so export works even on a hand-placed trajectory.
-        cmd += ["--stock-size-in", *ssi, "--workspace-in", *wsi]
+        cmd += ["--workspace-in", *wsi]
+        if ssi is not None:
+            cmd += ["--stock-size-in", *ssi]
         if soi is not None:
             cmd += ["--stock-origin-in", *soi]
         rc, _ = _run(cmd, "export")
