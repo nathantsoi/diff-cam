@@ -707,7 +707,10 @@ export async function createVoxelViewer(canvas, options = {}) {
   // Render one frame with the given orbit camera. opts:
   //   showCube : bool        — draw the stock wireframe (default true)
   //   showAxes : bool        — draw the XYZ triad at the stock origin (default false)
-  //   cmdPts   : [[x,y,z]…]  — commanded (pre-clip) path to draw dimly (default null)
+  //   cmdPts   : [[x,y,z]…]  — commanded (pre-clip) path to draw dimly (default null);
+  //              violet when ctrlPts is also given (sweep runs: it IS the planned spline)
+  //   ctrlPts  : [[x,y,z]…]  — B-spline control polygon of a sweep run: chords drawn
+  //              dim violet with a small cross at every control point (default null)
   // The carved stock mesh, the reached tool path (bright), the not-yet-reached suffix
   // (dim), and the current tool-tip marker are always drawn when a trajectory is set.
   const render = (cam, reachedStep, opts = {}) => {
@@ -764,6 +767,7 @@ export async function createVoxelViewer(canvas, options = {}) {
     const showCube = opts.showCube !== false;
     const showAxes = !!opts.showAxes;
     const cmdPts = opts.cmdPts || null;
+    const ctrlPts = opts.ctrlPts || null;
     const segs = [];
     if (showCube) {
       STOCK_WIRE.forEach(([a,b]) => segs.push({ a, b, color:[0.22,0.26,0.30,0.5] }));
@@ -775,9 +779,24 @@ export async function createVoxelViewer(canvas, options = {}) {
       });
     }
     if (cmdPts && cmdPts.length > 1) {
+      const cc = ctrlPts ? [0.72,0.52,0.92,0.6] : [0.6,0.65,0.7,0.35];
       for (let i=1;i<cmdPts.length;i++){
-        segs.push({ a:cmdPts[i-1], b:cmdPts[i], color:[0.6,0.65,0.7,0.35] });
+        segs.push({ a:cmdPts[i-1], b:cmdPts[i], color:cc });
       }
+    }
+    if (ctrlPts && ctrlPts.length) {
+      // Control polygon chords (the spline lives inside this hull)…
+      for (let i=1;i<ctrlPts.length;i++){
+        segs.push({ a:ctrlPts[i-1], b:ctrlPts[i], color:[0.85,0.60,1.0,0.30] });
+      }
+      // …and a small 3-axis cross marking each control point.
+      const Lc = 0.012;
+      ctrlPts.forEach(p => {
+        [[1,0,0],[0,1,0],[0,0,1]].forEach(([dx,dy,dz])=>{
+          segs.push({ a:[p[0]-dx*Lc,p[1]-dy*Lc,p[2]-dz*Lc],
+                      b:[p[0]+dx*Lc,p[1]+dy*Lc,p[2]+dz*Lc], color:[0.90,0.62,1.0,0.95] });
+        });
+      });
     }
     if (trajectoryPts) {
       const rstep = Math.max(0, Math.min(reachedStep, trajectoryPts.length-1));

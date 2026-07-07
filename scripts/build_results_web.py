@@ -12,6 +12,8 @@ Each experiment record carries:
   - the results.tsv metadata (commit, dice, status, description, command, shape)
   - the matched run dir (relative to repo root) or null
   - the (T,3) tool trajectory + commanded (pre-clip) path (for the 3D plot)
+  - for ``--method sweep`` runs, the (K,3) B-spline control polygon (``ctrl``)
+    so the viewer can overlay the planned spline + its control points
   - relative paths to the STL meshes and G-code (for download links)
 
 Run from the repo root:
@@ -407,6 +409,43 @@ def _staged_boundary(run_rec):
         return None
 
 
+def sweep_control_points(run_rec, run_dir_abs, n_samples, cmd, decimals=4):
+    """B-spline control polygon (K,3) for ``--method sweep`` runs, or None.
+
+    Prefers the ``control_points.npy`` the trainer saves alongside the
+    trajectory. Older sweep runs predate that file; for those, refit the
+    control points by least squares against the planned (pre-clip) path --
+    ``cmd`` IS the sampled spline ``B @ P``, so the refit recovers P to float
+    precision. The refit needs ``simulator.sweep.bspline_basis``, which pulls
+    in taichi; if that import fails in a lightweight web-build env, skip the
+    overlay for legacy runs rather than failing the build.
+    """
+    args = run_rec.get("args") or {}
+    if args.get("method") != "sweep":
+        return None
+    cp = os.path.join(run_dir_abs, "control_points.npy")
+    if os.path.exists(cp):
+        try:
+            return np.round(np.load(cp).astype(np.float64), decimals).tolist()
+        except (OSError, ValueError):
+            return None
+    n_ctrl = args.get("n_ctrl")
+    if not n_ctrl or not cmd:
+        return None
+    try:
+        from simulator.sweep import bspline_basis
+    except Exception as e:  # noqa: BLE001 — taichi may be absent here
+        print(f"  [ctrl] {run_rec['name']}: no basis for refit ({e})",
+              file=sys.stderr)
+        return None
+    # Best-checkpoint sweep deltas carry a trailing zero step, so cmd can be
+    # one point longer than the T the basis was built for -- fit the first T.
+    plan = np.asarray(cmd, dtype=np.float64)[:n_samples]
+    B = bspline_basis(int(n_ctrl), len(plan)).astype(np.float64)
+    P, *_ = np.linalg.lstsq(B, plan, rcond=None)
+    return np.round(P, decimals).tolist()
+
+
 def trajectory_json(run_rec, decimals=4):
     """Load trajectory + commanded path, return compact JSON-ready arrays.
 
@@ -453,7 +492,11 @@ def trajectory_json(run_rec, decimals=4):
             cmd = np.round(commanded, decimals).tolist()
         except OSError:
             pass
-    return {"traj": traj, "cmd": cmd}
+    out = {"traj": traj, "cmd": cmd}
+    ctrl = sweep_control_points(run_rec, d, len(pos), cmd, decimals=decimals)
+    if ctrl is not None:
+        out["ctrl"] = ctrl
+    return out
 
 
 def stl_paths(run_rec):

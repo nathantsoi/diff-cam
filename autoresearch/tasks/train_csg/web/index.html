@@ -212,8 +212,10 @@
                 <input type="checkbox" id="opt-cube" checked></label>
               <label class="settings-row"><span>Show axes</span>
                 <input type="checkbox" id="opt-axes" checked></label>
-              <label class="settings-row"><span>Commanded (pre-clip) path</span>
+              <label class="settings-row"><span id="opt-cmd-label">Commanded (pre-clip) path</span>
                 <input type="checkbox" id="opt-cmd"></label>
+              <label class="settings-row" id="opt-ctrl-row" style="display:none;"><span>Spline control points</span>
+                <input type="checkbox" id="opt-ctrl" checked></label>
             </div>
           </div>
           <div class="nav-cube glass" id="nav-cube" title="Click a face for a standard view">
@@ -976,6 +978,7 @@ function selectExperiment(d) {
     <dt>description</dt><dd>${d.description||"(none)"}</dd>
     ${isRun ? "" : `<dt>commit</dt><dd>${d.commit||"?"}</dd>`}
     <dt>shape · seed · iters</dt><dd>${d.shape||"?"} · ${d.seed?? "?"} · ${d.iters?? "?"}</dd>
+    ${d.trajectory && d.trajectory.ctrl ? `<dt>method</dt><dd>sweep · ${d.trajectory.ctrl.length} spline control points</dd>` : ""}
     <dt>run dir</dt><dd>${d.run_dir||"(unmatched — no artifacts)"}</dd>
     <dt>command</dt><dd>${d.command||""}</dd>`;
 
@@ -1056,7 +1059,7 @@ const CUBE_EDGES = [
 let cam = {target:[0.5,0.5,0.5], distance:2.6, yaw:0.72, pitch:0.62};
 let curD = null;            // currently selected experiment
 let pbStep = 0, pbPlaying = false, pbSpeed = 1, pbLastT = 0, pbRAF = 0;
-let opt = {cube:true, axes:true, cmd:false};
+let opt = {cube:true, axes:true, cmd:false, ctrl:true};
 let vpInited = false;
 
 // WebGPU voxel viewer state. When `ready` is true the carved-stock mesh is rendered
@@ -1104,8 +1107,9 @@ function startVoxelLoop(){
     const cstep = Math.max(0, Math.min(pts.length-1, Math.round(pbStep)));
     if (cstep !== voxel.lastStep){ voxel.viewer.carveToStep(cstep); voxel.lastStep = cstep; }
     const cmd = opt.cmd && curD.trajectory.cmd ? curD.trajectory.cmd : null;
+    const ctrl = opt.ctrl && curD.trajectory.ctrl ? curD.trajectory.ctrl : null;
     try {
-      voxel.viewer.render(cam, cstep, { showCube: opt.cube, showAxes: opt.axes, cmdPts: cmd });
+      voxel.viewer.render(cam, cstep, { showCube: opt.cube, showAxes: opt.axes, cmdPts: cmd, ctrlPts: ctrl });
     } catch (e) {
       // A validation error in one frame (e.g. a bad bind group) must not kill the
       // render loop — log once and keep the canvas alive.
@@ -1230,6 +1234,7 @@ function initViewport(){
   document.getElementById("opt-cube").onchange = e=>{opt.cube=e.target.checked; renderViewport();};
   document.getElementById("opt-axes").onchange  = e=>{opt.axes =e.target.checked; renderViewport();};
   document.getElementById("opt-cmd").onchange   = e=>{opt.cmd  =e.target.checked; renderViewport();};
+  document.getElementById("opt-ctrl").onchange  = e=>{opt.ctrl =e.target.checked; renderViewport();};
 
   // Nav-cube: mirror orientation; click faces to snap.
   document.querySelectorAll("#nav-cube .cube-face").forEach(face=>{
@@ -1256,6 +1261,15 @@ function loadTrajectory(d){
   const T = d.trajectory ? d.trajectory.traj.length : 0;
   const scrub = document.getElementById("pb-scrub");
   scrub.min = 0; scrub.max = Math.max(0, T-1);
+
+  // Sweep runs carry a B-spline control polygon; for them the "commanded" path
+  // IS the planned spline, so relabel the toggle, expose the control-point
+  // toggle, and turn the plan on by default so the planning is visible.
+  const isSweep = !!(d.trajectory && d.trajectory.ctrl);
+  document.getElementById("opt-cmd-label").textContent =
+    isSweep ? "Planned spline path" : "Commanded (pre-clip) path";
+  document.getElementById("opt-ctrl-row").style.display = isSweep ? "" : "none";
+  if (isSweep && !opt.cmd) { opt.cmd = true; document.getElementById("opt-cmd").checked = true; }
 
   // Use the WebGPU carved-stock viewer when available; otherwise the SVG fallback.
   const useVoxel = voxel.ready && d.trajectory;
@@ -1375,14 +1389,39 @@ function renderViewport(){
     });
   }
 
-  // Commanded (pre-clip) path, dashed.
+  // Commanded (pre-clip) path, dashed. For sweep runs (a control polygon is
+  // present) this is the planned spline — draw it violet to match the control
+  // points instead of the neutral gray.
+  const ctrlPts = opt.ctrl ? curD.trajectory.ctrl : null;
   if (projCmd){
+    const cmdCol = curD.trajectory.ctrl ? "#b184e8" : "#9aa7b3";
     for (let i=1;i<projCmd.length;i++){
       const a=projCmd[i-1], b=projCmd[i]; if(!a||!b) continue;
       add((a[2]+b[2])/2, g=>g.append("line")
         .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
-        .attr("stroke","#9aa7b3").attr("stroke-width",1.1).attr("stroke-dasharray","4 4").attr("opacity",.45));
+        .attr("stroke",cmdCol).attr("stroke-width",1.1).attr("stroke-dasharray","4 4").attr("opacity",.5));
     }
+  }
+
+  // B-spline control polygon + control points (sweep runs).
+  if (ctrlPts && ctrlPts.length){
+    const projCtrl = ctrlPts.map(P);
+    for (let i=1;i<projCtrl.length;i++){
+      const a=projCtrl[i-1], b=projCtrl[i]; if(!a||!b) continue;
+      add((a[2]+b[2])/2, g=>g.append("line")
+        .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
+        .attr("stroke","#c89bff").attr("stroke-width",1).attr("stroke-dasharray","2 3").attr("opacity",.4));
+    }
+    projCtrl.forEach(p=>{
+      if (!p) return;
+      add(p[2]-1e-6, g=>g.append("circle")
+        .attr("cx",p[0]).attr("cy",p[1]).attr("r",3).attr("fill","#c89bff")
+        .attr("stroke","#000").attr("stroke-width",.8).attr("opacity",.95));
+    });
+    const p0 = projCtrl.find(Boolean);
+    if (p0) add(p0[2]-1e-6, g=>g.append("text")
+      .attr("x",p0[0]+6).attr("y",p0[1]-6).attr("fill","#c89bff")
+      .attr("font-size",10).text("ctrl pts"));
   }
 
   // Actual tool path, depth-colored. Reached prefix is bright; the not-yet-carved

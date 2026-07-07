@@ -950,6 +950,7 @@ def main():
     best_dice = -1.0
     best_positions = None
     best_deltas = None
+    best_ctrl = None
     best_m = None
     best_it = -1
     start_time = time.time()
@@ -1119,6 +1120,9 @@ def main():
                     best_m = dict(m)
                     best_positions = sim.tool_pos.to_torch()[:T].numpy().copy()
                     best_deltas = sim.tool_delta.to_torch()[:T].numpy().copy()
+                    if args.method == "sweep":
+                        best_ctrl = torch.cat([P0_const, params.detach()],
+                                              dim=0).numpy().copy()
                     best_it = it
                 writer.add_scalar("eval/dice", m["dice"], it)
                 writer.add_scalar("eval/asd", m["asd"], it)
@@ -1182,9 +1186,11 @@ def main():
             X_final = sweep_path().detach()
             deltas = (X_final[1:] - X_final[:-1]).numpy()
             sweep_load_sim(X_final)
+            ctrl_points = torch.cat([P0_const, params.detach()], dim=0).numpy()
         else:
             deltas = params.detach().numpy()
             sim.tool_delta.from_torch(params.detach())
+            ctrl_points = None
         # Evaluate/save from the canonical start so the reported dice and the
         # saved trajectory correspond to a single deployable initial condition
         # (training may have randomized the start or restarted from saved states).
@@ -1230,6 +1236,8 @@ def main():
             if best_dice > final_iter_dice:
                 positions = best_positions
                 deltas = best_deltas
+                if best_ctrl is not None:
+                    ctrl_points = best_ctrl
                 last_m = best_m
                 # Re-load the best trajectory into the sim so STL export and
                 # holder-overlap reflect the best model (a fresh carve -- visually
@@ -1315,6 +1323,12 @@ def main():
         if args.save_model:
             np.save(os.path.join(run_dir, "trajectory_deltas.npy"), deltas)
             np.save(os.path.join(run_dir, "trajectory.npy"), positions)
+            # Sweep method: also save the B-spline control polygon (K,3) that
+            # generated the planned path (X = B @ P), consistent with whichever
+            # checkpoint (best or final) the saved trajectory came from. The
+            # results web viewer overlays these on the 3D trajectory plot.
+            if ctrl_points is not None:
+                np.save(os.path.join(run_dir, "control_points.npy"), ctrl_points)
             print(f"[{run_name}] trajectory saved to {run_dir}/trajectory.npy")
         # Repo-root copy for the CAM round-trip demo / G-code export defaults.
         # Also copy args.json next to it so the exporter can auto-match the
