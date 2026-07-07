@@ -1796,13 +1796,24 @@ class CSGSimulatorDelta:
         self.compute_length_penalty(0, num_active_steps - 1)
         self.compute_tool_gouge_penalty(0, num_active_steps - 1)
         # Trajectory-quality measures (time / air-cut time / breakage). These
-        # run inside the Tape so their soft loss terms receive gradient.
-        self.zero_seg_volumes(0, num_active_steps - 1)
-        self.zero_acc_psum()
-        self.compute_seg_time(0, num_active_steps - 1)
-        self.compute_seg_volumes(0, num_active_steps - 1)
-        self.compute_traj_metrics(0, num_active_steps - 1)
-        self.compute_break_loss()
+        # run inside the Tape so their soft loss terms receive gradient. When
+        # all three soft weights are zero the kernels are skipped: they would
+        # add 0 to the loss but still build a large autodiff graph (atomic_adds
+        # to needs_grad seg_*/acc_psum fields over all voxels x T), which both
+        # slows training and corrupts tool_delta.grad. The hard, non-diff
+        # final-metric forms (diag_time/diag_air_time/diag_break_prob_*) are
+        # computed by compute_traj_diagnostics_hard in eval_metrics, outside
+        # the Tape, so the reported metrics are unaffected by this guard.
+        w_any = (self.w_time[None] > 0.0
+                 or self.w_air_time[None] > 0.0
+                 or self.w_break[None] > 0.0)
+        if w_any:
+            self.zero_seg_volumes(0, num_active_steps - 1)
+            self.zero_acc_psum()
+            self.compute_seg_time(0, num_active_steps - 1)
+            self.compute_seg_volumes(0, num_active_steps - 1)
+            self.compute_traj_metrics(0, num_active_steps - 1)
+            self.compute_break_loss()
 
     def forward_hard(self, num_active_steps, clip_speeds=True):
         """Hard boolean forward pass for evaluation and rendering.
