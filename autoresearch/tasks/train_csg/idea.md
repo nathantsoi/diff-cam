@@ -281,3 +281,47 @@ variance from GPU atomic-add nondeterminism). So `w_air_time=1.0` removes ~58%
 of air-cut time at NO cost to either soft OR hard dice — a genuinely FREE
 deployable win on both metrics. The headline finding #3 stands and is now
 verified on the deployable (hard) metric, not just the soft proxy.
+
+### Run 10 — generality: sphere air-win recipe on 2in stock (2 1 1) — RUNNING 18:00
+The headline air win is on the default 1in sphere. Does the recipe
+(`--w-air-time 1.0 --best-w-airtime 0.05`) generalize to a DIFFERENT scenario,
+or is it overfit to the 1in stock? Testing on a 2in stock (`2 1 1`, same sphere
+target): bigger stock → more empty space → more air-cut headroom (a harder test).
+Need a within-scenario baseline (w=0) + the recipe, same seed, on GPU 2.
+
+EARLY SIGNAL (iter ~56): dice=0.0 for BOTH, and the baseline's gradient is dying
+(4.5e-7) while the recipe's is healthy (3e-2, from the air-time loss). In the 2in
+stock the centered target is farther from the random init → dice loss is 0/flat →
+no gradient to pull the tool to the target. The recipe gets gradient from the
+air-time loss (penalizes non-cutting) which may pull it toward the target. If the
+baseline stays stuck at dice 0 but the recipe climbs, that's a generality finding
+(the air loss helps initialization in larger stocks, not just trims air). If both
+climb and the recipe gives dice-neutral air reduction vs the 2in baseline, the
+win generalizes. If both fail, random init doesn't reach the target in 2in stock
+(a method limit, not an air-loss limit). Awaiting completion (~19:00).
+
+### Run 10 RESULT — 2in stock: air win does NOT generalize (init/stock-size cap) — DONE 18:25
+Killed early once the plateau was clear (loss flat, no further progress). Both
+runs killed mid-training; dice values below are the plateau (soft dice stayed 0).
+
+| config (2in stock 2 1 1, sphere, random init) | soft dice | hard dice | grad | verdict |
+|------------------------------------------------|-----------|-----------|------|---------|
+| baseline (w=0) seed1 — killed iter ~229        | 0.000     | 0.157     | 4e-7 | STUCK: random init never reaches centered target; dice loss flat 0 → no gradient |
+| recipe (wat1.0+bwa0.05) seed1 — killed iter ~827 | 0.000   | 0.308     | 2.7e-2 | PLATEAU: air loss starts carving (hard 0→0.31) then air-min stalls further cutting |
+| recipe (wat1.0+bwa0.05) seed2 — killed iter ~649 | 0.000   | 0.308     | 3.0e-2 | PLATEAU: same, hard 0.31 (confirms seed1) |
+
+**VERDICT: the sphere air win does NOT generalize to the 2in stock.** The failure
+is a stock-size/init cap, NOT an air-loss limit: when the target is centered in a
+stock much larger than the target (2in stock vs 0.9in sphere), the random init
+(`init_scale 0.05`) places the toolpath in empty space far from the target → dice
+loss is 0/flat → no gradient to pull the tool in (baseline stuck, grad ~4e-7).
+The air-time loss partially rescues it (provides a "cut more" gradient → hard dice
+0→0.31) but then air-minimization dominates and the tool settles into a low-air,
+low-cut local minimum (hard dice plateaus at 0.31, soft dice never leaves 0). So
+the air win is **conditional on the init reaching the target** — which holds for
+the 1in stock (target nearly fills the stock) but not the 2in. **Generality
+boundary**: the headline "sphere air removable for free" applies when the stock ≈
+target bounding box; for larger stock the method needs an init that reaches the
+target (e.g. raster_fine / shape-aware coverage init, per [[train-csg-best-config]]
+jul4 GradMill), not the air-time loss. The air-time loss is an air *trimmer*, not
+an init fix.

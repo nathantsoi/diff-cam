@@ -118,6 +118,18 @@ headroom **only on freeform shapes**; box/cyl already have ~0% air.
   (transient instability) but best-checkpoint recovers; the loss perturbs
   optimization transiently. `w_air_time ≥ 3.0` shows gouge spikes mid-training
   but recovers dice-neutral at the best checkpoint.
+- **Generality boundary — the sphere air win does NOT transfer to a larger
+  stock.** On a 2in stock (`2 1 1`, same sphere target) the random init
+  (`init_scale 0.05`) places the toolpath in empty space far from the centered
+  target → dice loss is 0/flat → no gradient (baseline stuck at dice 0, grad
+  ~4e-7). The recipe `wat1.0 + bwa0.05` partially rescues it: the air-time loss
+  supplies a "cut more" gradient that starts carving (hard dice 0→0.31, 2 seeds)
+  but then air-minimization stalls further cutting (hard dice plateaus 0.31, soft
+  dice never leaves 0). So the air win is **conditional on the init reaching the
+  target** — true for the 1in stock (target ≈ fills the stock) but not larger
+  stock. The air-time loss is an air *trimmer*, not an init fix; larger stock
+  needs a coverage init (raster_fine / shape-aware, per `[[train-csg-best-config]]`
+  jul4 GradMill) to reach the target first.
 
 This **refines** the prior `[[air-cut-loss-tradeoff]]` finding ("~30% air
 inherent, loss-based air reduction trades dice 0.847→0.55") — that flat claim
@@ -149,8 +161,13 @@ but structural on the pyramid.
   default) → `fcut_max`/`engage_max` nonzero; `break_prob_any` fires (0.004–0.008
   freeform, lower prismatic). Dice-neutral. `broken=0` everywhere.
 - **Sphere dice-neutral air win:** `--w-air-time 1.0` (air −58%, dice neutral,
-  3 seeds) or `--w-air-time 3.0` (air −87%). Combined with
-  `--best-w-airtime 0.05` → air −78%.
+  3 seeds, **hard-dice-neutral too** — 3-seed baseline hard 0.552 vs wat1.0 hard
+  0.549) or `--w-air-time 3.0` (air −87%). Combined with
+  `--best-w-airtime 0.05` → air −78%. **Stock-size-conditional**: holds on the
+  1in stock where random init reaches the target; FAILS on a 2in stock (init
+  can't reach the centered target → baseline stuck at dice 0, recipe plateaus at
+  hard 0.31 / soft 0). Do NOT expect the air win on stock ≫ target bounding box
+  without a coverage init first.
 - **Free checkpoint-selection win:** `--best-w-airtime 0.05` (alone, `--w-air-time 0`)
   → air −45% on sphere, dice-neutral, no re-optimization.
 - **Pyramid:** air is structural; do not chase dice-neutral air reduction.
@@ -158,7 +175,7 @@ but structural on the pyramid.
 
 ## Artifacts
 
-- `results.tsv` — 24 experiments (commit, dice, memory, status, description, command).
+- `results.tsv` — 36 experiments (commit, dice, memory, status, description, command).
 - `results_plot.png` — 3 panels: dice over experiments; best dice per
   shape×method-family; trajectory-quality (air/total/break vs dice).
 - `idea.md` — chronological run log + headline findings.
