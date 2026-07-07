@@ -293,6 +293,55 @@ class Args:
     the HARD carve still gouges), this constrains the trajectory GEOMETRY
     directly so it transfers to hard dice. 0 disables."""
 
+    # ---- Trajectory-quality measures (time / air-cut time / breakage) ----
+    # Three deployable measures reported alongside dice and (when their weight
+    # is > 0) added to the soft loss as differentiable surrogates. Hard,
+    # non-differentiable final-metric forms are always reported in metrics.json
+    # regardless of these weights. See docs/algorithms.md + docs/design.md.
+    w_time: float = 1e-3
+    """weight on the TOTAL TOOLPATH TIME soft term (sum of per-segment motion
+    time at the feed/rapid regime speed, seconds). Shorter is better for equal
+    dice. 0 disables. NOTE: time (~10s) and breakage (~[0,1]) live on very
+    different scales, so the three w_* here are equal-by-default starting
+    points -- tune per-run."""
+    w_air_time: float = 1e-3
+    """weight on the AIR-CUTTING TIME soft term (seconds spent cutting air,
+    weighted by the per-segment air fraction). High retracts clear of the
+    surface are free; surface-hugging air in empty corners is charged. 0
+    disables."""
+    w_break: float = 1e-3
+    """weight on the TOOL-BREAKAGE PROBABILITY soft term (docs/algorithms.md
+    §4.1/§4.2 stress-strength interference, simplified to a single threshold
+    f_ref and log-variance sigma_risk). 0 disables. A too-risky toolpath should
+    be rejected even if shorter; raising this (and best_w_break) enforces that."""
+    kc: float = 700.0
+    """specific cutting force (N/mm^2) for the breakage force model
+    (Al ~600-800). mu_F = kc * V_chip_mm3 / (dt * D)."""
+    f_ref: float = 50.0
+    """nominal cutting force (N) at which per-step P_break = 0.5 (effective
+    S_bar / alpha_mean). Calibrate from known-good/bad cuts; raw fcut_max is
+    reported in metrics.json to aid this."""
+    sigma_risk: float = 0.5
+    """combined log-std of the stress-strength interference,
+    sqrt(sigma_alpha^2 + pi^2/(6 m^2)). Sets the transition band of the
+    breakage sigmoid."""
+    f_max: float = 100.0
+    """hard threshold force (N) for the docs/design.md broken flag: broken=1
+    iff F_cut_max > f_max. Calibrate; raw fcut_max is reported."""
+    best_w_airtime: float = 0.05
+    """composite best-checkpoint weight on normalized air-cutting time. The
+    best trajectory is selected by score = dice - best_w_airtime*air_time_norm
+    - best_w_time*total_time_norm - best_w_break*break_prob_any, where the time
+    metrics are normalized by T*dt (max possible time) into [0,1]. Small
+    weights keep dice dominant; raising best_w_break enforces the reject-too-
+    risky behavior."""
+    best_w_time: float = 0.05
+    """composite best-checkpoint weight on normalized total toolpath time."""
+    best_w_break: float = 0.05
+    """composite best-checkpoint weight on breakage probability (already
+    [0,1]). Raising this rejects high-engagement checkpoints even at higher
+    dice."""
+
     init_stock_from: str = ""
     """STAGED TRAINING: path to a .npz saved by the truncation utility containing
     a mid-cut stock SDF + tool position. When set, training starts each forward
@@ -457,7 +506,46 @@ def eval_metrics(sim, T, dx):
     m["air_cut_raw"] = air_vol
     m["tool_swept_raw"] = swept
     m["air_cut_fraction"] = air_vol / max(swept, 1e-8)
+    # Trajectory-quality measures (hard, final-metric form on the hard carve):
+    # total toolpath time, air-cutting time, breakage probability + force, and
+    # the docs/design.md broken flag. Computed by compute_traj_diagnostics_hard.
+    sim.compute_traj_diagnostics_hard(T - 1)
+    m["air_time"] = float(sim.diag_air_time[None])
+    m["total_time"] = float(sim.diag_time[None])
+    m["break_prob_any"] = float(sim.diag_break_prob_any[None])
+    m["break_prob_max"] = float(sim.diag_break_prob_max[None])
+    m["fcut_max"] = float(sim.diag_fcut_max[None])
+    m["broken"] = float(sim.diag_broken[None])
+    m["engage_max"] = float(sim.diag_engage_max[None])
+    m["engage_mean"] = float(sim.diag_engage_mean[None])
     return m
+
+
+def composite_score(m, args, T, dt):
+    """Best-checkpoint composite: dice minus normalized trajectory penalties.
+
+    score = dice - best_w_airtime*air_time_norm - best_w_time*total_time_norm
+            - best_w_break*break_prob_any
+
+    air_time and total_time are normalized by T*dt (the max possible toolpath
+    time = every segment at the dt cap) into ~[0,1] so the weights are
+    comparable; break_prob_any is already [0,1]. With small weights dice still
+    dominates; the new metrics break ties toward shorter/safer paths, and a
+    large best_w_break enforces the reject-too-risky behavior. m may be None
+    (returns -inf).
+    """
+    if m is None:
+        return -1e9
+    t_cap = max(T * dt, 1e-8)
+    air_norm = float(m.get("air_time", 0.0)) / t_cap
+    time_norm = float(m.get("total_time", 0.0)) / t_cap
+    brk = float(m.get("break_prob_any", 0.0))
+    return (
+        float(m["dice"])
+        - args.best_w_airtime * air_norm
+        - args.best_w_time * time_norm
+        - args.best_w_break * brk
+    )
 
 
 def export_stls(sim, T, dx, run_name, step, track):
@@ -595,6 +683,15 @@ def main():
     sim.w_traj_prox[None] = args.w_traj_prox
     sim.w_len[None] = args.w_len
     sim.w_tool_gouge[None] = args.w_tool_gouge
+    # Trajectory-quality measures (time / air-cut time / breakage) + breakage
+    # model constants.
+    sim.w_time[None] = args.w_time
+    sim.w_air_time[None] = args.w_air_time
+    sim.w_break[None] = args.w_break
+    sim.kc[None] = args.kc
+    sim.f_ref[None] = args.f_ref
+    sim.sigma_risk[None] = args.sigma_risk
+    sim.f_max[None] = args.f_max
     sim.bake_target_grid()
     sim.set_target_volume()
 
@@ -863,6 +960,7 @@ def main():
     # atomic-adds, so re-running forward on restored params would give a different
     # dice than the one we measured.
     best_dice = -1.0
+    best_score = -1e9
     best_positions = None
     best_deltas = None
     best_m = None
@@ -996,12 +1094,14 @@ def main():
                 sim.forward_hard(T)
                 m = eval_metrics(sim, T, dx)
                 last_m = m
-                if m["dice"] > best_dice:
+                score = composite_score(m, args, T, args.dt)
+                if score > best_score:
                     # sim.tool_delta / sim.tool_pos here reflect the PRE-step
                     # params (set before the forward at the top of the loop),
                     # which are exactly what produced this dice. Snapshot them
                     # directly so the saved best trajectory is consistent with
-                    # the measured best dice (no re-eval needed later).
+                    # the measured metrics (no re-eval needed later).
+                    best_score = score
                     best_dice = float(m["dice"])
                     best_m = dict(m)
                     best_positions = sim.tool_pos.to_torch()[:T].numpy().copy()
@@ -1018,6 +1118,14 @@ def main():
                 writer.add_scalar("loss/holder", m["loss_holder"], it)
                 writer.add_scalar("loss/air", m["loss_air"], it)
                 writer.add_scalar("loss/jerk", m["loss_jerk"], it)
+                # Trajectory-quality measures (reported alongside dice).
+                writer.add_scalar("metrics/air_time", m["air_time"], it)
+                writer.add_scalar("metrics/total_time", m["total_time"], it)
+                writer.add_scalar("metrics/break_prob_any", m["break_prob_any"], it)
+                writer.add_scalar("metrics/break_prob_max", m["break_prob_max"], it)
+                writer.add_scalar("metrics/fcut_max", m["fcut_max"], it)
+                writer.add_scalar("metrics/broken", m["broken"], it)
+                writer.add_scalar("charts/best_score", best_score, it)
                 last_eval_iter = it
                 if args.progress_bar:
                     pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['dice']:.3f}",
@@ -1025,6 +1133,9 @@ def main():
                                      gouge=f"{m['loss_gouge']:.3f}",
                                      hold=f"{m['loss_holder']:.2e}",
                                      air=f"{m['loss_air']:.3f}",
+                                     t=f"{m['total_time']:.2f}",
+                                     at=f"{m['air_time']:.2f}",
+                                     brk=f"{m['break_prob_any']:.2f}",
                                      jerk=f"{m['loss_jerk']:.2e}")
             elif args.progress_bar:
                 pbar.set_postfix(loss=f"{loss:.4f}", grad=f"{grad_norm:.2e}")
@@ -1108,8 +1219,13 @@ def main():
         # measurable independently of the best-dice checkpoint.
         final_iter_m = dict(last_m) if last_m is not None else None
         if best_positions is not None and best_dice > 0.0:
-            final_iter_dice = float(last_m["dice"]) if last_m is not None else 0.0
-            if best_dice > final_iter_dice:
+            final_iter_score = composite_score(last_m, args, T, args.dt)
+            # Use the best checkpoint when its COMPOSITE score (dice + the three
+            # trajectory-quality penalties) beats the final iter's composite --
+            # generalizes the old dice-only comparison. The reported metrics are
+            # the already-measured best_m (no re-eval: the hard carve is
+            # nondeterministic under GPU atomic-adds).
+            if best_score > final_iter_score:
                 positions = best_positions
                 deltas = best_deltas
                 last_m = best_m
@@ -1120,8 +1236,10 @@ def main():
                 sim.loss[None] = 0.0
                 sim.forward_hard(T)
                 used_best = True
-                print(f"[best] using best-dice checkpoint: dice={best_dice:.6f} @ iter {best_it} "
-                      f"(final-iter dice was {final_iter_dice:.6f})", flush=True)
+                print(f"[best] using best-composite checkpoint: dice={best_dice:.6f} "
+                      f"score={best_score:.6f} @ iter {best_it} "
+                      f"(final-iter dice={float(final_iter_m['dice']):.6f} "
+                      f"score={final_iter_score:.6f})", flush=True)
 
         final_overlap = float(sim.holder_overlap_total(T - 1))
         if final_overlap > 0.0:
@@ -1166,11 +1284,29 @@ def main():
             "air_cut_fraction": round(float(last_m.get("air_cut_fraction", 0.0)), 6) if last_m else 0.0,
             "air_cut_raw": round(float(last_m.get("air_cut_raw", 0.0)), 6) if last_m else 0.0,
             "tool_swept_raw": round(float(last_m.get("tool_swept_raw", 0.0)), 6) if last_m else 0.0,
+            # Trajectory-quality measures (hard, final-metric form on the hard
+            # carve) for the selected (best-composite) checkpoint. Reported
+            # alongside dice so the autoresearch harness can gate/compose on
+            # them. air_time/total_time are seconds; break_prob_* are [0,1];
+            # fcut_max is Newtons; broken is the docs/design.md hard flag;
+            # engage_* are raw chip volumes (unit-cube^3) for calibration.
+            "air_time": round(float(last_m.get("air_time", 0.0)), 6) if last_m else 0.0,
+            "total_time": round(float(last_m.get("total_time", 0.0)), 6) if last_m else 0.0,
+            "break_prob_any": round(float(last_m.get("break_prob_any", 0.0)), 6) if last_m else 0.0,
+            "break_prob_max": round(float(last_m.get("break_prob_max", 0.0)), 6) if last_m else 0.0,
+            "fcut_max": round(float(last_m.get("fcut_max", 0.0)), 6) if last_m else 0.0,
+            "broken": round(float(last_m.get("broken", 0.0)), 6) if last_m else 0.0,
+            "engage_max": round(float(last_m.get("engage_max", 0.0)), 6) if last_m else 0.0,
+            "engage_mean": round(float(last_m.get("engage_mean", 0.0)), 6) if last_m else 0.0,
+            "best_score": round(best_score, 6),
             # Final-iter (pre-best-checkpoint) trajectory metrics: exposes any
             # late-training polish (e.g. w_prox warmup) on the final trajectory,
             # independent of where the best-dice peak occurred.
             "final_iter_dice": round(float(final_iter_m["dice"]), 6) if final_iter_m else 0.0,
             "final_iter_air_cut_fraction": round(float(final_iter_m.get("air_cut_fraction", 0.0)), 6) if final_iter_m else 0.0,
+            "final_iter_air_time": round(float(final_iter_m.get("air_time", 0.0)), 6) if final_iter_m else 0.0,
+            "final_iter_total_time": round(float(final_iter_m.get("total_time", 0.0)), 6) if final_iter_m else 0.0,
+            "final_iter_break_prob_any": round(float(final_iter_m.get("break_prob_any", 0.0)), 6) if final_iter_m else 0.0,
         }
         metrics_path = os.path.join(run_dir, "metrics.json")
         with open(metrics_path, "w") as f:

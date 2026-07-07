@@ -174,6 +174,27 @@ def main():
     ap.add_argument("--w-tool-gouge", type=float, default=0.0,
                     help="weight on the tool-position gouge barrier (0 = disabled; soft-union-"
                          "independent surface respect that transfers to hard dice)")
+    # --- Trajectory-quality measures (time / air-cut time / breakage) ---
+    ap.add_argument("--w-time", type=float, default=1e-3,
+                    help="weight on the total toolpath time soft term (seconds; 0 disables)")
+    ap.add_argument("--w-air-time", type=float, default=1e-3,
+                    help="weight on the air-cutting time soft term (seconds; 0 disables)")
+    ap.add_argument("--w-break", type=float, default=1e-3,
+                    help="weight on the tool-breakage probability soft term (0 disables)")
+    ap.add_argument("--kc", type=float, default=700.0,
+                    help="specific cutting force (N/mm^2) for the breakage model (Al ~700)")
+    ap.add_argument("--f-ref", type=float, default=50.0,
+                    help="nominal force (N) at which per-step P_break=0.5 (calibrate; raw fcut_max reported)")
+    ap.add_argument("--sigma-risk", type=float, default=0.5,
+                    help="combined log-std of the stress-strength interference (transition band)")
+    ap.add_argument("--f-max", type=float, default=100.0,
+                    help="hard threshold force (N) for the broken flag (calibrate; raw fcut_max reported)")
+    ap.add_argument("--best-w-airtime", type=float, default=0.05,
+                    help="composite best-checkpoint weight on normalized air-cutting time")
+    ap.add_argument("--best-w-time", type=float, default=0.05,
+                    help="composite best-checkpoint weight on normalized total toolpath time")
+    ap.add_argument("--best-w-break", type=float, default=0.05,
+                    help="composite best-checkpoint weight on breakage probability (reject-too-risky)")
     ap.add_argument("--random-tool-start", action="store_true",
                     help="randomize the cutter start each fresh start (XY in the stock "
                          "footprint, Z >= stock top + --tool-start-clearance-in)")
@@ -348,6 +369,16 @@ def main():
             "--w_traj_prox_warmup_frac", str(args.w_traj_prox_warmup_frac),
             "--w_len", str(args.w_len),
             "--w_tool_gouge", str(args.w_tool_gouge),
+            "--w_time", str(args.w_time),
+            "--w_air_time", str(args.w_air_time),
+            "--w_break", str(args.w_break),
+            "--kc", str(args.kc),
+            "--f_ref", str(args.f_ref),
+            "--sigma_risk", str(args.sigma_risk),
+            "--f_max", str(args.f_max),
+            "--best_w_airtime", str(args.best_w_airtime),
+            "--best_w_time", str(args.best_w_time),
+            "--best_w_break", str(args.best_w_break),
             "--eval_freq", str(args.eval_freq),
             "--seed", str(args.seed),
             "--stock_size_in", *ssi,

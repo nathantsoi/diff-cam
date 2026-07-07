@@ -113,7 +113,24 @@ def carve_trajectory_metrics(positions, resolution=32, target_shape=TARGET_SHAPE
     stock = sim.stock.to_numpy()[len(positions) - 1]
     target = sim.target.to_numpy()
     # Surface distances reported in mm: one voxel == sim.v mm (cubic voxels).
-    return _metrics(stock, target, sim.v), stock, target
+    m = _metrics(stock, target, sim.v)
+    # Trajectory-quality measures (hard, final-metric form): total toolpath
+    # time, air-cutting time, breakage probability + force, broken flag.
+    # _HardCarveSimulator inherits CSGSimulatorDelta, so the kernel is
+    # available; run it on the just-carved stock/positions.
+    try:
+        sim.compute_traj_diagnostics_hard(len(positions) - 1)
+        m["air_time"] = float(sim.diag_air_time[None])
+        m["total_time"] = float(sim.diag_time[None])
+        m["break_prob_any"] = float(sim.diag_break_prob_any[None])
+        m["break_prob_max"] = float(sim.diag_break_prob_max[None])
+        m["fcut_max"] = float(sim.diag_fcut_max[None])
+        m["broken"] = float(sim.diag_broken[None])
+        m["engage_max"] = float(sim.diag_engage_max[None])
+        m["engage_mean"] = float(sim.diag_engage_mean[None])
+    except Exception as e:
+        print(f"[eval] trajectory diagnostics unavailable: {e}")
+    return m, stock, target
 
 
 # ---------------------------------------------------------------------------
@@ -154,11 +171,21 @@ def eval_trajectory(path, resolution, do_gcode, post, config, voxel_size_mm=VOXE
         print(f"  Dice : {m['dice']:.4f}")
         print(f"  ASD  : {m['asd']:.4f}")
         print(f"  HD95 : {m['hd95']:.4f}")
+        print(f"  Total toolpath time : {m.get('total_time', float('nan')):.4f} s")
+        print(f"  Air-cutting time    : {m.get('air_time', float('nan')):.4f} s")
+        print(f"  Break prob (any)    : {m.get('break_prob_any', float('nan')):.4f}")
+        print(f"  Max cutting force   : {m.get('fcut_max', float('nan')):.2f} N  "
+              f"(broken={int(m.get('broken', 0.0))})")
 
         wandb.log({
             "trajectory/dice": m["dice"],
             "trajectory/asd": m["asd"],
             "trajectory/hd95": m["hd95"],
+            "trajectory/total_time": m.get("total_time", 0.0),
+            "trajectory/air_time": m.get("air_time", 0.0),
+            "trajectory/break_prob_any": m.get("break_prob_any", 0.0),
+            "trajectory/fcut_max": m.get("fcut_max", 0.0),
+            "trajectory/broken": m.get("broken", 0.0),
         })
 
         if not do_gcode:
