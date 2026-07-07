@@ -1091,10 +1091,33 @@ def main():
                     sim.tool_start[None] = ti.Vector(list(CANONICAL_TOOL_START))
                     sim.tool_delta.from_torch(params.detach())
                     sim.loss[None] = 0.0
+                # SOFT carve eval: the proven 0.85/0.92/0.89/0.92 operating-point
+                # metric. forward() uses smooth_max (differentiable), so soft
+                # dice climbs smoothly with soft optimization. This is the
+                # primary "dice" used for best_score / best-checkpoint selection
+                # (matches the jul1 baseline that the task spec ceilings refer
+                # to).
+                sim.forward(T)
+                soft_stock = sim.stock.to_numpy()[T - 1]
+                soft_target = sim.target.to_numpy()
+                soft_m = _metrics(soft_stock, soft_target, dx)
+                # HARD carve eval: deployable measures. forward_hard() uses
+                # boolean ti.max (non-differentiable) with tool_sdf_sharp.
+                # Hard dice is quantized to 1-voxel steps (flat for many iters
+                # with small tool moves) and reports the actual carved result.
+                # compute_traj_diagnostics_hard (air_time/total_time/
+                # break_prob_any) also runs on this hard carve.
                 sim.forward_hard(T)
                 m = eval_metrics(sim, T, dx)
+                m["soft_dice"] = float(soft_m["dice"])
+                m["soft_asd"] = float(soft_m["asd"])
+                m["soft_hd95"] = float(soft_m["hd95"])
                 last_m = m
-                score = composite_score(m, args, T, args.dt)
+                # best_score uses SOFT dice (proven operating-point metric) with
+                # the hard-carve traj-quality penalties (best_w_* default 0.05,
+                # so penalties barely affect checkpoint selection; with
+                # --best-w-* 0 the composite is pure soft dice).
+                score = composite_score({**m, "dice": m["soft_dice"]}, args, T, args.dt)
                 if score > best_score:
                     # sim.tool_delta / sim.tool_pos here reflect the PRE-step
                     # params (set before the forward at the top of the loop),
@@ -1102,14 +1125,15 @@ def main():
                     # directly so the saved best trajectory is consistent with
                     # the measured metrics (no re-eval needed later).
                     best_score = score
-                    best_dice = float(m["dice"])
+                    best_dice = float(m["soft_dice"])
                     best_m = dict(m)
                     best_positions = sim.tool_pos.to_torch()[:T].numpy().copy()
                     best_deltas = sim.tool_delta.to_torch()[:T].numpy().copy()
                     best_it = it
-                writer.add_scalar("eval/dice", m["dice"], it)
-                writer.add_scalar("eval/asd", m["asd"], it)
-                writer.add_scalar("eval/hd95", m["hd95"], it)
+                writer.add_scalar("eval/dice", m["soft_dice"], it)
+                writer.add_scalar("eval/hard_dice", m["dice"], it)
+                writer.add_scalar("eval/asd", m["soft_asd"], it)
+                writer.add_scalar("eval/hd95", m["soft_hd95"], it)
                 writer.add_scalar("metrics/gouge", m["gouge"], it)
                 writer.add_scalar("metrics/residual", m["residual"], it)
                 writer.add_scalar("metrics/holder_overlap", m["holder_overlap"], it)
@@ -1128,7 +1152,8 @@ def main():
                 writer.add_scalar("charts/best_score", best_score, it)
                 last_eval_iter = it
                 if args.progress_bar:
-                    pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['dice']:.3f}",
+                    pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['soft_dice']:.3f}",
+                                     hd=f"{m['dice']:.3f}",
                                      resid=f"{m['loss_residual']:.3f}",
                                      gouge=f"{m['loss_gouge']:.3f}",
                                      hold=f"{m['loss_holder']:.2e}",
@@ -1144,8 +1169,12 @@ def main():
                 lr_val = opt.param_groups[0]["lr"]
                 time_str = time.strftime("[%Y-%m-%d %H:%M:%S] ")
                 if last_m is not None:
+                    # soft_dice is the proven operating-point metric (jul1
+                    # baseline); hard_dice is the deployable sharp carve.
+                    _sd = last_m.get("soft_dice", last_m["dice"])
+                    _hd = last_m["dice"]
                     line = (f"{time_str}[iter {it:4d}/{args.iters}] loss: {loss:.4f} | grad: {grad_norm:.2e} | lr: {lr_val:.2e} | "
-                            f"dice: {last_m['dice']:.4f} | asd: {last_m['asd']:.2f} | hd95: {last_m['hd95']:.2f} | "
+                            f"dice: {_sd:.4f} | hdice: {_hd:.4f} | asd: {last_m.get('soft_asd', last_m['asd']):.2f} | hd95: {last_m.get('soft_hd95', last_m['hd95']):.2f} | "
                             f"resid: {last_m['loss_residual']:.4f} | gouge: {last_m['loss_gouge']:.4f} | hold: {last_m['loss_holder']:.2e}")
                 else:
                     line = f"{time_str}[iter {it:4d}/{args.iters}] loss: {loss:.4f} | grad: {grad_norm:.2e} | lr: {lr_val:.2e}"
@@ -1219,7 +1248,12 @@ def main():
         # measurable independently of the best-dice checkpoint.
         final_iter_m = dict(last_m) if last_m is not None else None
         if best_positions is not None and best_dice > 0.0:
-            final_iter_score = composite_score(last_m, args, T, args.dt)
+            # composite_score reads m["dice"]; substitute soft_dice so the
+            # best-vs-final comparison uses the proven SOFT-dice metric.
+            final_iter_score = composite_score(
+                {**last_m, "dice": last_m.get("soft_dice", last_m["dice"])},
+                args, T, args.dt,
+            )
             # Use the best checkpoint when its COMPOSITE score (dice + the three
             # trajectory-quality penalties) beats the final iter's composite --
             # generalizes the old dice-only comparison. The reported metrics are
@@ -1238,7 +1272,8 @@ def main():
                 used_best = True
                 print(f"[best] using best-composite checkpoint: dice={best_dice:.6f} "
                       f"score={best_score:.6f} @ iter {best_it} "
-                      f"(final-iter dice={float(final_iter_m['dice']):.6f} "
+                      f"(final-iter soft-dice={float(final_iter_m.get('soft_dice', final_iter_m['dice'])):.6f} "
+                      f"hard-dice={float(final_iter_m['dice']):.6f} "
                       f"score={final_iter_score:.6f})", flush=True)
 
         final_overlap = float(sim.holder_overlap_total(T - 1))
@@ -1252,15 +1287,17 @@ def main():
         import json
         total_seconds = time.time() - start_time
         peak_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
-        final_dice = float(last_m["dice"]) if last_m is not None else 0.0
-        final_asd = float(last_m["asd"]) if last_m is not None else 0.0
-        final_hd95 = float(last_m["hd95"]) if last_m is not None else 0.0
+        final_dice = float(last_m.get("soft_dice", last_m["dice"])) if last_m is not None else 0.0
+        final_hard_dice = float(last_m["dice"]) if last_m is not None else 0.0
+        final_asd = float(last_m.get("soft_asd", last_m["asd"])) if last_m is not None else 0.0
+        final_hd95 = float(last_m.get("soft_hd95", last_m["hd95"])) if last_m is not None else 0.0
         final_gouge = float(last_m["gouge"]) if last_m is not None else 0.0
         final_resid = float(last_m["residual"]) if last_m is not None else 0.0
         final_hold = float(last_m["holder_overlap"]) if last_m is not None else final_overlap
 
         summary_data = {
             "dice": round(final_dice, 6),
+            "hard_dice": round(final_hard_dice, 6),
             "asd": round(final_asd, 6),
             "hd95": round(final_hd95, 6),
             "loss": round(float(sim.loss[None]), 6),
@@ -1302,7 +1339,8 @@ def main():
             # Final-iter (pre-best-checkpoint) trajectory metrics: exposes any
             # late-training polish (e.g. w_prox warmup) on the final trajectory,
             # independent of where the best-dice peak occurred.
-            "final_iter_dice": round(float(final_iter_m["dice"]), 6) if final_iter_m else 0.0,
+            "final_iter_dice": round(float(final_iter_m.get("soft_dice", final_iter_m["dice"])), 6) if final_iter_m else 0.0,
+            "final_iter_hard_dice": round(float(final_iter_m["dice"]), 6) if final_iter_m else 0.0,
             "final_iter_air_cut_fraction": round(float(final_iter_m.get("air_cut_fraction", 0.0)), 6) if final_iter_m else 0.0,
             "final_iter_air_time": round(float(final_iter_m.get("air_time", 0.0)), 6) if final_iter_m else 0.0,
             "final_iter_total_time": round(float(final_iter_m.get("total_time", 0.0)), 6) if final_iter_m else 0.0,
