@@ -99,9 +99,57 @@ def test_init_fit_starts_at_tool_start():
     sim, _ = _make_sim_and_path(T)
     start = np.array([0.5, 0.5, 1.0], dtype=np.float32)
     B = bspline_basis(16, T)
-    for mode in ("raster", "helix", "random"):
+    for mode in ("raster", "raster_arc", "helix", "random"):
         ref = init_reference_path(sim, start, T, mode=mode)
         P = fit_control_points(B, ref)
         P[0] = start
         X = B @ P
         assert np.allclose(X[0], start, atol=1e-5)
+
+
+def test_raster_arc_steps_uniform_and_capped():
+    """Arc-length resampling: every physical step equals total_len/(T-1) up to
+    corner-chord shortening — never longer — so choosing T >= len/cap + 1
+    makes the whole init feed-feasible by construction."""
+    from simulator.sweep import raster_arc_waypoints, _resample_arc_length
+    sim, _ = _make_sim_and_path(24)
+    start = (0.5, 0.5, 1.0)
+    wps, total_len = raster_arc_waypoints(sim, start)
+    L_mm = np.array([sim.Lx, sim.Ly, sim.Lz])
+    T = int(np.ceil(total_len / 1.905)) + 1
+    X = _resample_arc_length(wps, L_mm, T)
+    step = np.linalg.norm(np.diff(X, axis=0) * L_mm, axis=1)
+    ds = total_len / (T - 1)
+    assert step.max() <= ds + 1e-6          # never exceeds the uniform pitch
+    assert step.min() > 0.0                 # corner/U-turn chords only shorten
+    assert np.allclose(X[0], start, atol=1e-6)
+
+
+def test_stale_argmin_matches_exact_for_small_motion():
+    """amin-refresh: with an unchanged path the cached argmin gives the exact
+    loss; after a sub-voxel perturbation the stale loss stays close (the
+    winner index is stable under small motion)."""
+    sim, X = _make_sim_and_path(T=24)
+    sweep = SweepCarve(sim, n_points=X.shape[0])
+    l_exact, g_exact = sweep.loss_and_grad(X)
+    l_stale, g_stale = sweep.loss_and_grad(X, refresh_argmin=False)
+    assert np.isclose(l_exact, l_stale, rtol=1e-6)
+    assert np.allclose(g_exact, g_stale, rtol=1e-5, atol=1e-8)
+    X2 = X + np.float32(1e-4)               # ~0.003 voxels at 32^3
+    l2_exact, _ = sweep.loss_and_grad(X2)
+    l2_stale, _ = sweep.loss_and_grad(X2, refresh_argmin=False)
+    assert np.isclose(l2_exact, l2_stale, rtol=1e-3)
+
+
+def test_raster_arc_covers_bbox_footprint():
+    """The serpentine must reach all four footprint corners of the target bbox
+    and descend to its bottom (coverage precondition for any carve)."""
+    from simulator.sweep import raster_arc_waypoints, target_bbox
+    sim, _ = _make_sim_and_path(24)
+    wps, _ = raster_arc_waypoints(sim, (0.5, 0.5, 1.0))
+    lo, hi = target_bbox(sim)
+    body = wps[2:]                          # skip start + lead-in
+    for d in range(2):
+        assert body[:, d].min() <= lo[d] + 1e-6
+        assert body[:, d].max() >= hi[d] - 1e-6
+    assert body[:, 2].min() <= lo[2] + 1e-6

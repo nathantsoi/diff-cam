@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.ndimage import binary_erosion
-from scipy.spatial.distance import cdist
+from scipy.spatial import cKDTree
 
 # ============================================================
 # Helpers
@@ -83,10 +83,13 @@ def surface_distances(pred_mask, target_mask, spacing=(1.0, 1.0, 1.0)):
     if len(pred_pts) == 0 or len(target_pts) == 0:
         raise ValueError("Empty surface encountered.")
 
-    dists = cdist(pred_pts, target_pts)
-
-    d_pred_to_target = dists.min(axis=1)
-    d_target_to_pred = dists.min(axis=0)
+    # Exact nearest-neighbor distances via KD-tree: identical values to the
+    # former dense cdist(...).min(axis=...) but O(n log n) time and O(n)
+    # memory. The dense matrix was O(n_pred * n_target) -- ~16 GB for the
+    # hi-res STEP grid targets (50k x 40k surface points), which OOM-killed
+    # every eval on a 16 GB host.
+    d_pred_to_target = cKDTree(target_pts).query(pred_pts, workers=-1)[0]
+    d_target_to_pred = cKDTree(pred_pts).query(target_pts, workers=-1)[0]
 
     return d_pred_to_target, d_target_to_pred
 

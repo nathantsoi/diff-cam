@@ -190,8 +190,20 @@ class Args:
     """sweep: number of B-spline control points (path capacity knob)"""
     sweep_init: str = "raster"
     """sweep: init reference path the control points are least-squares fitted
-    to: 'raster' (boustrophedon over the target bbox), 'helix', or 'random'.
+    to: 'raster' (boustrophedon over the target bbox), 'raster_arc' (tool-sized
+    serpentine z-layer raster, arc-length-uniform samples), 'helix', or 'random'.
     Shape-agnostic (reads only the baked target SDF grid's bounding box)."""
+    amin_refresh: int = 1
+    """sweep: recompute the per-voxel argmin (winning segment) every this many
+    iterations. 1 = exact (every iteration). The argmin pass is O(T * N^3) and
+    dominates per-iteration cost at large T; the winner index is stable under
+    clipped sub-voxel path motion, so 4-8 trades exactness for ~2-4x throughput
+    with a periodic re-tightening."""
+    reach_gate: bool = False
+    """sweep: gate the residual + attraction loss terms by the exact vertical
+    3-axis reachability mask (utils/reachability.py) so waste that NO legal
+    tool position can remove stops pulling the path into part walls.
+    Shape-agnostic (derived from the target SDF grid + tool radius)."""
     w_feed: float = 5.0
     """sweep: weight of the feed-cap penalty relu(speed/cap - 1)^2 (dimensionless
     excess) on the sampled path -- keeps every step within the feed clip so the
@@ -694,9 +706,21 @@ def main():
         sweep = SweepCarve(sim, n_points=T)
         sweep.w_broad[None] = args.w_broad
         sweep.sigma_broad[None] = args.sigma_broad
+        if args.reach_gate:
+            from utils.reachability import compute_reachable_mask
+            _tgt = sim.target.to_numpy()
+            _reach = compute_reachable_mask(_tgt, sim.tool_radius[None] / sim.v)
+            _part = _tgt <= 0.0
+            _unreach = int(((~_part) & (~_reach)).sum())
+            _ceiling = 2.0 * _part.sum() / (2.0 * _part.sum() + _unreach)
+            sweep.reach.from_numpy(_reach.astype(np.float32))
+            print(f"[sweep] reach gate ON: {_unreach} unreachable waste voxels "
+                  f"masked from residual/attraction; dice ceiling {_ceiling:.4f}",
+                  flush=True)
         B_np = bspline_basis(args.n_ctrl, T)
+        _cap_budget_mm = (T - 1) * float(ipm_to_mm_per_s(args.feed_ipm)) * args.dt
         X_ref = init_reference_path(sim, tool_start, T, mode=args.sweep_init,
-                                    seed=args.seed)
+                                    seed=args.seed, max_len_mm=_cap_budget_mm)
         P_init = fit_control_points(B_np, X_ref)
         P_init[0] = tool_start
         B_t = torch.from_numpy(B_np)                       # (T, K)
@@ -709,6 +733,17 @@ def main():
         print(f"[sweep] K={args.n_ctrl} control points, T={T} samples, "
               f"init={args.sweep_init}, feed cap {feed_mm_s * args.dt:.2f} mm/step",
               flush=True)
+        # Feed-feasibility of the init: the evaluator clips every step to the
+        # cap, so an init whose length exceeds (T-1)*cap can only be executed
+        # truncated — coverage (and dice) die silently. Surface it up front.
+        _cap_mm = feed_mm_s * args.dt
+        _step_mm = np.linalg.norm(np.diff(X_ref.astype(np.float64), axis=0)
+                                  * np.array([sim.Lx, sim.Ly, sim.Lz]), axis=1)
+        _len = float(_step_mm.sum())
+        print(f"[sweep] init path {_len:.0f} mm vs executable budget "
+              f"{(T - 1) * _cap_mm:.0f} mm (ratio {_len / ((T - 1) * _cap_mm):.2f}); "
+              f"max step {_step_mm.max() / _cap_mm:.1f}x cap; "
+              f"feasible at T >= {int(np.ceil(_len / _cap_mm)) + 1}", flush=True)
 
         def sweep_path():
             """Sampled path X (T,3) as a torch tensor differentiable in params."""
@@ -1027,7 +1062,9 @@ def main():
                 reg_loss = args.w_feed * feed_pen + 100.0 * zfloor_pen
                 reg_loss.backward()
                 X_det = X.detach()
-                ti_loss, grad_X = sweep.loss_and_grad(X_det.numpy())
+                _refresh = args.amin_refresh <= 1 or it % args.amin_refresh == 0
+                ti_loss, grad_X = sweep.loss_and_grad(X_det.numpy(),
+                                                      refresh_argmin=_refresh)
                 grad = params.grad + (B_t.T @ torch.from_numpy(grad_X))[1:]
                 loss = ti_loss + float(reg_loss)
                 grad_norm = float(grad.norm().item())

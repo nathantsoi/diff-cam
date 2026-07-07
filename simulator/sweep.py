@@ -57,6 +57,12 @@ class SweepCarve:
         self.w_broad[None] = 0.0
         self.sigma_broad[None] = 4.0
 
+        # Per-voxel weight on the residual + attraction terms (1 = neutral).
+        # Loaded with the vertical-reachability mask (utils/reachability.py)
+        # to stop unreachable waste from pulling the path into part walls.
+        self.reach = ti.field(dtype=ti.f32, shape=(self.Nx, self.Ny, self.Nz))
+        self.reach.fill(1.0)
+
         # Non-diff diagnostics (hard counts on the swept carve).
         self.diag_residual_vox = ti.field(dtype=ti.i32, shape=())
         self.diag_gouge_vox = ti.field(dtype=ti.i32, shape=())
@@ -144,7 +150,9 @@ class SweepCarve:
 
             w_gouge = self.sim.w_gouge[None]
             w_residual = self.sim.w_residual[None]
-            contrib = inv_n * (w_gouge * gouge * gouge + w_residual * residual * residual)
+            reach_w = self.reach[i, j, k]
+            contrib = inv_n * (w_gouge * gouge * gouge
+                               + w_residual * reach_w * residual * residual)
 
             # Non-saturating residual attraction (SDF-valued): every still-uncut
             # waste voxel pulls its argmin segment with force ~ distance to the
@@ -156,7 +164,8 @@ class SweepCarve:
             w_b = self.w_broad[None]
             if w_b > 0.0:
                 pull = ti.max(0.0, d_tool) / self.sigma_broad[None]
-                contrib += inv_n * w_b * (1.0 - target_occ) * stock_occ * pull * pull
+                contrib += (inv_n * w_b * reach_w
+                            * (1.0 - target_occ) * stock_occ * pull * pull)
 
             ti.atomic_add(self.loss[None], contrib)
 
@@ -197,14 +206,23 @@ class SweepCarve:
     # ------------------------------------------------------------------
     # Host-side driver: one forward+backward, returns (loss, grad_X).
     # ------------------------------------------------------------------
-    def loss_and_grad(self, X):
+    def loss_and_grad(self, X, refresh_argmin=True):
         """X: (n_points, 3) float32 normalized path samples.
 
         Returns (loss_value, grad wrt X as (n_points, 3) float32 array).
+
+        ``refresh_argmin=False`` reuses the cached per-voxel winning segment
+        from the last refresh instead of re-running the O(T * N^3) argmin
+        pass (the per-iteration bottleneck at large T). The cached winner's
+        distance is an upper bound of the true min, so the loss stays a valid
+        surrogate; with clipped ~0.1-voxel/iter path motion the winner index
+        is stable over a handful of iterations, and a periodic refresh keeps
+        the bound tight.
         """
         S = self.n_points - 1
         self.path.from_numpy(X.astype(np.float32))
-        self.find_argmin(S)
+        if refresh_argmin:
+            self.find_argmin(S)
         self.loss[None] = 0.0
         with ti.ad.Tape(loss=self.loss):
             self.compute_loss()
@@ -264,14 +282,101 @@ def target_bbox(sim, margin_vox=2.0):
     return np.clip(lo, 0.0, 1.0), np.clip(hi, 0.0, 1.0)
 
 
-def init_reference_path(sim, tool_start, n_samples, mode="raster", seed=0):
+def _resample_arc_length(pts, L_mm, n_samples):
+    """Resample a polyline to ``n_samples`` points uniform in PHYSICAL arc length.
+
+    ``pts``: (M, 3) normalized [0,1] waypoints; ``L_mm``: (3,) physical box
+    dims. Uniform-in-index sampling puts the same number of samples on a 2 mm
+    hop as on a 150 mm cross-footprint jump, so single steps blow through the
+    feed cap by 25-190x on large STEP targets and the evaluator's speed clip
+    truncates the executed path. Uniform arc length makes every step exactly
+    ``total_len / (n_samples - 1)`` — feasible by construction when
+    ``n_samples >= total_len / cap + 1``.
+    """
+    pts = np.asarray(pts, dtype=np.float64)
+    seg = np.diff(pts, axis=0) * np.asarray(L_mm, dtype=np.float64)
+    cum = np.concatenate([[0.0], np.cumsum(np.linalg.norm(seg, axis=1))])
+    s = np.linspace(0.0, cum[-1], n_samples)
+    out = np.empty((n_samples, 3), dtype=np.float64)
+    for d in range(3):
+        out[:, d] = np.interp(s, cum, pts[:, d])
+    return out
+
+
+def raster_arc_waypoints(sim, tool_start, stepover_frac=0.8, stepdown_mm=None):
+    """Geometry-derived serpentine z-layer raster waypoints over the target bbox.
+
+    Shape-agnostic (reads only the baked SDF bbox, stock dims, and tool
+    radius). Unlike ``raster`` — whose row count comes from the sample budget
+    ``sqrt(T/2)`` and whose z descends continuously — the pattern here is CAM
+    practice sized by the CUTTER: row pitch = ``stepover_frac`` x tool
+    diameter, one full footprint pass per z layer, layers descending by
+    ``stepdown_mm`` (default: tool radius). Scan lines run along the LONGER
+    footprint axis (fewer turns per mm). Odd layers replay the previous layer
+    reversed, so the path is continuous (no cross-footprint teleports).
+
+    Returns (waypoints (M, 3) normalized float64, total physical length mm).
+    """
+    L_mm = np.array([sim.Lx, sim.Ly, sim.Lz], dtype=np.float64)
+    r_mm = float(sim.tool_radius[None])
+    if stepdown_mm is None:
+        stepdown_mm = r_mm
+    lo, hi = target_bbox(sim)
+    span_mm = (hi - lo) * L_mm
+
+    scan, row = (0, 1) if span_mm[0] >= span_mm[1] else (1, 0)
+    stepover_mm = stepover_frac * 2.0 * r_mm
+    n_rows = max(2, int(np.ceil(span_mm[row] / stepover_mm)) + 1)
+    rows = np.linspace(lo[row], hi[row], n_rows)
+
+    # z layers: below the part top by k*stepdown, last layer pinned at the
+    # bbox bottom (the trainer's z-floor barrier keeps it legal).
+    z_top, z_bot = hi[2], lo[2]
+    n_layers = max(1, int(np.ceil((z_top - z_bot) * L_mm[2] / stepdown_mm)))
+    z_layers = z_top - (np.arange(1, n_layers + 1) * stepdown_mm) / L_mm[2]
+    z_layers = np.clip(z_layers, z_bot, None)
+    z_layers[-1] = z_bot
+
+    # One serpentine footprint pass (XY waypoint pairs per row).
+    pass_xy = []
+    for j in range(n_rows):
+        ends = (lo[scan], hi[scan]) if j % 2 == 0 else (hi[scan], lo[scan])
+        for e in ends:
+            p = [0.0, 0.0]
+            p[scan], p[row] = e, rows[j]
+            pass_xy.append(tuple(p))
+
+    wps = [tuple(tool_start)]
+    # Lead-in above the stock (cuts nothing), then plunge at the first corner.
+    wps.append((pass_xy[0][0], pass_xy[0][1], tool_start[2]))
+    for k, z in enumerate(z_layers):
+        layer = pass_xy if k % 2 == 0 else pass_xy[::-1]
+        # Step down in place at the layer's first XY, then run the pass.
+        wps.append((layer[0][0], layer[0][1], z))
+        for x, y in layer[1:]:
+            wps.append((x, y, z))
+    wps = np.asarray(wps, dtype=np.float64)
+    seg = np.diff(wps, axis=0) * L_mm
+    return wps, float(np.linalg.norm(seg, axis=1).sum())
+
+
+def init_reference_path(sim, tool_start, n_samples, mode="raster", seed=0,
+                        max_len_mm=None):
     """Shape-agnostic reference polyline (n_samples, 3) for the init fit.
 
     Modes:
-      raster — boustrophedon over the target bbox footprint with linearly
-               descending z (fine zigzag, the proven coverage pattern);
-      helix  — descending spiral shrinking from the bbox wall to its center;
-      random — small random walk below the start (sanity baseline).
+      raster     — boustrophedon over the target bbox footprint with linearly
+                   descending z (fine zigzag, the proven coverage pattern);
+      raster_arc — tool-sized serpentine z-layer raster (stepover/stepdown from
+                   the cutter, scan along the longer bbox axis) resampled
+                   uniformly in PHYSICAL arc length, so per-step feed
+                   feasibility is uniform by construction. If ``max_len_mm``
+                   (the executable budget (T-1) * feed * dt) is given and the
+                   tool-sized raster exceeds it, both pitches are coarsened
+                   geometrically until the pattern fits — coverage resolution
+                   degrades gracefully instead of the path becoming infeasible;
+      helix      — descending spiral shrinking from the bbox wall to its center;
+      random     — small random walk below the start (sanity baseline).
     The first point is ``tool_start``; z descends from the stock top toward the
     target bbox bottom (the z-floor clamp in the trainer keeps it legal).
     """
@@ -279,7 +384,24 @@ def init_reference_path(sim, tool_start, n_samples, mode="raster", seed=0):
     lo, hi = target_bbox(sim)
     n = n_samples
     pts = np.zeros((n, 3), dtype=np.float64)
-    if mode == "helix":
+    if mode == "raster_arc":
+        stepover_frac, stepdown_mm = 0.8, float(sim.tool_radius[None])
+        wps, total = raster_arc_waypoints(sim, tool_start, stepover_frac,
+                                          stepdown_mm)
+        while max_len_mm is not None and total > max_len_mm:
+            f = max(1.05, np.sqrt(total / max_len_mm))
+            stepover_frac *= f
+            stepdown_mm *= f
+            wps, total = raster_arc_waypoints(sim, tool_start, stepover_frac,
+                                              stepdown_mm)
+        if stepover_frac > 0.8:
+            print(f"[sweep] raster_arc coarsened to fit the executable budget: "
+                  f"stepover {stepover_frac:.2f} x tool diameter, stepdown "
+                  f"{stepdown_mm:.2f} mm (len {total:.0f} <= {max_len_mm:.0f} mm)",
+                  flush=True)
+        L_mm = np.array([sim.Lx, sim.Ly, sim.Lz], dtype=np.float64)
+        pts = _resample_arc_length(wps, L_mm, n)
+    elif mode == "helix":
         cx, cy = 0.5 * (lo[0] + hi[0]), 0.5 * (lo[1] + hi[1])
         rx, ry = 0.5 * (hi[0] - lo[0]), 0.5 * (hi[1] - lo[1])
         revs = 10.0

@@ -144,8 +144,16 @@ def main():
                          "points, one-shot swept-volume carve; simulator/sweep.py)")
     ap.add_argument("--n-ctrl", type=int, default=40,
                     help="sweep: number of B-spline control points")
-    ap.add_argument("--sweep-init", default="raster", choices=("raster", "helix", "random"),
+    ap.add_argument("--sweep-init", default="raster",
+                    choices=("raster", "raster_arc", "helix", "random"),
                     help="sweep: init reference path fitted by the control points")
+    ap.add_argument("--amin-refresh", type=int, default=1,
+                    help="sweep: recompute the per-voxel winning segment every N iters "
+                         "(1 = exact; 4-8 buys ~2-4x throughput at large T)")
+    ap.add_argument("--reach-gate", action="store_true",
+                    help="sweep: mask residual/attraction loss off waste voxels no "
+                         "legal vertical tool position can remove (exact 3-axis "
+                         "reachability from the target SDF + tool radius)")
     ap.add_argument("--w-feed", type=float, default=5.0,
                     help="sweep: feed-cap penalty weight (dimensionless excess) on sampled steps")
     ap.add_argument("--w-broad", type=float, default=0.0,
@@ -359,6 +367,7 @@ def main():
             "--method", args.method,
             "--n_ctrl", str(args.n_ctrl),
             "--sweep_init", args.sweep_init,
+            "--amin_refresh", str(args.amin_refresh),
             "--w_feed", str(args.w_feed),
             "--w_broad", str(args.w_broad),
             "--sigma_broad", str(args.sigma_broad),
@@ -401,6 +410,8 @@ def main():
             cmd += ["--stock_size_in", *ssi]
         if args.target_sdf_path is not None:
             cmd += ["--target_sdf_path", args.target_sdf_path]
+        if args.reach_gate:
+            cmd.append("--reach_gate")
         if not args.no_save_model:
             cmd.append("--save_model")
         cmd.append("--track" if args.track else "--no-track")
