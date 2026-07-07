@@ -66,22 +66,37 @@ reduces sphere air-cut time **without costing dice**, confirmed over 3 seeds:
 | `w_air_time=1.0` s1 | 0.844 | 1.88 | 11.7 | dice≈, air **−54%**, total −40% |
 | `w_air_time=1.0` s2 | 0.844 | 1.43 | 13.2 | dice≈, air **−65%**, total −33% |
 | `w_air_time=1.0` s3 | 0.846 | 1.84 | 15.3 | dice≈, air **−55%**, total −22% |
-| **mean (3 seeds)** | **0.844±0.001** | **1.72** | **13.4** | **dice-NEUTRAL, air −58%, total −32%** |
-| `w_air_time=3.0` | 0.840 | 0.52 | 18.2 | dice-NEUTRAL, air **−87%** |
+| **`w_air_time=1.0` mean** | **0.844±0.001** | **1.72** | **13.4** | **dice-NEUTRAL, air −58%, total −32%** |
+| `+best_w_airtime=0.05` s1 | 0.844 | 0.90 | 13.3 | dice≈, air **−78%** |
+| `+best_w_airtime=0.05` s2 | 0.847 | 0.83 | 14.8 | dice≈, air **−80%** |
+| `+best_w_airtime=0.05` s3 | 0.845 | 0.00 | 13.0 | dice≈, air **−100%** |
+| **`w1+bwa0.05` mean** | **0.845±0.001** | **0.58** | **13.7** | **dice-NEUTRAL, air −86% (BEST, robust)** |
+| `w_air_time=3.0` (2 seeds) | 0.839 | 1.18 | 15.4 | ~neutral, air −71% (small dice cost) |
 
 `w_air_time ≤ 1e-2` is too weak (air unchanged); `1.0` is the clean
-dice-neutral point; `3.0` pushes air toward 0 (−87%) still dice-neutral. The
-sphere's 21% air is "unnecessary" repositioning the loss removes for free.
+dice-neutral point; `1.0 + best_w_airtime=0.05` is the best robust config
+(air −86%); `3.0` pushes air further (−71%) at a small dice cost. The sphere's
+21% air is "unnecessary" repositioning the loss removes for free.
 
-### 3. `best_w_airtime` checkpoint selection — a FREE air win (no re-optimization)
-Setting `--best-w-airtime 0.05` (with `--w-air-time 0`, i.e. **identical
-optimization to baseline**) changes only the best-checkpoint criterion
-(`best_score = dice − 0.05·air_norm`). On the sphere it selects a checkpoint at
-**equal dice but −45% air** (4.13→2.25s) — a lower-air checkpoint exists in the
-baseline trajectory that pure-dice selection misses. This is a deployable win
-with **zero re-training cost**. `--best-w-airtime 0.2` is too aggressive (picks a
-worse point, air goes up). Combining `w_air_time=1.0 + best_w_airtime=0.05`
-reaches **air −78%** (4.13→0.90s) dice-neutral.
+**Hard-dice neutrality CHECK (3-seed baseline, added at run close):** the air win
+was confirmed SOFT-dice-neutral, but the deployable metric is HARD dice. Sphere
+baseline (w=0) hard dice across seeds: s1=0.565 (high outlier), s2=0.552, s3=0.552
+→ mean 0.556 (0.552 excluding the outlier). The `w_air_time=1.0` runs: hard dice
+0.549/0.548/0.551 → mean 0.549. Gap ≈ 0.003 (s2,s3 baseline vs wat) — inside the
+±0.01–0.05 GPU atomic-add variance. **The air win is HARD-dice-neutral too**: the
+−58% air-cut costs neither soft nor hard dice. The free win holds on the deployable
+metric, not just the soft proxy.
+
+### 3. `best_w_airtime` checkpoint selection — helps only ON TOP of the loss
+Setting `--best-w-airtime 0.05` **alone** (with `--w-air-time 0`, identical
+optimization to baseline) does NOT reliably reduce air: seed 1 got −45% (lucky),
+seed 2 was −5%, seed 3 air went UP; 3-seed mean air 4.16s ≈ baseline 4.13s.
+**The "free selection win" was seed-1 luck and is RETRACTED** — the baseline
+trajectory does not reliably contain a low-air checkpoint that pure-dice
+selection misses. Selection IS useful on top of the air-time loss: `w_air_time=1.0
++ best_w_airtime=0.05` reaches air −86% (vs −58% for the loss alone), picking the
+lowest-air checkpoint among the loss-shaped candidates. `--best-w-airtime 0.2`
+alone is too aggressive (picks a worse point).
 
 ### 4. Air/time is bimodal across shapes (where the levers have headroom)
 box/cyl (z-invariant cross-section, raster init) produce fast, air-free

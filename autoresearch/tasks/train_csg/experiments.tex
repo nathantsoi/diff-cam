@@ -330,7 +330,7 @@ For completeness, Table~\ref{tab:negative} records the configurations that did
     $k_{\mathrm{final}}{=}1000$     & $<0.841$ & gap persists/widens; $k$-anneal cannot close narrow-hole gap alone \\
     $h{=}75~\mathrm{mm}$            & $\approx 0.841$ & $= h{=}50$ within seed noise; tool length saturated \\
     $\Delta > 0$ (loss-shift)       & $<0.237^*$ & wrong direction; monotonically increases over-carve \\
-    Air-cut regularizers            & --- & loss-based air reduction is shape-dependent: dice-NEUTRAL $-58\%$ air on sphere ($w_{\mathrm{air}}{=}1$), structural tradeoff on pyramid (Sec.~\ref{sec:trajqual}); free $-45\%$ via checkpoint selection \\
+    Air-cut regularizers            & --- & loss-based air reduction is shape-dependent: dice-NEUTRAL $-58\%$ air on sphere ($w_{\mathrm{air}}{=}1$, 3 seeds; $-86\%$ with $+w^{\mathrm{best}}_{\mathrm{air}}{=}0.05$), structural tradeoff on pyramid (Sec.~\ref{sec:trajqual}) \\
     \bottomrule
   \end{tabular}\\
   \small $^*$on the through-hole sphere.
@@ -405,33 +405,37 @@ optimization target.
 The differentiable air-time loss $w_{\mathrm{air}} \cdot \overline{\Delta t \cdot \mathrm{airfrac}}$
 (Sec.~\ref{sec:method}) penalizes non-cutting segments. Sweeping its weight
 $w_{\mathrm{air}}{\in}\{10^{-3},10^{-2},10^{-1},1,3\}$ on the two freeform shapes
-reveals a sharply shape-dependent result. On the \emph{sphere} the loss is a
-dice-\emph{neutral} air win: $w_{\mathrm{air}}{=}1.0$ holds Dice at
-$0.844 \pm 0.001$ over 3 seeds (vs.\ $0.842$ baseline) while cutting air time
+reveals a sharply shape-dependent result, confirmed over 3 seeds. On the
+\emph{sphere} the loss is a dice-\emph{neutral} air win: $w_{\mathrm{air}}{=}1.0$
+holds Dice at $0.844 \pm 0.001$ (vs.\ $0.842$ baseline) while cutting air time
 $4.13 \to 1.72~\mathrm{s}$ ($-58\%$) and total time $19.6 \to 13.4~\mathrm{s}$
-($-32\%$); $w_{\mathrm{air}}{=}3.0$ pushes air to $0.52~\mathrm{s}$ ($-87\%$)
-still dice-neutral. The sphere's $21\%$ air is unnecessary repositioning the loss
-removes for free. On the \emph{pyramid} the same loss trades Dice for air:
-$w_{\mathrm{air}}{=}1.0$ gives $-39\%$ air but costs $-0.076$ Dice;
-$w_{\mathrm{air}}{=}0.3$ gives $-15\%$ air for $-0.027$ Dice. The pyramid's $50\%$
-air is \emph{structural}---repositioning between steep slopes the tool must
-perform to cover the part. The default $w_{\mathrm{air}}{=}10^{-3}$ is too weak
-to move air on any shape; effective reduction needs $w_{\mathrm{air}} \ge 1.0$.
-This refines the flat ``$\sim 30\%$ air inherent'' air-regularizer tradeoff of
+($-32\%$); combining with the composite checkpoint weight
+$w^{\mathrm{best}}_{\mathrm{air}}{=}0.05$ reaches air $0.58~\mathrm{s}$ ($-86\%$)
+at Dice $0.845 \pm 0.001$ (3 seeds, robust); $w_{\mathrm{air}}{=}3.0$ pushes air
+to $\sim 1.2~\mathrm{s}$ ($-71\%$) at a small Dice cost ($0.839$). The sphere's
+$21\%$ air is unnecessary repositioning the loss removes for free. On the
+\emph{pyramid} the same loss trades Dice for air: $w_{\mathrm{air}}{=}1.0$ gives
+$-39\%$ air but costs $-0.076$ Dice; $w_{\mathrm{air}}{=}0.3$ gives $-15\%$ air
+for $-0.027$ Dice (reproducible over 2 seeds). The pyramid's $50\%$ air is
+\emph{structural}---repositioning between steep slopes the tool must perform to
+cover the part. The default $w_{\mathrm{air}}{=}10^{-3}$ is too weak to move air
+on any shape; effective reduction needs $w_{\mathrm{air}} \ge 1.0$. This refines
+the flat ``$\sim 30\%$ air inherent'' air-regularizer tradeoff of
 Sec.~\ref{sec:negative} into a bimodal, shape-dependent answer: air is
 removable-for-free on the sphere, structural on the pyramid, and absent on the
 prismatic shapes.
 
-\paragraph{Composite checkpoint selection: a free air win.}
-A dice-neutral air reduction is also achievable without re-optimizing, through
-the composite best-checkpoint criterion
-$\mathrm{best\_score} = \mathrm{Dice} - w^{\mathrm{best}}_{\mathrm{air}}\,\tilde t_{\mathrm{air}}$.
-With $w^{\mathrm{best}}_{\mathrm{air}}{=}0.05$ and the air-time loss
-\emph{disabled} (identical optimization to baseline), selection alone picks a
-sphere checkpoint at equal Dice ($0.842$) but $-45\%$ air ($4.13 \to 2.25~\mathrm{s}$)---a
-lower-air checkpoint exists in the baseline trajectory that pure-Dice selection
-misses. Combining $w_{\mathrm{air}}{=}1.0$ with $w^{\mathrm{best}}_{\mathrm{air}}{=}0.05$
-reaches $-78\%$ air dice-neutral. (On the pyramid, selection removes only
-$\sim 3\%$ air---structural air is not selectable away.) This makes
-checkpoint-selection cost the preferred lever when the baseline trajectory
-already contains a low-air checkpoint.
+\paragraph{Composite checkpoint selection helps only on top of the loss.}
+The composite best-checkpoint criterion
+$\mathrm{best\_score} = \mathrm{Dice} - w^{\mathrm{best}}_{\mathrm{air}}\,\tilde t_{\mathrm{air}}$
+biases checkpoint selection toward lower-air trajectories. Used \emph{alone}
+(with the air-time loss disabled, i.e.\ identical optimization to baseline) it
+does \emph{not} reliably reduce air: a $-45\%$ air reduction on seed 1 failed to
+generalize (seed 2 was $-5\%$, seed 3 increased air; 3-seed mean $\approx$
+baseline). The baseline trajectory does not reliably contain a low-air
+checkpoint that pure-Dice selection misses. Selection is instead useful
+\emph{on top of} the air-time loss: $w_{\mathrm{air}}{=}1.0 +
+w^{\mathrm{best}}_{\mathrm{air}}{=}0.05$ reaches $-86\%$ air dice-neutral (vs.
+$-58\%$ for the loss alone), picking the lowest-air checkpoint among the
+loss-shaped candidates. (On the pyramid, selection removes only $\sim 3\%$ air
+over 2 seeds---structural air is not selectable away.)

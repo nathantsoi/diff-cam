@@ -124,11 +124,21 @@ as above.
 - **Scatter plot**: each point is one experiment (x = chronological order,
   y = dice), colored by target shape, dimmed for discard/crash. The dashed red
   line is the running best.
-- **Hover** any point for its description + dice + status.
-- **Click** a point to open the detail panel: metadata, full metrics, the **3D
-  viewer**, and a **Downloads** card at the bottom of the dashboard with links
-  to that run's Haas G-code, the three STL meshes (`stock_initial`,
-  `stock_carved`, `target`), and the run directory.
+- **3D objective scatter** (the "Quality vs air-cut time vs tool-breakage
+  probability" card): a rotatable 3D plot of the three trajectory-quality
+  objectives — x = dice (higher better), y = air-cut time in seconds (lower
+  better), z = tool-breakage probability (lower better; sqrt-scaled so the tiny
+  values spread out). Drag to orbit, wheel to zoom. Points are colored by shape,
+  the yellow ring marks the Pareto-best run (high dice, low air, low break), and
+  clicking a point opens the detail panel just like the 2D scatter. Only runs
+  whose metrics include `air_time` / `break_prob_any` appear (29 of the 32 in
+  the jul6-traj-quality batch).
+- **Hover** any point for its description + dice + status + air/break summary.
+- **Click** a point to open the detail panel: metadata, full metrics (including
+  `hard_dice`, `air_time`, `total_time`, `break_prob_any`/`break_prob_max`, and
+  `air_cut_fraction`), the **3D viewer**, and a **Downloads** card at the bottom
+  of the dashboard with links to that run's Haas G-code, the three STL meshes
+  (`stock_initial`, `stock_carved`, `target`), and the run directory.
 - **Generate run video** (button in the Downloads card, run selected): renders
   that run's carve as an mp4 by replaying its saved trajectory through the
   Taichi CSG simulator (`scripts/render_run_video.py`, the same raymarch+ffmpeg
