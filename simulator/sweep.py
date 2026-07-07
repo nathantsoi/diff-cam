@@ -303,7 +303,34 @@ def _resample_arc_length(pts, L_mm, n_samples):
     return out
 
 
-def raster_arc_waypoints(sim, tool_start, stepover_frac=0.8, stepdown_mm=None):
+def legal_base_height(sim, margin_vox=0.5):
+    """Per-XY minimal legal tool-base z (normalized), shape-agnostic.
+
+    The tool cylinder occupies its disc for all z' >= base z, so the lowest
+    legal base height over (x, y) is the part height field max-filtered by
+    the tool disc: any lower and the cylinder clips part somewhere in the
+    disc. Returns an (Nx, Ny) array in normalized [0, 1] z (0 where the disc
+    never covers part — free column).
+    """
+    from scipy.ndimage import grey_dilation
+
+    tgt = sim.target.to_numpy()
+    part = tgt <= 0.0
+    nz = part.shape[2]
+    # Height field: index of the first free voxel above the topmost part
+    # voxel per column (0 for empty columns).
+    top = np.where(part.any(axis=2),
+                   nz - np.argmax(part[:, :, ::-1], axis=2), 0).astype(np.float64)
+    r_vox = float(sim.tool_radius[None]) / sim.v
+    n = int(np.floor(r_vox))
+    xx, yy = np.mgrid[-n:n + 1, -n:n + 1]
+    disc = (xx * xx + yy * yy) <= r_vox * r_vox
+    top_dil = grey_dilation(top, footprint=disc)
+    return np.clip((top_dil + margin_vox) / nz, 0.0, 1.0)
+
+
+def raster_arc_waypoints(sim, tool_start, stepover_frac=0.8, stepdown_mm=None,
+                         terrain=False):
     """Geometry-derived serpentine z-layer raster waypoints over the target bbox.
 
     Shape-agnostic (reads only the baked SDF bbox, stock dims, and tool
@@ -314,6 +341,12 @@ def raster_arc_waypoints(sim, tool_start, stepover_frac=0.8, stepdown_mm=None):
     ``stepdown_mm`` (default: tool radius). Scan lines run along the LONGER
     footprint axis (fewer turns per mm). Odd layers replay the previous layer
     reversed, so the path is continuous (no cross-footprint teleports).
+
+    With ``terrain=True`` each scan line follows z = max(layer_z,
+    legal_base_height(x, y)) sampled at ~2-voxel pitch: the tool climbs over
+    part it must not mow through (raised letters, the pin), making the init
+    gouge-free by construction instead of asking the gouge barrier to lift
+    thousands of samples out of the part.
 
     Returns (waypoints (M, 3) normalized float64, total physical length mm).
     """
@@ -337,24 +370,40 @@ def raster_arc_waypoints(sim, tool_start, stepover_frac=0.8, stepdown_mm=None):
     z_layers = np.clip(z_layers, z_bot, None)
     z_layers[-1] = z_bot
 
-    # One serpentine footprint pass (XY waypoint pairs per row).
-    pass_xy = []
+    if terrain:
+        hmap = legal_base_height(sim)
+        dims_xy = np.array([sim.Nx, sim.Ny], dtype=np.float64)
+
+        def z_at(x, y, layer_z):
+            i = min(int(x * dims_xy[0]), int(dims_xy[0]) - 1)
+            j = min(int(y * dims_xy[1]), int(dims_xy[1]) - 1)
+            return max(layer_z, float(hmap[i, j]))
+
+    # One serpentine footprint pass: rows of XY waypoints. Plain mode uses the
+    # two row endpoints; terrain mode samples the row densely so z can follow
+    # the legal-height profile along it.
+    pass_rows = []
+    n_scan = (max(2, int(np.ceil(span_mm[scan] / sim.v)))
+              if terrain else 2)
     for j in range(n_rows):
-        ends = (lo[scan], hi[scan]) if j % 2 == 0 else (hi[scan], lo[scan])
-        for e in ends:
+        line = np.linspace(lo[scan], hi[scan], n_scan)
+        if j % 2 == 1:
+            line = line[::-1]
+        pts = []
+        for e in line:
             p = [0.0, 0.0]
             p[scan], p[row] = e, rows[j]
-            pass_xy.append(tuple(p))
+            pts.append(tuple(p))
+        pass_rows.append(pts)
+    pass_xy = [p for r in pass_rows for p in r]
 
     wps = [tuple(tool_start)]
     # Lead-in above the stock (cuts nothing), then plunge at the first corner.
     wps.append((pass_xy[0][0], pass_xy[0][1], tool_start[2]))
     for k, z in enumerate(z_layers):
         layer = pass_xy if k % 2 == 0 else pass_xy[::-1]
-        # Step down in place at the layer's first XY, then run the pass.
-        wps.append((layer[0][0], layer[0][1], z))
-        for x, y in layer[1:]:
-            wps.append((x, y, z))
+        for x, y in layer:
+            wps.append((x, y, z_at(x, y, z) if terrain else z))
     wps = np.asarray(wps, dtype=np.float64)
     seg = np.diff(wps, axis=0) * L_mm
     return wps, float(np.linalg.norm(seg, axis=1).sum())
@@ -375,6 +424,9 @@ def init_reference_path(sim, tool_start, n_samples, mode="raster", seed=0,
                    tool-sized raster exceeds it, both pitches are coarsened
                    geometrically until the pattern fits — coverage resolution
                    degrades gracefully instead of the path becoming infeasible;
+      raster_terrain — raster_arc whose scan lines follow z = max(layer_z,
+                   legal tool-base height), i.e. the tool climbs over part
+                   instead of mowing through it: gouge-free by construction;
       helix      — descending spiral shrinking from the bbox wall to its center;
       random     — small random walk below the start (sanity baseline).
     The first point is ``tool_start``; z descends from the stock top toward the
@@ -384,16 +436,17 @@ def init_reference_path(sim, tool_start, n_samples, mode="raster", seed=0,
     lo, hi = target_bbox(sim)
     n = n_samples
     pts = np.zeros((n, 3), dtype=np.float64)
-    if mode == "raster_arc":
+    if mode in ("raster_arc", "raster_terrain"):
+        terrain = mode == "raster_terrain"
         stepover_frac, stepdown_mm = 0.8, float(sim.tool_radius[None])
         wps, total = raster_arc_waypoints(sim, tool_start, stepover_frac,
-                                          stepdown_mm)
+                                          stepdown_mm, terrain=terrain)
         while max_len_mm is not None and total > max_len_mm:
             f = max(1.05, np.sqrt(total / max_len_mm))
             stepover_frac *= f
             stepdown_mm *= f
             wps, total = raster_arc_waypoints(sim, tool_start, stepover_frac,
-                                              stepdown_mm)
+                                              stepdown_mm, terrain=terrain)
         if stepover_frac > 0.8:
             print(f"[sweep] raster_arc coarsened to fit the executable budget: "
                   f"stepover {stepover_frac:.2f} x tool diameter, stepdown "

@@ -79,3 +79,24 @@ sampling — chord sagitta risk on tight curves; test empirically.
   1.5 mm voxels — 2-voxel shell, precision-sensitive).
 - Reachability ceilings (table above); extrusion tool-radius sweep shows
   saturation at ~0.69 → orientation shadow, smaller tools don't help.
+- **(jul7) Eval OOM root-caused and fixed**: `surface_distances` built a dense
+  `cdist` matrix (50k × 40k surface points ≈ 16 GB on the hi-res grids) —
+  every grid-target eval hung in swap then died (the mysterious prior-session
+  hangs). Replaced with exact cKDTree queries (identical values, tested);
+  full suite green. rrph then trains at ~25 it/s @ T=256.
+- **Feed-feasibility quantified** (the diagnosed starvation, now exact): init
+  raster length vs executable budget (T−1)·feed·dt at T=256 — titan 7.4×,
+  bowl 15× over budget; worse, uniform-in-index sampling puts single steps at
+  26–192× the cap (row transitions/pass wraps), which the evaluator's speed
+  clip truncates. → `raster_arc` init (tool-sized serpentine z-layers,
+  arc-length-uniform samples, auto-coarsens pitches to fit the budget),
+  T sized by len/cap: rrph 832, extrusion 1952, titan 2560 @ dt 0.9.
+- `amin_refresh` (cached winning segment, refresh every N iters) for large-T
+  throughput; `--reach-gate` masks residual/attraction off unreachable waste
+  (my reachability code independently reproduces all four idea.md ceilings).
+  Extrusion note: uncarved stock already scores 0.644 vs 0.648 ceiling — that
+  target is a gouge-avoidance test, effectively.
+- Baselines (unchanged CSG-winning config, T256 raster): **rrph 0.9681**
+  (ceiling 0.9699 — at ceiling, target basically solved), **titan 0.718**
+  (hard plateau from ~iter 3.6k, loss frozen, grad ~1e-3 — starvation
+  signature as predicted).

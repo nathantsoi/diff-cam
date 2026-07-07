@@ -141,6 +141,21 @@ def test_stale_argmin_matches_exact_for_small_motion():
     assert np.isclose(l2_exact, l2_stale, rtol=1e-3)
 
 
+def test_raster_terrain_init_carve_is_gouge_free():
+    """The terrain-following init climbs over part (legal tool-base height),
+    so hard-carving the raw resampled polyline must remove (essentially) no
+    part voxels — the whole point of the mode vs plain raster_arc."""
+    from simulator.sweep import init_reference_path
+    sim, _ = _make_sim_and_path(T=24)
+    n = 600
+    X = init_reference_path(sim, (0.5, 0.5, 1.0), n, mode="raster_terrain")
+    sweep = SweepCarve(sim, n_points=n)
+    remaining = sweep.hard_carve_mask(X.astype(np.float32))
+    part = sim.target.to_numpy() <= 0.0
+    gouged = int((part & ~remaining).sum())
+    assert gouged <= 0.002 * part.sum(), gouged
+
+
 def test_raster_arc_covers_bbox_footprint():
     """The serpentine must reach all four footprint corners of the target bbox
     and descend to its bottom (coverage precondition for any carve)."""

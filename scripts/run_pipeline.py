@@ -145,7 +145,7 @@ def main():
     ap.add_argument("--n-ctrl", type=int, default=40,
                     help="sweep: number of B-spline control points")
     ap.add_argument("--sweep-init", default="raster",
-                    choices=("raster", "raster_arc", "helix", "random"),
+                    choices=("raster", "raster_arc", "raster_terrain", "helix", "random"),
                     help="sweep: init reference path fitted by the control points")
     ap.add_argument("--amin-refresh", type=int, default=1,
                     help="sweep: recompute the per-voxel winning segment every N iters "
