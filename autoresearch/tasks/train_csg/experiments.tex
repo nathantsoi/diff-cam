@@ -330,8 +330,108 @@ For completeness, Table~\ref{tab:negative} records the configurations that did
     $k_{\mathrm{final}}{=}1000$     & $<0.841$ & gap persists/widens; $k$-anneal cannot close narrow-hole gap alone \\
     $h{=}75~\mathrm{mm}$            & $\approx 0.841$ & $= h{=}50$ within seed noise; tool length saturated \\
     $\Delta > 0$ (loss-shift)       & $<0.237^*$ & wrong direction; monotonically increases over-carve \\
-    Air-cut regularizers            & --- & trade Dice for air reduction ($\sim 30\%$ air inherent); no Dice gain \\
+    Air-cut regularizers            & --- & loss-based air reduction is shape-dependent: dice-NEUTRAL $-58\%$ air on sphere ($w_{\mathrm{air}}{=}1$), structural tradeoff on pyramid (Sec.~\ref{sec:trajqual}); free $-45\%$ via checkpoint selection \\
     \bottomrule
   \end{tabular}\\
   \small $^*$on the through-hole sphere.
 \end{table}
+
+\subsection{Deployable Trajectory-Quality Measures}
+\label{sec:trajqual}
+
+Beyond geometric accuracy, a deployable toolpath must also be \emph{efficient}
+and \emph{safe}: it should minimize non-cutting (air) time and avoid tool
+breakage. We report three deployable measures computed on the exact boolean
+carve (independent of the soft surrogate used for optimization): total toolpath
+time $t_{\mathrm{tot}}$ (s), air-cutting time $t_{\mathrm{air}}$ (s), and a
+trajectory-level tool-breakage probability $P_{\mathrm{brk}}{\in}[0,1]$ from a
+per-segment engagement model
+$P_{\mathrm{brk}}{=}1{-}\exp(-\sum_t \sigma((\ln \mu_F(t) - \ln F_{\mathrm{ref}})/\sigma_r))$
+with $\mu_F(t){=}k_c\, e(t)\, v_{\mathrm{vox}}^3 / (\Delta t\, D)$. These are
+\emph{new and uncalibrated}; we treat them as reporting axes alongside Dice.
+
+\paragraph{Soft vs.\ hard Dice.}
+The differentiable surrogate optimizes a \emph{soft} (smooth-union) carve; the
+deployable outcome is the \emph{hard} (boolean) carve. We report both: soft Dice
+is the training metric (the proven $0.85$-class operating point), hard Dice is
+the sharp deployable score. At the shape-blind operating point (random init,
+fixed $k{=}10$), soft Dice reaches $0.84$--$0.94$ across primitives while hard
+Dice is quantized to 1-voxel steps and caps lower ($0.40$--$0.81$); closing the
+soft/hard gap is what the $k$-anneal mechanism of Sec.~\ref{sec:gap} achieves.
+
+\paragraph{Air time is bimodal across shapes.}
+Table~\ref{tab:trajqual} reports the three measures at the operating point.
+The air fraction $t_{\mathrm{air}}/t_{\mathrm{tot}}$ is strongly shape-dependent:
+the prismatic shapes (box, cylinder)---whose $z$-invariant cross-sections the
+raster init covers with the tool permanently engaged---produce fast, air-free
+trajectories ($\le 1\%$ air, $3$--$11~\mathrm{s}$). The freeform surfaces
+(sphere, pyramid) require 3D repositioning and incur $21$--$50\%$ air
+($20$--$37~\mathrm{s}$). The prior ``$\sim 30\%$ air is inherent'' figure is an
+average over this bimodal distribution; the headroom for air-time reduction is
+concentrated entirely in the freeform shapes.
+
+\begin{table}[t]
+  \centering
+  \caption{Deployable trajectory-quality at the shape-blind operating point (seed 1, $1~\mathrm{in}$ stock). Soft Dice is the training metric; hard Dice is the sharp boolean carve. Air fraction is $t_{\mathrm{air}}/t_{\mathrm{tot}}$. Breakage model calibrated with $F_{\mathrm{ref}}{=}5$ (see text).}
+  \label{tab:trajqual}
+  \small
+  \begin{tabular}{lcccc c}
+    \toprule
+    Shape & Soft Dice & Hard Dice & $t_{\mathrm{air}}$ (s) & $t_{\mathrm{tot}}$ (s) & Air \% \\
+    \midrule
+    Box      & 0.917 & 0.814 & 0.0  & 3.1  & 0\% \\
+    Cylinder & 0.944 & 0.726 & 0.1  & 11.4 & 1\% \\
+    Sphere   & 0.842 & 0.565 & 4.1  & 19.6 & 21\% \\
+    Pyramid  & 0.892 & 0.397 & 18.3 & 36.5 & 50\% \\
+    \bottomrule
+  \end{tabular}
+\end{table}
+
+\paragraph{Breakage calibration.}
+At the default reference force $F_{\mathrm{ref}}{=}50~\mathrm{N}$ the per-step
+engagement at $0.5~\mathrm{mm}$ voxels with a $3.175~\mathrm{mm}$ tool is tiny,
+so $F_{\mathrm{cut,max}}{=}0$ and $P_{\mathrm{brk}}$ collapses to numerical zero
+across all shapes---the model does not fire. Lowering the reference threshold
+tenfold ($F_{\mathrm{ref}}{=}5$, $F_{\mathrm{max}}{=}10$) makes it fire:
+$P_{\mathrm{brk}}$ rises to $0.004$--$0.008$ and $F_{\mathrm{cut,max}}$ becomes
+nonzero, while Dice is unchanged (the breakage loss term is disabled, so
+calibration affects only the report). Even calibrated, $P_{\mathrm{brk}}<1\%$
+and $F_{\mathrm{cut,max}} \ll F_{\mathrm{max}}$ with $\mathrm{broken}{=}0$
+everywhere: at this operating point tool breakage is \emph{not} a binding
+constraint, so $P_{\mathrm{brk}}$ is a reporting axis rather than an
+optimization target.
+
+\paragraph{Air-time loss: dice-neutral on the sphere, structural on the pyramid.}
+The differentiable air-time loss $w_{\mathrm{air}} \cdot \overline{\Delta t \cdot \mathrm{airfrac}}$
+(Sec.~\ref{sec:method}) penalizes non-cutting segments. Sweeping its weight
+$w_{\mathrm{air}}{\in}\{10^{-3},10^{-2},10^{-1},1,3\}$ on the two freeform shapes
+reveals a sharply shape-dependent result. On the \emph{sphere} the loss is a
+dice-\emph{neutral} air win: $w_{\mathrm{air}}{=}1.0$ holds Dice at
+$0.844 \pm 0.001$ over 3 seeds (vs.\ $0.842$ baseline) while cutting air time
+$4.13 \to 1.72~\mathrm{s}$ ($-58\%$) and total time $19.6 \to 13.4~\mathrm{s}$
+($-32\%$); $w_{\mathrm{air}}{=}3.0$ pushes air to $0.52~\mathrm{s}$ ($-87\%$)
+still dice-neutral. The sphere's $21\%$ air is unnecessary repositioning the loss
+removes for free. On the \emph{pyramid} the same loss trades Dice for air:
+$w_{\mathrm{air}}{=}1.0$ gives $-39\%$ air but costs $-0.076$ Dice;
+$w_{\mathrm{air}}{=}0.3$ gives $-15\%$ air for $-0.027$ Dice. The pyramid's $50\%$
+air is \emph{structural}---repositioning between steep slopes the tool must
+perform to cover the part. The default $w_{\mathrm{air}}{=}10^{-3}$ is too weak
+to move air on any shape; effective reduction needs $w_{\mathrm{air}} \ge 1.0$.
+This refines the flat ``$\sim 30\%$ air inherent'' air-regularizer tradeoff of
+Sec.~\ref{sec:negative} into a bimodal, shape-dependent answer: air is
+removable-for-free on the sphere, structural on the pyramid, and absent on the
+prismatic shapes.
+
+\paragraph{Composite checkpoint selection: a free air win.}
+A dice-neutral air reduction is also achievable without re-optimizing, through
+the composite best-checkpoint criterion
+$\mathrm{best\_score} = \mathrm{Dice} - w^{\mathrm{best}}_{\mathrm{air}}\,\tilde t_{\mathrm{air}}$.
+With $w^{\mathrm{best}}_{\mathrm{air}}{=}0.05$ and the air-time loss
+\emph{disabled} (identical optimization to baseline), selection alone picks a
+sphere checkpoint at equal Dice ($0.842$) but $-45\%$ air ($4.13 \to 2.25~\mathrm{s}$)---a
+lower-air checkpoint exists in the baseline trajectory that pure-Dice selection
+misses. Combining $w_{\mathrm{air}}{=}1.0$ with $w^{\mathrm{best}}_{\mathrm{air}}{=}0.05$
+reaches $-78\%$ air dice-neutral. (On the pyramid, selection removes only
+$\sim 3\%$ air---structural air is not selectable away.) This makes
+checkpoint-selection cost the preferred lever when the baseline trajectory
+already contains a low-air checkpoint.
