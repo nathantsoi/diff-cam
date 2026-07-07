@@ -1,156 +1,148 @@
-"""Plot autoresearch train_csg results over time, grouped by experiment branch/commit."""
+"""Plot jul6-spline-sweep autoresearch results.
+
+Left panel: hard dice per experiment in chronological order (marker = keep/discard
+status, color = target scenario parsed from the logged command).
+Right panel: best dice per scenario, sweep method vs the delta baseline where one
+was run, with the sphere 3-axis structural ceiling marked.
+
+Reads results.tsv in this directory; writes results_plot.png.
+"""
 import csv
-import os
 import re
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
 
 RESULTS = "results.tsv"
-OUT = "results_over_time.png"
+OUT = "results_plot.png"
+
+SPHERE_CEILING = 0.848  # 3-axis unreachable below-equator shadow (see idea.md)
+
+
+def scenario_of(cmd: str) -> str:
+    m = re.search(r"--target-shape\s+(\w+)", cmd)
+    return m.group(1) if m else "sphere"
+
+
+def method_of(cmd: str) -> str:
+    return "sweep" if "--method sweep" in cmd else "delta"
 
 
 def main():
     rows = []
     with open(RESULTS, newline="") as f:
-        reader = csv.DictReader(f, delimiter="\t")
-        for r in reader:
+        for r in csv.DictReader(f, delimiter="\t"):
             try:
                 rows.append({
-                    "commit": r["commit"],
                     "dice": float(r["dice"]),
                     "status": r["status"],
                     "desc": r["description"],
+                    "scenario": scenario_of(r["command"]),
+                    "method": method_of(r["command"]),
                 })
             except (ValueError, KeyError):
                 continue
 
-    # Order = experiment order (file order = chronological run order).
-    x = list(range(len(rows)))
-    dice = [r["dice"] for r in rows]
-    commits = [r["commit"] for r in rows]
-    statuses = [r["status"] for r in rows]
-
-    # Distinct commit -> branch label + color. The commit hash is the branch state.
-    unique_commits = []
-    for c in commits:
-        if c not in unique_commits:
-            unique_commits.append(c)
-
-    # Short, human-readable branch labels mapping each commit to its theme.
-    branch_labels = {
-        "6e0d2f4": "baseline (sphere, HARD dice)",
-        "2b2f30a": "k=5 sharper soft union (crash)",
-        "6278dd0": "raster_fine init",
-        "116078a": "w_gouge / w_tool_gouge barriers",
-        "625ec5d": "w_gouge=16 seed2",
-        "edfd235": "zlayer init discovery",
-        "d2f5f02": "zlayer + feed_ipm (speed cap)",
-        "3e09bf7": "zlayer param sweep (revs/osc/margin)",
-        "38392cb": "shape-aware pyramid/box",
-        "2bf863b": "pyramid 4-phase (below-disk recovery)",
-        "08d6f14": "sphere osc resonance + cyl osc",
-        "7e31dfa": "sphere T-scaling + determinism",
-        "3230c17": "toolholder-collision sim baseline",
-        "cead72f": "crash-safe zlayer z_bot=floor",
-        "a7c99d9": "holder-clear zlayer (sphere/cyl/box)",
-        "ba75e01": "pyramid crash-safe (drop deep-plunge)",
-        "0f3cd28": "pyramid 2D annulus boustrophedon",
-        "e289834": "pyramid 2D boust low->high + per-lvl cap",
-        "76390bb": "pyramid coarse grid + full-row cap (0.457)",
-        "8ad260e": "pyramid ring-annulus (regress)",
-        "1456fb4": "pyramid dense-ring+holder-margin (regress)",
-    }
-
+    scenarios = []
+    for r in rows:
+        if r["scenario"] not in scenarios:
+            scenarios.append(r["scenario"])
     cmap = plt.get_cmap("tab10")
-    commit_color = {c: cmap(i % 10) for i, c in enumerate(unique_commits)}
+    scen_color = {s: cmap(i % 10) for i, s in enumerate(scenarios)}
+    status_marker = {"keep": "o", "discard": "x", "crash": "v", "regress": "D"}
 
-    status_marker = {
-        "keep": "o",
-        "discard": "x",
-        "crash": "v",
-        "regress": "D",
-    }
-    status_label = {
-        "keep": "keep",
-        "discard": "discard",
-        "crash": "crash",
-        "regress": "regress",
-    }
+    fig, (ax, ax2) = plt.subplots(
+        1, 2, figsize=(15, 6), gridspec_kw={"width_ratios": [1.7, 1]})
 
-    fig, ax = plt.subplots(figsize=(16, 7))
+    # --- Left: chronological progress ---
+    for i, r in enumerate(rows):
+        filled = r["status"] != "discard"
+        ax.scatter(i, r["dice"], color=scen_color[r["scenario"]],
+                   marker=status_marker.get(r["status"], "o"),
+                   s=80 if r["status"] == "keep" else 50,
+                   edgecolors="black" if filled else None,
+                   linewidths=0.8 if filled else 1.5, zorder=3)
+        short = r["desc"][:34] + ("…" if len(r["desc"]) > 34 else "")
+        above = i % 2 == 0
+        ax.annotate(short, (i, r["dice"]), textcoords="offset points",
+                    xytext=(2, 10 if above else -12), ha="left",
+                    va="bottom" if above else "top", fontsize=6.5,
+                    rotation=18 if above else -18)
 
-    # Plot per status so the legend stays clean.
-    for status, marker in status_marker.items():
-        xs = [i for i, s in enumerate(statuses) if s == status]
-        if not xs:
-            continue
-        ax.scatter(
-            [x[i] for i in xs],
-            [dice[i] for i in xs],
-            c=[commit_color[commits[i]] for i in xs],
-            marker=marker,
-            s=70 if status == "keep" else 45,
-            edgecolors="black",
-            linewidths=0.6 if status in ("keep", "regress") else 0.0,
-            label=status_label[status],
-            zorder=3,
-        )
+    # running best per scenario (sweep runs only)
+    for s in scenarios:
+        xs, ys, best = [], [], -1.0
+        for i, r in enumerate(rows):
+            if r["scenario"] != s or r["method"] != "sweep":
+                continue
+            best = max(best, r["dice"])
+            xs.append(i)
+            ys.append(best)
+        if len(xs) > 1:
+            ax.plot(xs, ys, color=scen_color[s], lw=1.4, ls="--", alpha=0.7,
+                    zorder=2)
 
-    # Running best (max so far) line.
-    running_best = []
-    best = -1.0
-    for d in dice:
-        if d > best:
-            best = d
-        running_best.append(best)
-    ax.plot(x, running_best, color="crimson", lw=1.8, ls="--",
-            label="running best", zorder=2)
-
-    # Vertical separators + labels per commit block.
-    boundaries = []
-    for i in range(1, len(commits)):
-        if commits[i] != commits[i - 1]:
-            boundaries.append(i)
-    for b in boundaries:
-        ax.axvline(b - 0.5, color="gray", lw=0.7, ls=":", alpha=0.7, zorder=1)
-
-    # Commit labels centered over each block, placed near the top.
-    blocks = []
-    start = 0
-    for b in boundaries + [len(commits)]:
-        blocks.append((start, b - 1))
-        start = b
-    ymax = max(dice) if max(dice) > 0 else 1.0
-    for (s, e), c in zip(blocks, unique_commits):
-        mid = (s + e) / 2.0
-        label = branch_labels.get(c, c)
-        ax.text(mid, ymax * 1.03, label, ha="center", va="bottom",
-                fontsize=8, color=commit_color[c], fontweight="bold", rotation=0)
-
-    ax.set_xlabel("experiment # (chronological run order)")
-    ax.set_ylabel("dice")
-    ax.set_title("GradMill (train_csg) autoresearch — dice over time, by branch/commit")
-    ax.set_xlim(-1, len(rows))
-    ax.set_ylim(-0.05, ymax * 1.18)
+    delta_rows = [r for r in rows if r["method"] == "delta"]
+    if delta_rows:
+        ax.axhline(delta_rows[0]["dice"], color="gray", lw=1.2, ls=":",
+                   label=f"delta baseline (sphere) {delta_rows[0]['dice']:.3f}")
+    ax.set_xlabel("experiment # (chronological)")
+    ax.set_ylabel("hard-carve dice")
+    ax.set_title("Spline-sweep campaign: dice per experiment")
+    lo = min(r["dice"] for r in rows)
+    hi = max(r["dice"] for r in rows)
+    ax.set_ylim(lo - 0.04, hi + 0.05)
+    ax.set_xlim(-0.6, len(rows) + 1.2)
     ax.grid(True, alpha=0.25, zorder=0)
+    handles = [Line2D([0], [0], marker=m, color="gray", ls="none", ms=8, label=st)
+               for st, m in status_marker.items()
+               if any(r["status"] == st for r in rows)]
+    handles += [Line2D([0], [0], marker="s", color=scen_color[s], ls="none",
+                       ms=9, label=s) for s in scenarios]
+    if delta_rows:
+        handles.append(Line2D([0], [0], color="gray", ls=":", lw=1.2,
+                              label="delta baseline"))
+    ax.legend(handles=handles, loc="lower right", fontsize=8, framealpha=0.9)
 
-    # Legend: status markers + commit colors + running best.
-    handles = []
-    for status, marker in status_marker.items():
-        handles.append(Line2D([0], [0], marker=marker, color="gray",
-                              linestyle="none", markersize=8, label=status))
-    handles.append(Line2D([0], [0], color="crimson", ls="--", lw=1.8, label="running best"))
-    for c in unique_commits:
-        handles.append(Line2D([0], [0], marker="s", color=commit_color[c],
-                              linestyle="none", markersize=9, markeredgecolor="black",
-                              markeredgewidth=0.5,
-                              label=branch_labels.get(c, c)))
-    ax.legend(handles=handles, loc="lower right", fontsize=7.5, ncol=2, framealpha=0.9)
+    # --- Right: best per scenario, sweep vs delta ---
+    width = 0.38
+    for i, s in enumerate(scenarios):
+        best_sweep = max((r["dice"] for r in rows
+                          if r["scenario"] == s and r["method"] == "sweep"),
+                         default=None)
+        best_delta = max((r["dice"] for r in rows
+                          if r["scenario"] == s and r["method"] == "delta"),
+                         default=None)
+        if best_delta is not None:
+            ax2.bar(i - width / 2, best_delta, width, color="lightgray",
+                    edgecolor="black", label="delta" if i == 0 else None)
+            ax2.text(i - width / 2, best_delta + 0.008, f"{best_delta:.3f}",
+                     ha="center", fontsize=8)
+        if best_sweep is not None:
+            xoff = i + width / 2 if best_delta is not None else i
+            ax2.bar(xoff, best_sweep, width, color=scen_color[s],
+                    edgecolor="black", label="sweep" if i == 0 else None)
+            ax2.text(xoff, best_sweep + 0.008, f"{best_sweep:.3f}",
+                     ha="center", fontsize=8)
+    if "sphere" in scenarios:
+        i = scenarios.index("sphere")
+        ax2.hlines(SPHERE_CEILING, i - 0.55, i + 0.55, color="crimson", lw=1.4,
+                   ls="--")
+        ax2.text(i - 0.55, SPHERE_CEILING - 0.03, "3-axis\nceiling",
+                 ha="left", va="top", fontsize=7, color="crimson")
+    ax2.set_xticks(range(len(scenarios)))
+    ax2.set_xticklabels(scenarios)
+    ax2.set_ylabel("best hard-carve dice")
+    ax2.set_ylim(0, 1.05)
+    ax2.set_title("Best per scenario: sweep vs delta")
+    ax2.grid(True, axis="y", alpha=0.25, zorder=0)
+    ax2.legend(loc="lower right", fontsize=8)
 
     fig.tight_layout()
     fig.savefig(OUT, dpi=150)
-    print(f"saved {OUT} ({len(rows)} experiments, {len(unique_commits)} commits)")
+    print(f"saved {OUT} ({len(rows)} experiments, {len(scenarios)} scenarios)")
 
 
 if __name__ == "__main__":

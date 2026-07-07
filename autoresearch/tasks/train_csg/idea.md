@@ -78,3 +78,48 @@ swept volume is computed in one shot**:
   - Autodiff vs finite differences: meaningful-magnitude grads match within
     0.1–3%; sub-1e-4 entries are f32 FD noise (documented in test).
   - Basis partition-of-unity/endpoint pinning; init fit starts at tool start.
+- **Baseline (delta, canonical command)**: hard dice **0.6426** (best @ i1840
+  ≈ 13 min; final-iter 0.551 — the usual transient-peak-then-degrade). 5000
+  iters took 34.7 min on this laptop GPU (protocol command was tuned for a
+  bigger card), but the peak fell inside the 15-min window, so 0.6426 stands as
+  the fair reference. NOTE: this branch evals HARD dice (forward_hard), so all
+  numbers here are deployable-carve dice, not the old soft-dice scale.
+- **Smoke (sweep, 200i)**: wiring OK, ~47 ms/iter. Feed penalty dominated the
+  loss (74 vs 0.5 geometry) → made it dimensionless (relu(speed/cap - 1)²,
+  w_feed 5, commit bd6465d).
+- **Exp2 (sweep v1: K40 T256 raster, lr1e-3, w_feed5)**: hard dice **0.8358**
+  (best @ i2600, final 0.8346 — SUSTAINED, no over-carve degrade), 12000 iters
+  in 4.3 min (~47 it/s incl eval@50 ≈ 15× delta throughput). +0.193 over the
+  delta baseline. Gradient collapsed to 6e-4 by i2600 → plateau is gradient
+  starvation (sigmoid saturation beyond ~1 voxel from the tube), NOT capacity
+  or budget. Next lever: w_broad SDF-valued attraction.
+- **Exp3 (+ w_broad 0.1)**: **0.8411** (best @ i11850, still creeping up).
+  +0.005; keep. Attraction term works as designed.
+- **Exp4 (K=64)**: 0.8401 — capacity is NOT the bottleneck. Discard (keep K40).
+- **Exp5 (T=512)**: 0.8355 — executable path length NOT the bottleneck either.
+  Discard (keep T256).
+- **Ceiling analysis (why ~0.84 plateaus)**: a vertical 3-axis tool cannot
+  remove the waste in the shadow below the sphere's equator (any placement
+  covering it sweeps up through the part): unreachable volume ≈ πR²·(z_eq) −
+  hemisphere + equator fillet ring ≈ 2.2 cm³ vs sphere 6.26 cm³ → structural
+  hard-dice ceiling ≈ 2V/(2V + V_shadow) ≈ **0.848** for this scenario. At
+  0.8411 we are within ~0.007 of the geometric optimum. The frontier is now
+  generality (other shapes have different ceilings), not more sphere tuning.
+- (Exp6 = lr 3e-3 tie, logged above the ceiling note in results.tsv.)
+- **Exp7 (GENERALITY: box, same config)**: **0.9111** (sustained, final=best;
+  508 s ≈ 8.5 min on battery-throttled GPU). Same optimizer/init/losses, zero
+  shape-specific code — the bbox raster init + attraction carry over. Box has
+  no below-equator shadow → higher ceiling, and the method finds it. Keep.
+  Next: cylinder, pyramid, then ≥3 seeds on the sphere config.
+- **Exp8 (GENERALITY: cylinder, same config)**: **0.9368** (final iter 0.9244
+  — mild late drift, best-checkpoint deployed; 5.5 min). Keep. Vertical walls
+  + flat top suit a vertical tool: highest dice yet.
+- **Exp9 (GENERALITY: pyramid, same config)**: **0.8285** (sustained, final
+  0.8278; 3.6 min). Keep. Tapered walls stair-step under a flat vertical tool
+  — the main open gap; slope-aware ideas queued in future_work.md.
+- **Exp10/11 (seed variance, sphere best config)**: seed2 **0.8408**, seed3
+  **0.8410** vs seed1 0.8411 — spread ±0.0002 (protocol threshold ±0.04).
+  The +0.198 over the delta baseline is real and reproducible, and the plateau
+  location is deterministic → consistent with the structural-ceiling story.
+- Two literature agents (diff. swept volumes / VCPP+CAM) launched — findings
+  to be written to future_work.md for later testing.
