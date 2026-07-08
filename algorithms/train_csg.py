@@ -470,11 +470,27 @@ def record_video(sim, gui, T, out_path, fps):
         return None
 
 
+def _safe_round(v, ndigits=6):
+    """Round a metric to ndigits, coercing non-finite (nan/inf) to None so the
+    summary JSON stays strictly parseable (autoresearch harnesses reject NaN)."""
+    if v is None:
+        return None
+    f = float(v)
+    return None if not np.isfinite(f) else round(f, ndigits)
+
+
 def eval_metrics(sim, T, dx):
-    """Dice/ASD/HD95 (shared `_metrics` path) + gouge/residual of the carved stock."""
+    """Dice/ASD/HD95 (shared `_metrics` path) + gouge/residual of the carved stock.
+
+    Also reports dice_baseline (do-nothing: uncut stock vs target) and
+    dice_improvement = (dice - baseline)/(1 - baseline), a difficulty-normalized
+    accuracy score (0 = idle, 1 = perfect). stock[0] is the pristine uncut stock
+    (forward writes stock[t+1], never stock[0]), so it is the right baseline for
+    both soft and hard carves."""
     stock = sim.stock.to_numpy()[T - 1]
     target = sim.target.to_numpy()
-    m = _metrics(stock, target, dx)  # {"dice", "asd", "hd95"} -- same as csg_ppo
+    uncut = sim.stock.to_numpy()[0]
+    m = _metrics(stock, target, dx, uncut)  # +dice_baseline/dice_improvement
     pred_mask = sdf_to_mask(stock)
     target_mask = sdf_to_mask(target)
     m["gouge"] = float(_gouge(pred_mask, target_mask) * (dx ** 3))
@@ -1100,7 +1116,8 @@ def main():
                 sim.forward(T)
                 soft_stock = sim.stock.to_numpy()[T - 1]
                 soft_target = sim.target.to_numpy()
-                soft_m = _metrics(soft_stock, soft_target, dx)
+                soft_uncut = sim.stock.to_numpy()[0]
+                soft_m = _metrics(soft_stock, soft_target, dx, soft_uncut)
                 # HARD carve eval: deployable measures. forward_hard() uses
                 # boolean ti.max (non-differentiable) with tool_sdf_sharp.
                 # Hard dice is quantized to 1-voxel steps (flat for many iters
@@ -1112,6 +1129,8 @@ def main():
                 m["soft_dice"] = float(soft_m["dice"])
                 m["soft_asd"] = float(soft_m["asd"])
                 m["soft_hd95"] = float(soft_m["hd95"])
+                m["soft_dice_baseline"] = float(soft_m.get("dice_baseline", float("nan")))
+                m["soft_dice_improvement"] = float(soft_m.get("dice_improvement", float("nan")))
                 last_m = m
                 # best_score uses SOFT dice (proven operating-point metric) with
                 # the hard-carve traj-quality penalties (best_w_* default 0.05,
@@ -1134,6 +1153,9 @@ def main():
                 writer.add_scalar("eval/hard_dice", m["dice"], it)
                 writer.add_scalar("eval/asd", m["soft_asd"], it)
                 writer.add_scalar("eval/hd95", m["soft_hd95"], it)
+                writer.add_scalar("eval/dice_baseline", m.get("dice_baseline", float("nan")), it)
+                writer.add_scalar("eval/dice_improvement", m.get("dice_improvement", float("nan")), it)
+                writer.add_scalar("eval/soft_dice_improvement", m["soft_dice_improvement"], it)
                 writer.add_scalar("metrics/gouge", m["gouge"], it)
                 writer.add_scalar("metrics/residual", m["residual"], it)
                 writer.add_scalar("metrics/holder_overlap", m["holder_overlap"], it)
@@ -1304,6 +1326,14 @@ def main():
             "dice": round(final_dice, 6),
             "asd": round(final_asd, 6),
             "hd95": round(final_hd95, 6),
+            # Do-nothing baseline (uncut stock vs target) and difficulty-normalized
+            # dice improvement = (dice - baseline)/(1 - baseline): 0 = idle, 1 =
+            # perfect. Both reported for the soft (operating-point) and hard
+            # (deployable) dice; nan when the part fills the stock (no headroom).
+            "dice_baseline": _safe_round(last_m.get("dice_baseline")) if last_m else 0.0,
+            "dice_improvement": _safe_round(last_m.get("dice_improvement")) if last_m else 0.0,
+            "soft_dice_baseline": _safe_round(last_m.get("soft_dice_baseline")) if last_m else 0.0,
+            "soft_dice_improvement": _safe_round(last_m.get("soft_dice_improvement")) if last_m else 0.0,
             "loss": round(float(sim.loss[None]), 6),
             "residual": round(final_resid, 6),
             "gouge": round(final_gouge, 6),

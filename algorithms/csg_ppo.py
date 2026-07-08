@@ -109,7 +109,11 @@ class Args:
     max_steps: int = 64
     """max episode steps (== max_cuts + 1 in CamEnvDiff)"""
     target_shape: str = "sphere"
-    """target shape: 'box', 'cylinder', 'sphere', 'pyramid', or None for random"""
+    """target shape: one of 'sphere', 'box', 'cylinder', 'pyramid', 'sphere_hole',
+    'sphere_bowl', or None for random. The four primitives are single CSG shapes;
+    'sphere_hole' (0.9in sphere minus a 0.75in through-hole cylinder) and
+    'sphere_bowl' (0.9in sphere minus a lower hemisphere) are combined CSG shapes.
+    See simulator/csg_simulator.py (_init_target_fields) for the authoritative list."""
     k_init: float = 10.0
     """initial smoothness parameter for the smooth-min/max SDF ops"""
 
@@ -550,10 +554,22 @@ if __name__ == "__main__":
     final_hd95 = float(last_m.get("hd95", 0.0)) if last_m is not None else 0.0
     final_reward = float(last_m.get("reward", 0.0)) if last_m is not None else 0.0
 
+    def _safe_round(v):
+        if v is None:
+            return None
+        import math
+        f = float(v)
+        return None if not math.isfinite(f) else round(f, 6)
+
     summary_data = {
         "dice": round(final_dice, 6),
         "asd": round(final_asd, 6),
         "hd95": round(final_hd95, 6),
+        # Do-nothing baseline (uncut stock vs target) and difficulty-normalized
+        # dice improvement = (dice - baseline)/(1 - baseline): 0 = idle, 1 =
+        # perfect; null when the part fills the stock (no headroom).
+        "dice_baseline": _safe_round(last_m.get("dice_baseline")) if last_m else None,
+        "dice_improvement": _safe_round(last_m.get("dice_improvement")) if last_m else None,
         "reward": round(final_reward, 6),
         "training_seconds": round(total_seconds, 2),
         "peak_vram_mb": round(peak_vram_mb, 2),

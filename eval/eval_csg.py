@@ -58,8 +58,25 @@ TOOL_HEIGHT = 25.0      # mm
 # ---------------------------------------------------------------------------
 # Metric helpers
 # ---------------------------------------------------------------------------
-def _metrics(stock_grid, target_grid, dx):
-    """Dice / ASD / HD95 between a carved stock grid and the target grid."""
+# Below this much headroom (1 - dice_baseline) the dice-improvement ratio is
+# undefined / noise-amplified: a part that nearly fills the stock leaves almost
+# nothing to improve, so tiny raw-dice swings blow up the ratio. Report nan
+# there rather than a misleading number (downstream means filter via isfinite).
+_DICE_HEADROOM_FLOOR = 1e-6
+
+
+def _metrics(stock_grid, target_grid, dx, uncut_grid=None):
+    """Dice / ASD / HD95 between a carved stock grid and the target grid.
+
+    If ``uncut_grid`` (the pristine stock, e.g. ``stock[0]``) is given, also
+    report the do-nothing baseline ``dice_baseline = dice(uncut, target)`` and
+    the skill-score ``dice_improvement = (dice - baseline) / (1 - baseline)``.
+    The ratio maps the achievable range [baseline, 1] onto [0, 1]: doing nothing
+    scores 0, a perfect carve scores 1, and over-carving (worse than idle) goes
+    negative. It is a difficulty-normalized accuracy score -- a small/inscribed
+    part has a high baseline and little headroom, so raw dice over-credits it;
+    the ratio strips that free credit for fair cross-part comparison.
+    """
     pred = sdf_to_mask(stock_grid)
     targ = sdf_to_mask(target_grid)
     out = {"dice": float(dice_score(pred, targ))}
@@ -71,6 +88,15 @@ def _metrics(stock_grid, target_grid, dx):
         out["hd95"] = float(hd95(pred, targ)) * dx
     except ValueError:
         out["hd95"] = float("inf")
+    if uncut_grid is not None:
+        baseline = float(dice_score(sdf_to_mask(uncut_grid), targ))
+        out["dice_baseline"] = baseline
+        headroom = 1.0 - baseline
+        if headroom < _DICE_HEADROOM_FLOOR:
+            # Part fills the stock -- no headroom, ratio undefined.
+            out["dice_improvement"] = float("nan")
+        else:
+            out["dice_improvement"] = (out["dice"] - baseline) / headroom
     return out
 
 
@@ -112,8 +138,12 @@ def carve_trajectory_metrics(positions, resolution=32, target_shape=TARGET_SHAPE
 
     stock = sim.stock.to_numpy()[len(positions) - 1]
     target = sim.target.to_numpy()
+    # stock[0] is the pristine uncut stock (init_stock writes the full-envelope
+    # SDF there); pass it so _metrics can report the do-nothing dice baseline
+    # and the difficulty-normalized dice-improvement ratio.
+    uncut = sim.stock.to_numpy()[0]
     # Surface distances reported in mm: one voxel == sim.v mm (cubic voxels).
-    m = _metrics(stock, target, sim.v)
+    m = _metrics(stock, target, sim.v, uncut)
     # Trajectory-quality measures (hard, final-metric form): total toolpath
     # time, air-cutting time, breakage probability + force, broken flag.
     # _HardCarveSimulator inherits CSGSimulatorDelta, so the kernel is
@@ -171,6 +201,10 @@ def eval_trajectory(path, resolution, do_gcode, post, config, voxel_size_mm=VOXE
         print(f"  Dice : {m['dice']:.4f}")
         print(f"  ASD  : {m['asd']:.4f}")
         print(f"  HD95 : {m['hd95']:.4f}")
+        print(f"  Dice baseline (uncut vs target) : {m.get('dice_baseline', float('nan')):.4f}")
+        di = m.get("dice_improvement", float("nan"))
+        print(f"  Dice improvement ratio          : {di:.4f}"
+              f"{'  (n/a: part fills stock)' if not np.isfinite(di) else ''}")
         print(f"  Total toolpath time : {m.get('total_time', float('nan')):.4f} s")
         print(f"  Air-cutting time    : {m.get('air_time', float('nan')):.4f} s")
         print(f"  Break prob (any)    : {m.get('break_prob_any', float('nan')):.4f}")
@@ -181,6 +215,8 @@ def eval_trajectory(path, resolution, do_gcode, post, config, voxel_size_mm=VOXE
             "trajectory/dice": m["dice"],
             "trajectory/asd": m["asd"],
             "trajectory/hd95": m["hd95"],
+            "trajectory/dice_baseline": m.get("dice_baseline", 0.0),
+            "trajectory/dice_improvement": m.get("dice_improvement", 0.0),
             "trajectory/total_time": m.get("total_time", 0.0),
             "trajectory/air_time": m.get("air_time", 0.0),
             "trajectory/break_prob_any": m.get("break_prob_any", 0.0),
@@ -233,6 +269,8 @@ def eval_trajectory(path, resolution, do_gcode, post, config, voxel_size_mm=VOXE
                                             target_shape=target_shape)
         print("  --- carved stock of executed program vs target ---")
         print(f"  Dice : {me['dice']:.4f}   ASD : {me['asd']:.4f}   HD95 : {me['hd95']:.4f}")
+        print(f"  Dice baseline : {me.get('dice_baseline', float('nan')):.4f}   "
+              f"improvement : {me.get('dice_improvement', float('nan')):.4f}")
 
         wp_err = (waypoint_roundtrip_error(pos_mm, rec_mm, 1.0)
                   if pos_mm.shape == rec_mm.shape else float("nan"))
@@ -247,6 +285,8 @@ def eval_trajectory(path, resolution, do_gcode, post, config, voxel_size_mm=VOXE
             "gcode/executed_dice": me["dice"],
             "gcode/executed_asd": me["asd"],
             "gcode/executed_hd95": me["hd95"],
+            "gcode/executed_dice_baseline": me.get("dice_baseline", 0.0),
+            "gcode/executed_dice_improvement": me.get("dice_improvement", 0.0),
         })
     finally:
         run.finish()
@@ -298,7 +338,8 @@ def _rollout(agent, env, seed):
     t = env.unwrapped.current_step
     stock = sim.stock.to_numpy()[t]
     target = sim.target.to_numpy()
-    return _metrics(stock, target, 1.0 / resolution), float(total_reward)
+    uncut = sim.stock.to_numpy()[0]
+    return _metrics(stock, target, 1.0 / resolution, uncut), float(total_reward)
 
 
 def eval_checkpoints(paths, num_runs, base_seed):
@@ -328,14 +369,19 @@ def eval_checkpoints(paths, num_runs, base_seed):
         )
 
         per_run = []
-        table = wandb.Table(columns=["run_index", "seed", "reward", "dice", "asd", "hd95"])
+        table = wandb.Table(columns=["run_index", "seed", "reward", "dice",
+                                     "dice_baseline", "dice_improvement",
+                                     "asd", "hd95"])
         try:
             for i in range(num_runs):
                 seed = base_seed + i
                 m, r = _rollout(agent, env, seed)
                 per_run.append({"seed": seed, "reward": r, **m})
+                di = m.get("dice_improvement", float("nan"))
                 print(f"  run {i} (seed {seed}): reward={r:+.3f} "
-                      f"dice={m['dice']:.3f} asd={m['asd']:.4f} hd95={m['hd95']:.4f}")
+                      f"dice={m['dice']:.3f} asd={m['asd']:.4f} hd95={m['hd95']:.4f} "
+                      f"baseline={m.get('dice_baseline', float('nan')):.3f} "
+                      f"improvement={di:.3f}")
 
                 # Log episodic metrics to wandb
                 wandb.log({
@@ -345,13 +391,19 @@ def eval_checkpoints(paths, num_runs, base_seed):
                     "episode/dice": m["dice"],
                     "episode/asd": m["asd"],
                     "episode/hd95": m["hd95"],
+                    "episode/dice_baseline": m.get("dice_baseline", 0.0),
+                    "episode/dice_improvement": m.get("dice_improvement", 0.0),
                 })
-                table.add_data(i, seed, r, m["dice"], m["asd"], m["hd95"])
+                table.add_data(i, seed, r, m["dice"],
+                               m.get("dice_baseline", float("nan")),
+                               m.get("dice_improvement", float("nan")),
+                               m["asd"], m["hd95"])
 
             wandb.log({"eval_results_table": table})
 
             # Calculate and log summary metrics
-            for key in ("reward", "dice", "asd", "hd95"):
+            for key in ("reward", "dice", "dice_baseline", "dice_improvement",
+                        "asd", "hd95"):
                 vals = np.array([r[key] for r in per_run], dtype=np.float64)
                 finite = vals[np.isfinite(vals)]
                 if len(finite):
@@ -369,13 +421,14 @@ def eval_checkpoints(paths, num_runs, base_seed):
     print("\n=== Summary (mean +/- std over runs) ===")
     for path, runs in results.items():
         print(f"\n{path}")
-        for key in ("reward", "dice", "asd", "hd95"):
+        for key in ("reward", "dice", "dice_baseline", "dice_improvement",
+                    "asd", "hd95"):
             vals = np.array([r[key] for r in runs], dtype=np.float64)
             finite = vals[np.isfinite(vals)]
             if len(finite):
-                print(f"  {key:5s}: {finite.mean():+.4f} +/- {finite.std():.4f}")
+                print(f"  {key:18s}: {finite.mean():+.4f} +/- {finite.std():.4f}")
             else:
-                print(f"  {key:5s}: n/a")
+                print(f"  {key:18s}: n/a")
     return results
 
 
