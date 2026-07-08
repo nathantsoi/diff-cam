@@ -1163,6 +1163,14 @@ class CSGSimulatorDelta:
 
         Differentiable in ``tool_pos``/``tool_delta`` (via ``tool_sdf``) and in
         ``stock`` (via ``stock_occ``); safe under ``ti.ad.Tape``.
+
+        Caveat (same grid-only blind spot as ``compute_traj_diagnostics_hard``
+        before its fix): this loop sums only over the [0,1]^3 voxel grid, so a
+        tool swept entirely OFF the stock contributes 0 air here too — it will
+        not penalize far-from-stock wandering even with w_air>0. ``w_air`` /
+        ``w_prox`` are confirmed dead levers (trade off dice), so this is left
+        as-is; a shape-blind stock-proximity anchor is the open lever for the
+        off-stock collapse (see autoresearch.md).
         """
         for t, i, j, k in ti.ndrange((t_start, T), self.Nx, self.Ny, self.Nz):
             scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
@@ -1566,8 +1574,18 @@ class CSGSimulatorDelta:
         v_mm3 = self.v ** 3
         for t in range(T):
             st = self.seg_time[t]
-            sw = ti.max(self.seg_swept[t], 1e-12)
-            af = self.seg_air[t] / sw
+            sw = self.seg_swept[t]
+            # A segment whose swept cylinder hits NO grid voxel (tool entirely
+            # outside the [0,1]^3 stock box) cuts nothing, so it is 100% air.
+            # The old `ti.max(sw, 1e-12)` made af = seg_air / eps = 0 here,
+            # undercounting air_time to ~0 for trajectories that leave the stock
+            # (125/127 and 249/255 segments off-grid in the jul6 baselines; see
+            # the air-time-metric-bug finding). Count the full seg_time as air.
+            # On-grid segments are unaffected: seg_air/seg_swept already gives
+            # af=1 for empty-space traversal and af=0 for genuine cutting.
+            # ti.select (not an if/else) so `af` is a single SSA value visible
+            # after the branch — Taichi doesn't let names escape an if-block.
+            af = ti.select(sw <= 1e-12, 1.0, self.seg_air[t] / ti.max(sw, 1e-12))
             total_time += st
             air_time += st * af
             eng = self.seg_engage[t]

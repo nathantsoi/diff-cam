@@ -54,7 +54,7 @@ Run each experiment on a single GPU, you can run multiple experiments at once, b
 - Modify components of the simulator that change *how* the evaluation is computed (the dice/ASD/HD95 metric code, the carve used for scoring). Changing the stock/target **via the CLI flags** is allowed and encouraged — that selects the task; editing the metric/eval code to inflate the score is not.
 - Modify the evaluation harness.
 
-**The goal is simple: get the highest dice score** — on the default scenario, and ideally robustly across the stock/target scenarios you explore (compare dice only within the same scenario). Since the time budget is fixed, you don't need to worry about training time — it's always 15 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget. **Secondary goal (new, lower priority than dice): keep `air_time` / `total_time` / `break_prob_any` reasonable** — a dice win that doubles `total_time` or trips `broken=1` is not a clean deployable win. The composite `best_score` already penalizes these; when reporting a win, quote `air_time`/`total_time`/`break_prob_any`/`broken` alongside dice so the deployable cost is visible.
+**The goal is simple: get the highest `hard_dice` score** — on the default scenario, and ideally robustly across the stock/target scenarios you explore (compare `hard_dice` only within the same scenario). `hard_dice` (the sharp boolean carve) is the deployable metric you advance on; the soft `dice` is a proxy only and MUST NOT be used to claim a win (it stays ~0.91 even when nothing is cut). Since the time budget is fixed, you don't need to worry about training time — it's always 15 minutes. Everything is fair game: change the architecture, the optimizer, the hyperparameters, the batch size, the model size. The only constraint is that the code runs without crashing and finishes within the time budget. **Secondary goal (new, lower priority than `hard_dice`): keep `air_time` / `total_time` / `break_prob_any` reasonable** — a `hard_dice` win that doubles `total_time` or trips `broken=1` is not a clean deployable win. The composite `best_score` already penalizes these; when reporting a win, quote `air_time`/`total_time`/`break_prob_any`/`broken` alongside `hard_dice` so the deployable cost is visible.
 
 **VRAM** is a soft constraint. Some increase is acceptable for meaningful dice gains, but it should not blow up dramatically.
 
@@ -62,12 +62,32 @@ Run each experiment on a single GPU, you can run multiple experiments at once, b
 
 **The first run**: Your very first run should always be to establish the baseline — run the pipeline script with the default scenario (the baseline command in [Experimentation](#experimentation): default 1 in cube stock, sphere target, `--voxel-size-mm 0.5`, and **`--learning-rate 1e-3`**) and no method changes. All later scenario or method variations are compared against this. **Note**: most of the proven operating point is baked into the code defaults (`--dt 0.45 --grad-clip 0.5 --eval-freq 10 --iters 5000`), **but `--learning-rate` is NOT — its code default is still the old `5e-3`**, so you must pass `--learning-rate 1e-3` explicitly or the run overshoots and scores ~0.67 (sphere) instead of ~0.85. With `--learning-rate 1e-3`, a fresh baseline scores **~0.85 (sphere) / ~0.92 (box) / ~0.89 (pyramid) / ~0.92 (cylinder)** reliably — compare new ideas against this strong basin. See [Proven operating point & dead levers](#proven-operating-point--dead-levers) for what is already established and what has been ruled out.
 
+## Known failure mode: the soft-collapse (tool drifts off the stock and stops cutting)
+
+A degenerate optimum the optimizer can fall into — and that you MUST guard against / fix — is the **soft-collapse**: the tool drifts off the `[0,1]^3` stock into air and stops cutting entirely, yet the run still looks "good" on the soft `dice`. This was diagnosed on the `jul6-traj-quality` baselines (box run `…1783433209348`, cyl run `…1783433209615`):
+
+- The box run removes **0 / 132,651** voxels — `hard_dice` 0.8144 equals the no-cut baseline exactly — while soft `dice` reads 0.9165. The cyl run removes 1.9% of voxels (`hard_dice` 0.7264 vs no-cut 0.7175) while soft `dice` reads 0.9440.
+- Cause: with `--w-gouge 4.0` (penalizes touching the target) and **no term anchoring the tool to the stock** (`--w-air 0 --w-prox 0 --w-traj-prox 0 --w-air-time 0 --w-break 0`, `k=10` no-anneal), the tool starts in air above the stock, the residual gradient vanishes once it drifts off-stock, the deltas grow unbounded (the cyl run reaches x = −3.7, ~3.7 stock-widths away), and best-checkpoint selection was on the **soft** dice — which stays ~0.91 without any boolean cutting, so the collapse is *rewarded*.
+- This is invisible if you only read soft `dice`. **Always confirm a win with `hard_dice` (and the carved-voxel count / `residual`)** — a `hard_dice` equal to the no-cut baseline means nothing was cut, regardless of soft dice.
+
+**Your job: find a shape-blind fix for this collapse and validate it raises `hard_dice` on the default scenario (and ideally across shapes).** Candidate directions, all of which MUST stay shape-blind (see constraint below):
+
+- **A stock-proximity anchor term** — penalize the tool's distance to the stock box / remaining material (using the **stock SDF or the `[0,1]^3` bounding box**, NOT the target shape) so the tool can't wander off and the residual gradient never vanishes. This is distinct from the dead `w_prox` / `w_traj_prox` (which pull toward the *target surface* and trade off dice); a *stock*-box anchor is an unexplored lever.
+- **Select the best checkpoint on `hard_dice`** (or a `hard_dice`-led composite) instead of soft dice, so a non-cutting trajectory can no longer win the checkpoint race. `best_score` already composes `air_time`/`total_time`/`break_prob_any` penalties — and with the `air_time` fix (below) off-stock wandering now correctly reports high `air_time`, so a nonzero `--best-w-airtime` penalizes collapsed checkpoints for free.
+- **Bound or project the deltas / tool position** to the stock box (a hard constraint via the stock SDF), or freeze/anchor the init so the tool can't drift away.
+- **Anneal `k`** (soft→sharp union) so the soft objective tracks the hard carve late in training, reducing the soft/hard gap that lets soft dice lie.
+
+**Shape-blindness constraint (non-negotiable, restated for this task):** any fix MUST NOT inspect, branch on, or leverage the target shape name (`sphere`/`cylinder`/`box`/`pyramid`) or any task metadata — not in the optimizer, the initialization, the loss, or the checkpoint selector. Rely *only* on the general geometric representation in the simulator: the voxel occupancy grid, the stock SDF / `[0,1]^3` box, the target SDF *field* (as a continuous distance field, not its name), bounding boxes, and spatial/collision queries. A stock-box anchor, a hard-dice selector, or a delta projection all satisfy this; a "if shape==sphere then …" branch does not. The fix must generalize to arbitrary unseen shapes by construction, not by per-shape tuning.
+
+**`air_time` metric fix (2026-07-07, already applied to the simulator):** `air_time` previously read ~0 for any off-stock motion (a segment sweeping no grid voxel got air-fraction 0, not 1); it now counts off-grid segments as full air. Consequences for your work: (1) the composite `best_score` now correctly penalizes off-stock-wandering checkpoints when `--best-w-airtime > 0` — use this; (2) any prior `air_time` number (including the `traj-quality-air-win` "-58% air" claim) is **not comparable** to post-fix runs and must be re-measured; (3) `total_time` is unaffected.
+
 ## Output format
 
 Once the script finishes it prints a summary like this:
 
 ```
 ---
+hard_dice:         0.718300
 dice:              0.852300
 asd:               1.234500
 hd95:              3.456700
@@ -90,13 +110,15 @@ best_score:        0.560100
 ---
 ```
 
-Beyond dice, three **deployable trajectory-quality measures** are now reported (added 2026-07-06): total toolpath time (`total_time`, s), air-cutting time (`air_time`, s), and tool-breakage probability (`break_prob_any` / `break_prob_max`, [0,1]). `best_score` is the composite best-checkpoint score (see "Trajectory-quality levers" below). These are **new and uncalibrated** — treat them as additional reporting axes, not yet as proven optimization targets.
-
-Note that the script outputs clean scrolling lines by default (without `tqdm` carriage-return overwriting) so that LLM harnesses like Claude Code can easily ingest logs. You can extract the key metric from the log file:
+**`hard_dice` is the FINAL, deployable metric and the number you optimize/advance on.** It is the sharp boolean carve (what the part actually looks like). `dice` (printed second) is the SOFT differentiable dice — a sigmoid-blurred proxy that is **inflated and can mask failure**: a run that removes *zero* voxels still scores soft dice ~0.91 (it equals the no-cut baseline), so soft dice CANNOT tell you whether the part was cut. **Always read `hard_dice` first; treat `dice` as a secondary proxy only.** Extract the headline metric with:
 
 ```
-grep "^dice:" run.log
+grep "^hard_dice:" run.log
 ```
+
+Beyond dice, three **deployable trajectory-quality measures** are reported (added 2026-07-06): total toolpath time (`total_time`, s), air-cutting time (`air_time`, s), and tool-breakage probability (`break_prob_any` / `break_prob_max`, [0,1]). `best_score` is the composite best-checkpoint score (see "Trajectory-quality levers" below). These are **new and uncalibrated** — treat them as additional reporting axes, not yet as proven optimization targets.
+
+> **`air_time` metric fix (2026-07-07).** `air_time` previously undercounted to ~0 for any tool motion outside the [0,1]³ stock box: a segment whose swept cylinder hit no grid voxel got `air_fraction = 0` instead of 1, so a trajectory that flew off into air reported `air_time ≈ 0`. This is now fixed — off-grid segments count their full time as air. **Prior `air_time` numbers (including the `traj-quality-air-win` "-58% air" claim) are NOT comparable to post-fix numbers** and must be re-measured before trusting any air-reduction result. `total_time` was unaffected.
 
 The trajectory-quality metrics are not printed on the `^metric:` summary lines — read them from JSON. The full metrics (including `air_time`, `total_time`, `break_prob_any`, `break_prob_max`, `fcut_max`, `broken`, `engage_max`, `engage_mean`, `best_score`, and `final_iter_*` variants of all of these) are written to `runs/<run_name>/metrics.json` and a static copy at `runs/latest_metrics.json`. Extract them with, e.g.:
 
@@ -115,10 +137,10 @@ commit	dice	memory_gb	status	description	command
 ```
 
 1. git commit hash (short, 7 chars)
-2. dice achieved (e.g. 0.852300) — use 0.000000 for crashes
+2. **soft `dice`** achieved (e.g. 0.852300) — use 0.000000 for crashes. This column stays the SOFT dice because the dashboard's run-matching keys on it (soft dice varies continuously, hard dice is quantized to 1-voxel steps and matches ambiguously). It is NOT the metric you advance on — that is `hard_dice`, which you record in the description (next row).
 3. peak memory in GB, round to .1f (e.g. 1.0 — divide peak_vram_mb by 1024) — use 0.0 for crashes
 4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried — when a trajectory-quality measure is the *point* of the experiment or materially affects the verdict (e.g. `broken=1`, a dice win with doubled `total_time`, a `best_score` that disagrees with `dice`), call it out in the description (e.g. `cyl k-anneal (dice 0.905, air 0.21, broken=0)`). The full per-run numbers live in `metrics.json` — the TSV description is just a human reminder.
+5. short text description of what this experiment tried — **lead with `hard_dice=X`** (the deployable metric you advanced on), then soft `dice` and any trajectory-quality measures that are the *point* of the experiment or materially affect the verdict (e.g. `broken=1`, a `hard_dice` win with doubled `total_time`, a `best_score` that disagrees with `hard_dice`). Example: `cyl k-anneal (hdice 0.718, soft 0.905, air 0.21, broken=0)`. The full per-run numbers live in `metrics.json` — the TSV description is just a human reminder.
 6. the exact run command used (the full `uv run python scripts/run_pipeline.py ...` invocation, WITHOUT the `> run.log 2>&1` redirect). This captures the scenario (stock/target/voxel flags) and hyperparameters so every row is reproducible and so the plot can group by config. It must contain no literal tab characters.
 
 Example:
@@ -143,11 +165,11 @@ LOOP FOREVER:
 4. Run the experiment, redirecting everything to `run.log` (do NOT use tee or let output flood your context). Record the exact command you ran (see "Logging results"). Example:
    `uv run python scripts/run_pipeline.py --stages train --iters 5000 --max-steps 128 --stock-size-in 1 1 1 --voxel-size-mm 0.5 --target-shape sphere --target-radius-mm 11.43 --post haas --dt 0.45 --learning-rate 1e-3 --grad-clip 0.5 --eval-freq 10 > run.log 2>&1`
 5. **Move the run into the branch folder** so the dashboard groups it with this branch's batch: extract the run dir the trainer reported (`grep "writing outputs to" run.log` → `runs/<run_name>`) and `mv runs/<run_name> runs/<tag>/`. This must happen before the next experiment so runs don't pile up at the top level of `runs/` (where `discover_batches` can't see them). The run-dir matching in `build_results_web.py` keys on (shape, iters, seed) + dice, not path, so moving is safe.
-6. Read out the results: `grep "^dice:\|^peak_vram_mb:" run.log` or read `runs/latest_metrics.json`
+6. Read out the results: `grep "^hard_dice:\|^peak_vram_mb:" run.log` or read `runs/latest_metrics.json` (the `hard_dice` field is the deployable headline; `dice` is the soft proxy — do not advance on it)
 7. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 8. Record the results in the tsv, including the exact run command in the `command` column (NOTE: do not commit the results.tsv file, leave it untracked by git)
-9. If dice improved (higher), you "advance" the branch, keeping the git commit
-10. If dice is equal or worse, you git reset back to where you started
+9. If `hard_dice` improved (higher), you "advance" the branch, keeping the git commit
+10. If `hard_dice` is equal or worse, you git reset back to where you started
 
 The idea is that you are a completely autonomous researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate. If you feel like you're getting stuck in some way, you can rewind but you should probably do this very very sparingly (if ever).
 
@@ -165,9 +187,9 @@ The loop is autonomous and never self-terminates — but whenever it *is* wound 
 
 Generate the plot from `results.tsv` (the source of truth — it has the per-experiment dice and the run command). Use `matplotlib` (already available; it is what the trainer uses for `metrics.png` — do NOT install anything). Write a small script to `autoresearch/tasks/train_csg/plot_results.py` and save the figure to `autoresearch/tasks/train_csg/results_plot.png`. The figure should make the research legible at a glance:
 
-- **Progress over experiments**: dice on the y-axis vs. experiment order on the x-axis, with kept vs. discarded vs. crashed points distinguished, and a "running best" line so the improvement trajectory is obvious.
-- **Generality across scenarios**: since you vary the stock/target, also show the **best dice per machining scenario** (parse the stock/target flags out of the `command` column — e.g. group by `--target-shape` and `--stock-size-in`). A grouped bar chart is fine. This is the payoff of varying the scenario: it shows where the method is strong and where it struggles.
-- **Trajectory-quality panel (new)**: read `metrics.json` for each kept run and add a small panel showing `total_time`, `air_time`, and `break_prob_any` (and `broken`) alongside dice — e.g. a grouped bar or a small-multiples row keyed by run name. The point is to make deployable *cost* visible next to the dice *benefit*, since a dice win that doubles `total_time` or sets `broken=1` is not a clean win. If the measures are all 0/un-calibrated across the run, say so in the plot caption rather than plotting empty bars.
+- **Progress over experiments**: **`hard_dice`** on the y-axis vs. experiment order on the x-axis, with kept vs. discarded vs. crashed points distinguished, and a "running best" line so the improvement trajectory is obvious. The TSV `dice` column is soft dice (used for run-matching) — read `hard_dice` from each kept run's `metrics.json` (keyed by `run_dir`) and plot THAT; plotting the TSV soft `dice` would hide the soft-collapse (soft dice stays ~0.91 for non-cutting runs).
+- **Generality across scenarios**: since you vary the stock/target, also show the **best `hard_dice` per machining scenario** (parse the stock/target flags out of the `command` column — e.g. group by `--target-shape` and `--stock-size-in`). A grouped bar chart is fine. This is the payoff of varying the scenario: it shows where the method is strong and where it struggles.
+- **Trajectory-quality panel (new)**: read `metrics.json` for each kept run and add a small panel showing `total_time`, `air_time`, and `break_prob_any` (and `broken`) alongside `hard_dice` — e.g. a grouped bar or a small-multiples row keyed by run name. The point is to make deployable *cost* visible next to the `hard_dice` benefit, since a `hard_dice` win that doubles `total_time` or sets `broken=1` is not a clean win. If the measures are all 0/un-calibrated across the run, say so in the plot caption rather than plotting empty bars.
 
 Keep the script simple and robust (skip `crash` rows / `0.000000` dice where appropriate, handle a commit appearing more than once by taking its best). Then summarize the plot's takeaways in `idea.md` and in your final message. Finally, write `autoresearch/tasks/train_csg/findings.md` — the consolidated, deduplicated record of every finding from the run (task, best method, the real levers in order of impact, dead levers, methodological lessons, artifacts), drawing on `idea.md` (chronological) and `results.tsv` (numbers). This is the file the next run's `autoresearch.md` "Proven operating point" section will be built from, so be precise about configs and effect sizes. **When trajectory-quality levers were tuned this run, record (a) the calibration you used for `--f-ref`/`--f-max`/`--kc`/`--sigma-risk`, (b) the `--w-time`/`--w-air-time`/`--w-break` and `--best-w-*` values that worked, and (c) the `air_time`/`total_time`/`break_prob_any`/`best_score` numbers alongside dice for the kept runs** — the next run needs these to avoid re-calibrating from scratch. After the plot and `findings.md` exist, you may conclude.
 

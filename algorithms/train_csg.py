@@ -1296,8 +1296,12 @@ def main():
         final_hold = float(last_m["holder_overlap"]) if last_m is not None else final_overlap
 
         summary_data = {
-            "dice": round(final_dice, 6),
+            # hard_dice is the FINAL/DEPLOYABLE metric (sharp boolean carve) and
+            # is printed first so log-grepping agents read it as the headline.
+            # "dice" below it is the soft (differentiable, sigmoid-blurred) dice
+            # — an inflated proxy that can mask runs which don't boolean-cut.
             "hard_dice": round(final_hard_dice, 6),
+            "dice": round(final_dice, 6),
             "asd": round(final_asd, 6),
             "hd95": round(final_hd95, 6),
             "loss": round(float(sim.loss[None]), 6),

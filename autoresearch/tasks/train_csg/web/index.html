@@ -345,6 +345,17 @@ const BASE = "../../../../";
 const SHAPE_COLOR = {sphere:"#1f77b4", cylinder:"#ff7f0e", box:"#2ca02c", pyramid:"#d62728"};
 const STATUS_OPACITY = {keep:0.92, discard:0.45, crash:0.6};
 let DATA = null, selected = null;
+
+// Headline metric = HARD dice (the deployable sharp-carve dice; what the part
+// actually looks like). Soft dice (d.dice, the differentiable sigmoid-blurred
+// proxy) is kept as a secondary column/row — it is inflated by blur and masks
+// runs that don't boolean-cut (jul6 baselines scored soft 0.91 while removing
+// 0 voxels; hard dice == no-cut baseline). Fall back to soft dice only for the
+// few legacy runs / batch-API runs that carry no hard_dice in their metrics.
+const hd = d => {
+  const v = d.metrics && d.metrics.hard_dice;
+  return (typeof v === "number" && !Number.isNaN(v)) ? v : d.dice;
+};
 // Discovered experiment batch directories under runs/<name>/ — populated from
 // /__api/batches so new branches appear without code changes.
 let BATCHES = [];
@@ -364,12 +375,12 @@ function updateStats() {
   const qp = new URLSearchParams(location.search);
   const batch = qp.get("batch") || "";
   if (batch && CURRENT_BATCH_RUNS.length > 0) {
-    const bestDice = d3.max(CURRENT_BATCH_RUNS, d => d.dice || 0);
-    el.innerHTML = `<b>${CURRENT_BATCH_RUNS.length}</b> runs in <b>${batch}</b> · best dice <b>${bestDice.toFixed(4)}</b>`;
+    const bestDice = d3.max(CURRENT_BATCH_RUNS, d => hd(d) || 0);
+    el.innerHTML = `<b>${CURRENT_BATCH_RUNS.length}</b> runs in <b>${batch}</b> · best hard dice <b>${bestDice.toFixed(4)}</b>`;
   } else if (DATA && DATA.experiments) {
     el.innerHTML =
       `<b>${DATA.n_experiments}</b> experiments · <b>${DATA.n_matched}</b> with artifacts · ` +
-      `overall best <b>${d3.max(DATA.experiments, d => d.dice).toFixed(4)}</b>`;
+      `overall best hard dice <b>${d3.max(DATA.experiments, d => hd(d)).toFixed(4)}</b>`;
   } else {
     el.innerHTML = `<span class="hint">Loading…</span>`;
   }
@@ -508,7 +519,7 @@ function initRunPicker(){
     
     const populateOptions = (list) => {
       sel.innerHTML = `<option value="">(arbitrary run…)</option>` + list.map(r =>
-        `<option value="${r.run_dir}">${r.name} · ${r.shape||"?"} · dice ${(r.dice||0).toFixed(4)}</option>`
+        `<option value="${r.run_dir}">${r.name} · ${r.shape||"?"} · hdice ${(hd(r)||0).toFixed(4)}</option>`
       ).join("");
     };
 
@@ -913,10 +924,10 @@ function renderScatter() {
   const data = filtered();
   const xs = data.map(d=>d.idx);
   const x = d3.scaleLinear().domain([d3.min(xs)-1, d3.max(xs)+1]).range([m.l, W-m.r]);
-  const y = d3.scaleLinear().domain([0, d3.max(data,d=>d.dice)*1.15]).range([H-m.b, m.t]);
+  const y = d3.scaleLinear().domain([0, d3.max(data,d=>hd(d))*1.15]).range([H-m.b, m.t]);
 
   let best=-1, run=[];
-  data.forEach(d=>{ best=Math.max(best,d.dice); run.push(best); });
+  data.forEach(d=>{ best=Math.max(best,hd(d)); run.push(best); });
   const line = d3.line().x((d,i)=>x(d.idx)).y((d,i)=>y(run[i]));
   svg.append("path").datum(data).attr("d", line).attr("fill","none")
     .attr("stroke","#e5534b").attr("stroke-width",1.6).attr("stroke-dasharray","5 4").attr("opacity",.85);
@@ -930,11 +941,11 @@ function renderScatter() {
   svg.append("text").attr("x",W/2).attr("y",H-4).attr("text-anchor","middle")
     .attr("fill","var(--muted)").attr("font-size",12).text("experiment # (chronological run order)");
   svg.append("text").attr("transform",`translate(14,${H/2}) rotate(-90)`)
-    .attr("text-anchor","middle").attr("fill","var(--muted)").attr("font-size",12).text("dice");
+    .attr("text-anchor","middle").attr("fill","var(--muted)").attr("font-size",12).text("hard dice");
 
   const tip = document.getElementById("tooltip");
   svg.append("g").selectAll("circle").data(data).join("circle")
-    .attr("cx", d=>x(d.idx)).attr("cy", d=>y(d.dice)).attr("r", d=>d.status==="keep"?4.5:3.2)
+    .attr("cx", d=>x(d.idx)).attr("cy", d=>y(hd(d))).attr("r", d=>d.status==="keep"?4.5:3.2)
     .attr("fill", d=>SHAPE_COLOR[d.shape]||"#888")
     .attr("opacity", d=>STATUS_OPACITY[d.status]??0.5)
     .attr("stroke", d=>selected && (d.idx===selected.idx || (d.run_dir && d.run_dir===selected.run_dir)) ? "#fff" : "none")
@@ -943,7 +954,7 @@ function renderScatter() {
     .on("mouseover",(ev,d)=>{
       tip.style.display="block";
       const m=d.metrics||{};
-      tip.innerHTML = `<div class="t-title">#${d.idx} · ${d.shape||"?"} · dice ${d.dice.toFixed(4)} · ${d.status}</div>` +
+      tip.innerHTML = `<div class="t-title">#${d.idx} · ${d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)}) · ${d.status}</div>` +
         (m.air_time!=null ? `<div>air ${m.air_time.toFixed(2)} s · break ${fmtBreak(m.break_prob_any)}</div>` : ``) +
         `<div>${d.description||"(no description)"}</div>` +
         (d.run_dir ? `<div class="t-cmd">▶ click to view trajectory &amp; downloads</div>` :
@@ -977,20 +988,21 @@ function renderScatter() {
       selectExperiment(d);
     });
 
-  const bi = data[d3.scan(data, (a,b)=>b.dice-a.dice)];
+  const bi = data[d3.scan(data, (a,b)=>hd(b)-hd(a))];
   if (bi) {
-    svg.append("text").attr("x", x(bi.idx)).attr("y", y(bi.dice)-9)
+    svg.append("text").attr("x", x(bi.idx)).attr("y", y(hd(bi))-9)
       .attr("text-anchor","middle").attr("fill","#e5534b").attr("font-size",11).attr("font-weight","bold")
-      .text(`best ${bi.dice.toFixed(4)}`);
+      .text(`best ${hd(bi).toFixed(4)}`);
   }
 
   // Draw comparison dashed reference line for arbitrary runs
-  if (selected && selected.idx === null && !Number.isNaN(selected.dice)) {
+  if (selected && selected.idx === null && !Number.isNaN(hd(selected))) {
+    const hsel = hd(selected);
     svg.append("line")
       .attr("x1", m.l)
       .attr("x2", W - m.r)
-      .attr("y1", y(selected.dice))
-      .attr("y2", y(selected.dice))
+      .attr("y1", y(hsel))
+      .attr("y2", y(hsel))
       .attr("stroke", "#ffd166")
       .attr("stroke-dasharray", "4 4")
       .attr("stroke-width", 1.5)
@@ -998,12 +1010,12 @@ function renderScatter() {
 
     svg.append("text")
       .attr("x", W - m.r - 6)
-      .attr("y", y(selected.dice) - 6)
+      .attr("y", y(hsel) - 6)
       .attr("text-anchor", "end")
       .attr("fill", "#ffd166")
       .attr("font-size", 11)
       .attr("font-weight", "bold")
-      .text(`selected run: ${selected.dice.toFixed(4)}`);
+      .text(`selected run: ${hsel.toFixed(4)}`);
   }
 }
 
@@ -1013,7 +1025,7 @@ function renderScatter() {
 // are clickable to sort (hover for a description tooltip) and each column has a
 // value filter in the row beneath the headers; the best value in each numeric
 // column is highlighted.
-let batchSort = {key:"dice", dir:-1};  // dir: -1 = desc, 1 = asc
+let batchSort = {key:"hard_dice", dir:-1};  // dir: -1 = desc, 1 = asc
 // Per-column filter state. text/select columns store a string; range columns
 // store {min:number|null, max:number|null}. Persisted across re-renders so
 // external triggers (batch switch, selection, global shape filter) don't drop
@@ -1140,12 +1152,12 @@ const BATCH_COLS = [
    tip:"Breakage-model max force (--f-max). Lowered 10× to 10 (from 100) alongside f_ref for calibration.",
    get:d=>cmdFlagNum(d,"f_max",100), fmt:v=>fmtLev(v)},
   // ---- output metrics ----
-  {key:"dice",  hdr:"dice",   better:+1, filter:"range",
-   tip:"Soft Dice similarity between the carved stock and the target (0–1). The headline training metric; higher is better.",
-   get:d=>d.dice, fmt:v=>fmtNum(v,4)},
   {key:"hard_dice", hdr:"hdice", better:+1, filter:"range",
-   tip:"Hard Dice: voxelized carved stock vs voxelized target at the final trajectory. Stricter than soft dice (0–1, higher better).",
+   tip:"HARD Dice (the final/deployable metric): voxelized carved stock vs voxelized target at the final trajectory, sharp boolean carve. Stricter than soft dice — it equals the no-cut baseline when the tool removes nothing (0–1, higher better).",
    get:d=>d.metrics&&d.metrics.hard_dice, fmt:v=>fmtNum(v,4)},
+  {key:"dice",  hdr:"dice*",  better:+1, filter:"range",
+   tip:"SOFT Dice (secondary, differentiable proxy): sigmoid-blurred carve vs target. INFLATED by blur — a run can score soft 0.91 while removing 0 voxels, so it masks the soft-collapse. Trust hdice, not this (0–1, higher better).",
+   get:d=>d.dice, fmt:v=>fmtNum(v,4)},
   {key:"air_time", hdr:"air s", better:-1, filter:"range",
    tip:"Estimated air-cut time in seconds — tool moving while not cutting stock (lower better).",
    get:d=>d.metrics&&d.metrics.air_time, fmt:v=>fmtNum(v,2)},
@@ -1338,7 +1350,7 @@ function renderBatchBody(){
   }
 
   // Sort the filtered set by the active column (nulls last both directions).
-  const col = BATCH_COLS.find(c => c.key === batchSort.key) || BATCH_COLS.find(c => c.key === "dice");
+  const col = BATCH_COLS.find(c => c.key === batchSort.key) || BATCH_COLS.find(c => c.key === "hard_dice");
   const sorted = data.slice().sort((a,b) => {
     const av = col.get(a), bv = col.get(b);
     const an = av==null || av==="" || (typeof av==="number" && Number.isNaN(av));
@@ -1434,10 +1446,10 @@ function renderScatter3D() {
   // so tiny values don't all collapse onto the floor.
   const maxAir  = d3.max(data, d=>d.metrics.air_time) || 1;
   const maxBreak= d3.max(data, d=>d.metrics.break_prob_any) || 1;
-  const sx = v => v;                         // dice already 0..1
+  const sx = v => v;                         // hard dice already 0..1
   const sy = v => v / maxAir;                // air time 0..1
   const sz = v => Math.sqrt(Math.max(0,v) / maxBreak); // break: sqrt-spread 0..1
-  const P = d => [sx(d.dice), sy(d.metrics.air_time), sz(d.metrics.break_prob_any)];
+  const P = d => [sx(hd(d)), sy(d.metrics.air_time), sz(d.metrics.break_prob_any)];
 
   const cam = CAM3D;
   const pj = p => project(p, cam, W, H);
@@ -1459,7 +1471,7 @@ function renderScatter3D() {
   // Axis ticks + labels along the three edges from the origin corner.
   const ticks = [0,0.25,0.5,0.75,1];
   const axisSpec = [
-    {edge:[[0,0,0],[1,0,0]], dim:0, name:"dice", inv:v=>v, fmt:v=>v.toFixed(2)},
+    {edge:[[0,0,0],[1,0,0]], dim:0, name:"hard dice", inv:v=>v, fmt:v=>v.toFixed(2)},
     {edge:[[0,0,0],[0,1,0]], dim:1, name:"air time (s)", inv:v=>v*maxAir, fmt:v=>v.toFixed(1)},
     {edge:[[0,0,0],[0,0,1]], dim:2, name:"break prob", inv:v=>(v*v)*maxBreak, fmt:fmtBreak},
   ];
@@ -1497,7 +1509,7 @@ function renderScatter3D() {
     .on("mouseover",(ev,o)=>{
       tip.style.display="block";
       const m=o.d.metrics;
-      tip.innerHTML = `<div class="t-title">#${o.d.idx} · ${o.d.shape||"?"} · dice ${o.d.dice.toFixed(4)} · ${o.d.status}</div>` +
+      tip.innerHTML = `<div class="t-title">#${o.d.idx} · ${o.d.shape||"?"} · hdice ${hd(o.d).toFixed(4)} (soft ${o.d.dice.toFixed(4)}) · ${o.d.status}</div>` +
         `<div>air-cut time <b>${m.air_time.toFixed(2)} s</b> · total <b>${(m.total_time||0).toFixed(1)} s</b></div>` +
         `<div>break prob (any) <b>${fmtBreak(m.break_prob_any)}</b> · max <b>${fmtBreak(m.break_prob_max)}</b></div>` +
         `<div>${o.d.description||"(no description)"}</div>` +
@@ -1527,11 +1539,11 @@ function renderScatter3D() {
       selectExperiment(o.d);
     });
 
-  // Highlight the Pareto-best (max dice, min air, min break) with a ring.
+  // Highlight the Pareto-best (max hard dice, min air, min break) with a ring.
   const pareto = data[d3.scan(data,(a,b)=>{
-    // "better" = higher dice, lower air, lower break → composite rank
-    const sa = a.dice - a.metrics.air_time/maxAir - a.metrics.break_prob_any/maxBreak;
-    const sb = b.dice - b.metrics.air_time/maxAir - b.metrics.break_prob_any/maxBreak;
+    // "better" = higher hard dice, lower air, lower break → composite rank
+    const sa = hd(a) - a.metrics.air_time/maxAir - a.metrics.break_prob_any/maxBreak;
+    const sb = hd(b) - b.metrics.air_time/maxAir - b.metrics.break_prob_any/maxBreak;
     return sb - sa;
   })];
   if (pareto) {
@@ -1574,8 +1586,8 @@ function selectExperiment(d) {
   card.style.display = "block";
   const isRun = d.idx == null;
   document.getElementById("detail-title").textContent = isRun
-    ? `Run — ${d.name||d.shape||"?"} · dice ${d.dice.toFixed(4)}`
-    : `Experiment #${d.idx} — ${d.shape||"?"} · dice ${d.dice.toFixed(4)} · ${d.status}`;
+    ? `Run — ${d.name||d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)})`
+    : `Experiment #${d.idx} — ${d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)}) · ${d.status}`;
 
   const meta = document.getElementById("meta");
   meta.innerHTML = `
@@ -1590,8 +1602,8 @@ function selectExperiment(d) {
     const f = v => typeof v==="number" ? (Math.abs(v)>=100 ? v.toFixed(1)
       : (v!==0 && Math.abs(v)<1e-3 ? v.toExponential(2) : v.toFixed(4))) : v;
     const rows = [
+      ["hard_dice (final)", d.metrics.hard_dice],
       ["dice (soft)", d.dice],
-      ["hard_dice", d.metrics.hard_dice],
       ["air_time (s)", d.metrics.air_time],
       ["total_time (s)", d.metrics.total_time],
       ["break_prob_any", d.metrics.break_prob_any],
