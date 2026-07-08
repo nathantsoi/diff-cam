@@ -34,8 +34,56 @@
     text-transform:uppercase; letter-spacing:.04em; }
   #scatter { width:100%; height:380px; }
   #bars { width:100%; height:200px; }
-  #detail { display:none; }
+  /* ---- per-batch runs table (replaces the old best-dice-per-shape bar chart) ---- */
+  .batch-table-wrap { width:100%; max-height:380px; overflow:auto; border:1px solid var(--grid);
+    border-radius:8px; }
+  .batch-table { border-collapse:collapse; width:100%; font-size:12px;
+    font-variant-numeric:tabular-nums; }
+  .batch-table thead { position:sticky; top:0; z-index:2; background:var(--panel2); }
+  .batch-table th, .batch-table td { border-bottom:1px solid var(--grid); padding:5px 8px;
+    white-space:nowrap; text-align:right; }
+  .batch-table th { text-align:right; color:var(--muted); font-weight:600; cursor:pointer;
+    user-select:none; position:relative; }
+  .batch-table th:hover { color:var(--ink); }
+  .batch-table th.left, .batch-table td.left { text-align:left; }
+  .batch-table th .sort-arrow { color:var(--accent); font-size:10px; margin-left:3px; }
+  .batch-table tbody tr { cursor:pointer; }
+  .batch-table tbody tr:hover { background:var(--panel2); }
+  .batch-table tbody tr.sel { background:hsla(210,40%,30%,.4); }
+  .batch-table td.best { color:#7ee787; font-weight:600; }
+  .batch-table td.miss { color:var(--muted); }
+  .batch-shape-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
+    margin-right:5px; vertical-align:middle; }
+  /* filter row (second thead row) — per-column value filters */
+  .batch-table th.filter-cell { cursor:default; user-select:text; padding:3px 4px;
+    text-align:right; font-weight:400; }
+  .batch-table th.filter-cell.left { text-align:left; }
+  .batch-table .bf-text, .batch-table .bf-sel { width:100%; max-width:130px; box-sizing:border-box;
+    background:var(--bg); color:var(--ink); border:1px solid var(--grid); border-radius:4px;
+    padding:2px 4px; font-size:11px; }
+  .batch-table .bf-text:focus, .batch-table .bf-sel:focus,
+  .batch-table .bf-range input:focus { outline:none; border-color:var(--accent); }
+  .batch-table .bf-range { display:flex; flex-direction:column; gap:2px; align-items:stretch;
+    min-width:56px; }
+  .batch-table .bf-range input { width:100%; box-sizing:border-box; background:var(--bg);
+    color:var(--ink); border:1px solid var(--grid); border-radius:4px; padding:2px 3px;
+    font-size:10px; text-align:right; }
+  #scatter3d { width:100%; height:440px; touch-action:none; cursor:grab; }
+  #scatter3d:active { cursor:grabbing; }
+  .s3d-hint { color:var(--muted); font-size:11px; margin-top:6px; }
+  .s3d-axis text { fill:var(--muted); font-size:10px; }
+  .s3d-axis line { stroke:var(--grid); stroke-width:1; }
+  .s3d-edge { stroke:var(--grid); stroke-width:1; fill:none; stroke-dasharray:3 3; opacity:.6; }
   #detail .grid { display:grid; grid-template-columns:1.1fr 1fr; gap:18px; }
+  /* Empty-state placeholder: shown when no run is selected. The card stays
+     visible at the top of the dashboard; the viewport grid + downloads hide
+     and a centered prompt takes their place. */
+  #detail.empty .grid, #detail.empty #dl-title, #detail.empty .downloads { display:none; }
+  #detail-empty { display:none; min-height:360px; align-items:center; justify-content:center;
+    text-align:center; color:var(--muted); font-size:14px; line-height:1.6; }
+  #detail.empty #detail-empty { display:flex; }
+  #detail-empty .de-icon { font-size:34px; margin-bottom:10px; opacity:.7; }
+  #detail-empty .de-hint { max-width:560px; }
   .meta dt { color:var(--muted); font-size:12px; margin-top:8px; }
   .meta dd { margin:2px 0 0 0; font-family:"SFMono-Regular",Consolas,monospace; font-size:12px;
     word-break:break-all; }
@@ -187,18 +235,16 @@
 <div class="legend" style="padding:8px 22px;" id="legend"></div>
 
 <main>
-  <div class="card">
-    <h2>Dice over experiments — click a point to inspect its trajectory &amp; artifacts</h2>
-    <svg id="scatter"></svg>
-  </div>
-
-  <div class="card">
-    <h2>Best dice per target shape</h2>
-    <svg id="bars"></svg>
-  </div>
-
-  <div class="card" id="detail">
+  <div class="card empty" id="detail">
     <h2 id="detail-title">Experiment detail</h2>
+    <div id="detail-empty">
+      <div class="de-hint">
+        <div class="de-icon">&#128269;</div>
+        <div>Select a run to inspect its trajectory, metrics, and artifacts here —
+        click a point in the dice scatter, a row in the batch table, or a point in
+        the 3D quality/air/breakage plot below.</div>
+      </div>
+    </div>
     <div class="grid">
       <div class="viewport-wrap">
         <canvas id="voxel-canvas"></canvas>
@@ -252,11 +298,27 @@
         <div class="metrics" id="metrics-box"></div>
       </div>
     </div>
+    <h2 id="dl-title" style="margin-top:16px;">Downloads</h2>
+    <div class="downloads" id="downloads"></div>
   </div>
 
-  <div class="card" id="downloads-card">
-    <h2 id="dl-title">Downloads</h2>
-    <div class="downloads" id="downloads"></div>
+  <div class="card">
+    <h2>Best per batch — one column per evaluation measure, click a header to sort</h2>
+    <div class="batch-table-wrap">
+      <table id="batch-table" class="batch-table"></table>
+    </div>
+    <div class="hint" style="margin-top:6px;">rows = all runs in the active batch (or all experiments when no batch is selected) · bold = best in column · hover a header for its description · use the row under the headers to filter by value · <a href="#" id="bf-clear" style="color:var(--accent)">clear filters</a> · click a row to inspect its trajectory &amp; artifacts</div>
+  </div>
+
+  <div class="card">
+    <h2>Dice over experiments — click a point to inspect its trajectory &amp; artifacts</h2>
+    <svg id="scatter"></svg>
+  </div>
+
+  <div class="card">
+    <h2>Quality vs air-cut time vs tool-breakage probability — drag to orbit</h2>
+    <svg id="scatter3d"></svg>
+    <div class="s3d-hint">x = dice (higher better) · y = air-cut time s (lower better) · z = break prob (lower better) · points colored by shape · click a point to inspect its run</div>
   </div>
 </main>
 </section>
@@ -283,6 +345,17 @@ const BASE = "../../../../";
 const SHAPE_COLOR = {sphere:"#1f77b4", cylinder:"#ff7f0e", box:"#2ca02c", pyramid:"#d62728"};
 const STATUS_OPACITY = {keep:0.92, discard:0.45, crash:0.6};
 let DATA = null, selected = null;
+
+// Headline metric = HARD dice (the deployable sharp-carve dice; what the part
+// actually looks like). Soft dice (d.dice, the differentiable sigmoid-blurred
+// proxy) is kept as a secondary column/row — it is inflated by blur and masks
+// runs that don't boolean-cut (jul6 baselines scored soft 0.91 while removing
+// 0 voxels; hard dice == no-cut baseline). Fall back to soft dice only for the
+// few legacy runs / batch-API runs that carry no hard_dice in their metrics.
+const hd = d => {
+  const v = d.metrics && d.metrics.hard_dice;
+  return (typeof v === "number" && !Number.isNaN(v)) ? v : d.dice;
+};
 // Discovered experiment batch directories under runs/<name>/ — populated from
 // /__api/batches so new branches appear without code changes.
 let BATCHES = [];
@@ -302,12 +375,12 @@ function updateStats() {
   const qp = new URLSearchParams(location.search);
   const batch = qp.get("batch") || "";
   if (batch && CURRENT_BATCH_RUNS.length > 0) {
-    const bestDice = d3.max(CURRENT_BATCH_RUNS, d => d.dice || 0);
-    el.innerHTML = `<b>${CURRENT_BATCH_RUNS.length}</b> runs in <b>${batch}</b> · best dice <b>${bestDice.toFixed(4)}</b>`;
+    const bestDice = d3.max(CURRENT_BATCH_RUNS, d => hd(d) || 0);
+    el.innerHTML = `<b>${CURRENT_BATCH_RUNS.length}</b> runs in <b>${batch}</b> · best hard dice <b>${bestDice.toFixed(4)}</b>`;
   } else if (DATA && DATA.experiments) {
     el.innerHTML =
       `<b>${DATA.n_experiments}</b> experiments · <b>${DATA.n_matched}</b> with artifacts · ` +
-      `overall best <b>${d3.max(DATA.experiments, d => d.dice).toFixed(4)}</b>`;
+      `overall best hard dice <b>${d3.max(DATA.experiments, d => hd(d)).toFixed(4)}</b>`;
   } else {
     el.innerHTML = `<span class="hint">Loading…</span>`;
   }
@@ -319,7 +392,8 @@ d3.json("data.json").then(raw => {
   buildFilters();
   updateStats();
   renderScatter();
-  renderBars();
+  renderBatchTable();
+  renderScatter3D();
 }).catch(err => {
   // data.json is the autoresearch experiment index; it may be absent or stale
   // when the page is used just to inspect an arbitrary run. Fall back to an
@@ -331,9 +405,11 @@ d3.json("data.json").then(raw => {
   buildLegend();
   buildFilters();
   renderScatter();
-  renderBars();
+  renderBatchTable();
+  renderScatter3D();
 }).finally(() => {
   initViewport();
+  initScatter3DControls();
   renderDownloads(null);
   // Populate the batch selector from the API (auto-discovers runs/<branch>/),
   // then if there's a ?batch= in URL, fetch that branch's runs and render.
@@ -350,7 +426,8 @@ d3.json("data.json").then(raw => {
       await fetchBatchRuns(batch);
       updateStats();
       renderScatter();
-      renderBars();
+      renderBatchTable();
+      renderScatter3D();
     }
   });
 });
@@ -404,7 +481,10 @@ async function fetchBatchRuns(batch) {
         ...run,
         status: matched ? matched.status : "arbitrary",
         description: matched ? matched.description : run.name,
-        metrics: matched ? matched.metrics : null,
+        // list_runs now ships metrics for every viewable run, so prefer the
+        // run's own metrics; fall back to the matched experiment's (they come
+        // from the same metrics.json) and only then to null.
+        metrics: run.metrics || (matched ? matched.metrics : null),
         stl: matched ? matched.stl : {},
         gcode: matched ? matched.gcode : null,
         command: matched ? matched.command : "",
@@ -439,7 +519,7 @@ function initRunPicker(){
     
     const populateOptions = (list) => {
       sel.innerHTML = `<option value="">(arbitrary run…)</option>` + list.map(r =>
-        `<option value="${r.run_dir}">${r.name} · ${r.shape||"?"} · dice ${(r.dice||0).toFixed(4)}</option>`
+        `<option value="${r.run_dir}">${r.name} · ${r.shape||"?"} · hdice ${(hd(r)||0).toFixed(4)}</option>`
       ).join("");
     };
 
@@ -681,7 +761,9 @@ function triggerDownload(e, url, filename) {
 function renderDownloads(d){
   const dl = document.getElementById("downloads");
   const title = document.getElementById("dl-title");
-  const card = document.getElementById("downloads-card");
+  // Downloads live inside the detail card now (moved in from a standalone
+  // bottom card), so append the on-demand video region to #detail.
+  const card = document.getElementById("detail");
   let html = "";
   if (d && d.run_dir){
     // Descriptive, run-unique download filenames. Every run's exported meshes
@@ -773,8 +855,8 @@ function buildFilters() {
   const sel = document.getElementById("shape-filter");
   sel.innerHTML = `<option value="all">all</option>` +
     Object.keys(SHAPE_COLOR).map(s=>`<option value="${s}">${s}</option>`).join("");
-  sel.onchange = ()=>{ renderScatter(); renderBars(); };
-  document.getElementById("status-filter").onchange = renderScatter;
+  sel.onchange = ()=>{ renderScatter(); renderBatchTable(); renderScatter3D(); };
+  document.getElementById("status-filter").onchange = ()=>{ renderScatter(); renderScatter3D(); };
   // Batch selector: re-render on change, propagate to URL so it's shareable,
   // and fetch the full run list for that batch.
   const batchSel = document.getElementById("batch-selector");
@@ -788,18 +870,25 @@ function buildFilters() {
       await fetchBatchRuns(batchSel.value);
       updateStats();
       renderScatter();
-      renderBars();
+      renderBatchTable();
+      renderScatter3D();
     };
   }
   document.getElementById("reset-zoom").onclick = ()=>{
     selected = null;
     RUN_VIEW = false;
-    document.getElementById("detail").style.display = "none";
+    // Restore the detail card's empty-state placeholder (card stays visible at
+    // the top; the viewport grid + downloads hide until a run is picked again).
+    const card = document.getElementById("detail");
+    card.classList.add("empty");
+    document.getElementById("detail-title").textContent = "Experiment detail";
+    renderDownloads(null);
     const rp = document.getElementById("run-picker");
     if (rp) rp.value = "";
     // Also clear batch selector to restore the full view.
     if (batchSel) { batchSel.value = ""; }
     renderScatter();
+    renderScatter3D();
   };
 }
 
@@ -835,10 +924,10 @@ function renderScatter() {
   const data = filtered();
   const xs = data.map(d=>d.idx);
   const x = d3.scaleLinear().domain([d3.min(xs)-1, d3.max(xs)+1]).range([m.l, W-m.r]);
-  const y = d3.scaleLinear().domain([0, d3.max(data,d=>d.dice)*1.15]).range([H-m.b, m.t]);
+  const y = d3.scaleLinear().domain([0, d3.max(data,d=>hd(d))*1.15]).range([H-m.b, m.t]);
 
   let best=-1, run=[];
-  data.forEach(d=>{ best=Math.max(best,d.dice); run.push(best); });
+  data.forEach(d=>{ best=Math.max(best,hd(d)); run.push(best); });
   const line = d3.line().x((d,i)=>x(d.idx)).y((d,i)=>y(run[i]));
   svg.append("path").datum(data).attr("d", line).attr("fill","none")
     .attr("stroke","#e5534b").attr("stroke-width",1.6).attr("stroke-dasharray","5 4").attr("opacity",.85);
@@ -852,11 +941,11 @@ function renderScatter() {
   svg.append("text").attr("x",W/2).attr("y",H-4).attr("text-anchor","middle")
     .attr("fill","var(--muted)").attr("font-size",12).text("experiment # (chronological run order)");
   svg.append("text").attr("transform",`translate(14,${H/2}) rotate(-90)`)
-    .attr("text-anchor","middle").attr("fill","var(--muted)").attr("font-size",12).text("dice");
+    .attr("text-anchor","middle").attr("fill","var(--muted)").attr("font-size",12).text("hard dice");
 
   const tip = document.getElementById("tooltip");
   svg.append("g").selectAll("circle").data(data).join("circle")
-    .attr("cx", d=>x(d.idx)).attr("cy", d=>y(d.dice)).attr("r", d=>d.status==="keep"?4.5:3.2)
+    .attr("cx", d=>x(d.idx)).attr("cy", d=>y(hd(d))).attr("r", d=>d.status==="keep"?4.5:3.2)
     .attr("fill", d=>SHAPE_COLOR[d.shape]||"#888")
     .attr("opacity", d=>STATUS_OPACITY[d.status]??0.5)
     .attr("stroke", d=>selected && (d.idx===selected.idx || (d.run_dir && d.run_dir===selected.run_dir)) ? "#fff" : "none")
@@ -864,7 +953,9 @@ function renderScatter() {
     .style("cursor","pointer")
     .on("mouseover",(ev,d)=>{
       tip.style.display="block";
-      tip.innerHTML = `<div class="t-title">#${d.idx} · ${d.shape||"?"} · dice ${d.dice.toFixed(4)} · ${d.status}</div>` +
+      const m=d.metrics||{};
+      tip.innerHTML = `<div class="t-title">#${d.idx} · ${d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)}) · ${d.status}</div>` +
+        (m.air_time!=null ? `<div>air ${m.air_time.toFixed(2)} s · break ${fmtBreak(m.break_prob_any)}</div>` : ``) +
         `<div>${d.description||"(no description)"}</div>` +
         (d.run_dir ? `<div class="t-cmd">▶ click to view trajectory &amp; downloads</div>` :
                      `<div class="t-cmd">no run artifacts (unmatched)</div>`);
@@ -897,20 +988,21 @@ function renderScatter() {
       selectExperiment(d);
     });
 
-  const bi = data[d3.scan(data, (a,b)=>b.dice-a.dice)];
+  const bi = data[d3.scan(data, (a,b)=>hd(b)-hd(a))];
   if (bi) {
-    svg.append("text").attr("x", x(bi.idx)).attr("y", y(bi.dice)-9)
+    svg.append("text").attr("x", x(bi.idx)).attr("y", y(hd(bi))-9)
       .attr("text-anchor","middle").attr("fill","#e5534b").attr("font-size",11).attr("font-weight","bold")
-      .text(`best ${bi.dice.toFixed(4)}`);
+      .text(`best ${hd(bi).toFixed(4)}`);
   }
 
   // Draw comparison dashed reference line for arbitrary runs
-  if (selected && selected.idx === null && !Number.isNaN(selected.dice)) {
+  if (selected && selected.idx === null && !Number.isNaN(hd(selected))) {
+    const hsel = hd(selected);
     svg.append("line")
       .attr("x1", m.l)
       .attr("x2", W - m.r)
-      .attr("y1", y(selected.dice))
-      .attr("y2", y(selected.dice))
+      .attr("y1", y(hsel))
+      .attr("y2", y(hsel))
       .attr("stroke", "#ffd166")
       .attr("stroke-dasharray", "4 4")
       .attr("stroke-width", 1.5)
@@ -918,58 +1010,584 @@ function renderScatter() {
 
     svg.append("text")
       .attr("x", W - m.r - 6)
-      .attr("y", y(selected.dice) - 6)
+      .attr("y", y(hsel) - 6)
       .attr("text-anchor", "end")
       .attr("fill", "#ffd166")
       .attr("font-size", 11)
       .attr("font-weight", "bold")
-      .text(`selected run: ${selected.dice.toFixed(4)}`);
+      .text(`selected run: ${hsel.toFixed(4)}`);
   }
 }
 
-// ---------- per-shape bars ----------
-function renderBars() {
-  const svg = d3.select("#bars");
-  svg.selectAll("*").remove();
-  const W = svg.node().clientWidth, H=200, m={t:14,r:14,b:34,l:44};
-  const sh = document.getElementById("shape-filter").value;
-  const data = DATA.experiments.filter(d=>d.status==="keep" && (sh==="all"||d.shape===sh));
-  const best = {};
-  data.forEach(d=>{ best[d.shape]=Math.max(best[d.shape]??0, d.dice); });
-  const rows = Object.entries(best).sort((a,b)=>b[1]-a[1]);
-  if (!rows.length) return;
-  const x = d3.scaleLinear().domain([0, d3.max(rows,r=>r[1])*1.18]).range([m.l, W-m.r]);
-  const y = d3.scaleBand().domain(rows.map(r=>r[0])).range([m.t, H-m.b]).padding(.4);
-  svg.append("g").attr("transform",`translate(${m.l},0)`)
-    .call(d3.axisLeft(y)).selectAll("text").attr("fill","var(--muted)");
-  svg.append("g").attr("transform",`translate(0,${H-m.b})`)
-    .call(d3.axisBottom(x).ticks(5,".2f")).selectAll("text").attr("fill","var(--muted)");
-  svg.selectAll(".domain,line,path").attr("stroke","var(--grid)");
-  rows.forEach(([s,v])=>{
-    svg.append("rect").attr("x",m.l).attr("y",y(s)).attr("width",x(v)-m.l).attr("height",y.bandwidth())
-      .attr("fill",SHAPE_COLOR[s]).attr("opacity",.85).attr("rx",3)
-      .style("cursor","pointer").on("click",()=>{ selectBestFor(s); });
-    svg.append("text").attr("x",x(v)+6).attr("y",y(s)+y.bandwidth()/2+4)
-      .attr("fill","var(--ink)").attr("font-size",12).attr("font-weight","bold").text(v.toFixed(4));
+// ---------- per-batch runs table (replaces the old per-shape bar chart) ----------
+// One row per run in the active view (CURRENT_BATCH_RUNS when a batch is
+// selected, else DATA.experiments), one column per evaluation measure. Headers
+// are clickable to sort (hover for a description tooltip) and each column has a
+// value filter in the row beneath the headers; the best value in each numeric
+// column is highlighted.
+let batchSort = {key:"hard_dice", dir:-1};  // dir: -1 = desc, 1 = asc
+// Per-column filter state. text/select columns store a string; range columns
+// store {min:number|null, max:number|null}. Persisted across re-renders so
+// external triggers (batch switch, selection, global shape filter) don't drop
+// the user's in-progress filters.
+let batchFilters = {};
+
+// Parse a CLI lever's value from a run's command string. argparse takes the
+// LAST occurrence of a repeated flag (the run commands sometimes override an
+// earlier flag, e.g. `--init_mode raster_fine ... --init_mode random`), so we
+// scan every match and return the final one. Returns null when the flag is
+// absent or the run has no command (arbitrary / unmatched runs show "—").
+function cmdFlag(d, flag){
+  if (!d || !d.command) return null;
+  const re = new RegExp("--" + flag + "\\s+(\\S+)", "g");
+  let m, last = null;
+  while ((m = re.exec(d.command)) !== null) last = m[1];
+  return last;
+}
+// Numeric lever value (parseFloat of cmdFlag). When the flag is OMITTED from an
+// otherwise-present command, return `def` (the code default) so the cell shows
+// what actually ran rather than "—". Returns null only when the run has no
+// command at all (arbitrary / unmatched runs).
+function cmdFlagNum(d, flag, def){
+  if (!d || !d.command) return null;
+  const s = cmdFlag(d, flag);
+  if (s == null) return def !== undefined ? def : null;
+  const v = parseFloat(s);
+  return Number.isFinite(v) ? v : (def !== undefined ? def : null);
+}
+// String lever value with the same omitted->default fallback (e.g. init_mode).
+function cmdFlagDef(d, flag, def){
+  if (!d || !d.command) return null;
+  const s = cmdFlag(d, flag);
+  return s == null ? (def !== undefined ? def : null) : s;
+}
+// --stock_size_in takes three space-separated inch values; compact to "X×Y×Z"
+// (last occurrence wins). e.g. "2.0 1.0 1.0" -> "2×1×1". Defaults to 1×1×1.
+function cmdStock(d){
+  if (!d || !d.command) return null;
+  const re = /--stock_size_in\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/g;
+  let m, last = null;
+  while ((m = re.exec(d.command)) !== null)
+    last = `${trimLevNum(m[1])}×${trimLevNum(m[2])}×${trimLevNum(m[3])}`;
+  return last !== null ? last : "1×1×1";
+}
+// Strip a numeric string to its most compact form ("1.0"->"1", "0.50"->"0.5").
+function trimLevNum(s){ const v = parseFloat(s); return Number.isFinite(v) ? ""+v : s; }
+// Format a lever value: null/empty -> "—"; numbers compact (drop trailing
+// zeros, keep tiny ones like 1e-3 readable); strings verbatim.
+function fmtLev(v){
+  if (v==null || v==="") return "—";
+  if (typeof v !== "number") return ""+v;
+  if (Number.isNaN(v)) return "—";
+  if (v === 0) return "0";
+  const r = parseFloat(v.toFixed(4));
+  return Number.isFinite(r) && r !== 0 ? ""+r : v.toExponential(1);
+}
+
+// Column spec. `better` = +1 (higher better) / -1 (lower better) drives sort
+// default direction + best-in-column highlighting. `filter` = "text" (substring),
+// "select" (distinct-value dropdown), or "range" (min/max). shape/status have no
+// table-local filter because the page-header dropdowns already filter every view
+// by them; their tooltip points there.
+const BATCH_COLS = [
+  {key:"idx",   hdr:"run",    left:true, filter:"text",
+   tip:"Positional index of the run in chronological (oldest-first) order within the active view. '—' for runs outside the autoresearch experiment matrix.",
+   get:d=>d.idx, fmt:v=>v==null?"—":""+v},
+  {key:"name",  hdr:"name",   left:true, filter:"text",
+   tip:"Run directory name (timestamped). Type here to filter by substring.",
+   get:d=>d.name||d.run_dir, fmt:v=>v||"—"},
+  {key:"shape", hdr:"shape",  left:true,
+   tip:"Target shape carved by this run. Filter with the 'shape' dropdown in the page header (it applies to every view).",
+   get:d=>d.shape, fmt:v=>v||"—"},
+  {key:"status",hdr:"status", left:true,
+   tip:"autoresearch verdict: keep / discard / crash. 'arbitrary' = run not matched to a results.tsv row. Filter with the 'status' dropdown in the page header.",
+   get:d=>d.status, fmt:v=>v||"—"},
+  {key:"seed",  hdr:"seed",   filter:"select",
+   tip:"Random seed used for training.",
+   get:d=>d.seed, fmt:v=>v==null?"—":""+v},
+  {key:"iters", hdr:"iters",  filter:"select",
+   tip:"Number of optimization steps trained.",
+   get:d=>d.iters, fmt:v=>v==null?"—":""+v},
+  // ---- input levers (parsed from the run command; argparse last-wins) ----
+  {key:"stock", hdr:"stock",  filter:"select",
+   tip:"Stock box size in inches (X×Y×Z). Set via --stock-size-in. The 1×1×1 default vs 2×1×1 tests generality across stock sizes.",
+   get:d=>cmdStock(d), fmt:v=>v||"—"},
+  {key:"lr",    hdr:"lr",     filter:"range",
+   tip:"Optimizer learning rate (--learning-rate). The single biggest lever: 1e-3 settles into the carving basin; the old 5e-3 default overshoots.",
+   get:d=>cmdFlagNum(d,"learning_rate",5e-3), fmt:v=>fmtLev(v)},
+  {key:"dt",    hdr:"dt",     filter:"range",
+   tip:"Time step per trajectory step (--dt). Foundational: 0.45 ≈ 1 voxel/step so the tool covers the part; low dt caps dice ~0.56.",
+   get:d=>cmdFlagNum(d,"dt",0.45), fmt:v=>fmtLev(v)},
+  {key:"gc",    hdr:"gc",     filter:"range",
+   tip:"Gradient clip (--grad-clip). 0.5 stabilizes the dice peak for best-checkpoint capture.",
+   get:d=>cmdFlagNum(d,"grad_clip",0.5), fmt:v=>fmtLev(v)},
+  {key:"init",  hdr:"init",   filter:"select",
+   tip:"Trajectory initialization mode (--init-mode). random vs raster_fine (clipping-aware boustrophedon).",
+   get:d=>cmdFlagDef(d,"init_mode","random"), fmt:v=>v||"—"},
+  {key:"maxstep", hdr:"mstep", filter:"select",
+   tip:"Max trajectory steps (--max-steps). 128 default; 256 for cylinder (coverage).",
+   get:d=>cmdFlagNum(d,"max_steps",128), fmt:v=>fmtLev(v)},
+  {key:"wlen",  hdr:"w_len",  filter:"range",
+   tip:"Path-length / minimal-motion penalty weight (--w-len). Fixes trailing-drift on cylinder; 0 elsewhere.",
+   get:d=>cmdFlagNum(d,"w_len",0), fmt:v=>fmtLev(v)},
+  {key:"w_airt", hdr:"w_airt", filter:"range",
+   tip:"Differentiable air-CUT-TIME loss weight (--w-air-time). The headline lever: 1.0 on sphere is a dice-NEUTRAL -58% air win; ≤1e-2 is a no-op; pyramid air is structural (trades dice).",
+   get:d=>cmdFlagNum(d,"w_air_time",1e-3), fmt:v=>fmtLev(v)},
+  {key:"w_time", hdr:"w_time", filter:"range",
+   tip:"Total toolpath-time loss weight (--w-time). Pyramid w_time=0.1 trades -0.020 dice for -10% total time; not dice-neutral. Note the 1e-3 code default leaks if not set explicitly.",
+   get:d=>cmdFlagNum(d,"w_time",1e-3), fmt:v=>fmtLev(v)},
+  {key:"w_break", hdr:"w_break", filter:"range",
+   tip:"Tool-breakage soft loss weight (--w-break). 0 in these runs (breakage is non-binding at 0.5mm voxels / 3.175mm tool).",
+   get:d=>cmdFlagNum(d,"w_break",1e-3), fmt:v=>fmtLev(v)},
+  {key:"bwa",   hdr:"b_air",  filter:"range",
+   tip:"Best-checkpoint weight on air-time (--best-w-airtime). Alone is NOT a robust win (seed-1 luck); on top of w_air_time=1.0 it picks the lowest-air checkpoint → air -86%. Code default 0.05 if omitted.",
+   get:d=>cmdFlagNum(d,"best_w_airtime",0.05), fmt:v=>fmtLev(v)},
+  {key:"bwt",   hdr:"b_time", filter:"range",
+   tip:"Best-checkpoint weight on total-time (--best-w-time). NO-OP: total_time is fixed by necessary cutting, not selectable away at equal dice.",
+   get:d=>cmdFlagNum(d,"best_w_time",0.05), fmt:v=>fmtLev(v)},
+  {key:"fref",  hdr:"f_ref",  filter:"range",
+   tip:"Breakage-model reference force (--f-ref). Default 50 gives fcut_max=0 (model doesn't fire); 5 (10× lower) makes it fire for nonzero reporting. Dice-neutral.",
+   get:d=>cmdFlagNum(d,"f_ref",50), fmt:v=>fmtLev(v)},
+  {key:"fmax",  hdr:"f_max",  filter:"range",
+   tip:"Breakage-model max force (--f-max). Lowered 10× to 10 (from 100) alongside f_ref for calibration.",
+   get:d=>cmdFlagNum(d,"f_max",100), fmt:v=>fmtLev(v)},
+  // ---- output metrics ----
+  {key:"hard_dice", hdr:"hdice", better:+1, filter:"range",
+   tip:"HARD Dice (the final/deployable metric): voxelized carved stock vs voxelized target at the final trajectory, sharp boolean carve. Stricter than soft dice — it equals the no-cut baseline when the tool removes nothing (0–1, higher better).",
+   get:d=>d.metrics&&d.metrics.hard_dice, fmt:v=>fmtNum(v,4)},
+  {key:"dice",  hdr:"dice*",  better:+1, filter:"range",
+   tip:"SOFT Dice (secondary, differentiable proxy): sigmoid-blurred carve vs target. INFLATED by blur — a run can score soft 0.91 while removing 0 voxels, so it masks the soft-collapse. Trust hdice, not this (0–1, higher better).",
+   get:d=>d.dice, fmt:v=>fmtNum(v,4)},
+  {key:"air_time", hdr:"air s", better:-1, filter:"range",
+   tip:"Estimated air-cut time in seconds — tool moving while not cutting stock (lower better).",
+   get:d=>d.metrics&&d.metrics.air_time, fmt:v=>fmtNum(v,2)},
+  {key:"total_time", hdr:"total s", better:-1, filter:"range",
+   tip:"Estimated total toolpath time in seconds (lower better).",
+   get:d=>d.metrics&&d.metrics.total_time, fmt:v=>fmtNum(v,2)},
+  {key:"air_cut_fraction", hdr:"air frac", better:-1, filter:"range",
+   tip:"Fraction of the swept path that is air-cut, 0–1 (lower better).",
+   get:d=>d.metrics&&d.metrics.air_cut_fraction, fmt:v=>fmtNum(v,3)},
+  {key:"break_prob_any", hdr:"break any", better:-1, filter:"range",
+   tip:"Probability that any tool step exceeds the breakage threshold over the whole run (lower better).",
+   get:d=>d.metrics&&d.metrics.break_prob_any, fmt:v=>v==null?"—":fmtBreak(v)},
+  {key:"break_prob_max", hdr:"break max", better:-1, filter:"range",
+   tip:"Max single-step tool-breakage probability over the run (lower better).",
+   get:d=>d.metrics&&d.metrics.break_prob_max, fmt:v=>v==null?"—":fmtBreak(v)},
+  {key:"asd",   hdr:"asd",    better:-1, filter:"range",
+   tip:"Average surface distance between carved stock and target, in voxels (lower better).",
+   get:d=>d.metrics&&d.metrics.asd, fmt:v=>fmtNum(v,3)},
+  {key:"hd95",  hdr:"hd95",   better:-1, filter:"range",
+   tip:"95th-percentile Hausdorff distance between carved stock and target, in voxels (lower better).",
+   get:d=>d.metrics&&d.metrics.hd95, fmt:v=>fmtNum(v,3)},
+  {key:"loss",  hdr:"loss",   better:-1, filter:"range",
+   tip:"Final training loss (lower better).",
+   get:d=>d.metrics&&d.metrics.loss, fmt:v=>fmtNum(v,4)},
+  {key:"residual", hdr:"resid", better:-1, filter:"range",
+   tip:"Voxel count of uncarved target / leftover stock (lower better).",
+   get:d=>d.metrics&&d.metrics.residual, fmt:v=>fmtNum(v,1)},
+  {key:"gouge", hdr:"gouge",  better:-1, filter:"range",
+   tip:"Volume carved below the target surface — gouging into the part (0 ideal, lower better).",
+   get:d=>d.metrics&&d.metrics.gouge, fmt:v=>fmtNum(v,2)},
+  {key:"holder_overlap", hdr:"holder", better:-1, filter:"range",
+   tip:"Toolholder penetration into the stock volume (0 ideal, lower better).",
+   get:d=>d.metrics&&d.metrics.holder_overlap, fmt:v=>fmtNum(v,2)},
+  {key:"training_seconds", hdr:"train s", better:-1, filter:"range",
+   tip:"Wall-clock training time in seconds (lower better).",
+   get:d=>d.metrics&&d.metrics.training_seconds, fmt:v=>fmtNum(v,1)},
+];
+
+// Numeric formatter shared with the detail metrics box: tight for small
+// magnitudes, exponential for tiny non-zero values, plain for large ones.
+function fmtNum(v, p){
+  if (v==null || v==="" || Number.isNaN(v)) return "—";
+  if (typeof v !== "number") return ""+v;
+  if (v!==0 && Math.abs(v) < 1e-3) return v.toExponential(1);
+  return Math.abs(v) >= 100 ? v.toFixed(1) : v.toFixed(p);
+}
+// Escape a string for use inside an HTML attribute (title=, value=, option value).
+function escAttr(s){ return String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+// Parse a filter input into a number, or null when blank/invalid.
+function parseNum(s){ const v = parseFloat(s); return Number.isFinite(v) ? v : null; }
+
+// Distinct non-null values a column takes over the current base set (filtered()),
+// sorted ascending — used to populate the "select" filter dropdowns.
+function batchDistinct(col){
+  const vals = new Set();
+  for (const d of filtered()){
+    const v = col.get(d);
+    if (v==null || v==="") continue;
+    vals.add(v);
+  }
+  const arr = [...vals];
+  arr.sort((a,b)=> typeof a==="number" && typeof b==="number" ? a-b : String(a).localeCompare(String(b)));
+  return arr;
+}
+
+// The base set (filtered()) narrowed by the table's per-column filters. Filters
+// compose with the page-header shape/status/batch controls (AND).
+function batchFiltered(){
+  return filtered().filter(d => {
+    for (const col of BATCH_COLS){
+      if (!col.filter) continue;
+      const f = batchFilters[col.key];
+      const v = col.get(d);
+      if (col.filter === "text"){
+        if (!f) continue;
+        if (v==null || !String(v).toLowerCase().includes(String(f).toLowerCase())) return false;
+      } else if (col.filter === "select"){
+        if (!f) continue;
+        if (v==null || String(v) !== String(f)) return false;
+      } else if (col.filter === "range"){
+        const min = f ? f.min : null, max = f ? f.max : null;
+        if (min==null && max==null) continue;
+        if (v==null || typeof v !== "number") return false;
+        if (min!=null && v < min) return false;
+        if (max!=null && v > max) return false;
+      }
+    }
+    return true;
   });
 }
 
-function selectBestFor(shape) {
-  const cand = DATA.experiments.filter(d=>d.shape===shape && d.status==="keep" && d.run_dir);
-  if (!cand.length) return;
-  selectExperiment(cand[d3.scan(cand,(a,b)=>b.dice-a.dice)]);
+// Build the table's thead: row 1 = sortable headers (with title tooltips + sort
+// arrows), row 2 = per-column filter controls. Called on full re-renders; the
+// filter inputs are restored from batchFilters so selections survive.
+function buildBatchHeader(tbl){
+  const arrow = c => c.key === batchSort.key
+    ? `<span class="sort-arrow">${batchSort.dir < 0 ? "▼" : "▲"}</span>` : "";
+  let html = `<thead><tr>`;
+  for (const c of BATCH_COLS){
+    html += `<th class="${c.left?"left":""}" data-key="${c.key}" title="${escAttr(c.tip||"")}">${c.hdr}${arrow(c)}</th>`;
+  }
+  html += `</tr><tr class="filter-row">`;
+  for (const c of BATCH_COLS){
+    html += `<th class="filter-cell ${c.left?"left":""}" data-key="${c.key}">${filterCellHtml(c)}</th>`;
+  }
+  html += `</tr></thead>`;
+  tbl.innerHTML = html;
+
+  // Sort on header click: same column toggles direction; a new column resets to
+  // its natural direction (desc for higher-better, asc otherwise).
+  tbl.querySelectorAll("thead tr:first-child th").forEach(th => {
+    th.onclick = () => {
+      const key = th.dataset.key;
+      if (key === batchSort.key) batchSort.dir = -batchSort.dir;
+      else { batchSort.key = key; batchSort.dir = BATCH_COLS.find(c=>c.key===key)?.better > 0 ? -1 : 1; }
+      renderBatchTable();   // refresh arrows (click — no text input focus to lose)
+    };
+  });
+
+  // Filter input/select → update state, re-render body only (NOT the header) so
+  // typing in a text field doesn't drop focus. Range inputs read both min & max
+  // from their shared cell so each keystroke sees the other bound.
+  tbl.querySelectorAll(".filter-cell input, .filter-cell select").forEach(el => {
+    const key = el.dataset.key;
+    const col = BATCH_COLS.find(c => c.key === key);
+    if (!col) return;
+    const ev = el.tagName === "SELECT" ? "change" : "input";
+    el.addEventListener(ev, () => {
+      if (col.filter === "range"){
+        const cell = el.closest(".filter-cell");
+        const minEl = cell.querySelector(".bf-min"), maxEl = cell.querySelector(".bf-max");
+        batchFilters[key] = { min: parseNum(minEl.value), max: parseNum(maxEl.value) };
+      } else {
+        batchFilters[key] = el.value;
+      }
+      renderBatchBody();
+    });
+  });
+
+  // "clear filters" link under the table.
+  const clr = document.getElementById("bf-clear");
+  if (clr) clr.onclick = (e) => { e.preventDefault(); batchFilters = {}; renderBatchTable(); };
+}
+
+// HTML for one column's filter control, restored from batchFilters.
+function filterCellHtml(c){
+  if (!c.filter) return "";
+  const f = batchFilters[c.key];
+  if (c.filter === "text"){
+    return `<input type="text" class="bf-text" data-key="${c.key}" placeholder="filter…" value="${escAttr(f||"")}">`;
+  }
+  if (c.filter === "select"){
+    const cur = f || "";
+    const opts = batchDistinct(c).map(v => {
+      const vs = String(v);
+      return `<option value="${escAttr(vs)}" ${vs===cur?"selected":""}>${escAttr(vs)}</option>`;
+    }).join("");
+    return `<select class="bf-sel" data-key="${c.key}"><option value="">all</option>${opts}</select>`;
+  }
+  if (c.filter === "range"){
+    const min = f ? f.min : null, max = f ? f.max : null;
+    return `<div class="bf-range">` +
+      `<input type="number" class="bf-min" data-key="${c.key}" placeholder="min" value="${min!=null?min:""}">` +
+      `<input type="number" class="bf-max" data-key="${c.key}" placeholder="max" value="${max!=null?max:""}">` +
+      `</div>`;
+  }
+  return "";
+}
+
+// Re-render only the body (rows). Safe to call rapidly from filter input events
+// without disturbing the header's filter controls or their focus.
+function renderBatchBody(){
+  const tbl = document.getElementById("batch-table");
+  if (!tbl) return;
+  tbl.querySelectorAll("tbody").forEach(tb => tb.remove());
+  const data = batchFiltered();
+
+  // Best-in-column over the visible (filtered) set, so the highlight tracks what
+  // the user is currently looking at rather than the whole batch.
+  const bestOf = {};
+  for (const c of BATCH_COLS){
+    if (!c.better) continue;
+    let best = null;
+    for (const d of data){
+      const v = c.get(d);
+      if (v==null || v==="" || (typeof v==="number" && Number.isNaN(v))) continue;
+      if (best === null || (c.better > 0 ? v > best : v < best)) best = v;
+    }
+    bestOf[c.key] = best;
+  }
+
+  // Sort the filtered set by the active column (nulls last both directions).
+  const col = BATCH_COLS.find(c => c.key === batchSort.key) || BATCH_COLS.find(c => c.key === "hard_dice");
+  const sorted = data.slice().sort((a,b) => {
+    const av = col.get(a), bv = col.get(b);
+    const an = av==null || av==="" || (typeof av==="number" && Number.isNaN(av));
+    const bn = bv==null || bv==="" || (typeof bv==="number" && Number.isNaN(bv));
+    if (an && bn) return 0;
+    if (an) return 1;
+    if (bn) return -1;
+    if (typeof av === "number" && typeof bv === "number") return (av - bv) * batchSort.dir;
+    return String(av).localeCompare(String(bv)) * batchSort.dir;
+  });
+
+  const tbody = document.createElement("tbody");
+  if (!sorted.length){
+    tbody.innerHTML = `<tr><td class="left" style="text-align:left;padding:10px;">no runs match the current filters</td></tr>`;
+    tbl.appendChild(tbody);
+    return;
+  }
+  sorted.forEach(d => {
+    const tr = document.createElement("tr");
+    if (selected && (d.idx===selected.idx || (d.run_dir && d.run_dir===selected.run_dir))) tr.className = "sel";
+    for (const c of BATCH_COLS){
+      const v = c.get(d);
+      const td = document.createElement("td");
+      if (c.left) td.className = "left";
+      // Shape column gets a colored dot prefix matching the scatter/legend.
+      td.innerHTML = c.key === "shape" && d.shape && SHAPE_COLOR[d.shape]
+        ? `<span class="batch-shape-dot" style="background:${SHAPE_COLOR[d.shape]}"></span>${c.fmt(v)}`
+        : c.fmt(v);
+      // Highlight the best-in-column value (ties both highlight).
+      if (c.better && bestOf[c.key] != null && v === bestOf[c.key]) td.classList.add("best");
+      tr.appendChild(td);
+    }
+    tr.onclick = () => selectRunRow(d);
+    tbody.appendChild(tr);
+  });
+  tbl.appendChild(tbody);
+}
+
+// Full render: rebuild header (tooltips + filter controls + sort arrows) and body.
+// Called by external triggers (initial load, batch switch, global shape/status
+// filter change, selection). Filter typing instead calls renderBatchBody() only,
+// so the header inputs keep focus.
+function renderBatchTable(){
+  const tbl = document.getElementById("batch-table");
+  if (!tbl) return;
+  buildBatchHeader(tbl);
+  renderBatchBody();
+}
+
+// Fetch the full run record (trajectory/stl/gcode/tool_geom) for a table row
+// when it isn't already on the datum — batch runs from /__api/runs ship metrics
+// but not the heavy artifacts. Mirrors the lazy-load the scatter/3D plots do.
+async function selectRunRow(d) {
+  if (!d.trajectory && d.run_dir) {
+    try {
+      const r = await fetch(`${BASE}__api/run?run=${encodeURIComponent(d.run_dir)}`);
+      const rec = await r.json();
+      if (rec && rec.ok !== false && rec.run_dir) {
+        d.trajectory = rec.trajectory || null;
+        d.stl = rec.stl || {};
+        d.gcode = rec.gcode || null;
+        d.metrics = d.metrics || rec.metrics || null;
+        d.tool_geom = rec.tool_geom || null;
+        d.args = rec.args || d.args;
+      }
+    } catch (e) { /* fall through; selectExperiment shows "no trajectory" */ }
+  }
+  selectExperiment(d);   // selectExperiment re-renders the table (.sel highlight)
+}
+
+// ---------- 3D objective scatter (dice × air-cut time × break prob) ----------
+// Reuses the perspective projection helpers defined further down
+// (camFwd/camUp/camRight/camEye/project). They are const arrow functions, but
+// this is only ever called from async callbacks (.then / event handlers), so
+// they are initialized by the time we run.
+let CAM3D = {target:[0.5,0.5,0.5], distance:3.4, yaw:0.72, pitch:0.62};
+const fmtBreak = v => v==null ? "—" : (v>=1e-3 ? v.toFixed(4) : v.toExponential(1));
+
+function renderScatter3D() {
+  const svg = d3.select("#scatter3d");
+  svg.selectAll("*").remove();
+  const W = svg.node().clientWidth || 600, H = 440;
+  svg.attr("viewBox", `0 0 ${W} ${H}`);
+  const data = filtered().filter(d => d.metrics && d.metrics.air_time!=null
+    && d.metrics.break_prob_any!=null && d.dice!=null);
+  if (!data.length) {
+    svg.append("text").attr("x",W/2).attr("y",H/2).attr("text-anchor","middle")
+      .attr("fill","var(--muted)").attr("font-size",13)
+      .text("no runs with air-time / break-probability metrics in this view");
+    return;
+  }
+  // Domains. Break probability spans many orders of magnitude; use a sqrt scale
+  // so tiny values don't all collapse onto the floor.
+  const maxAir  = d3.max(data, d=>d.metrics.air_time) || 1;
+  const maxBreak= d3.max(data, d=>d.metrics.break_prob_any) || 1;
+  const sx = v => v;                         // hard dice already 0..1
+  const sy = v => v / maxAir;                // air time 0..1
+  const sz = v => Math.sqrt(Math.max(0,v) / maxBreak); // break: sqrt-spread 0..1
+  const P = d => [sx(hd(d)), sy(d.metrics.air_time), sz(d.metrics.break_prob_any)];
+
+  const cam = CAM3D;
+  const pj = p => project(p, cam, W, H);
+
+  // --- cube wireframe (unit cube [0,1]^3) + axis ticks ---
+  const edges = [
+    [[0,0,0],[1,0,0]],[[0,0,0],[0,1,0]],[[0,0,0],[0,0,1]],
+    [[1,0,0],[1,1,0]],[[1,0,0],[1,0,1]],[[0,1,0],[1,1,0]],
+    [[0,1,0],[0,1,1]],[[0,0,1],[1,0,1]],[[0,0,1],[0,1,1]],
+    [[1,1,0],[1,1,1]],[[1,0,1],[1,1,1]],[[0,1,1],[1,1,1]],
+  ];
+  const gEdge = svg.append("g").attr("class","s3d-edge");
+  edges.forEach(([a,b])=>{
+    const pa=pj(a), pb=pj(b);
+    if (pa && pb) gEdge.append("line").attr("x1",pa[0]).attr("y1",pa[1])
+      .attr("x2",pb[0]).attr("y2",pb[1]);
+  });
+
+  // Axis ticks + labels along the three edges from the origin corner.
+  const ticks = [0,0.25,0.5,0.75,1];
+  const axisSpec = [
+    {edge:[[0,0,0],[1,0,0]], dim:0, name:"hard dice", inv:v=>v, fmt:v=>v.toFixed(2)},
+    {edge:[[0,0,0],[0,1,0]], dim:1, name:"air time (s)", inv:v=>v*maxAir, fmt:v=>v.toFixed(1)},
+    {edge:[[0,0,0],[0,0,1]], dim:2, name:"break prob", inv:v=>(v*v)*maxBreak, fmt:fmtBreak},
+  ];
+  axisSpec.forEach(ax=>{
+    const [a,b]=ax.edge;
+    ticks.forEach(t=>{
+      const p = a.map((c,i)=>c+(b[i]-c)*t);
+      const tickEnd = a.map((c,i)=>c+(b[i]-c)*t) ; // base point
+      // small tick mark perpendicular-ish: nudge +0.04 in the next axis dim
+      const nudge = [0,0,0]; nudge[(ax.dim+1)%3]=0.04;
+      const ps=pj(p), pe=pj(p.map((c,i)=>c+nudge[i]));
+      const g = svg.append("g").attr("class","s3d-axis");
+      if (ps && pe) g.append("line").attr("x1",ps[0]).attr("y1",ps[1]).attr("x2",pe[0]).attr("y2",pe[1]);
+      if (ps) g.append("text").attr("x",ps[0]+3).attr("y",ps[1]-2)
+        .text(ax.fmt(ax.inv(tickEnd[ax.dim])));
+    });
+    // axis name at the far end
+    const lab = pj(b);
+    if (lab) svg.append("text").attr("class","s3d-axis").attr("x",lab[0])
+      .attr("y",lab[1]+4).attr("font-weight","bold").text(ax.name);
+  });
+
+  // --- points (painter's algorithm: sort by depth, far first) ---
+  const pts = data.map(d=>({d, p:pj(P(d))})).filter(o=>o.p);
+  pts.sort((a,b)=>b.p[2]-a.p[2]); // painter's: far (large depth) drawn first
+  const tip = document.getElementById("tooltip");
+  svg.append("g").selectAll("circle").data(pts).join("circle")
+    .attr("cx",o=>o.p[0]).attr("cy",o=>o.p[1])
+    .attr("r", o=>o.d.status==="keep"?5:3.5)
+    .attr("fill", o=>SHAPE_COLOR[o.d.shape]||"#888")
+    .attr("opacity", o=>STATUS_OPACITY[o.d.status]??0.5)
+    .attr("stroke", o=>selected && (o.d.idx===selected.idx || (o.d.run_dir&&o.d.run_dir===selected.run_dir)) ? "#fff":"none")
+    .attr("stroke-width",1.6)
+    .style("cursor","pointer")
+    .on("mouseover",(ev,o)=>{
+      tip.style.display="block";
+      const m=o.d.metrics;
+      tip.innerHTML = `<div class="t-title">#${o.d.idx} · ${o.d.shape||"?"} · hdice ${hd(o.d).toFixed(4)} (soft ${o.d.dice.toFixed(4)}) · ${o.d.status}</div>` +
+        `<div>air-cut time <b>${m.air_time.toFixed(2)} s</b> · total <b>${(m.total_time||0).toFixed(1)} s</b></div>` +
+        `<div>break prob (any) <b>${fmtBreak(m.break_prob_any)}</b> · max <b>${fmtBreak(m.break_prob_max)}</b></div>` +
+        `<div>${o.d.description||"(no description)"}</div>` +
+        (o.d.run_dir ? `<div class="t-cmd">▶ click to view trajectory &amp; downloads</div>` : "");
+    })
+    .on("mousemove",(ev)=>{ tip.style.left=(ev.pageX+14)+"px"; tip.style.top=(ev.pageY+14)+"px"; })
+    .on("mouseout",()=>tip.style.display="none")
+    .on("click", async (ev,o) => {
+      // Batch runs (from /__api/runs) carry no trajectory/stl/gcode/metrics.
+      // Fetch the full record via /__api/run and merge onto the point's record
+      // so the detail view + 3D viewport populate. data.json experiments
+      // already have these, so this is a no-op for them. Mirrors the 2D scatter.
+      if (!o.d.trajectory && o.d.run_dir) {
+        try {
+          const r = await fetch(`${BASE}__api/run?run=${encodeURIComponent(o.d.run_dir)}`);
+          const rec = await r.json();
+          if (rec && rec.ok !== false && rec.run_dir) {
+            o.d.trajectory = rec.trajectory || null;
+            o.d.stl = rec.stl || {};
+            o.d.gcode = rec.gcode || null;
+            o.d.metrics = rec.metrics || o.d.metrics;
+            o.d.tool_geom = rec.tool_geom || o.d.tool_geom;
+            o.d.args = rec.args || o.d.args;
+          }
+        } catch (e) { /* fall through; selectExperiment shows "no trajectory" */ }
+      }
+      selectExperiment(o.d);
+    });
+
+  // Highlight the Pareto-best (max hard dice, min air, min break) with a ring.
+  const pareto = data[d3.scan(data,(a,b)=>{
+    // "better" = higher hard dice, lower air, lower break → composite rank
+    const sa = hd(a) - a.metrics.air_time/maxAir - a.metrics.break_prob_any/maxBreak;
+    const sb = hd(b) - b.metrics.air_time/maxAir - b.metrics.break_prob_any/maxBreak;
+    return sb - sa;
+  })];
+  if (pareto) {
+    const pp = pj(P(pareto));
+    if (pp) svg.append("circle").attr("cx",pp[0]).attr("cy",pp[1]).attr("r",9)
+      .attr("fill","none").attr("stroke","#ffd166").attr("stroke-width",1.8)
+      .attr("opacity",.9).attr("pointer-events","none");
+  }
+}
+
+// Orbit / zoom interaction for the 3D scatter. State persists in CAM3D across
+// re-renders so the view angle survives filter changes.
+function initScatter3DControls() {
+  const svg = d3.select("#scatter3d");
+  let dragging=false, lx=0, ly=0;
+  svg.on("mousedown", ev=>{ dragging=true; lx=ev.clientX; ly=ev.clientY; })
+    .on("mouseup", ()=>dragging=false)
+    .on("mouseleave",()=>dragging=false)
+    .on("mousemove", ev=>{
+      if(!dragging) return;
+      const dx=ev.clientX-lx, dy=ev.clientY-ly; lx=ev.clientX; ly=ev.clientY;
+      CAM3D.yaw   = clamp(CAM3D.yaw   + dx*ORBIT_SENS, -Math.PI, Math.PI);
+      CAM3D.pitch = clamp(CAM3D.pitch + dy*ORBIT_SENS, -MAX_PITCH, MAX_PITCH);
+      renderScatter3D();
+    });
+  svg.on("wheel", ev=>{
+    ev.preventDefault();
+    CAM3D.distance = clamp(CAM3D.distance * (ev.deltaY>0?1.1:0.9), 1.5, 12);
+    renderScatter3D();
+  }, {passive:false});
 }
 
 // ---------- selection / detail ----------
 function selectExperiment(d) {
   selected = d;
   renderScatter();
+  renderBatchTable();   // keep the per-batch table's .sel row in sync with any selection path
   const card = document.getElementById("detail");
+  card.classList.remove("empty");
   card.style.display = "block";
   const isRun = d.idx == null;
   document.getElementById("detail-title").textContent = isRun
-    ? `Run — ${d.name||d.shape||"?"} · dice ${d.dice.toFixed(4)}`
-    : `Experiment #${d.idx} — ${d.shape||"?"} · dice ${d.dice.toFixed(4)} · ${d.status}`;
+    ? `Run — ${d.name||d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)})`
+    : `Experiment #${d.idx} — ${d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)}) · ${d.status}`;
 
   const meta = document.getElementById("meta");
   meta.innerHTML = `
@@ -981,11 +1599,25 @@ function selectExperiment(d) {
 
   const mb = document.getElementById("metrics-box");
   if (d.metrics) {
-    const rows = [["dice",d.dice],["asd",d.metrics.asd],["hd95",d.metrics.hd95],
-      ["loss",d.metrics.loss],["residual",d.metrics.residual],["gouge",d.metrics.gouge],
-      ["holder_overlap",d.metrics.holder_overlap],["training_seconds",d.metrics.training_seconds]];
-    mb.innerHTML = rows.map(([k,v])=>`<div><span>${k}</span><span>${
-      typeof v==="number" ? (v>=100?v.toFixed(1):v.toFixed(4)) : v}</span></div>`).join("");
+    const f = v => typeof v==="number" ? (Math.abs(v)>=100 ? v.toFixed(1)
+      : (v!==0 && Math.abs(v)<1e-3 ? v.toExponential(2) : v.toFixed(4))) : v;
+    const rows = [
+      ["hard_dice (final)", d.metrics.hard_dice],
+      ["dice (soft)", d.dice],
+      ["air_time (s)", d.metrics.air_time],
+      ["total_time (s)", d.metrics.total_time],
+      ["break_prob_any", d.metrics.break_prob_any],
+      ["break_prob_max", d.metrics.break_prob_max],
+      ["air_cut_frac", d.metrics.air_cut_fraction],
+      ["asd", d.metrics.asd],
+      ["hd95", d.metrics.hd95],
+      ["loss", d.metrics.loss],
+      ["residual", d.metrics.residual],
+      ["gouge", d.metrics.gouge],
+      ["holder_overlap", d.metrics.holder_overlap],
+      ["training_seconds", d.metrics.training_seconds],
+    ];
+    mb.innerHTML = rows.map(([k,v])=>`<div><span>${k}</span><span>${f(v)}</span></div>`).join("");
   } else { mb.innerHTML = `<div><span>—</span><span>no metrics (unmatched)</span></div>`; }
 
   renderDownloads(d);

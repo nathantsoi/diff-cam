@@ -200,6 +200,36 @@ regularizers are inactive in the final operating point: they trade off the
 geometry objective for marginal air-cut reduction without improving the
 deployable metric (Sec.~\ref{sec:experiments}).
 
+\paragraph{Deployable trajectory-quality loss terms.}
+In addition to the geometry objective, the simulator exposes three
+\emph{differentiable} per-segment trajectory-quality terms that, when weighted,
+enter $\mathcal{L}$ and shape the deployable toolpath directly. Let $s_t$ be the
+per-segment duration, $\mathrm{af}_t = \mathrm{air}_t / \mathrm{swept}_t$ the
+segment air fraction (soft, in $[0,1]$), and
+$\mu_F(t) = k_c\, e(t)\, v_{\mathrm{vox}}^3 / (\Delta t\, D)$ the per-step
+engagement force. The terms are
+\begin{equation}
+  \label{eq:trajloss}
+  \mathcal{L}_{\mathrm{traj}} = w_{\mathrm{time}}\,\overline{s_t}
+  \;+\; w_{\mathrm{air}}\,\overline{s_t\,\mathrm{af}_t}
+  \;+\; w_{\mathrm{brk}}\!\left(1 - e^{-\sum_t \sigma\!\left(\tfrac{\ln \mu_F(t) - \ln F_{\mathrm{ref}}}{\sigma_r}\right)}\right),
+\end{equation}
+where the overline denotes a mean over segments (a linear combination, hence
+differentiable per segment) and the breakage term is a trajectory-level
+probability accumulated from per-step sigmoid risks. Grad flows through the
+soft segment volumes into $\boldsymbol{\delta}$. These terms are
+\emph{deployable} diagnostics (computed in a matching hard form on the boolean
+carve for reporting), and their weights are uncalibrated starting points:
+Sec.~\ref{sec:trajqual} shows the air-time term $w_{\mathrm{air}}$ yields a
+dice-\emph{neutral} air reduction on freeform surfaces with sufficient weight,
+while the breakage term is inactive at the operating point (per-step engagement
+is too small to fire). A composite best-checkpoint score
+$\mathrm{best} = \mathrm{Dice} - w^{\mathrm{best}}_{\mathrm{air}}\tilde t_{\mathrm{air}}
+- w^{\mathrm{best}}_{\mathrm{time}}\tilde t_{\mathrm{tot}}
+- w^{\mathrm{best}}_{\mathrm{brk}}\tilde P_{\mathrm{brk}}$
+optionally biases checkpoint selection toward lower-cost trajectories without
+re-running the optimization.
+
 \subsection{The Optimization and Evaluation Loop}
 \label{sec:optim}
 

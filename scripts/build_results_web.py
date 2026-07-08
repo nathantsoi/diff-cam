@@ -191,6 +191,10 @@ def list_runs(batch=None):
                 "iters": rec["iters"],
                 "seed": rec["seed"],
                 "dice": rec["dice"],
+                # Full metrics dict so the dashboard's per-batch table can show
+                # every evaluation measure (hard_dice, air_time, break_prob, …)
+                # for every run without a per-row /__api/run fetch.
+                "metrics": rec["metrics"],
                 "mtime": rec["mtime"],
             })
 
