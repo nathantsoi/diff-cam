@@ -158,8 +158,42 @@ it MAXIMIZES residual. Need to let it bite closer to / slightly into the surface
 to remove residual without the speed-clip waste. => Wave 3: sweep margin downward
 (through 0 to negative = light intentional engagement) + raise w_residual.
 
-### Wave 3 — engagement sweet spot (default sphere), LAUNCHED 17:10
-Dense geometry (feed60 revs12) base; sweep multidepth_margin +0.01/0/-0.01/
+### Wave 3 — engagement sweet spot (default sphere), COMPLETE
+Dense geometry (feed60 revs12) base; swept multidepth_margin +0.01/0/-0.01/
 -0.02/-0.03 (cut progressively closer/into the surface to drop residual), plus
 margin0+wr3, margin-0.01+wr3 (drive residual-clearing via loss not gouge), and
 margin-0.01+revs24. See launch_wave3.sh; sentinel wait_wave3.sh.
+
+hard_dice / gouge / residual (seed=1, 5000 iters):
+- w3_md_m0_wr3 (margin0 + w_res3): **0.6207** / 0 / 7649 ← BEST CLEAN, best zero-gouge
+- w3_md_mn01_wr3 (margin-0.01 + w_res3): 0.6118 / 0 / 7951
+- w3_md_mn01_rev24 (margin-0.01 + revs24): 0.6056 / 0 / 8150
+- w3_md_m0 (margin0): 0.5994 / 0 / 8338
+- w3_md_m001 (margin+0.01): 0.5987 / 0 / 8366
+- w3_md_mn01 (margin-0.01): 0.5967 / 0 / 8438
+- w3_md_mn03 (margin-0.03): 0.5957 / 0.2 / 8451
+- w3_md_mn02 (margin-0.02): 0.5948 / 0 / 8471
+
+KEY FINDINGS (turn the lever identification):
+1. The margin sweep (runs WITHOUT w_res change) is FLAT at ~0.595-0.599 regardless
+   of init engagement -- confirming the init geometry is INERT: the optimizer
+   re-positions passes off the init margin anyway. Negative margin does NOT help
+   (it doesn't bite because the optimizer overrides it).
+2. w_residual IS the real lever. Raising it 1.0 -> 3.0 lifts hard_dice 0.599 ->
+   0.621 (the only non-flat jumps), AND it does so at ZERO gouge -- residual is
+   cleared by the loss gradient, not by over-cutting. This is the clean path to
+   higher dice (vs raster's gouge-to-win 0.654).
+3. Best zero-gouge config across all 24 runs so far: multidepth feed60 revs12
+   margin0 --w-residual 3.0 = 0.6207, residual 7649, air-cut 18.9%, break 0.0016.
+4. Gap to raster's gouging 0.654 is ~0.03; wave 4 tests whether raising
+   w_residual further (5/10) closes it while staying zero-gouge.
+
+### Wave 4 — push w_residual + generality probe, LAUNCHED 18:35
+Take the wave-3 lever (w_residual) and push it: 5.0/10.0, plus complementary knobs
+(lr 1e-2, w_gouge 8, revs24, loss_shift 2) on the best geometry (multidepth feed60
+revs12 margin0). In parallel, START the generality probe -- run the best config
+(multidepth + w_res3) AND a random baseline on a SECOND shape (cylinder, r=11.43
+h=22.86mm) to begin measuring cross-scenario dice_improvement. Note: cylinder
+init hard_dice is ~0.72 (vs sphere ~0.59), so its baseline differs -- the
+dice_improvement normalization matters for fair generality comparison. See
+launch_wave4.sh; sentinel wait_wave4.sh.
