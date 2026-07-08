@@ -195,6 +195,9 @@ def main():
                     help="composite best-checkpoint weight on normalized total toolpath time")
     ap.add_argument("--best-w-break", type=float, default=0.05,
                     help="composite best-checkpoint weight on breakage probability (reject-too-risky)")
+    ap.add_argument("--best-metric", default="soft", choices=("soft", "hard"),
+                    help="which dice the best-checkpoint composite selects on: 'soft' (proven "
+                         "operating-point metric) or 'hard' (deployable sharp boolean carve)")
     ap.add_argument("--random-tool-start", action="store_true",
                     help="randomize the cutter start each fresh start (XY in the stock "
                          "footprint, Z >= stock top + --tool-start-clearance-in)")
@@ -379,6 +382,7 @@ def main():
             "--best_w_airtime", str(args.best_w_airtime),
             "--best_w_time", str(args.best_w_time),
             "--best_w_break", str(args.best_w_break),
+            "--best_metric", args.best_metric,
             "--eval_freq", str(args.eval_freq),
             "--seed", str(args.seed),
             "--stock_size_in", *ssi,

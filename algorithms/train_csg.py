@@ -341,6 +341,14 @@ class Args:
     """composite best-checkpoint weight on breakage probability (already
     [0,1]). Raising this rejects high-engagement checkpoints even at higher
     dice."""
+    best_metric: str = "soft"
+    """which dice the best-checkpoint composite selects on: 'soft' (the proven
+    operating-point sigmoid-blurred metric) or 'hard' (the deployable sharp
+    boolean carve that the summary reports as `hard_dice`). Hard dice is
+    quantized to 1-voxel steps so many iters tie; the composite then breaks
+    ties toward shorter/safer paths (best_w_*). Selecting on 'hard' aligns the
+    deployed checkpoint with the deployable metric. Default 'soft' preserves
+    the baseline."""
 
     init_stock_from: str = ""
     """STAGED TRAINING: path to a .npz saved by the truncation utility containing
@@ -1136,7 +1144,8 @@ def main():
                 # the hard-carve traj-quality penalties (best_w_* default 0.05,
                 # so penalties barely affect checkpoint selection; with
                 # --best-w-* 0 the composite is pure soft dice).
-                score = composite_score({**m, "dice": m["soft_dice"]}, args, T, args.dt)
+                _sel_dice = m["dice"] if args.best_metric == "hard" else m["soft_dice"]
+                score = composite_score({**m, "dice": _sel_dice}, args, T, args.dt)
                 if score > best_score:
                     # sim.tool_delta / sim.tool_pos here reflect the PRE-step
                     # params (set before the forward at the top of the loop),
@@ -1144,7 +1153,7 @@ def main():
                     # directly so the saved best trajectory is consistent with
                     # the measured metrics (no re-eval needed later).
                     best_score = score
-                    best_dice = float(m["soft_dice"])
+                    best_dice = float(_sel_dice)
                     best_m = dict(m)
                     best_positions = sim.tool_pos.to_torch()[:T].numpy().copy()
                     best_deltas = sim.tool_delta.to_torch()[:T].numpy().copy()
@@ -1272,8 +1281,10 @@ def main():
         if best_positions is not None and best_dice > 0.0:
             # composite_score reads m["dice"]; substitute soft_dice so the
             # best-vs-final comparison uses the proven SOFT-dice metric.
+            _final_sel = (last_m["dice"] if args.best_metric == "hard"
+                          else last_m.get("soft_dice", last_m["dice"]))
             final_iter_score = composite_score(
-                {**last_m, "dice": last_m.get("soft_dice", last_m["dice"])},
+                {**last_m, "dice": _final_sel},
                 args, T, args.dt,
             )
             # Use the best checkpoint when its COMPOSITE score (dice + the three
