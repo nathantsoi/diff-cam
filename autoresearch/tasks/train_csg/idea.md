@@ -125,8 +125,41 @@ multidepth target: match raster's coverage (high dice) while gouging like rfw
 (zero) and keeping low air-time — bulk removal WITHOUT the over-cutting tax.
 All 8 results collected into results.tsv; run dirs moved to runs/jul8-multidepth/.
 
-### Wave 2 — multidepth density + loss levers (default sphere), LAUNCHED 16:55
-Tests whether multidepth beats raster(0.654)/rfw(0.643). 8-wide (see
-launch_wave2.sh): multidepth density sweep (feed10 revs~3 / feed60 revs12 /
-+margin0.01 / revs24 / levels10) + multidepth with w_tool_gouge & loss_shift +
-raster with w_tool_gouge (de-gouge the leader). Sentinels: wait_wave2.sh.
+### Wave 2 — multidepth density + loss levers (default sphere), COMPLETE
+hard_dice / gouge / residual (seed=1):
+- w2_md_default (feed10 revs~3): **0.6415** / 199 / **6573** ← wins by lowest residual
+- w2_md_feed60_rev24: 0.6112 / 0 / 7963
+- w2_md_feed60_lvl10: 0.6061 / 0 / 8135
+- w2_md_feed60_tg: 0.6038 / 0 / 8211
+- w2_md_feed60: 0.6002 / 0 / 8338
+- w2_md_feed60_tight: 0.6002 / 0 / 8338
+- w2_raster_tg (raster+barrier): 0.5921 / 0 / 8622 (barrier killed raster's 0.654)
+- w2_md_feed60_shift: 0.5763 / 0 / 9202 (loss_shift hurt)
+
+KEY FINDINGS (turn the whole framing):
+1. The density hypothesis was WRONG. Dense feed-60 multidepth (revs12-24, ZERO
+   gouge) scores LOWER (0.60) than sparse feed-10 multidepth (0.642). Dense
+   sweeps a clean annulus but leaves a REGULAR, evenly-distributed RESIDUAL the
+   128-step budget can't clean. Sparse multidepth gets higher dice precisely
+   BECAUSE it gouges (199 vox) -- it over-cuts like raster.
+2. hard_dice tracks RESIDUAL, not gouge. Winner has lowest residual (6573);
+   zero-gouge runs leave 8000+ residual. The tool tolerates mild gouge; the
+   differentiable stage's w_gouge=4 is not strong enough to fully de-bias, so
+   trajectories that lean INTO cutting (low residual, some gouge) win hard_dice.
+3. w_tool_gouge on raster killed its dice (0.654->0.592): raster wins BY gouging;
+   the barrier removed the over-cutting that made it win. loss_shift hurt
+   multidepth (0.60->0.576).
+4. BUT dense multidepth has MUCH better trajectory QUALITY: air-cut 12-17% vs
+   22.7%, break 0.0008 vs 0.0074. So it's the higher-quality path by the user's
+   secondary criteria (minimize air time, no breakage) -- it just under-cuts.
+
+CONCLUSION: multidepth's "stay outside the part" design is too conservative --
+it MAXIMIZES residual. Need to let it bite closer to / slightly into the surface
+to remove residual without the speed-clip waste. => Wave 3: sweep margin downward
+(through 0 to negative = light intentional engagement) + raise w_residual.
+
+### Wave 3 — engagement sweet spot (default sphere), LAUNCHED 17:10
+Dense geometry (feed60 revs12) base; sweep multidepth_margin +0.01/0/-0.01/
+-0.02/-0.03 (cut progressively closer/into the surface to drop residual), plus
+margin0+wr3, margin-0.01+wr3 (drive residual-clearing via loss not gouge), and
+margin-0.01+revs24. See launch_wave3.sh; sentinel wait_wave3.sh.
