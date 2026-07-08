@@ -155,13 +155,17 @@ class Args:
     """half-range of the uniform random init for per-step displacements (0.02 and 0.1 both hurt)"""
     init_mode: str = "random"
     """trajectory init: 'random', 'raster', 'raster_fine', 'raster_fine_wide',
-    'spiral', 'shell', or 'zlayer' (z-level descent that pre-clears the target
-    exterior layer by layer, using the tall tool's vertical extent). 'raster_fine'
-    is a clipping-aware fine boustrophedon (per-step <= feed cap) that survives
-    the speed clip; 'raster_fine_wide' spans the full target envelope (0.05-0.95)
-    instead of the inner 0.20-0.80 core. 'shell'/'zlayer' derive the target
-    surface from the baked SDF grid (shape-agnostic -- no task metadata). The
-    coarse structured inits (raster/spiral/shell/zlayer) fail via speed-limit
+    'spiral', 'shell', 'zlayer', or 'multidepth'. 'raster_fine' is a
+    clipping-aware fine boustrophedon (per-step <= feed cap) that survives the
+    speed clip; 'raster_fine_wide' spans the full target envelope (0.05-0.95)
+    instead of the inner 0.20-0.80 core. 'shell'/'zlayer'/'multidepth' derive
+    the target surface from the baked SDF grid (shape-agnostic -- no task
+    metadata). 'multidepth' is a continuous multi-depth helical roughing: it
+    descends through the target's full z-extent while a triangle-wave radius
+    sweeps the waste annulus from the cube wall inward to the target surface
+    + r_tool (bulk removal without gouging), arc-length-resampled + auto-revs
+    so the whole path fits the speed-clip budget and survives it. The coarse
+    structured inits (raster/spiral/shell/zlayer) fail via speed-limit
     clipping."""
     zlayer_revs: float = 12.0
     """zlayer init: angular revolutions over the full z descent. Higher revs =
@@ -174,6 +178,24 @@ class Args:
     """zlayer init: normalized gap between the target surface + r_tool and the
     tool-center orbit. Tighter (0.005-0.015) leaves less residual surface waste
     without gouging (tool inner edge still clears the part)."""
+
+    multidepth_levels: int = 5
+    """multidepth init: number of RADIAL sweep cycles across the waste annulus
+    (r_outer -> r_safe -> r_outer) over the full z descent. More cycles = denser
+    radial coverage of the annulus (more multi-depth passes through the bulk
+    waste). The helix descends continuously through the target's full z-extent
+    (read shape-agnostically from the baked SDF grid) -- this is the
+    multi-depth aspect, not discrete z-levels."""
+    multidepth_revs: float = 3.0
+    """multidepth init: angular revolutions of the helix over the full z
+    descent. More revs = denser angular coverage but longer arc; revs is
+    auto-shrunk so the total path fits the speed-clip budget (the tool can
+    only traverse (T-1)*feed_cap arc-units), so the full z-extent stays
+    reachable with every step <= the feed cap."""
+    multidepth_margin: float = 0.02
+    """multidepth init: normalized gap between target surface + r_tool and the
+    innermost spiral radius (keeps the tool tangent-or-outside the part -> no
+    gouge). Same role as zlayer_margin."""
     grad_clip: float = 0.5
     """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
     transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5
@@ -956,6 +978,99 @@ def main():
             positions[t, 0] = 0.5 + r_orbit * math.cos(phase)
             positions[t, 1] = 0.5 + r_orbit * math.sin(phase)
             positions[t, 2] = zb
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "multidepth":
+        # Shape-agnostic MULTI-DEPTH surface-following helical roughing. Builds
+        # a continuous 3D toolpath from the baked target SDF grid ONLY (no shape
+        # names / params). A single helix simultaneously (a) descends through
+        # the target's full z-extent (multi-depth), (b) rotates to cover the
+        # annulus angularly, and (c) sweeps the radius back and forth across the
+        # waste annulus -- from the cube wall (r_outer = 0.5 + r_tool, tangent so
+        # corner waste is removed) inward to the target surface offset by the
+        # tool radius (r_safe(z) = target cross-section radius at z + r_tool +
+        # margin, read shape-agnostically from target_cross_section_radii). The
+        # tool center stays >= r_tool outside the target surface at every point,
+        # so it removes the bulk EXTERIOR waste (the residual a surface-hugging
+        # shell leaves behind) WITHOUT gouging -- a regular, generalizable CNC
+        # helical-z-level roughing pattern. No retracts (continuous descent) ->
+        # low air time.
+        #
+        # The simulator's per-step speed clip is a HARD wall: in T-1 steps the
+        # tool can traverse at most (T-1)*feed_cap arc-units, so any commanded
+        # path longer than that has its tail never reached (the discrete
+        # per-level-spiral version of this init hit exactly that -- 42 units of
+        # arc for a 9.5-unit budget, so only the top of the part was carved).
+        # We therefore (1) build a CONTINUOUS helix (interleave z/angle/radius
+        # so coverage is simultaneous, not sequential per level) and (2) resample
+        # the path at constant arc length to EXACTLY n points spanning the whole
+        # path, so every step is <= feed_cap and the entire z-extent is reached.
+        n = T - 1
+        stock_mm_x = args.stock_size_in[0] * 25.4
+        r_tool = args.tool_radius_mm / stock_mm_x
+        margin = args.multidepth_margin
+        # Feed speed cap in normalized units per step (the clip-survival budget).
+        # feed_ipm [in/min] * dt [s] / 60 [s/min] / stock_size_in[0] [in/unit].
+        feed_cap = args.feed_ipm * args.dt / 60.0 / args.stock_size_in[0]
+        # Target z-extent from the baked grid (shape-agnostic): lowest/highest
+        # solid voxel, padded by one voxel and clamped inside the stock.
+        _sdf_grid = sim.target.to_numpy()
+        Nz_grid = float(_sdf_grid.shape[2])
+        _solid = np.where(_sdf_grid <= 0.0)[2]
+        if len(_solid):
+            z_top = float(_solid.max()) / Nz_grid + 1.0 / Nz_grid
+            z_bot = float(_solid.min()) / Nz_grid
+        else:
+            z_top, z_bot = 0.95, 0.05
+        z_top = min(z_top + 2.0 * r_tool, 0.98)
+        z_bot = max(z_bot, 0.02)
+        r_cross = target_cross_section_radii(sim)
+        r_outer = 0.5 + r_tool  # tool tangent to cube wall removes corner waste
+
+        def r_safe_at(z):
+            return _r_cross_at(r_cross, z) + r_tool + margin
+
+        # Continuous helix over u in [0,1]: z descends, angle rotates (revs
+        # turns), and radius sweeps the annulus via a triangle wave (radial_cycles
+        # in->out passes) clamped to [r_safe(z), r_outer].
+        radial_cycles = max(1.0, float(args.multidepth_levels))
+        u = np.linspace(0.0, 1.0, 4000)
+        z = z_top + (z_bot - z_top) * u
+        r_safe_u = np.clip(np.array([r_safe_at(zz) for zz in z]), 0.0, r_outer)
+        budget = max(1.0, (n - 1)) * feed_cap  # max arc the tool can traverse
+
+        def build_helix(revs):
+            theta = 2.0 * np.pi * revs * u
+            ph = (u * radial_cycles) % 1.0
+            tri = np.abs(1.0 - 2.0 * ph)            # 0 at walls -> 1 mid
+            r = r_outer + (r_safe_u - r_outer) * tri
+            pts = np.stack([0.5 + r * np.cos(theta),
+                            0.5 + r * np.sin(theta), z], axis=1
+                           ).astype(np.float32)
+            seg = np.diff(pts, axis=0)
+            seglen = np.sqrt((seg ** 2).sum(axis=1))
+            cum = np.concatenate([[0.0], np.cumsum(seglen)])
+            return pts, cum, float(cum[-1])
+
+        # Adaptively shrink revs so the helix total arc fits the speed-clip
+        # budget (arc ~ linear in revs, dominant term r*2*pi*revs). This keeps
+        # the FULL z descent reachable in n steps (no tail dropped) while every
+        # step stays <= feed_cap. One refinement suffices.
+        revs = max(0.5, args.multidepth_revs)
+        _, _, total = build_helix(revs)
+        if total > 0.95 * budget:
+            revs = max(0.5, revs * (0.95 * budget) / total)
+            revs = max(0.5, revs * (0.95 * budget) / build_helix(revs)[2])
+        pts, cum, total = build_helix(revs)
+        # Resample the (now budget-fitting) full path at constant arc length to
+        # EXACTLY n points: every step <= feed_cap, full z-extent reached.
+        s_targets = np.linspace(0.0, total, n)
+        idx = np.clip(np.searchsorted(cum, s_targets) - 1, 0, len(pts) - 2)
+        frac = ((s_targets - cum[idx]) /
+                np.maximum(cum[idx + 1] - cum[idx], 1e-9))
+        positions = (pts[idx] + (pts[idx + 1] - pts[idx]) * frac[:, None]
+                     ).astype(np.float32)
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
