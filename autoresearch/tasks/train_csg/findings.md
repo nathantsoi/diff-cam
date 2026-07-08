@@ -112,6 +112,11 @@ headroom **only on freeform shapes**; box/cyl already have ~0% air.
   (air −15%); `w_time=0.1` → dice −0.020 (total −10%). Not dice-neutral.
 - **`best_w_airtime` on pyramid = marginal.** Selection removes only ~3% air
   dice-neutral — structural air is not selectable away.
+- **`best_w_time` selection = no-op (dead).** `--best-w-time 0.05` alone on
+  sphere: total_time 19.69s vs baseline 19.5s (unchanged, within seed noise).
+  Unlike air_time (repositioning headroom), total_time is fixed by the necessary
+  cutting distance — no faster checkpoint exists at equal dice. Selection cannot
+  remove necessary cutting time.
 - **`w_air_time ≤ 1e-2` = no-op.** Too weak to move air on any shape (noise
   dominates). Effective air reduction needs `w_air_time ≥ 1.0`.
 - **`w_air_time = 1.0` on sphere at `1e-1` weight** non-monotonic mid-training
@@ -175,7 +180,7 @@ but structural on the pyramid.
 
 ## Artifacts
 
-- `results.tsv` — 36 experiments (commit, dice, memory, status, description, command).
+- `results.tsv` — 37 experiments (commit, dice, memory, status, description, command).
 - `results_plot.png` — 3 panels: dice over experiments; best dice per
   shape×method-family; trajectory-quality (air/total/break vs dice).
 - `idea.md` — chronological run log + headline findings.

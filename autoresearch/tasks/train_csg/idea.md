@@ -325,3 +325,27 @@ target bounding box; for larger stock the method needs an init that reaches the
 target (e.g. raster_fine / shape-aware coverage init, per [[train-csg-best-config]]
 jul4 GradMill), not the air-time loss. The air-time loss is an air *trimmer*, not
 an init fix.
+
+### Run 11 — best_w_time=0.05 selection ONLY (last untested traj-quality lever) — RUNNING 18:35
+The last untested trajectory-quality selection lever. `--best-w-time 0.05` alone
+(`--w-air-time 0 --best-w-airtime 0`, identical optimization to baseline) — only
+the best-checkpoint criterion changes, now favoring lower total_time. Question:
+does the baseline sphere trajectory contain a faster checkpoint at equal dice
+(a free total_time win, analogous to what best_w_airtime did for air on seed 1)?
+Expected marginal: total_time is mostly necessary cutting (after air removal the
+13.4s is cutting, not repositioning), so selection headroom is small. If
+total_time drops dice-neutrally and robustly, it's a free win; if marginal/seed-1
+luck (like best_w_airtime-only was), it's dead. Single seed-1 probe first;
+confirm with seed 2 only if it shows a real total_time drop. GPU 1.
+
+### Run 11 RESULT — best_w_time selection is a NO-OP (dead) — DONE 19:25
+`--best-w-time 0.05` ONLY (selection, identical opt to baseline), sphere seed1:
+dice 0.845, hard 0.558, **total_time 19.69s** vs baseline ~19.5s (3-seed mean
+19.5s; range 18.3-20.5s). total_time is **unchanged** — within baseline seed
+noise. air_time 5.49s (within baseline 3.58-5.36s range). **VERDICT: dead.**
+Unlike air_time (which has repositioning headroom the loss/selection can trim),
+total_time is fixed by the necessary cutting distance — there is no faster
+checkpoint at equal dice because the carve requires those cutting steps.
+Selection cannot remove necessary cutting time. The last traj-quality selection
+lever is closed. (Not confirmed across seeds because the single-seed result is
+already a clear no-op: total_time identical to baseline mean.)
