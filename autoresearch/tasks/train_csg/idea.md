@@ -114,13 +114,19 @@ this baseline.
 
 - DONE: baseline; best-metric=hard; gouge-aware composite; best_w_gouge=3.0;
   w_gouge=8.0; max_steps 160; lr-decay 0.5; w_gouge 2.0; lr 1e-2+decay;
-  init-scale 0.1; seed-2 reproducibility.
+  init-scale 0.1; seed-2 reproducibility; iters 8000; restart-from-state;
+  k-anneal k_init=5 (broken, like k=2).
 - KEY: 0.660 best is noise-tail; real level ~0.64. Stop chasing 0.660; lift the
   MEAN or take secondary-axis wins (lr-decay halves time at equal dice).
-- RUNNING: expG iters=8000 (more independent best-checkpoint draws → higher
-  expected max); expH restart-from-state (per-slice refinement for convergence).
-- Next: if expG/H clear >0.68 advance; else try k-anneal k_init=5→10 (sharpen
-  late, NOT k=2 which is broken), grad-clip 1.0, anneal-lr (full). Then
-  cross-shape generality (cylinder/box/pyramid/sphere_hole/sphere_bowl) with
-  the winning config; use dice_improvement to compare fairly. Multi-seed a
-  promising config (3 seeds) to confirm before declaring a real advance.
+- **CANDIDATE ADVANCE — k-anneal sharpen-late (k_init=10→k_final=14): expJ
+  hard_dice 0.674, dice_improvement 0.278 (HIGHEST yet vs ~0.21 base), gouge 102,
+  time 12.3s.** Blurry→sharp curriculum done RIGHT (start at safe k=10, sharpen
+  late — NOT k_init=2/5 which collapses soft dice). First run to clear the 0.66
+  noise band. NEEDS seed confirmation (expL seed2) — single run could be tail.
+- RUNNING: expL sharpen-late seed2 (confirm not noise-tail); expM sharpen
+  k_init=10→k_final=16 (does lift scale with more sharpening?); expK cylinder
+  (cross-shape generality of winning config — already ~0.66 mid-run).
+- Next: if expL confirms ~0.67, advance the branch on k-anneal sharpen-late;
+  pick best k_final from expM. Then sweep cross-shape (box/pyramid/sphere_hole/
+  sphere_bowl) with the winning config; use dice_improvement to compare fairly.
+  Multi-seed a promising config (3 seeds) to confirm before declaring real.
