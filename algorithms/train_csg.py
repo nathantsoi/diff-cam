@@ -179,7 +179,7 @@ class Args:
     tool-center orbit. Tighter (0.005-0.015) leaves less residual surface waste
     without gouging (tool inner edge still clears the part)."""
 
-    multidepth_levels: int = 5
+    multidepth_levels: float = 5.0
     """multidepth init: number of RADIAL sweep cycles across the waste annulus
     (r_outer -> r_safe -> r_outer) over the full z descent. More cycles = denser
     radial coverage of the annulus (more multi-depth passes through the bulk

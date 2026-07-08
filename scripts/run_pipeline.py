@@ -140,7 +140,7 @@ def main():
                          "(dead lever on current API; best-checkpoint saving subsumes it)")
     ap.add_argument("--init-scale", type=float, default=0.05,
                     help="half-range of the uniform random init for per-step displacements")
-    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "raster_fine", "raster_fine_wide", "spiral", "shell", "zlayer"),
+    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "raster_fine", "raster_fine_wide", "spiral", "shell", "zlayer", "multidepth"),
                     help="trajectory init mode")
     ap.add_argument("--w-gouge", type=float, default=4.0,
                     help="loss weight on cutting INTO the part (barrier)")
@@ -311,6 +311,17 @@ def main():
     ap.add_argument("--zlayer-margin", type=float, default=0.03,
                     help="zlayer init: normalized gap between sphere+r_tool and the orbit. Tighter "
                          "(0.005-0.015) leaves less residual waste without gouging.")
+    ap.add_argument("--multidepth-levels", type=float, default=5.0,
+                    help="multidepth init: number of RADIAL sweep cycles across the waste annulus "
+                         "(r_outer -> r_safe -> r_outer) over the full z descent. Higher = denser "
+                         "bulk removal. Forwarded to train_csg.")
+    ap.add_argument("--multidepth-revs", type=float, default=3.0,
+                    help="multidepth init: angular revolutions of the helix; auto-shrunk so the "
+                         "total path fits the speed-clip budget. Forwarded to train_csg.")
+    ap.add_argument("--multidepth-margin", type=float, default=0.02,
+                    help="multidepth init: normalized gap between target surface + r_tool and the "
+                         "innermost spiral radius (keeps the tool tangent-or-outside the part -> "
+                         "no gouge). Forwarded to train_csg.")
     # --- G-code / viz ---
     ap.add_argument("--post", default="haas", choices=("rs274", "haas"),
                     help="post-processor for export/eval/viz")
@@ -395,6 +406,9 @@ def main():
             "--zlayer_revs", str(args.zlayer_revs),
             "--zlayer_osc", str(args.zlayer_osc),
             "--zlayer_margin", str(args.zlayer_margin),
+            "--multidepth_levels", str(args.multidepth_levels),
+            "--multidepth_revs", str(args.multidepth_revs),
+            "--multidepth_margin", str(args.multidepth_margin),
             "--z_floor_epsilon_mm", str(args.z_floor_epsilon_mm),
             "--enforce_z_floor" if not args.no_z_floor else "--no-enforce_z_floor",
             "--holder_margin", str(args.holder_margin),
