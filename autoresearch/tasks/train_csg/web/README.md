@@ -164,6 +164,20 @@ as above.
 - The **per-shape bar chart** is clickable: click a bar to jump to that shape's
   best experiment.
 - Filter by shape / status using the dropdowns in the header.
+- **Batch table** (sortable; click a header to sort, click again to reverse).
+  Each row is one run. Columns are grouped **inputs → outputs**:
+  - *Identity/scenario*: run, name, shape, status, seed, iters.
+  - *Input levers* (parsed from each run's command line; argparse last-wins, and
+    a flag omitted from the command falls back to its code default so the cell
+    shows what actually ran): `stock` (X×Y×Z in), `lr`, `dt`, `gc` (grad-clip),
+    `init` (init-mode), `mstep` (max-steps), `w_len`, `w_airt` (w-air-time),
+    `w_time`, `w_break`, `b_air` (best-w-airtime), `b_time` (best-w-time),
+    `f_ref`, `f_max`. Hover a header for what the lever does and the run's
+    finding about it.
+  - *Output metrics*: dice (soft), hdice (hard), air s, total s, air frac,
+    break any/max, asd, hd95, loss, residual, gouge, holder, train s.
+  - A second header row gives a per-column filter (text substring, distinct-value
+    dropdown, or min/max range). Best-in-column values are highlighted in green.
 
 ## Notes
 

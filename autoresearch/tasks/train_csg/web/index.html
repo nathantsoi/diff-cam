@@ -1020,6 +1020,58 @@ let batchSort = {key:"dice", dir:-1};  // dir: -1 = desc, 1 = asc
 // the user's in-progress filters.
 let batchFilters = {};
 
+// Parse a CLI lever's value from a run's command string. argparse takes the
+// LAST occurrence of a repeated flag (the run commands sometimes override an
+// earlier flag, e.g. `--init_mode raster_fine ... --init_mode random`), so we
+// scan every match and return the final one. Returns null when the flag is
+// absent or the run has no command (arbitrary / unmatched runs show "—").
+function cmdFlag(d, flag){
+  if (!d || !d.command) return null;
+  const re = new RegExp("--" + flag + "\\s+(\\S+)", "g");
+  let m, last = null;
+  while ((m = re.exec(d.command)) !== null) last = m[1];
+  return last;
+}
+// Numeric lever value (parseFloat of cmdFlag). When the flag is OMITTED from an
+// otherwise-present command, return `def` (the code default) so the cell shows
+// what actually ran rather than "—". Returns null only when the run has no
+// command at all (arbitrary / unmatched runs).
+function cmdFlagNum(d, flag, def){
+  if (!d || !d.command) return null;
+  const s = cmdFlag(d, flag);
+  if (s == null) return def !== undefined ? def : null;
+  const v = parseFloat(s);
+  return Number.isFinite(v) ? v : (def !== undefined ? def : null);
+}
+// String lever value with the same omitted->default fallback (e.g. init_mode).
+function cmdFlagDef(d, flag, def){
+  if (!d || !d.command) return null;
+  const s = cmdFlag(d, flag);
+  return s == null ? (def !== undefined ? def : null) : s;
+}
+// --stock_size_in takes three space-separated inch values; compact to "X×Y×Z"
+// (last occurrence wins). e.g. "2.0 1.0 1.0" -> "2×1×1". Defaults to 1×1×1.
+function cmdStock(d){
+  if (!d || !d.command) return null;
+  const re = /--stock_size_in\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/g;
+  let m, last = null;
+  while ((m = re.exec(d.command)) !== null)
+    last = `${trimLevNum(m[1])}×${trimLevNum(m[2])}×${trimLevNum(m[3])}`;
+  return last !== null ? last : "1×1×1";
+}
+// Strip a numeric string to its most compact form ("1.0"->"1", "0.50"->"0.5").
+function trimLevNum(s){ const v = parseFloat(s); return Number.isFinite(v) ? ""+v : s; }
+// Format a lever value: null/empty -> "—"; numbers compact (drop trailing
+// zeros, keep tiny ones like 1e-3 readable); strings verbatim.
+function fmtLev(v){
+  if (v==null || v==="") return "—";
+  if (typeof v !== "number") return ""+v;
+  if (Number.isNaN(v)) return "—";
+  if (v === 0) return "0";
+  const r = parseFloat(v.toFixed(4));
+  return Number.isFinite(r) && r !== 0 ? ""+r : v.toExponential(1);
+}
+
 // Column spec. `better` = +1 (higher better) / -1 (lower better) drives sort
 // default direction + best-in-column highlighting. `filter` = "text" (substring),
 // "select" (distinct-value dropdown), or "range" (min/max). shape/status have no
@@ -1044,6 +1096,50 @@ const BATCH_COLS = [
   {key:"iters", hdr:"iters",  filter:"select",
    tip:"Number of optimization steps trained.",
    get:d=>d.iters, fmt:v=>v==null?"—":""+v},
+  // ---- input levers (parsed from the run command; argparse last-wins) ----
+  {key:"stock", hdr:"stock",  filter:"select",
+   tip:"Stock box size in inches (X×Y×Z). Set via --stock-size-in. The 1×1×1 default vs 2×1×1 tests generality across stock sizes.",
+   get:d=>cmdStock(d), fmt:v=>v||"—"},
+  {key:"lr",    hdr:"lr",     filter:"range",
+   tip:"Optimizer learning rate (--learning-rate). The single biggest lever: 1e-3 settles into the carving basin; the old 5e-3 default overshoots.",
+   get:d=>cmdFlagNum(d,"learning_rate",5e-3), fmt:v=>fmtLev(v)},
+  {key:"dt",    hdr:"dt",     filter:"range",
+   tip:"Time step per trajectory step (--dt). Foundational: 0.45 ≈ 1 voxel/step so the tool covers the part; low dt caps dice ~0.56.",
+   get:d=>cmdFlagNum(d,"dt",0.45), fmt:v=>fmtLev(v)},
+  {key:"gc",    hdr:"gc",     filter:"range",
+   tip:"Gradient clip (--grad-clip). 0.5 stabilizes the dice peak for best-checkpoint capture.",
+   get:d=>cmdFlagNum(d,"grad_clip",0.5), fmt:v=>fmtLev(v)},
+  {key:"init",  hdr:"init",   filter:"select",
+   tip:"Trajectory initialization mode (--init-mode). random vs raster_fine (clipping-aware boustrophedon).",
+   get:d=>cmdFlagDef(d,"init_mode","random"), fmt:v=>v||"—"},
+  {key:"maxstep", hdr:"mstep", filter:"select",
+   tip:"Max trajectory steps (--max-steps). 128 default; 256 for cylinder (coverage).",
+   get:d=>cmdFlagNum(d,"max_steps",128), fmt:v=>fmtLev(v)},
+  {key:"wlen",  hdr:"w_len",  filter:"range",
+   tip:"Path-length / minimal-motion penalty weight (--w-len). Fixes trailing-drift on cylinder; 0 elsewhere.",
+   get:d=>cmdFlagNum(d,"w_len",0), fmt:v=>fmtLev(v)},
+  {key:"w_airt", hdr:"w_airt", filter:"range",
+   tip:"Differentiable air-CUT-TIME loss weight (--w-air-time). The headline lever: 1.0 on sphere is a dice-NEUTRAL -58% air win; ≤1e-2 is a no-op; pyramid air is structural (trades dice).",
+   get:d=>cmdFlagNum(d,"w_air_time",1e-3), fmt:v=>fmtLev(v)},
+  {key:"w_time", hdr:"w_time", filter:"range",
+   tip:"Total toolpath-time loss weight (--w-time). Pyramid w_time=0.1 trades -0.020 dice for -10% total time; not dice-neutral. Note the 1e-3 code default leaks if not set explicitly.",
+   get:d=>cmdFlagNum(d,"w_time",1e-3), fmt:v=>fmtLev(v)},
+  {key:"w_break", hdr:"w_break", filter:"range",
+   tip:"Tool-breakage soft loss weight (--w-break). 0 in these runs (breakage is non-binding at 0.5mm voxels / 3.175mm tool).",
+   get:d=>cmdFlagNum(d,"w_break",1e-3), fmt:v=>fmtLev(v)},
+  {key:"bwa",   hdr:"b_air",  filter:"range",
+   tip:"Best-checkpoint weight on air-time (--best-w-airtime). Alone is NOT a robust win (seed-1 luck); on top of w_air_time=1.0 it picks the lowest-air checkpoint → air -86%. Code default 0.05 if omitted.",
+   get:d=>cmdFlagNum(d,"best_w_airtime",0.05), fmt:v=>fmtLev(v)},
+  {key:"bwt",   hdr:"b_time", filter:"range",
+   tip:"Best-checkpoint weight on total-time (--best-w-time). NO-OP: total_time is fixed by necessary cutting, not selectable away at equal dice.",
+   get:d=>cmdFlagNum(d,"best_w_time",0.05), fmt:v=>fmtLev(v)},
+  {key:"fref",  hdr:"f_ref",  filter:"range",
+   tip:"Breakage-model reference force (--f-ref). Default 50 gives fcut_max=0 (model doesn't fire); 5 (10× lower) makes it fire for nonzero reporting. Dice-neutral.",
+   get:d=>cmdFlagNum(d,"f_ref",50), fmt:v=>fmtLev(v)},
+  {key:"fmax",  hdr:"f_max",  filter:"range",
+   tip:"Breakage-model max force (--f-max). Lowered 10× to 10 (from 100) alongside f_ref for calibration.",
+   get:d=>cmdFlagNum(d,"f_max",100), fmt:v=>fmtLev(v)},
+  // ---- output metrics ----
   {key:"dice",  hdr:"dice",   better:+1, filter:"range",
    tip:"Soft Dice similarity between the carved stock and the target (0–1). The headline training metric; higher is better.",
    get:d=>d.dice, fmt:v=>fmtNum(v,4)},
