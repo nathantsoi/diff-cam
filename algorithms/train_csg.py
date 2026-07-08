@@ -349,6 +349,15 @@ class Args:
     ties toward shorter/safer paths (best_w_*). Selecting on 'hard' aligns the
     deployed checkpoint with the deployable metric. Default 'soft' preserves
     the baseline."""
+    best_w_gouge: float = 0.0
+    """composite best-checkpoint weight on normalized GOUGE (target material
+    removed by the tool -- an unrecoverable defect: a gouged part is scrap,
+    unlike leftover residual material which can be re-machined). gouge_norm =
+    gouge / target_volume (fraction of the target destroyed, ~[0,1]). The
+    composite penalizes it so hard-dice selection cannot deploy a checkpoint
+    that traded part damage for a higher dice. 0 disables (baseline); ~0.5-1.0
+    rejects gouged checkpoints. With best_metric='hard' a positive value is
+    strongly recommended -- a gouged state can otherwise win on hard dice."""
 
     init_stock_from: str = ""
     """STAGED TRAINING: path to a .npz saved by the truncation utility containing
@@ -503,6 +512,10 @@ def eval_metrics(sim, T, dx):
     target_mask = sdf_to_mask(target)
     m["gouge"] = float(_gouge(pred_mask, target_mask) * (dx ** 3))
     m["residual"] = float(_residual(pred_mask, target_mask) * (dx ** 3))
+    # Target volume (mm^3) for normalizing gouge/residual into fractions in the
+    # best-checkpoint composite (gouge is an unrecoverable defect; a normalized
+    # gouge lets the composite reject part-damaging checkpoints on equal dice).
+    m["target_volume"] = float(target_mask.sum()) * (dx ** 3)
     # Holder/stock collision volume across the trajectory (0 = holder stays
     # clear of the remaining stock, which is what we want for safe deployment).
     m["holder_overlap"] = float(sim.holder_overlap_total(T - 1))
@@ -549,14 +562,16 @@ def composite_score(m, args, T, dt):
     """Best-checkpoint composite: dice minus normalized trajectory penalties.
 
     score = dice - best_w_airtime*air_time_norm - best_w_time*total_time_norm
-            - best_w_break*break_prob_any
+            - best_w_break*break_prob_any - best_w_gouge*gouge_norm
 
     air_time and total_time are normalized by T*dt (the max possible toolpath
     time = every segment at the dt cap) into ~[0,1] so the weights are
-    comparable; break_prob_any is already [0,1]. With small weights dice still
-    dominates; the new metrics break ties toward shorter/safer paths, and a
-    large best_w_break enforces the reject-too-risky behavior. m may be None
-    (returns -inf).
+    comparable; break_prob_any is already [0,1]. gouge_norm = gouge /
+    target_volume (fraction of the target destroyed -- an unrecoverable
+    defect), ~[0,1]. With small weights dice still dominates; the penalties
+    break ties toward shorter/safer/non-gouged paths, and a large
+    best_w_break/best_w_gouge enforces reject-too-risky / reject-gouged. m may
+    be None (returns -inf).
     """
     if m is None:
         return -1e9
@@ -564,11 +579,14 @@ def composite_score(m, args, T, dt):
     air_norm = float(m.get("air_time", 0.0)) / t_cap
     time_norm = float(m.get("total_time", 0.0)) / t_cap
     brk = float(m.get("break_prob_any", 0.0))
+    tv = max(float(m.get("target_volume", 0.0)), 1e-8)
+    gouge_norm = float(m.get("gouge", 0.0)) / tv
     return (
         float(m["dice"])
         - args.best_w_airtime * air_norm
         - args.best_w_time * time_norm
         - args.best_w_break * brk
+        - args.best_w_gouge * gouge_norm
     )
 
 
