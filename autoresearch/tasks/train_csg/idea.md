@@ -381,3 +381,50 @@ cuts the 0.91 tool-body air without hurting dice; (2) sphere_hole INIT attack --
 try zlayer/shell inits (orbit the actual target SDF surface, may trace the hole
 rim) and slow-lr random (1e-3) to avoid the destroy-the-carve collapse. Loss-
 structure fix (accessibility-weighted residual) deferred -- needs a new flag.
+
+=== WAVE 7 (8-wide) RESULTS -- 2026-07-08 ===
+Air-lever re-probe (FIXED differentiable seg_air, commit 6d4602a) + sphere_hole
+init/lr attack. hard_dice (best ckpt) / gouge / corrected sharp air_time/total:
+
+  run                     shape       init         wr  lr    hdice   gouge   air
+  w7_sph_md_air1m3        sphere      mdepth       5   5e-3  0.6377  0.0     0.8860  <- control (fix, 1e-3)
+  w7_sph_md_air1m2        sphere      mdepth       5   5e-3  0.6411  0.0     0.8313  <- SWEET SPOT
+  w7_sph_md_air1m1        sphere      mdepth       5   5e-3  0.6304  0.0     0.8523  <- 1e-1 overshoots
+  w7_cyl_md_air1m2        cylinder    mdepth       5   5e-3  0.7599  0.0     0.8253
+  w7_hole_rasterf_wr5     sphere_hole raster_fine  5   5e-3  0.1162  215.6   0.8863  <- iter0, raster gouges
+  w7_hole_rasterf_wr5_lr3 sphere_hole raster_fine  5   1e-3  0.1162  215.6   0.8863  <- iter0 (identical)
+  w7_hole_rand_wr5_lr3    sphere_hole random       5   1e-3  0.1283  1.125   0.9382  <- iter0 (same as wave6)
+  w7_hole_rand_wr3_lr3    sphere_hole random       3   1e-3  0.1006  395.1   0.9243  <- TRAINED! iter2930, soft 0.211
+
+FINDINGS:
+1. AIR LEVER NOW HONESTLY TUNED. With the fixed pre-cut gradient, w_air_time
+   sweeps cleanly on sphere multidepth: 1e-3 -> air 0.886 (control), 1e-2 ->
+   air 0.831 (dice 0.641, BEST -- air -5.5pts AND dice +0.003), 1e-1 -> air
+   0.852 (dice DROPS to 0.630, too aggressive). 1e-2 is the sweet spot.
+   Cylinder 1e-2: air 0.825 (vs wave5 0.852), dice 0.760 (vs 0.757) -- also
+   better on BOTH. The lever is a genuine method improvement on 2 shapes.
+   Contrast with wave-6 BUGGY air10 (1e-2): air 0.797 but dice 0.633 -- the
+   buggy gradient pushed air lower by penalizing TOTAL time (shortening engaged
+   moves too), which also hurt dice. The fixed gradient penalizes ONLY real
+   air, so air drops less but dice is preserved. The lever WORKS and is honest.
+2. sphere_hole: wr3 + lr1e-3 is the FIRST recipe to TRAIN past iter 0. Best
+   checkpoint @ iter 2930, soft_dice 0.211 (+0.103 over 0.122 baseline -- the
+   biggest hole improvement yet). Lower residual weight lets the optimizer
+   explore the interior hole instead of maximizing exterior coverage. BUT it
+   gouges 395 (tool rams down the hole column through the sphere top) and
+   hard_dice is only 0.1006 -- the soft carve finds the hole, the hard carve
+   gouges the part walls. Final-iter still collapses (soft 0.000) -- the good
+   state is TRANSIENT, saved by composite best-checkpoint selection.
+3. raster_fine init: gouge 215 at iter 0 -- the XY raster drives straight down
+   through the part. Dead for concave. (spiral init NaN'd at iter0 in launch;
+   replaced.)
+4. wr5/lr1e-3 random: STILL collapses to iter0 (0.1283) -- slow lr alone doesn't
+   help; the residual WEIGHT must drop (wr3) to find the hole.
+
+NEXT (WAVE 8): (A) Lock in the air lever across shapes -- run the improved
+method (multidepth wr5 + w_air_time 1e-2) on pyramid/box/bowl to confirm the
+air win generalizes (sphere+cylinder already done in wave7). (B) Tame the
+hole gouge: wr3/lr1e-3 found the hole but gouges 395; escalate w_gouge (8, 16)
+on that recipe to suppress the plunge while keeping the low residual that
+reaches the interior. w_gouge>4 was a loser on CONVEX; on concave it may be
+exactly what suppresses the through-part plunge.
