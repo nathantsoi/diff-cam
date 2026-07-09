@@ -324,3 +324,60 @@ residual by target-surface proximity so the through-hole wall gets gradient);
 (3) the corrected air metric reveals ~90% air everywhere -- a real efficiency
 lever now that w_air_time is correctly wired; consider raising w_air_time (1e-3)
 or best_w_airtime (0.05) in a future wave to directly optimize engagement.
+
+=== WAVE 6 (8-wide) RESULTS -- 2026-07-08 ===
+Matched random+wr5 baselines + sphere_hole attack + air-lever probe.
+hard_dice (best ckpt) / gouge / corrected sharp air_time/total_time:
+
+  run                     shape       init    wr   hdice   gouge    air(sharp)
+  w6_sph_rand5            sphere      random  5    0.6006  0.0      0.9367
+  w6_cyl_rand5            cylinder    random  5    0.7323  0.0      0.9379
+  w6_hole_rand_kann       sphere_hole random  5    0.1283  1.125    0.9382
+  w6_hole_rand_k60        sphere_hole random  5    0.1283  1.125    0.9382
+  w6_hole_rand_wr10       sphere_hole random  10   0.1283  1.125    0.9382
+  w6_hole_rand_wr10_kann  sphere_hole random  10   0.1283  1.125    0.9382
+  w6_hole_md_tprox        sphere_hole mdepth  5    0.0559  816.0    0.9233
+  w6_sph_md_air10         sphere      mdepth  5    0.6328  0.0      0.7971  <- air 0.91->0.80
+
+FINDINGS:
+1. MATCHED TABLE COMPLETE. random+wr5 sphere=0.6006, cylinder=0.7323. Vs
+   multidepth+wr5: sphere md 0.6365 (+0.023 impr), cylinder md 0.7574 (+0.081
+   impr). Confirms the wave-5 generality table with fully matched wr5 baselines.
+2. SPHERE_HOLE: ALL FOUR LEVER VARIANTS (k-anneal, k60, wr10, wr10+kann)
+   produced BYTE-IDENTICAL final trajectories (same MD5) at hdice=0.1283,
+   gouge=1.125. Root cause: every variant's [best] checkpoint is @ ITER 0 (the
+   raw random init, shared seed=1) because training only made sphere_hole WORSE
+   -- soft_dice collapsed 0.122 -> 0.000, composite score went negative. The
+   coverage/residual loss is maximized by carving the easy EXTERIOR and ignoring
+   the tiny interior through-hole void, so GRADIENT DESCENT ACTIVELY DESTROYS
+   the initial hole-rim nick. k-sharpening / wr10 / k-anneal change nothing
+   because the basin is the same (over-erode exterior). This is a LOSS-STRUCTURE
+   + INIT problem, not a hyperparameter one.
+3. w_traj_prox is ACTIVELY HARMFUL on concave: w6_hole_md_tprox gouge=816
+   (pull-to-contour drags the tool into the hole walls / part). Dead lever for
+   concave features.
+4. AIR LEVER (w6_sph_md_air10, w_air_time 1e-2): cut sharp air 0.91->0.80 while
+   holding dice at 0.633 (vs 0.6365 baseline) -- air cut WITHOUT killing dice.
+   BUT this run trained against the BUGGY post-cut seg_air gradient (commit
+   6d4602a fixes the differentiable path). With the bug, af~=1 everywhere so
+   "air10" was really a TOTAL-TIME penalty (shortened moves). The FIXED pre-cut
+   gradient penalizes ONLY real air (tool-body re-traversal of carved space),
+   so the honest effect is unknown -- must re-run. The 0.80-0.91 sharp air is a
+   REAL inefficiency: the 25mm tool body re-traverses already-carved space
+   during helical descent (only the tip engages) -- exactly the "spiraling
+   wastes time" intuition, confirmed.
+
+GRADIENT-VIZ on run 1783553721972 (/tmp/grad_viz_1972.py, 3 isolated Tape
+passes): on the SPHERE the gradient IS helping -- |g|~=0.95 residual-grad active
+on all 127 segs, engage~=0.89 everywhere (25mm tool buried across full 25.4mm
+stock height -> the spiral "descent" IS the cut, helical roughing of the
+overburden above the embedded sphere). The only true non-cutting move is the
+z=1.0->1.32 climb (gouge-avoidance, gz=+0.44 fighting it). |g|air~=1e-5, ~1e5x
+weaker than residual -- air-time steers nothing at default 1e-3.
+
+NEXT (WAVE 7): (1) air-lever RE-PROBE with the FIXED gradient -- sphere
+multidepth w_air_time 1e-3/1e-2/1e-1 (+1e-2&w_time) to see if honest air-time
+cuts the 0.91 tool-body air without hurting dice; (2) sphere_hole INIT attack --
+try zlayer/shell inits (orbit the actual target SDF surface, may trace the hole
+rim) and slow-lr random (1e-3) to avoid the destroy-the-carve collapse. Loss-
+structure fix (accessibility-weighted residual) deferred -- needs a new flag.
