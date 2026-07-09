@@ -263,3 +263,21 @@ metric + the now-corrected air-time loss/selection semantics change. w_air/w_pro
 (soft loss terms) default 0 and were unused in all waves -> soft fix has no
 training impact. Wave 5 ran on pre-edit compiled code -> hard_dice valid, air to
 be recomputed from saved trajectory.npy post-hoc.
+
+RECOMPUTED sharp air_time/total_time for all 32 wave1-4 archived runs (saved to
+air_recompute_waves1to4.tsv; air is target-independent so one sim replays every
+trajectory). Broken metric said 1.0000 for ALL; corrected differentiates 0.78-0.96.
+KEY PATTERN (vindicates the wave-2 quality claim with a REAL metric):
+- Dense multidepth (feed60 revs12/24): sharp air 0.78-0.86 (cuts 14-22% of time)
+  e.g. w2_md_feed60_rev24 0.806, w3_md_m0_wr3 0.877, wr5 winner (0.6365) 0.902.
+- Sparse/random/zlayer (feed10): sharp air 0.92-0.96 (cuts only 4-8% of time)
+  e.g. random baseline 0.945, zlayer 0.937, raster 0.940.
+So dense multidepth really DOES spend more time engaged (less air) -- the wave-2
+"dense multidepth has better trajectory quality" conclusion was RIGHT, just
+previously unmeasurable because the air metric was pinned at 1.0. Corrected metric
+also confirms the user's observation: even the best runs spend ~90% of time in air
+(only 8-22% cutting) -- large efficiency headroom, and the reason w_air_time /
+best_w_airtime now matter once correctly wired.
+Soft air_cut_fraction barely moved under the fix (0.2096 -> 0.2096) -- confirms it
+is sigmoid-blur-distorted (tool_occ bleeds into solid stock, inflating the
+denominator). Use sharp air_time/total_time, not soft air_cut_fraction.
