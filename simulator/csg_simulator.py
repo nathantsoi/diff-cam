@@ -1420,14 +1420,19 @@ class CSGSimulatorDelta:
           stock_pre   = sigmoid(stock[t, p])          ~1 inside material pre-cut
           stock_post  = sigmoid(stock[t+1, p])        ~1 inside material post-cut
           seg_swept  += tool_occ                       (swept tool volume)
-          seg_air    += tool_occ * (1 - stock_post)    (swept in EMPTY stock)
+          seg_air    += tool_occ * (1 - stock_pre)     (swept in EMPTY stock)
           seg_engage += tool_occ * stock_pre           (chip engaged with material)
 
-        Engage uses the PRE-cut stock (the material the tooth actually meets),
-        per docs/algorithms.md §2; air uses post-cut (remaining material after
-        the pass), consistent with the existing w_air loop. Differentiable in
-        tool_pos/tool_delta (via tool_sdf) and stock (via stock_occ); safe under
-        ti.ad.Tape.
+        Both air and engage use the PRE-cut stock: engage is the material the
+        tooth actually meets, and air is swept volume in ALREADY-EMPTY space
+        (re-traversal / flying through a void) -- NOT the material this pass
+        carves away. The post-cut form (1 - stock_post) counted every just-cut
+        voxel as air, so a descent through solid stock read as 100% air and the
+        w_air_time gradient could not distinguish productive carving from real
+        air-cut motion. Pre-cut matches the sharp diagnostic in
+        compute_traj_diagnostics_hard. Differentiable in tool_pos/tool_delta
+        (via tool_sdf) and stock (via stock_occ, which carries grad to earlier
+        deltas through the evolving stock); safe under ti.ad.Tape.
         """
         for t, i, j, k in ti.ndrange((t_start, T), self.Nx, self.Ny, self.Nz):
             inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
@@ -1439,10 +1444,8 @@ class CSGSimulatorDelta:
             tool_occ = 1.0 / (1.0 + ti.exp(ta))             # ~1 inside swept tool
             sa_pre = ti.max(-50.0, ti.min(50.0, self.stock[t, i, j, k]))
             stock_occ_pre = 1.0 / (1.0 + ti.exp(sa_pre))    # ~1 inside material
-            sa_post = ti.max(-50.0, ti.min(50.0, self.stock[t + 1, i, j, k]))
-            stock_occ_post = 1.0 / (1.0 + ti.exp(sa_post))  # ~1 inside material
             ti.atomic_add(self.seg_swept[t], inv_n * tool_occ)
-            ti.atomic_add(self.seg_air[t], inv_n * tool_occ * (1.0 - stock_occ_post))
+            ti.atomic_add(self.seg_air[t], inv_n * tool_occ * (1.0 - stock_occ_pre))
             ti.atomic_add(self.seg_engage[t], inv_n * tool_occ * stock_occ_pre)
 
     @ti.kernel
