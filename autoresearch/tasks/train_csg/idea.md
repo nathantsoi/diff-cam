@@ -227,3 +227,39 @@ KEY FINDINGS:
    --w-residual 5.0) AND a random baseline across the remaining shapes
    (box/pyramid/sphere_hole/sphere_bowl + non-cubic stock) to compute the full
    average dice_improvement generality score. 8-wide: 4 shapes x {method, random}.
+
+### Air-metric bug — FOUND + FIXED (interrupting finding, 2026-07-08)
+User flagged: run 1783545047470 reports soft `air_cut_fraction=0.102` yet the tool
+spends the vast majority of time NOT engaged. Root cause = BOTH air metrics used
+POST-cut stock state where PRE-cut was required:
+
+1. SHARP `air_time/total_time` (`compute_traj_diagnostics_hard`, csg_simulator.py
+   ~L1536): `seg_air += tool_occ*(1-post)`. The tool empties every voxel it
+   touches, so post-cut those voxels are empty -> counted as air -> EVERY on-grid
+   segment reported 100% air -> air_time==total_time==1.0 for ALL runs. FIX
+   applied: `(1-pre)` so air = swept - engage (tool in already-empty space).
+   Verified: cited zlayer run 1.0000 -> 0.9447 (94.5% air / 5.5% cutting); good
+   cutter 1783553721971 1.0000 -> 0.9143 (91.4% air / 8.6% cutting). seg_engage
+   already matched ground-truth removed volume (truncate_trajectory oracle), so
+   only the air term was wrong.
+
+2. SOFT `air_cut_fraction` (`compute_diagnostics`, ~L1676): `air =
+   tool_occ*(1-stock_occ_post)`. Same pre/post bug fixed (now pre-cut
+   stock_occ_pre). BUT the soft scalar barely moved (0.1024 -> 0.1023) because it
+   ALSO under-reports for a SEPARATE reason: the sigmoid-blurred tool_occ bleeds
+   several voxels into solid stock, inflating the denominator (diag_tool_swept)
+   with "engaged" bleed while the numerator (tool in empty space) stays small.
+   So soft air_cut_fraction remains a blur-distorted proxy; use SHARP
+   air_time/total_time as the reporting/decision metric.
+
+SIGNIFICANT — not diagnostic-only: the sharp air_time feeds `w_air_time` (default
+1e-3, ACTIVE in the loss) and `best_w_airtime` (default 0.05, ACTIVE in
+best-checkpoint selection, `composite_score`). With the bug: air_time==total_time
+so w_air_time was penalizing TOTAL time (not air), and best_w_airtime was a
+REDUNDANT extra time weight (air_norm==time_norm, no independent effect). After
+the fix both genuinely target air -> realigns the optimizer with the goal
+(minimize air time). Prior-wave hard_dice/residual/gouge remain valid; only air
+metric + the now-corrected air-time loss/selection semantics change. w_air/w_prox
+(soft loss terms) default 0 and were unused in all waves -> soft fix has no
+training impact. Wave 5 ran on pre-edit compiled code -> hard_dice valid, air to
+be recomputed from saved trajectory.npy post-hoc.

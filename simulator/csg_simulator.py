@@ -1533,7 +1533,13 @@ class CSGSimulatorDelta:
             if self.stock[t + 1, i, j, k] < 0.0:
                 post = 1.0
             ti.atomic_add(self.seg_swept[t], inv_n * tool_occ)
-            ti.atomic_add(self.seg_air[t], inv_n * tool_occ * (1.0 - post))
+            # Air = tool swept volume that is in ALREADY-EMPTY stock (pre-cut),
+            # i.e. the tool re-traversing carved space rather than engaging solid
+            # material. Using post-cut stock here was a bug: the tool empties every
+            # voxel it touches, so post-cut those voxels read as empty and EVERY
+            # on-grid segment reported 100% air. pre-cut gives the true engaged vs
+            # air split (air = swept - engage).
+            ti.atomic_add(self.seg_air[t], inv_n * tool_occ * (1.0 - pre))
             ti.atomic_add(self.seg_engage[t], inv_n * tool_occ * pre)
         # Per-segment time (sharp regime gate, non-diff).
         for t in range(T):
@@ -1669,11 +1675,18 @@ class CSGSimulatorDelta:
             stock_occ = 1.0 / (1.0 + ti.exp(sa))
             penetration = ti.max(0.0, (margin - holder_d) * scale)
             h += inv_n * w_h * stock_occ * penetration * penetration
-            # Air-cut: tool swept volume in empty stock.
+            # Air-cut: tool swept volume in ALREADY-EMPTY stock. Use pre-cut
+            # stock[t]: "empty stock" means empty before this segment cut, i.e.
+            # the tool re-traversing carved space. (Post-cut stock[t+1] was a bug:
+            # the tool empties what it touches, so post-cut read as empty and
+            # over-reported air / distorted the sigmoid-blurred fraction.)
+            stock_d_pre = self.stock[t, i, j, k]
+            sa_pre = ti.max(-50.0, ti.min(50.0, stock_d_pre * scale))
+            stock_occ_pre = 1.0 / (1.0 + ti.exp(sa_pre))
             tool_d = self.tool_sdf(p, t)
             ta = ti.max(-50.0, ti.min(50.0, -tool_d * scale))
             tool_occ = 1.0 / (1.0 + ti.exp(ta))
-            air = tool_occ * (1.0 - stock_occ)
+            air = tool_occ * (1.0 - stock_occ_pre)
             a += inv_n * w_a * air * air
             au += inv_n * air
             ts += inv_n * tool_occ
