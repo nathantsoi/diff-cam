@@ -1,5 +1,6 @@
 #!/bin/bash
 # Block until all 8 wave-4 runs print a final summary (^hard_dice:) or die.
+cd "$(dirname "$0")"
 logs=(w4_sph_wr5 w4_sph_wr10 w4_sph_wr3_lr1e2 w4_sph_wr5_wg8 w4_sph_wr3_rev24 w4_sph_wr5_shift w4_cyl_md_wr3 w4_cyl_rand)
 declare -A done
 while true; do

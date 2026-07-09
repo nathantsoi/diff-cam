@@ -188,12 +188,42 @@ KEY FINDINGS (turn the lever identification):
 4. Gap to raster's gouging 0.654 is ~0.03; wave 4 tests whether raising
    w_residual further (5/10) closes it while staying zero-gouge.
 
-### Wave 4 — push w_residual + generality probe, LAUNCHED 18:35
-Take the wave-3 lever (w_residual) and push it: 5.0/10.0, plus complementary knobs
-(lr 1e-2, w_gouge 8, revs24, loss_shift 2) on the best geometry (multidepth feed60
-revs12 margin0). In parallel, START the generality probe -- run the best config
-(multidepth + w_res3) AND a random baseline on a SECOND shape (cylinder, r=11.43
-h=22.86mm) to begin measuring cross-scenario dice_improvement. Note: cylinder
-init hard_dice is ~0.72 (vs sphere ~0.59), so its baseline differs -- the
-dice_improvement normalization matters for fair generality comparison. See
-launch_wave4.sh; sentinel wait_wave4.sh.
+### Wave 4 — push w_residual + generality probe, COMPLETE
+Pushed w_residual (5/10) + complementary knobs (lr 1e-2, w_gouge 8, revs24,
+loss_shift 2) on the best geometry (multidepth feed60 revs12 margin0), and ran
+the best config + random baseline on a SECOND shape (cylinder).
+
+SPHERE hard_dice / gouge / residual / air% / impr (dice_baseline=0.548):
+- w4_sph_wr5:        **0.6365** / 0 / 7149 / 21.0% / 0.1957  <- BEST sphere, best impr
+- w4_sph_wr3_rev24:  0.6353 / 0 / 7186 / 21.0% / 0.1931
+- w4_sph_wr10:       0.6293 / 0 / 7374 /  8.1% / 0.1798  (lowest air, but lower dice)
+- w4_sph_wr3_lr1e2:  0.6238 / 0 / 7546 / 19.3% / 0.1678  (lr 1e-2 < 5e-3)
+- w4_sph_wr5_wg8:    0.6127 / 0 / 7911 / 17.4% / 0.1432  (w_gouge 8 HURT)
+- w4_sph_wr5_shift:  0.6022 / 0 / 8268 / 15.8% / 0.1199  (loss_shift HURT worst)
+
+CYLINDER hard_dice / gouge / residual / air% / impr (dice_baseline=0.7175):
+- w4_cyl_md_wr3:  **0.7574** / 0 / 5943 / 12.8% / 0.1412  <- method beats random
+- w4_cyl_rand:       0.7361 / 0 / 6650 /  9.4% / 0.0661  <- random baseline
+
+KEY FINDINGS:
+1. w_residual=5.0 is the sphere SWEET SPOT: 0.6365, the best zero-gouge hard_dice
+   across all 32 runs, closing raster's gouge-to-win 0.654 gap to ~0.018. w_res=10
+   overshoots (0.6293) -- too aggressive, clears into the part and degrades. So
+   the lever is real but has an optimum near 5; further does not help.
+2. loss_shift and w_gouge are now CONFIRMED losers (hurt in both wave 2 and wave
+   4). Higher lr (1e-2) is slightly worse than 5e-3. rev24 matches wr5 on dice.
+   => Drop loss_shift, w_gouge>4, lr>5e-3 from the recipe. Keep wr5 as the config.
+3. GENERALITY (the primary goal): the shape-agnostic method (multidepth + w_res3)
+   BEATS random on cylinder without ANY retuning (+0.0213 hard_dice, +0.075 impr).
+   Cross-scenario dice_improvement averaging (the generality score), using the
+   SAME wr3 config on both shapes: sphere impr 0.161 (w3_md_m0_wr3 0.6207) +
+   cylinder impr 0.141 = avg 0.151, vs random avg (sphere 0.177 + cyl 0.066)/2 =
+   0.122. The method beats random ON AVERAGE despite random being strong on sphere
+   alone -- i.e. the method's advantage grows on the harder-to-init cylinder.
+   Note: at wr3 sphere random (0.628) edges md (0.621); at wr5 md (0.6365) finally
+   beats sphere random (0.628). So wr5 is the config to standardize on for the
+   full generality sweep.
+4. NEXT (wave 5): run the winning config (multidepth feed60 revs12 margin0
+   --w-residual 5.0) AND a random baseline across the remaining shapes
+   (box/pyramid/sphere_hole/sphere_bowl + non-cubic stock) to compute the full
+   average dice_improvement generality score. 8-wide: 4 shapes x {method, random}.
