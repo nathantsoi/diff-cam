@@ -119,6 +119,8 @@ class Args:
     """whether to save the learned trajectory into the `runs/{run_name}` folder"""
     autoresearch: bool = False
     """if True, prefix the run name with 'AR-' for tracking experiments"""
+    runs_subdir: str = ""
+    """optional subdirectory under runs/ to write the run into (e.g. 'jul8-multidepth'); empty = top-level runs/. Lets the web dashboard group runs into a batch without moving them after the fact."""
 
     # eval / video cadence -- measured in Adam iterations (same flags as csg_ppo)
     eval: bool = False
@@ -314,6 +316,15 @@ class Args:
     stock-based w_gouge (satisfied trivially by soft-union over-erosion while
     the HARD carve still gouges), this constrains the trajectory GEOMETRY
     directly so it transfers to hard dice. 0 disables."""
+    tool_gouge_margin_mm: float = 0.0
+    """margin (mm) added to the tool radius in the TOOL-POSITION gouge barrier.
+    The barrier fires when target_sdf(tool_center) < r_tool + margin, i.e. the
+    tool center must stay `margin` mm FURTHER off the surface than mere
+    tangency. Convex parts (sphere) gouge at pass seams where overlapping
+    TANGENT capsules bite into the part -- loss_tool_gouge=0 at midpoints yet
+    the boolean union still over-erodes; a positive margin lifts the tool so the
+    union of capsules stays tangent-only, trading a little uncut residual for
+    no gouge. Shape-agnostic (target_sdf only). 0 = tangent-only (default)."""
 
     # ---- Trajectory-quality measures (time / air-cut time / breakage) ----
     # Three deployable measures reported alongside dice and (when their weight
@@ -363,6 +374,15 @@ class Args:
     """composite best-checkpoint weight on breakage probability (already
     [0,1]). Raising this rejects high-engagement checkpoints even at higher
     dice."""
+    best_on_hard: bool = False
+    """select the best/deployable checkpoint by HARD dice (the deployable sharp
+    carve metric) instead of the default SOFT dice. The soft selector is less
+    noisy but can deploy a checkpoint whose soft dice is high yet hard dice is
+    much lower (the soft/hard gap) -- throwing away a higher-hard-dice final
+    iter. Hard selection aligns deployment with the metric we advance on, at the
+    cost of selecting on a nondeterministic carve (mitigated by the air/break
+    penalties and by hard dice being stable at convergence). The reported
+    `hard_dice` then reflects the hard-dice-best checkpoint."""
 
     init_stock_from: str = ""
     """STAGED TRAINING: path to a .npz saved by the truncation utility containing
@@ -586,13 +606,13 @@ def composite_score(m, args, T, dt):
     )
 
 
-def export_stls(sim, T, dx, run_name, step, track):
+def export_stls(sim, T, dx, run_dir, step, track):
     """Export initial stock / carved stock / target meshes (shared `_sdf_to_stl`)."""
     initial_stock = sim.stock.to_numpy()[0].copy()      # before the first cut
     carved_stock = sim.stock.to_numpy()[T - 1].copy()
     target = sim.target.to_numpy().copy()
 
-    mesh_dir = os.path.join("runs", run_name, "meshes")
+    mesh_dir = os.path.join(run_dir, "meshes")
     os.makedirs(mesh_dir, exist_ok=True)
     written = []
     for name, sdf in (("stock_initial", initial_stock),
@@ -619,10 +639,21 @@ def main():
     prefix = "AR-" if args.autoresearch else ""
     ts = int(time.time() * 1000)
     run_name = f"{prefix}{args.env_id}__{args.exp_name}__{args.seed}__{ts}"
-    while os.path.exists(os.path.join("runs", run_name)):
-        ts += 1
-        run_name = f"{prefix}{args.env_id}__{args.exp_name}__{args.seed}__{ts}"
-    run_dir = os.path.join("runs", run_name)
+    run_dir = os.path.join("runs", args.runs_subdir, run_name) if args.runs_subdir else os.path.join("runs", run_name)
+    # Atomically claim a unique run dir. The old check-then-create loop
+    # (`while os.path.exists`) raced when two launches landed in the same
+    # millisecond: both saw no dir, both proceeded, and os.makedirs(exist_ok=True)
+    # silently let the loser overwrite the winner's artifacts. makedirs with
+    # exist_ok=False is atomic on POSIX -- exactly one process wins; the other
+    # gets FileExistsError and retries with an incremented timestamp.
+    while True:
+        try:
+            os.makedirs(run_dir, exist_ok=False)
+            break
+        except FileExistsError:
+            ts += 1
+            run_name = f"{prefix}{args.env_id}__{args.exp_name}__{args.seed}__{ts}"
+            run_dir = os.path.join("runs", args.runs_subdir, run_name) if args.runs_subdir else os.path.join("runs", run_name)
     video_dir = os.path.join(run_dir, "videos")
     os.makedirs(video_dir, exist_ok=True)
     print(f"[run] writing outputs to {run_dir}")
@@ -721,6 +752,9 @@ def main():
     sim.w_traj_prox[None] = args.w_traj_prox
     sim.w_len[None] = args.w_len
     sim.w_tool_gouge[None] = args.w_tool_gouge
+    # Margin is in mm; the barrier works in voxels (target_sdf + r_vox are both
+    # voxel units), so convert mm -> voxels via the voxel size v (mm/voxel).
+    sim.tool_gouge_margin[None] = args.tool_gouge_margin_mm / sim.v
     # Trajectory-quality measures (time / air-cut time / breakage) + breakage
     # model constants.
     sim.w_time[None] = args.w_time
@@ -1250,8 +1284,12 @@ def main():
                 # best_score uses SOFT dice (proven operating-point metric) with
                 # the hard-carve traj-quality penalties (best_w_* default 0.05,
                 # so penalties barely affect checkpoint selection; with
-                # --best-w-* 0 the composite is pure soft dice).
-                score = composite_score({**m, "dice": m["soft_dice"]}, args, T, args.dt)
+                # --best-w-* 0 the composite is pure soft dice). With
+                # --best-on-hard, select on HARD dice (m["dice"]) instead so the
+                # deployed checkpoint is the hard-dice-best, aligning with the
+                # deployable metric we advance on.
+                sel_m = m if args.best_on_hard else {**m, "dice": m["soft_dice"]}
+                score = composite_score(sel_m, args, T, args.dt)
                 if score > best_score:
                     # sim.tool_delta / sim.tool_pos here reflect the PRE-step
                     # params (set before the forward at the top of the loop),
@@ -1259,7 +1297,7 @@ def main():
                     # directly so the saved best trajectory is consistent with
                     # the measured metrics (no re-eval needed later).
                     best_score = score
-                    best_dice = float(m["soft_dice"])
+                    best_dice = float(sel_m["dice"])
                     best_m = dict(m)
                     best_positions = sim.tool_pos.to_torch()[:T].numpy().copy()
                     best_deltas = sim.tool_delta.to_torch()[:T].numpy().copy()
@@ -1385,12 +1423,14 @@ def main():
         # measurable independently of the best-dice checkpoint.
         final_iter_m = dict(last_m) if last_m is not None else None
         if best_positions is not None and best_dice > 0.0:
-            # composite_score reads m["dice"]; substitute soft_dice so the
-            # best-vs-final comparison uses the proven SOFT-dice metric.
-            final_iter_score = composite_score(
-                {**last_m, "dice": last_m.get("soft_dice", last_m["dice"])},
-                args, T, args.dt,
-            )
+            # composite_score reads m["dice"]; by default substitute soft_dice so
+            # the best-vs-final comparison uses the proven SOFT-dice metric. With
+            # --best-on-hard, compare on HARD dice (last_m["dice"]) instead so a
+            # higher-hard-dice final iter isn't rejected in favor of a soft-best
+            # checkpoint that deploys worse.
+            final_sel_m = last_m if args.best_on_hard else {
+                **last_m, "dice": last_m.get("soft_dice", last_m["dice"])}
+            final_iter_score = composite_score(final_sel_m, args, T, args.dt)
             # Use the best checkpoint when its COMPOSITE score (dice + the three
             # trajectory-quality penalties) beats the final iter's composite --
             # generalizes the old dice-only comparison. The reported metrics are
@@ -1478,6 +1518,13 @@ def main():
             # engage_* are raw chip volumes (unit-cube^3) for calibration.
             "air_time": round(float(last_m.get("air_time", 0.0)), 6) if last_m else 0.0,
             "total_time": round(float(last_m.get("total_time", 0.0)), 6) if last_m else 0.0,
+            # Sharp air-time fraction = air_time / total_time in [0,1]. This is
+            # the deployable air-cut metric (fraction of toolpath TIME in air on
+            # the hard carve). Distinct from air_cut_fraction, a SOFT blurred
+            # volume ratio that does NOT track this and can read ~0.09 while
+            # air_time==total_time (i.e. the whole path is air). Use this one.
+            "air_time_frac": (round(float(last_m["air_time"]) / max(float(last_m["total_time"]), 1e-8), 6)
+                              if last_m and last_m.get("total_time", 0.0) > 0 else 0.0),
             "break_prob_any": round(float(last_m.get("break_prob_any", 0.0)), 6) if last_m else 0.0,
             "break_prob_max": round(float(last_m.get("break_prob_max", 0.0)), 6) if last_m else 0.0,
             "fcut_max": round(float(last_m.get("fcut_max", 0.0)), 6) if last_m else 0.0,
@@ -1493,6 +1540,8 @@ def main():
             "final_iter_air_cut_fraction": round(float(final_iter_m.get("air_cut_fraction", 0.0)), 6) if final_iter_m else 0.0,
             "final_iter_air_time": round(float(final_iter_m.get("air_time", 0.0)), 6) if final_iter_m else 0.0,
             "final_iter_total_time": round(float(final_iter_m.get("total_time", 0.0)), 6) if final_iter_m else 0.0,
+            "final_iter_air_time_frac": (round(float(final_iter_m["air_time"]) / max(float(final_iter_m["total_time"]), 1e-8), 6)
+                                         if final_iter_m and final_iter_m.get("total_time", 0.0) > 0 else 0.0),
             "final_iter_break_prob_any": round(float(final_iter_m.get("break_prob_any", 0.0)), 6) if final_iter_m else 0.0,
         }
         metrics_path = os.path.join(run_dir, "metrics.json")
@@ -1514,7 +1563,7 @@ def main():
         print("---\n", flush=True)
 
         # Export the final geometry (initial stock, carved stock, target).
-        export_stls(sim, T, dx, run_name, it, args.track)
+        export_stls(sim, T, dx, run_dir, it, args.track)
 
         # --- Save the learned trajectory (this is GradMill's "model") ---
         if args.save_model:

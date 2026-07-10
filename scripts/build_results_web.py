@@ -42,6 +42,30 @@ OUT = os.path.join(WEB, "data.json")
 DICE_TOL = 0.05  # results.tsv dice must be within this of a run's metrics dice
 
 
+def clean_for_json(obj):
+    """Recursively replace non-finite floats (inf / -inf / NaN) with None.
+
+    Python's ``json`` renders these as ``Infinity`` / ``-Infinity`` / ``NaN`` by
+    default, which are NOT valid JSON — the browser's ``JSON.parse`` (used by
+    ``d3.json`` and ``response.json()``) rejects the WHOLE response with
+    "Unexpected token 'I'". That silently empties the dashboard: every fetch's
+    ``.json()`` rejects into a local catch, leaving ``DATA.experiments`` and
+    ``CURRENT_BATCH_RUNS`` empty. ``metrics.asd`` / ``hd95`` are ``+inf`` for any
+    run whose carve never overlaps the target (no surface distance), so this
+    fires routinely. ``null`` is the standards-compliant rendering the page
+    already displays as "—".
+    """
+    if isinstance(obj, dict):
+        return {k: clean_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [clean_for_json(v) for v in obj]
+    # numpy scalars subclass float, so this covers them too.
+    if isinstance(obj, float):
+        if obj != obj or obj == float("inf") or obj == float("-inf"):
+            return None
+    return obj
+
+
 def parse_cmd(cmd):
     """Pull shape / iters / seed out of a results.tsv command string."""
     if not isinstance(cmd, str):
@@ -113,7 +137,7 @@ def load_run(run_dir):
         "iters": int(args["iters"]) if args.get("iters") is not None else None,
         "seed": int(args["seed"]) if args.get("seed") is not None else None,
         "dice": float(metrics["dice"]),
-        "metrics": metrics,
+        "metrics": clean_for_json(metrics),
         "args": args,
         "mtime": os.path.getmtime(tp),
     }
@@ -514,6 +538,7 @@ def build_data_payload(generate_gcode=True, verbose=True):
     # Build experiment records, matching each results row to a run dir.
     experiments = []
     n_matched = 0
+    matched_dirs = set()
     for i, r in enumerate(rows):
         cmd = r.get("command", "") or ""
         desc = r.get("description", "") or ""
@@ -553,7 +578,46 @@ def build_data_payload(generate_gcode=True, verbose=True):
         }
         if run:
             n_matched += 1
+            matched_dirs.add(run["run_dir"])
         experiments.append(rec)
+
+    # Append every viewable run dir that results.tsv did NOT match, as a
+    # lightweight "arbitrary" experiment. The autoresearch launch scripts
+    # (launch_wave*.sh) run train_csg directly and never append to results.tsv,
+    # so without this the dashboard's default data.json grid is frozen at the
+    # last results.tsv era (e.g. 32 wave-4 rows) while hundreds of newer runs
+    # sit on disk invisible until a batch is manually selected. These records
+    # carry run_dir + dice + metrics (so the grid's hard-dice axis + tooltips
+    # work) but NO embedded trajectory/stl/gcode; the page fetches the full
+    # record via /__api/run on click (index.html ~L974), exactly as it does for
+    # batch-dropdown runs. Newest first (list_runs sorts by mtime desc).
+    n_arbitrary = 0
+    for r in list_runs():
+        if r["run_dir"] in matched_dirs:
+            continue
+        experiments.append({
+            "idx": len(experiments),
+            "commit": "",
+            "dice": r["dice"],
+            "memory_gb": 0.0,
+            "status": "arbitrary",
+            "description": r["name"],
+            "command": "",
+            "shape": r["shape"],
+            "iters": r["iters"],
+            "seed": r["seed"],
+            "run_dir": r["run_dir"],
+            "name": r["name"],
+            "metrics": r["metrics"],
+            "stl": {},
+            "gcode": None,
+            "trajectory": None,
+            "tool_geom": None,
+            "mtime": r["mtime"],
+        })
+        n_arbitrary += 1
+    if verbose:
+        print(f"[arbitrary] appended {n_arbitrary} unmatched run dirs as lightweight experiments")
 
     if verbose:
         print(f"[match] {n_matched}/{len(rows)} rows matched to a run dir")
@@ -616,8 +680,15 @@ class IncrementalResultsBuilder:
                 try:
                     payload = build_data_payload(generate_gcode=self.generate_gcode, verbose=self.verbose)
                     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-                    with open(OUT, "w") as f:
+                    # Atomic write: serialize to a temp file in the same dir, then
+                    # os.replace onto data.json. A concurrent browser read of an
+                    # in-place json.dump can catch a half-written file (parse fail
+                    # -> the page's catch branch empties the dashboard and crashes
+                    # updateStats on d3.max([])); rename is atomic on POSIX.
+                    tmp = OUT + ".tmp"
+                    with open(tmp, "w") as f:
                         json.dump(payload, f)
+                    os.replace(tmp, OUT)
                     if self.verbose:
                         print(f"[write] {OUT} ({os.path.getsize(OUT) / 1e6:.2f} MB)")
                     self.payload = payload

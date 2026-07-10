@@ -44,6 +44,26 @@ def find_repo_root() -> Path:
     return Path.cwd()
 
 
+def _json_sanitize(obj):
+    """Recursively replace non-finite floats (inf / -inf / NaN) with None.
+
+    Defense-in-depth at the API egress: Python's ``json`` would otherwise emit
+    ``Infinity`` / ``-Infinity`` / ``NaN`` (invalid JSON), which the browser's
+    ``JSON.parse`` rejects, silently emptying the dashboard. ``build_results_web``
+    sanitizes at the source (``load_run``), but this guarantees every response —
+    including a cached payload built before that fix or any future non-finite
+    value — is strict JSON. ``null`` renders as "—" in the page.
+    """
+    if isinstance(obj, dict):
+        return {k: _json_sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_json_sanitize(v) for v in obj]
+    if isinstance(obj, float):
+        if obj != obj or obj == float("inf") or obj == float("-inf"):
+            return None
+    return obj
+
+
 def ensure_cert(cert_dir: Path, host: str) -> tuple[Path, Path]:
     """Generate a self-signed cert+key via openssl if not already present."""
     cert_dir.mkdir(parents=True, exist_ok=True)
@@ -258,7 +278,7 @@ def main() -> None:
             super().end_headers()
 
         def _json(self, obj, status=200):
-            body = json.dumps(obj).encode()
+            body = json.dumps(_json_sanitize(obj)).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

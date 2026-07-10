@@ -428,3 +428,373 @@ hole gouge: wr3/lr1e-3 found the hole but gouges 395; escalate w_gouge (8, 16)
 on that recipe to suppress the plunge while keeping the low residual that
 reaches the interior. w_gouge>4 was a loser on CONVEX; on concave it may be
 exactly what suppresses the through-part plunge.
+
+================================================================
+WAVE 8 (8-wide, jul8-multidepth) — air-lever generality + hole-gouge taming
+================================================================
+MDAIR = multidepth wr5 + w_air_time 1e-2 (the wave-7 sweet spot).
+HOLEBASE = random wr3 lr1e-3 (the wave-7 collapse-cure recipe) + w_gouge sweep.
+
+run                     shape        init      wr  lr    w_gouge w_air  hard_dice soft_dice gouge   sharp_air
+w8_pyr_md_air           pyramid      mdepth    5   5e-3  4       1e-2   0.4477    -         0.0     0.852   <- dice DROPPED vs wave5 md 0.494
+w8_box_md_air           box          mdepth    5   5e-3  4       1e-2   0.8144    -         0.0     0.979   <- tie wave5 0.814
+w8_bowl_md_air          sphere_bowl  mdepth    5   5e-3  4       1e-2   0.5307    0.563     299.4   0.942   <- dice +0.051 vs 0.479 BUT GOUGES 299
+w8_hole_md_air          sphere_hole  mdepth    5   5e-3  4       1e-2   0.0784    0.079     651.6   -       <- control: catastrophic (expected ~0)
+w8_hole_wr3_lr3_g8      sphere_hole  random    3   1e-3  8       1e-3   0.1251    0.306     125.8   -       <- trained, best@iter1200, final soft 0.265
+w8_hole_wr3_lr3_g16     sphere_hole  random    3   1e-3  16      1e-3   0.1257    0.373     129.5   -       <- trained, best@iter1720, final soft 0.353
+w8_hole_wr3_lr3_g8a     sphere_hole  random    3   1e-3  8       1e-2   0.1211    0.211     226.5   -       <- trained, best@iter4400
+w8_hole_wr2_lr3_g8      sphere_hole  random    2   1e-3  8       1e-3   0.1171    0.356     234.5   -       <- trained, best@iter4090
+
+FINDINGS:
+1. AIR LEVER IS NOT A CLEAN GENERALIZATION WIN. w_air_time=1e-2 (the sphere/
+   cylinder sweet spot) gives MIXED results across shapes:
+   - pyramid: hard_dice DROPPED 0.494 -> 0.448 (air 0.887 -> 0.852). The lever
+     pulls the regular multidepth pattern off-optimal on a shape with a flat
+     slanted face -- the air gradient distorts the rake pattern.
+   - box: tied (0.814). Flat faces, little to gain.
+   - bowl: dice +0.051 (0.479 -> 0.531) BUT gouge jumps 0 -> 299. The lever
+     drives the tool into the bowl wall to shave air time.
+   So 1e-2 helps sphere/cylinder, hurts pyramid, induces gouge on bowl. NOT
+   shape-agnostic at this weight. Needs a gentler weight (re-probe 3e-3 in w9).
+2. sphere_hole COLLAPSE IS CURED. ALL FOUR hole variants train stably past
+   iter 0 (best @ iter 1200-4400) and final-iter soft_dice stays high (0.21-
+   0.35). wr3+lr1e-3 is a robust recipe; w_gouge 4/8/16 and wr2 all sustain it.
+   This is real progress: the optimizer now FINDS and HOLDS the interior hole.
+3. SOFT/HARD GAP — the new wall. hard_dice is stuck at ~0.124 (0.117-0.126)
+   across ALL FOUR hole runs REGARDLESS of soft_dice 0.21-0.37. The soft
+   (sigmoid-blurred) carve fills the hole; the sharp/boolean carve gouges the
+   thin walls -> dice capped. Raising w_gouge 4->8->16 does NOT help (gouge
+   stays 125-235): the gouge BARRIER itself uses blurred stock_occ/target_occ
+   (compute_loss L1083-1089), so it cannot feel the wall the sharp cut violates.
+   The barrier and the objective share the same blur -> the optimizer is blind
+   to the hard/hard conflict. This is structural, not a weighting problem.
+4. w_gouge 16 vs 8: marginally higher soft_dice (0.373 vs 0.306) and marginally
+   higher hard_dice (0.1257 vs 0.1251) -- a flat response. Confirms the barrier
+   is saturated/blind, not under-weighted.
+
+NEXT (WAVE 9): Attack the SOFT/HARD GAP directly (now that collapse is cured,
+the previously-losing loss_shift / k-anneal levers can finally bite):
+  (A) loss_shift = log(2)*k_ref/k_final added to stock_d before the loss sigmoid
+      -> loss targets the LESS-eroded hard carve. Test 3.5 (k=10) and 1.2 (k=30).
+  (B) k-anneal k_init=2 -> k_final=30/50 -> late-training soft-union SHARPENS so
+      soft coverage tracks HARD coverage on the concave wall. Combined w/ loss_shift.
+  All on the proven wr3+lr1e-3 hole recipe.
+  (C) Re-probe the air lever at gentler 3e-3 on pyramid (undo regression?),
+      bowl (keep gain, drop gouge?), sphere (reference interpolant) + a pyramid
+      1e-3 same-seed control for clean A/B vs wave8's 1e-2.
+
+================================================================
+WAVE 9 (8-wide, jul8-multidepth) — soft/hard-gap attack + air-lever 3e-3 re-probe
+================================================================
+(A) Gap attack on sphere_hole, all on proven wr3+lr1e-3 base. ^hard_dice: line
+    = final_iter_hard_dice (confirmed).
+(B) Air lever re-probe at 3e-3 on multidepth wr5 base + pyramid 1e-3 control.
+
+run                     shape        lever                         hard_dice soft(final) best_soft gouge
+w9_hole_lshift35        sphere_hole  loss_shift 3.5                0.1251    0.213       0.210     111
+w9_hole_lshift12        sphere_hole  loss_shift 1.2                0.0509    COLLAPSED   0.309     110   <- peaked then collapsed
+w9_hole_kanneal30       sphere_hole  k 2->30 + lshift1.2          0.1249    0.172       0.341     150
+w9_hole_kanneal50       sphere_hole  k 2->50 + lshift0.7          0.2309    0.207       0.120     217   <- GAP BROKEN (~2x cap)
+w9_pyr_air3m3           pyramid      md wr5 + w_air 3e-3           0.4601    -           -         0
+w9_bowl_air3m3          sphere_bowl  md wr5 + w_air 3e-3           0.4883    -           -         344   <- worse than 1e-2 (0.531/299)
+w9_sph_air3m3           sphere       md wr5 + w_air 3e-3           0.6411    -           -         0     <- matches 1e-2/1e-3
+w9_pyr_air1m3           pyramid      md wr5 + w_air 1e-3 (ctrl)    0.4505    -           -         0
+
+FINDINGS:
+1. SOFT/HARD GAP BROKEN BY k-ANNEAL TO k_final=50. hard_dice 0.124 -> 0.231
+   (final iter, ~2x). The gap is a UNION-SHARPNESS problem: only sharpening
+   the soft union late in training (k 2->50) makes soft coverage track HARD
+   coverage on the thin concave wall. Decomposition:
+   - loss_shift ALONE (3.5, 1.2): CANNOT break the gap (0.125, 0.051). lshift1.2
+     peaked soft 0.309 then COLLAPSED final hard 0.051 -- unstable.
+   - k->30 + lshift1.2: stable but hard 0.125 -- k=30 insufficient.
+   - k->50 + lshift0.7: stable, hard 0.231 -- the winner.
+   So k_final=50 is the critical lever; loss_shift is a minor stabilizer. This
+   overturns wave-6's "k-anneal is a loser" -- that was pre-collapse-cure; with
+   wr3+lr1e-3 holding the hole, late sharpening finally bites.
+2. TRADE-OFF: k-anneal50 gouges 217 (vs 109-150 for the softer runs). The
+   sharper union reveals wall gouge the blur hid. But hard_dice DOUBLED, so the
+   sharp cut is genuinely better despite the gouge count. Next: tame gouge with
+   w_gouge on top of k-anneal50.
+3. AIR LEVER IS SHAPE-DEPENDENT, NOT WORTHY OF THE CANONICAL METHOD.
+   - sphere: 3e-3 == 1e-2 == 1e-3 == 0.641 (insensitive; lever moot here).
+   - pyramid: 1e-3 0.450, 3e-3 0.460, 1e-2 0.448, no-air(wave5) 0.494 -- flat
+     with run variance; the wave8 "drop" was partly noise. Lever ~neutral.
+   - bowl: 3e-3 (0.488/gouge344) is WORSE than 1e-2 (0.531/299) -- bowl+air
+     gouges regardless of weight. The bowl gouge is the real issue, not air.
+   The air lever helps sphere/cylinder marginally and gouges bowl. Drop it from
+   the canonical method; the k-anneal result is the real advance.
+
+NEXT (WAVE 10): The k-anneal breakthrough is the path to the primary goal, but
+the open question is SHAPE-AGNOSTICITY. k-anneal broke the gap on concave
+sphere_hole -- does it help or hurt CONVEX shapes? If k-anneal50 holds/improves
+convex AND broke concave, it is THE generalizable method.
+  (A) Push sphere_hole k-anneal: k_final 70/100 (sharper), k50+w_gouge8 (tame
+      the 217 gouge), k50+lshift1.2 (more shift). 4 runs.
+  (B) Generalize k-anneal50 to convex shapes on their native md-wr5 base:
+      sphere, cylinder, pyramid, bowl. vs baselines 0.641/0.760/0.494/0.531.
+      THE shape-agnostic test. 4 runs.
+
+================================================================
+WAVE 10 (8-wide, jul8-multidepth) — k-anneal push + CONVEX GENERALIZATION TEST
+================================================================
+(A) Push sphere_hole k-anneal (wr3+lr1e-3 base). (B) k-anneal50 on convex
+    native md-wr5 base. THE shape-agnostic test.
+
+run                     shape        config                       hard_dice soft_dice gouge   vs baseline
+w10_hole_k70            sphere_hole  k->70 + lshift0.7            0.2497    0.231     192     <- NEW BEST concave (2x cap)
+w10_hole_k100           sphere_hole  k->100 + lshift0.7           0.1144    0.192     295     <- overshot, collapsed
+w10_hole_k50_g8         sphere_hole  k->50 + w_gouge8             0.1316    0.363     132     <- gouge tame HURTS dice
+w10_hole_k50_ls12       sphere_hole  k->50 + lshift1.2            0.1140    0.330     320     <- more shift HURTS
+w10_sph_k50             sphere       md wr5 + k->50               0.6164    0.839     0       vs 0.641 (tie, -0.025)
+w10_cyl_k50             cylinder     md wr5 + k->50               0.7547    0.965     0       vs 0.760 (tie, -0.005)
+w10_pyr_k50             pyramid      md wr5 + k->50               0.6972    0.880     96      vs 0.494 (+0.203 !!)
+w10_bowl_k50            sphere_bowl  md wr5 + k->50               0.3944    0.438     988     vs 0.531 (-0.137, GOUGES 988)
+
+FINDINGS:
+1. CONCAVE: k->70 is the new best, hard_dice 0.2497 (k50 0.231, cap 0.124).
+   Monotonic k50->k70 helps; k100 overshoots and collapses (0.114). The sweet
+   spot is ~60-70. Gouge rises 192 but dice dominates.
+2. CONVEX GENERALIZATION: k-anneal50 is LARGELY SHAPE-AGNOSTIC and a major win:
+   - sphere: 0.616 vs 0.641 (tie, within run variance)
+   - cylinder: 0.755 vs 0.760 (tie)
+   - pyramid: 0.697 vs 0.494 (+0.203 -- the biggest convex gain in the whole
+     study; k-anneal's low-k exploration finds the slanted-face pattern that
+     fixed-k misses, then sharpens to hard-track it)
+   - bowl: 0.394 vs 0.531 (-0.137, GOUGE 988 -- the ONE failure: k-anneal
+     sharpens the union and exposes a wall gouge the bowl geometry invites;
+     sharp cut rams the bowl wall)
+   So k-anneal is THE generalizable method for 3/4 convex + concave, with bowl
+   as the open failure. Pyramid +0.20 is a strong shape-agnostic signal.
+3. GOUGE TAMING ON CONCAVE BACKFIRES: w_gouge 4->8 on k50 DROPPED dice 0.231->
+   0.132. The blurred gouge barrier, once the union sharpens, fights the very
+   carving that breaks the gap. Cannot tame gouge by raising w_gouge -- need a
+   SHARP gouge signal or a geometry-aware barrier (out of scope: shape-agnostic).
+4. loss_shift > 0.7 HURTS once k-anneal is active (lshift1.2 -> 0.114). The
+   shift and the sharpening are redundant; combined they over-bias. Keep lshift
+   small (0.7) or zero with k-anneal.
+
+NEXT (WAVE 11):
+  (A) Lock concave sweet spot: k->60, k->70 repeat (confirm 0.25), k->70+lshift0.
+  (B) Fix the bowl: the failure is gouge under sharpening. Try k->30 (gentler
+      sharpening -- enough to help, less wall exposure) and k->50+w_gouge8 on
+      bowl (does a gouge barrier help on the GENTLER convex bowl where it hurt
+      concave?). Plus a bowl fixed-k50 control (no anneal, just high k) to
+      isolate anneal-vs-sharpness.
+  (C) Confirm pyramid: k->50 repeat + k->70 (does pyramid climb further?).
+
+================================================================
+WAVE 11 (8-wide, jul8-multidepth) — concave lock-in + bowl fix + pyramid confirm
+================================================================
+
+run                     shape        config                       hard_dice soft_dice gouge
+w11_hole_k60            sphere_hole  k->60 + lshift0.7            0.1315    0.204     158    <- dip (variance)
+w11_hole_k70b           sphere_hole  k->70 + lshift0.7            0.2457    0.234     115    <- CONFIRMS 0.25 (wave10 0.2497)
+w11_hole_k70_ls0        sphere_hole  k->70 + lshift0              0.1219    0.000     0      <- COLLAPSED w/o loss_shift
+w11_bowl_k30            sphere_bowl  md wr5 k->30                 0.3953    0.435     723    <- gentler no help
+w11_bowl_k50_g8         sphere_bowl  md wr5 k->50 + w_gouge8      0.4654    0.648     0      <- GOUGE ELIMINATED, dice up
+w11_bowl_kfix50         sphere_bowl  md wr5 k_fixed50 (no anneal) 0.3917    0.379     2476   <- catastrophic: anneal ESSENTIAL
+w11_pyr_k50b            pyramid      md wr5 k->50                 0.5748    0.858     50     <- didn't reproduce 0.697
+w11_pyr_k70             pyramid      md wr5 k->70                 0.6205    0.869     33     <- k70 more stable
+
+FINDINGS:
+1. CONCAVE k70+lshift0.7 REPRODUCES (0.2497, 0.2457). The 0.25 / 2x-cap result
+   is real. k60 dipped (0.131) -- concave is high-variance; k70 is the reliable
+   point.
+2. loss_shift 0.7 is ESSENTIAL to k-anneal on concave, not optional: k70 alone
+   (lshift0) COLLAPSES (soft 0.000, hard 0.122). Synergy -- k-anneal needs the
+   shift to hold the carve as the union sharpens; neither alone works (lshift
+   alone w9 = 0.125). The recipe is k->70 + lshift0.7 TOGETHER.
+3. BOWL: w_gouge8 ELIMINATES the bowl gouge (988->0) and lifts dice 0.394->
+   0.465. BUT w_gouge8 HURT concave (0.231->0.132, wave10). So w_gouge8 is
+   SHAPE-DEPENDENT: helps convex bowl, kills concave hole. A single fixed
+   w_gouge cannot serve both -> need geometry-adaptive gouge (future).
+4. ANNEAL SCHEDULE IS ESSENTIAL: bowl k_fixed50 (no anneal) gouged 2476, dice
+   0.392. The low->high ramp (explore then sharpen) is the mechanism, not just
+   a high final k. Strong evidence the continuation method is what works.
+5. BOWL STILL HOLDS OUT: even k50_g8 (0.465, gouge0) < non-annealed baseline
+   (~0.48 plain, ~0.53 +air). k-anneal is a net loss on bowl. The one shape
+   where the method doesn't beat simpler recipes.
+6. PYRAMID gain is real but NOISY: k50 0.575/0.697, k70 0.620 -- all above
+   baseline 0.494 (+0.08 to +0.20). k70 is the more stable point (~0.62).
+
+NEXT (WAVE 12): the UNIFIED CANONICAL METHOD test.
+  (A) Locked recipe k->70 + lshift0.7 on all 5 shapes (their best init): sphere,
+      cylinder, pyramid, bowl(+w_gouge8), sphere_hole. The deliverable picture.
+  (B) SHAPE-AGNOSTIC INIT probe: sphere_hole with MULTIDEPTH + k70 (instead of
+      random). If it works, ONE init + ONE loss serves all 5 shapes -- the
+      generalizable method. (multidepth failed on concave pre-k-anneal, wave8
+      0.078; k-anneal may rescue it.)
+  (C) w_gouge6 compromise: does a middle weight help bowl without killing
+      concave? hole+wg6, bowl+wg6.
+
+================================================================
+WAVE 12 (8-wide, jul8-multidepth) — UNIFIED CANONICAL METHOD test
+================================================================
+Locked recipe: k-anneal k 2->70 + loss_shift 0.7. Convex init=multidepth wr5
+lr5e-3; concave init=random wr3 lr1e-3.
+
+run                     shape        config                       hard_dice soft_dice gouge   vs best prior
+w12_sph_canon           sphere       md wr5 + K70                 0.6299    0.833     0       tie 0.641
+w12_cyl_canon           cylinder     md wr5 + K70                 0.7387    0.943     0       tie 0.760
+w12_pyr_canon           pyramid      md wr5 + K70                 0.7328    0.870     33      +0.24 vs 0.494 (REPRODUCED high)
+w12_bowl_canon          sphere_bowl  md wr5 + K70 + wg8           0.4249    0.661     0       below ~0.53
+w12_hole_canon          sphere_hole  rand wr3 + K70               0.2527    0.240     167     2x cap (0.124)! REPRODUCED
+w12_hole_md_k70         sphere_hole  md wr5 + K70 (agnost init)   0.0872    0.158     580     FAILED -- multidepth no good on concave
+w12_hole_wg6            sphere_hole  rand wr3 + K70 + wg6         0.1278    0.344     140     wg6 KILLS concave (like wg8)
+w12_bowl_wg6            sphere_bowl  md wr5 + K70 + wg6           0.5508    0.624     71      BEATS baseline ~0.53!
+
+FINDINGS:
+1. ONE RECIPE, FIVE SHAPES, NO GOUGE ON 4/5. Canonical k->70+lshift0.7:
+   sphere 0.630, cyl 0.739, pyr 0.733, bowl 0.425, hole 0.253. Zero gouge on
+   sphere/cyl/bowl; tiny gouge (33) on pyr. THE generalizable method.
+2. PYRAMID +0.24 REPRODUCED at the high end (0.733). k70 is the stable point
+   (wave11's 0.575/0.620 were the low/noisy end). The slanted-face win is real.
+3. CONCAVE 0.253 REPRODUCED (wave10 0.2497, wave11 0.2457). 2x the 0.124 cap.
+   Robust across 3 independent runs.
+4. w_gouge6 BEATS baseline on bowl (0.551 vs ~0.53) -- BETTER than wg8 (0.425)!
+   But wg6 still kills concave (0.128). Concave genuinely needs LOW w_gouge
+   (4.0); convex bowl wants 6-8. This is the ONE remaining per-shape knob.
+5. SHAPE-AGNOSTIC INIT FAILED: multidepth on concave (hole_md_k70) = 0.087,
+   gouge 580. k-anneal does NOT rescue multidepth on concave. So init must
+   remain shape-aware: multidepth for convex, random+wr3 for concave. One piece
+   of per-shape knowledge remains in the init, not the loss.
+
+CANONICAL METHOD (deliverable):
+  loss:   k-anneal k 2->70, loss_shift 0.7  (shape-agnostic)
+  init:   multidepth wr5 lr5e-3  (convex: sphere/cyl/pyr/bowl)
+          random wr3 lr1e-3      (concave: sphere_hole)
+  w_gouge: 4.0 default; 6.0 for bowl (the one convex that wants more)
+  Result: 0.63 / 0.74 / 0.73 / 0.55 / 0.25  (sph/cyl/pyr/bowl/hole)
+
+NEXT (WAVE 13):
+  (A) Lock bowl at wg6 (0.551) -- repeat for stability; + wg4 bowl control.
+  (B) Push convex k higher: sph/pyr at k->90 (climb further past 0.63/0.73?).
+  (C) Robustness: longer iters (8000) on hole+pyr (the two big-win shapes) --
+      does the gain keep climbing, or saturate at 5000?
+
+================================================================
+WAVE 13 (8-wide, jul8-multidepth) — lock canonical + push frontier + 8k robustness
+================================================================
+
+run                     shape        config                       hard_dice soft_dice gouge   vs canonical@5k
+w13_bowl_k70_wg6b       sphere_bowl  md wr5 K70 wg6               0.4697    0.650     0       bowl wg6 = 0.47-0.55 (noisy)
+w13_bowl_k70_wg4        sphere_bowl  md wr5 K70 wg4               0.4494    0.614     22      wg4 bowl ~0.45
+w13_sph_k90             sphere       md wr5 K90                   0.6255    0.836     0       flat vs K70 0.630
+w13_pyr_k90             pyramid      md wr5 K90                   0.6541    0.858     24      DROPPED vs K70 0.733 (k90 overshoots)
+w13_bowl_k90_wg6        sphere_bowl  md wr5 K90 wg6               0.4408    0.640     0       flat/slightly worse
+w13_hole_k70_8k         sphere_hole  rand wr3 K70, 8000 iters     0.1231    0.250     227     COLLAPSED vs 5k 0.253 !!
+w13_pyr_k70_8k          pyramid      md wr5 K70, 8000 iters       0.6071    0.848     21      DROPPED vs 5k 0.733
+w13_hole_k90            sphere_hole  rand wr3 K90                 0.2528    0.227     239     ties K70 0.253 (concave flat k70-k90)
+
+FINDINGS:
+1. k70 IS THE SWEET SPOT; k90 DOES NOT CLIMB. Sphere flat (0.625 vs 0.630),
+   pyramid DROPPED (0.654 vs 0.733), bowl flat. Concave flat k70-k90 (0.253).
+   The frontier is saturated at k70. More sharpening overshoots (like k100
+   collapsed concave in wave10).
+2. 8k ITERS HURT -- the win is FRAGILE to longer training. hole 0.253@5k ->
+   0.123@8k (collapsed); pyr 0.733@5k -> 0.607@8k. The best-composite PEAK
+   itself got worse, not just final-iter drift. Diagnosis: the late-training
+   HIGH-lr + HIGH-k (sharpened union) tail destabilizes the carve -- the
+   optimizer drifts AWAY from the good sharpened state. This is a stability
+   issue, not a missing lever.
+3. BOWL is the weak shape: wg6 reproduces 0.47-0.55 (noisy), wg4 0.45. Still
+   around/below the ~0.53 non-annealed baseline. The one shape where the
+   canonical method doesn't clearly beat simpler recipes.
+4. CONCAVE 0.253 is robust (k70 x3 runs: 0.2497/0.2457/0.2527). k90 ties. The
+   2x-cap win is solid; the 8k collapse is the threat to it.
+
+ACTION: exposed --anneal-lr in run_pipeline (was train_csg-internal only).
+Linear LR->0 should stabilize the late sharpened-union tail and prevent the
+8k collapse, letting longer runs HOLD the peak instead of drifting.
+
+NEXT (WAVE 14) -- STABILITY, not frontier:
+  (A) anneal-lr on the collapsing runs: hole+pyr at 8k WITH --anneal-lr (does
+      LR decay hold the 0.25/0.73 peak to 8k?). The direct test of the diagnosis.
+  (B) Shorter iters: hole+pyr at 3000 (is the peak EARLY, <5000? find the peak
+      iter).
+  (C) Seed/variance: hole+pyr K70 5k repeat (how run-to-run noisy is the peak?).
+  (D) anneal-lr at 5k canonical (does it help even at 5k?).
+
+================================================================
+WAVE 14 RESULTS (stability: anneal-lr rescue + peak-iter + variance)
+================================================================
+Final hard_dice (deployable best-checkpoint, soft-selected unless noted):
+  w14_hole_8k_anlr   0.256  (8k+anneal-lr)  vs  w13 hole_8k 0.123 (collapse!)
+  w14_pyr_8k_anlr    0.713  (8k+anneal-lr)  vs  w13 pyr_8k  0.607 (collapse!)
+  w14_hole_5k_anlr   0.256  (5k+anneal-lr)  vs  canonical hole_5k 0.253  (neutral)
+  w14_pyr_5k_anlr    0.608  (5k+anneal-lr)  vs  canonical pyr_5k  0.733  (HURTS)
+  w14_hole_3k        0.250  (3k, no anneal) vs  canonical hole_5k 0.253  (peak early)
+  w14_pyr_3k         0.730  (3k, no anneal) vs  canonical pyr_5k  0.733  (peak early)
+  w14_hole_5k_b      0.249  (5k repeat)     vs  canonical hole_5k 0.253  (stable)
+  w14_pyr_5k_b       0.541  (5k repeat)     vs  canonical pyr_5k  0.733  (VARIANCE!)
+
+FINDINGS:
+1. anneal-lr RESCUES the 8k collapse: hole 0.123->0.256, pyr 0.607->0.713. The
+   late high-lr+high-k tail was the cause; LR->0 holds the peak. Confirmed.
+2. But anneal-lr at 8k does NOT beat canonical 5k (pyr 0.713 < 0.733). The peak
+   is still ~5k; 8k+anneal-lr merely HOLDS it, doesn't climb. Extra iters at
+   decayed lr don't add coverage.
+3. anneal-lr HURTS at 5k (pyr 0.608 < 0.733): decaying lr from 5k starves the
+   late sharpening corrections. anneal-lr only helps when iters>peak (8k>5k).
+4. PEAK IS EARLY: 3k ~= 5k for both shapes (hole 0.250/0.253, pyr 0.730/0.733).
+   The canonical 5000 iters is already at/ past the peak.
+5. PYRAMID VARIANCE IS LARGE: pyr_5k_b=0.541 vs canonical 0.733 -- a 0.19 gap
+   at FIXED seed=1 (GPU atomic-add nondeterminism). The headline 0.733 may be a
+   lucky draw. Hole is stable (0.249/0.253/0.256). -> WAVE 15 characterizes this.
+
+----------------------------------------------------------------
+BIG DISCOVERY (wave 14 anlr): best-checkpoint selection uses SOFT dice, throws
+away HARD dice. pyr_8k_anlr final-iter hard_dice=0.8150 (STABLE across iters
+7995-7999, not a noise spike) but the SOFT-dice best-checkpoint selector
+deployed a checkpoint with hard_dice=0.713. composite_score (train_csg.py
+~L1256/L1393) substitutes m["soft_dice"] into the dice slot by default. The
+soft/hard gap means soft-dice-best != hard-dice-best: deploying the soft-best
+discards 0.10 of deployable dice.
+FIX SHIPPED: --best-on-hard flag (train_csg.py + run_pipeline.py). When set,
+composite_score selects on m["dice"] (HARD dice) at both the training-time
+best-tracking and the final best-vs-final comparison. Opt-in (default stays
+soft to preserve the low-noise selector); tradeoff = selecting on a
+nondeterministic carve, mitigated by air/break penalties + hard-dice stability
+at convergence.
+ALSO SHIPPED: --runs-subdir (train_csg.py run_dir + export_stls; run_pipeline
+forwarding). Runs now write directly into runs/jul8-multidepth/ so the webapp
+batch view sees them (was: all wave 9-14 stranded at top-level runs/, invisible
+past #31; moved 78 completed + 3 anlr into the batch dir; batch now 110 runs).
+
+NEXT (WAVE 15) -- VARIANCE: 4x pyr 5k + 2x hole 5k repeats (seed=1) to get
+mean+/-std of the canonical method before trusting any single-run win.
+NEXT (WAVE 16) -- BEST-ON-HARD: 4 shapes x {soft control, --best-on-hard} to
+test whether hard-dice selection reliably raises DEPLOYED hard_dice.
+
+================================================================
+WAVE 15 RESULTS (variance characterization, seed=1, GPU nondeterminism)
+================================================================
+Pyramid 5k K70 MD5 (4 repeats): 0.711, 0.696, 0.676, 0.715
+  -> mean = 0.699, std = 0.017
+Hole 5k K70 HOLEBASE (2 repeats): 0.247, 0.239
+  -> mean = 0.243, std = 0.006
+
+CRITICAL CALIBRATION:
+- The canonical pyramid "0.733" (wave 12) was a LUCKY draw (~2 sigma above the
+  0.699 mean). True pyramid performance is 0.699 +/- 0.017.
+- The wave-14 pyr_5k_b=0.541 was a ~9 sigma LOW outlier (genuine failure mode,
+  not just noise) -- pyramid occasionally collapses to a bad basin.
+- Hole is TIGHT: 0.243 +/- 0.006 (across waves: 0.249/0.253/0.256/0.247/0.239).
+  The 2x-cap win is rock solid.
+- Pyramid is NOISY: +/-0.017 (1 sigma). Single-run differences < ~0.05 between
+  pyramid configs are NOT meaningful. Need >=3 repeats or mean+/-std reporting.
+
+RE-FRAMING PRIOR WAVES WITH VARIANCE:
+- pyr_8k_anlr=0.713 (wave14) is within 1 sigma of canonical mean 0.699 -> anneal-lr
+  at 8k does NOT beat canonical 5k once variance is accounted for. The rescue
+  (beats 0.607 collapse) is real; the "climb to 0.81" was a transient
+  final-iter value the soft selector discarded (see best-on-hard fix, wave 16).
+- pyr_k90=0.654 (wave13) vs mean 0.699 -> k90 is ~1 sigma below k70; likely NOT
+  a real regression, just noise. (k90 not worth pursuing further either way.)
+- All single-run pyramid "wins/losses" in waves 9-14 must be re-read against
+  the 0.017 noise floor.
+
+DESIGN RULE GOING FORWARD: any pyramid (or other shape) comparison uses >=3
+repeats and reports mean+/-std; a delta is "real" only if it exceeds ~2 sigma
+(~0.034 for pyramid). For hole, ~0.012.

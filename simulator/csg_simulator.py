@@ -314,6 +314,16 @@ class CSGSimulatorDelta:
         # so it transfers to the hard carve. Gated by w_tool_gouge (0 -> disabled).
         self.w_tool_gouge = ti.field(dtype=ti.f32, shape=())
         self.w_tool_gouge[None] = 0.0
+        # Tool-gouge MARGIN (voxels): inflate the no-penetration radius from
+        # r_tool to r_tool + margin so the tool center must stay `margin` voxels
+        # FURTHER off the surface than mere tangency. Overlapping tangent tool
+        # capsules bite into a CONVEX part at pass seams (the sphere's gouge
+        # mechanism -- loss_tool_gouge=0 at midpoints yet the boolean union
+        # still over-erodes); a positive margin lifts the tool so the union of
+        # capsules stays tangent-only and does not gouge at the seams, at the
+        # cost of a little uncut residual. Shape-agnostic (target_sdf only).
+        self.tool_gouge_margin = ti.field(dtype=ti.f32, shape=())
+        self.tool_gouge_margin[None] = 0.0
 
         # ---- Trajectory-quality measures (time + breakage) ----
         # Three deployable measures reported alongside dice and (when their
@@ -1331,6 +1341,9 @@ class CSGSimulatorDelta:
             w = self.w_tool_gouge[None]
             n = ti.max(1, T - 1 - t_start)
             r_vox = self.tool_radius[None] / self.v
+            # Margin inflates the no-penetration radius so the tool center must
+            # stay `margin` voxels beyond mere tangency (see tool_gouge_margin).
+            r_eff = r_vox + self.tool_gouge_margin[None]
             # Component-wise midpoint (avoids the same Taichi autodiff
             # load-forwarding issue as compute_traj_prox_penalty).
             mx = 0.5 * (self.tool_pos[t].x + self.tool_pos[t + 1].x)
@@ -1338,7 +1351,7 @@ class CSGSimulatorDelta:
             mz = 0.5 * (self.tool_pos[t].z + self.tool_pos[t + 1].z)
             mid = ti.Vector([mx, my, mz])
             d = self.target_sdf_scalar(mid)
-            pen = ti.max(0.0, r_vox - d)
+            pen = ti.max(0.0, r_eff - d)
             ti.atomic_add(self.loss[None], w * pen * pen / n)
 
     # ========================================================================
@@ -1722,7 +1735,7 @@ class CSGSimulatorDelta:
             d = self.target_sdf_scalar(mid)
             exc = ti.max(0.0, d - r_vox)
             tpx += w_tp * exc * exc / ntp
-            pen = ti.max(0.0, r_vox - d)
+            pen = ti.max(0.0, r_vox + self.tool_gouge_margin[None] - d)
             tg += w_tg * pen * pen / ntp
         # Path-length (minimal-motion) over all active segments.
         nl = ti.max(1, T)
