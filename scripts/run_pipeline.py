@@ -138,9 +138,15 @@ def main():
     ap.add_argument("--lr-decay-frac", type=float, default=0.0,
                     help="fraction of iters (at the end) over which LR decays to 0 "
                          "(dead lever on current API; best-checkpoint saving subsumes it)")
+    ap.add_argument("--anneal-lr", action="store_true",
+                    help="linearly anneal LR to 0 over the full run. Stabilizes the "
+                         "late-training sharpened-union phase under k-anneal: without "
+                         "it, the high-lr + high-k tail destabilizes the carve (the "
+                         "wave-13 8k collapse: hole 0.253@5k -> 0.123@8k, pyr "
+                         "0.733@5k -> 0.607@8k). Holds the peak instead of drifting.")
     ap.add_argument("--init-scale", type=float, default=0.05,
                     help="half-range of the uniform random init for per-step displacements")
-    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "raster_fine", "raster_fine_wide", "spiral", "shell", "zlayer"),
+    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "raster_fine", "raster_fine_wide", "spiral", "shell", "zlayer", "multidepth"),
                     help="trajectory init mode")
     ap.add_argument("--w-gouge", type=float, default=4.0,
                     help="loss weight on cutting INTO the part (barrier)")
@@ -174,6 +180,10 @@ def main():
     ap.add_argument("--w-tool-gouge", type=float, default=0.0,
                     help="weight on the tool-position gouge barrier (0 = disabled; soft-union-"
                          "independent surface respect that transfers to hard dice)")
+    ap.add_argument("--tool-gouge-margin-mm", type=float, default=0.0,
+                    help="margin (mm) added to r_tool in the tool-position gouge barrier; lifts the "
+                         "tool off the surface so overlapping tangent capsules don't gouge convex "
+                         "parts at pass seams (sphere). 0 = tangent-only.")
     # --- Trajectory-quality measures (time / air-cut time / breakage) ---
     ap.add_argument("--w-time", type=float, default=1e-3,
                     help="weight on the total toolpath time soft term (seconds; 0 disables)")
@@ -195,6 +205,10 @@ def main():
                     help="composite best-checkpoint weight on normalized total toolpath time")
     ap.add_argument("--best-w-break", type=float, default=0.05,
                     help="composite best-checkpoint weight on breakage probability (reject-too-risky)")
+    ap.add_argument("--best-on-hard", action="store_true",
+                    help="select the best/deployable checkpoint by HARD dice instead of the "
+                         "default soft dice (aligns deployment with the deployable metric; "
+                         "trades off soft-dice's lower noise)")
     ap.add_argument("--random-tool-start", action="store_true",
                     help="randomize the cutter start each fresh start (XY in the stock "
                          "footprint, Z >= stock top + --tool-start-clearance-in)")
@@ -218,6 +232,10 @@ def main():
                          "Fine cadence (10) samples the transient dice peak for "
                          "best-checkpoint saving.")
     ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--runs-subdir", default="",
+                    help="subdirectory under runs/ to write the run into (e.g. "
+                         "'jul8-multidepth') so the web dashboard groups it into a "
+                         "batch; empty = top-level runs/. The subdir must already exist.")
     ap.add_argument("--no-save-model", action="store_true",
                     help="don't pass --save_model (trajectory won't be written to the run dir)")
     ap.add_argument("--track", action="store_true",
@@ -311,6 +329,17 @@ def main():
     ap.add_argument("--zlayer-margin", type=float, default=0.03,
                     help="zlayer init: normalized gap between sphere+r_tool and the orbit. Tighter "
                          "(0.005-0.015) leaves less residual waste without gouging.")
+    ap.add_argument("--multidepth-levels", type=float, default=5.0,
+                    help="multidepth init: number of RADIAL sweep cycles across the waste annulus "
+                         "(r_outer -> r_safe -> r_outer) over the full z descent. Higher = denser "
+                         "bulk removal. Forwarded to train_csg.")
+    ap.add_argument("--multidepth-revs", type=float, default=3.0,
+                    help="multidepth init: angular revolutions of the helix; auto-shrunk so the "
+                         "total path fits the speed-clip budget. Forwarded to train_csg.")
+    ap.add_argument("--multidepth-margin", type=float, default=0.02,
+                    help="multidepth init: normalized gap between target surface + r_tool and the "
+                         "innermost spiral radius (keeps the tool tangent-or-outside the part -> "
+                         "no gouge). Forwarded to train_csg.")
     # --- G-code / viz ---
     ap.add_argument("--post", default="haas", choices=("rs274", "haas"),
                     help="post-processor for export/eval/viz")
@@ -369,6 +398,7 @@ def main():
             "--w_traj_prox_warmup_frac", str(args.w_traj_prox_warmup_frac),
             "--w_len", str(args.w_len),
             "--w_tool_gouge", str(args.w_tool_gouge),
+            "--tool_gouge_margin_mm", str(args.tool_gouge_margin_mm),
             "--w_time", str(args.w_time),
             "--w_air_time", str(args.w_air_time),
             "--w_break", str(args.w_break),
@@ -381,6 +411,7 @@ def main():
             "--best_w_break", str(args.best_w_break),
             "--eval_freq", str(args.eval_freq),
             "--seed", str(args.seed),
+            "--runs_subdir", args.runs_subdir,
             "--stock_size_in", *ssi,
             "--voxel_size_mm", str(args.voxel_size_mm),
             "--workspace_in", *wsi,
@@ -395,6 +426,9 @@ def main():
             "--zlayer_revs", str(args.zlayer_revs),
             "--zlayer_osc", str(args.zlayer_osc),
             "--zlayer_margin", str(args.zlayer_margin),
+            "--multidepth_levels", str(args.multidepth_levels),
+            "--multidepth_revs", str(args.multidepth_revs),
+            "--multidepth_margin", str(args.multidepth_margin),
             "--z_floor_epsilon_mm", str(args.z_floor_epsilon_mm),
             "--enforce_z_floor" if not args.no_z_floor else "--no-enforce_z_floor",
             "--holder_margin", str(args.holder_margin),
@@ -409,6 +443,10 @@ def main():
         cmd.append("--eval")
         if args.k_anneal:
             cmd.append("--k_anneal")
+        if args.anneal_lr:
+            cmd.append("--anneal_lr")
+        if args.best_on_hard:
+            cmd.append("--best_on_hard")
         # Trajectory regularizers + robustness-to-initial-conditions options.
         if args.random_tool_start:
             cmd += ["--random_tool_start",

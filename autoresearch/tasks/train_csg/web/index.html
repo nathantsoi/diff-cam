@@ -340,6 +340,23 @@
 <div id="tooltip"></div>
 
 <script>
+// ---- Global error trap: render any uncaught JS error / rejected promise as a
+// visible banner so a silent empty dashboard is never silent again. Diagnostics
+// are also written to #stats once it exists. ----
+(function () {
+  const show = (kind, msg, where) => {
+    const line = `[diag] ${kind}: ${msg}${where ? "  @  " + where : ""}`;
+    try { console.error(line); } catch (e) {}
+    const banner = document.createElement("div");
+    banner.style.cssText = "position:fixed;left:8px;right:8px;top:8px;z-index:9999;padding:10px 12px;background:#3a0d0d;color:#ffd6d6;border:2px solid #e5534b;border-radius:8px;font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap;";
+    banner.textContent = line;
+    document.body ? document.body.prepend(banner) : document.documentElement.prepend(banner);
+    const st = document.getElementById("stats");
+    if (st) st.innerHTML = `<span style="color:#e5534b">${line}</span>`;
+  };
+  window.addEventListener("error", e => show("JS ERROR", e.message, (e.filename || "") + ":" + (e.lineno || "?") + ":" + (e.colno || "?")));
+  window.addEventListener("unhandledrejection", e => show("PROMISE REJECT", (e.reason && (e.reason.stack || e.reason.message || String(e.reason))) || String(e.reason), ""));
+})();
 // Paths in data.json are relative to the repo root; the page lives 4 dirs deep.
 const BASE = "../../../../";
 const SHAPE_COLOR = {sphere:"#1f77b4", cylinder:"#ff7f0e", box:"#2ca02c", pyramid:"#d62728"};
@@ -374,13 +391,21 @@ function updateStats() {
   if (!el) return;
   const qp = new URLSearchParams(location.search);
   const batch = qp.get("batch") || "";
+  // d3.max returns undefined for an empty array (e.g. data.json failed to load
+  // and the catch branch set DATA.experiments=[], or a batch fetch came back
+  // empty); guard so .toFixed never throws on undefined.
+  const bestOf = arr => { const v = d3.max(arr, d => hd(d)); return (typeof v === "number" && !Number.isNaN(v)) ? v : null; };
   if (batch && CURRENT_BATCH_RUNS.length > 0) {
-    const bestDice = d3.max(CURRENT_BATCH_RUNS, d => hd(d) || 0);
-    el.innerHTML = `<b>${CURRENT_BATCH_RUNS.length}</b> runs in <b>${batch}</b> · best hard dice <b>${bestDice.toFixed(4)}</b>`;
-  } else if (DATA && DATA.experiments) {
+    const bestDice = bestOf(CURRENT_BATCH_RUNS);
+    el.innerHTML = `<b>${CURRENT_BATCH_RUNS.length}</b> runs in <b>${batch}</b> · best hard dice <b>${bestDice !== null ? bestDice.toFixed(4) : "—"}</b>`;
+  } else if (DATA && DATA.experiments && DATA.experiments.length > 0) {
+    const bestDice = bestOf(DATA.experiments);
     el.innerHTML =
       `<b>${DATA.n_experiments}</b> experiments · <b>${DATA.n_matched}</b> with artifacts · ` +
-      `overall best hard dice <b>${d3.max(DATA.experiments, d => hd(d)).toFixed(4)}</b>`;
+      `overall best hard dice <b>${bestDice !== null ? bestDice.toFixed(4) : "—"}</b>`;
+  } else if (DATA && DATA.experiments) {
+    // data.json loaded but empty (no experiments yet) -- don't crash on max([]).
+    el.innerHTML = `<b>0</b> experiments · use the <b>run</b> picker or a <b>batch</b> to view runs.`;
   } else {
     el.innerHTML = `<span class="hint">Loading…</span>`;
   }
@@ -412,9 +437,10 @@ d3.json("data.json").then(raw => {
   initScatter3DControls();
   renderDownloads(null);
   // Populate the batch selector from the API (auto-discovers runs/<branch>/),
-  // then if there's a ?batch= in URL, fetch that branch's runs and render.
+  // then if there's a ?batch= in URL, fetch that branch's runs ONCE and feed
+  // the same list to both the dashboard plots and the run-picker (no second
+  // /__api/runs call).
   fetchBatches().then(async () => {
-    await initRunPicker();
     const qp = new URLSearchParams(location.search);
     const batch = qp.get("batch");
     if (batch) {
@@ -424,11 +450,16 @@ d3.json("data.json").then(raw => {
         sel.value = batch;
       }
       await fetchBatchRuns(batch);
-      updateStats();
-      renderScatter();
-      renderBatchTable();
-      renderScatter3D();
+      // Reuse the just-fetched batch runs for the picker (newest-first) so we
+      // don't re-request /__api/runs?batch=… a second time.
+      await initRunPicker(CURRENT_BATCH_RUNS.slice().reverse());
+    } else {
+      await initRunPicker();
     }
+    updateStats();
+    renderScatter();
+    renderBatchTable();
+    renderScatter3D();
   });
 });
 
@@ -500,80 +531,92 @@ async function fetchBatchRuns(batch) {
 }
 
 // ---- arbitrary-run viewer ----
-// Populates the run picker from /__api/runs (every viewable runs/<name> dir,
-// newest first) and supports ?run=runs/<name> or ?run=latest to open a run
-// directly. Honors the active batch filter via ?batch=. Requires
+// Populates the run picker and supports ?run=runs/<name> or ?run=latest to
+// open a run directly. Pass `runs` to reuse an already-fetched list
+// (CURRENT_BATCH_RUNS when a batch is active) so the picker does NOT issue a
+// second /__api/runs?batch=… call alongside fetchBatchRuns — the dashboard
+// plots and the picker share one fetch. Omit `runs` to fetch the full
+// viewable-runs list (no batch filter) for the no-batch view. Requires
 // scripts/serve_web_https.py (plain http.server has no API).
-function initRunPicker(){
+async function initRunPicker(runs){
   const sel = document.getElementById("run-picker");
   const searchInput = document.getElementById("run-search");
   sel.innerHTML = `<option value="">(arbitrary run…)</option>`;
-  // Pick up the active batch filter so the run picker matches.
-  const batchQp = new URLSearchParams(location.search).get("batch") || "";
-  fetch(`${BASE}__api/runs?${batchQp ? "batch=" + encodeURIComponent(batchQp) + "&" : ""}`).then(r => r.json()).then(data => {
-    const runs = (data && data.runs) || [];
-    if (!runs.length){
-      sel.innerHTML = `<option value="">(no runs found)</option>`;
+  const wireButtons = () => {
+    sel.onchange = () => { if (sel.value) openRun(sel.value); };
+    document.getElementById("view-latest").onclick = () => openRun("latest");
+  };
+  if (runs === undefined) {
+    try {
+      const r = await fetch(`${BASE}__api/runs`);
+      const data = await r.json();
+      runs = (data && data.runs) || [];
+    } catch (e) {
+      sel.innerHTML = `<option value="">(run API unavailable — serve via serve_web_https.py)</option>`;
+      wireButtons();
       return;
     }
-    
-    const populateOptions = (list) => {
-      sel.innerHTML = `<option value="">(arbitrary run…)</option>` + list.map(r =>
-        `<option value="${r.run_dir}">${r.name} · ${r.shape||"?"} · hdice ${(hd(r)||0).toFixed(4)}</option>`
-      ).join("");
+  }
+  if (!runs.length){
+    sel.innerHTML = `<option value="">(no runs found)</option>`;
+    wireButtons();
+    return;
+  }
+
+  const populateOptions = (list) => {
+    sel.innerHTML = `<option value="">(arbitrary run…)</option>` + list.map(r =>
+      `<option value="${r.run_dir}">${r.name} · ${r.shape||"?"} · hdice ${(hd(r)||0).toFixed(4)}</option>`
+    ).join("");
+  };
+
+  populateOptions(runs);
+
+  if (searchInput) {
+    searchInput.oninput = () => {
+      const term = searchInput.value.toLowerCase().trim();
+      const filtered = runs.filter(r =>
+        r.name.toLowerCase().includes(term) ||
+        (r.shape && r.shape.toLowerCase().includes(term)) ||
+        r.run_dir.toLowerCase().includes(term)
+      );
+      populateOptions(filtered);
     };
 
-    populateOptions(runs);
-
-    if (searchInput) {
-      searchInput.oninput = () => {
-        const term = searchInput.value.toLowerCase().trim();
-        const filtered = runs.filter(r => 
-          r.name.toLowerCase().includes(term) || 
-          (r.shape && r.shape.toLowerCase().includes(term)) ||
-          r.run_dir.toLowerCase().includes(term)
-        );
-        populateOptions(filtered);
-      };
-      
-      searchInput.onkeydown = (ev) => {
-        if (ev.key === "Enter") {
-          const val = searchInput.value.trim();
-          if (val) {
-            const opt = [...sel.options].find(o => o.value === val || o.text.toLowerCase().includes(val.toLowerCase()));
-            if (opt && opt.value) {
-              sel.value = opt.value;
-              openRun(opt.value);
-            } else {
-              let path = val;
-              if (!path.startsWith("runs/")) path = "runs/" + path;
-              openRun(path);
-            }
+    searchInput.onkeydown = (ev) => {
+      if (ev.key === "Enter") {
+        const val = searchInput.value.trim();
+        if (val) {
+          const opt = [...sel.options].find(o => o.value === val || o.text.toLowerCase().includes(val.toLowerCase()));
+          if (opt && opt.value) {
+            sel.value = opt.value;
+            openRun(opt.value);
+          } else {
+            let path = val;
+            if (!path.startsWith("runs/")) path = "runs/" + path;
+            openRun(path);
           }
         }
-      };
-    }
-
-    // Honor ?run=runs/<name> (or ?run=latest) from the URL on first load.
-    const qp = new URLSearchParams(location.search);
-    const want = qp.get("run");
-    if (want){
-      const resolved = (want === "latest") ? (runs[0] && runs[0].run_dir) : want;
-      if (resolved && [...sel.options].some(o => o.value === resolved)){
-        sel.value = resolved;
-        openRun(resolved);
-      } else if (want === "latest"){
-        openRun("latest");
-      } else {
-        // Unknown name: try the API anyway (it may resolve latest, or 404).
-        openRun(want);
       }
+    };
+  }
+
+  // Honor ?run=runs/<name> (or ?run=latest) from the URL on first load. Resolve
+  // "latest" through the server (/__api/run?run=latest) rather than runs[0], so
+  // the result is independent of whether the list is newest- or oldest-first.
+  const qp = new URLSearchParams(location.search);
+  const want = qp.get("run");
+  if (want){
+    if (want === "latest"){
+      openRun("latest");
+    } else if ([...sel.options].some(o => o.value === want)){
+      sel.value = want;
+      openRun(want);
+    } else {
+      // Unknown name: try the API anyway (it may resolve latest, or 404).
+      openRun(want);
     }
-  }).catch(() => {
-    sel.innerHTML = `<option value="">(run API unavailable — serve via serve_web_https.py)</option>`;
-  });
-  sel.onchange = () => { if (sel.value) openRun(sel.value); };
-  document.getElementById("view-latest").onclick = () => openRun("latest");
+  }
+  wireButtons();
 }
 
 async function openRun(run){
@@ -609,7 +652,12 @@ const MD = { idea: "../idea.md", report: "../report.md" };
 const REPORT_IMG = "../results_plot.png";
 const mdCache = {};
 
-document.getElementById("report-img").src = REPORT_IMG;
+// results_plot.png is optional (only present if a report plot was generated);
+// HEAD-check before assigning the img src so a missing file doesn't 404.
+fetch(REPORT_IMG, {method: "HEAD"}).then(r => {
+  if (r.ok) document.getElementById("report-img").src = REPORT_IMG;
+  else document.getElementById("report-img").style.display = "none";
+}).catch(() => { document.getElementById("report-img").style.display = "none"; });
 document.querySelectorAll(".tab").forEach(b =>
   b.addEventListener("click", () => showTab(b.dataset.tab)));
 
@@ -868,6 +916,10 @@ function buildFilters() {
       history.replaceState(null, "", "?" + qp.toString() + location.hash);
       // Fetch all runs for the selected batch so scatter shows every experiment.
       await fetchBatchRuns(batchSel.value);
+      // Keep the run-picker in sync with the new batch, reusing the runs we
+      // just fetched (no extra /__api/runs call). Newest-first for the dropdown.
+      if (batchSel.value) await initRunPicker(CURRENT_BATCH_RUNS.slice().reverse());
+      else await initRunPicker();
       updateStats();
       renderScatter();
       renderBatchTable();
@@ -1164,9 +1216,9 @@ const BATCH_COLS = [
   {key:"total_time", hdr:"total s", better:-1, filter:"range",
    tip:"Estimated total toolpath time in seconds (lower better).",
    get:d=>d.metrics&&d.metrics.total_time, fmt:v=>fmtNum(v,2)},
-  {key:"air_cut_fraction", hdr:"air frac", better:-1, filter:"range",
-   tip:"Fraction of the swept path that is air-cut, 0–1 (lower better).",
-   get:d=>d.metrics&&d.metrics.air_cut_fraction, fmt:v=>fmtNum(v,3)},
+  {key:"air_time_frac", hdr:"air frac", better:-1, filter:"range",
+   tip:"Sharp air-time fraction = air_time / total_time, 0–1 (lower better). The fraction of toolpath TIME spent cutting air, computed from the hard carve. (The legacy soft air_cut_fraction — a blurred volume ratio that does NOT track this — is shown in the detail panel.)",
+   get:d=>{const a=d.metrics&&d.metrics.air_time,t=d.metrics&&d.metrics.total_time; return (a!=null&&t!=null&&t>0)?a/t:null;}, fmt:v=>v==null?"—":fmtNum(v,3)},
   {key:"break_prob_any", hdr:"break any", better:-1, filter:"range",
    tip:"Probability that any tool step exceeds the breakage threshold over the whole run (lower better).",
    get:d=>d.metrics&&d.metrics.break_prob_any, fmt:v=>v==null?"—":fmtBreak(v)},
@@ -1606,9 +1658,10 @@ function selectExperiment(d) {
       ["dice (soft)", d.dice],
       ["air_time (s)", d.metrics.air_time],
       ["total_time (s)", d.metrics.total_time],
+      ["air_time_frac", (d.metrics.air_time!=null&&d.metrics.total_time>0)?d.metrics.air_time/d.metrics.total_time:null],
       ["break_prob_any", d.metrics.break_prob_any],
       ["break_prob_max", d.metrics.break_prob_max],
-      ["air_cut_frac", d.metrics.air_cut_fraction],
+      ["air_cut_frac (soft, legacy)", d.metrics.air_cut_fraction],
       ["asd", d.metrics.asd],
       ["hd95", d.metrics.hd95],
       ["loss", d.metrics.loss],

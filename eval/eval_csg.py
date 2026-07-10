@@ -126,6 +126,9 @@ def carve_trajectory_metrics(positions, resolution=32, target_shape=TARGET_SHAPE
     )
     sim.tool_radius[None] = TOOL_RADIUS
     sim.tool_height[None] = TOOL_HEIGHT
+    # Cutting-tip band for the air-time metric (0 -> one tool radius); matches
+    # the training sim so air_time_frac is comparable across train/eval.
+    sim.tool_cut_height[None] = TOOL_RADIUS
     sim.set_target_params(radius_mm=TARGET_RADIUS, height_mm=TARGET_HEIGHT,
                           half_size_mm=TARGET_RADIUS, center=TARGET_CENTER)
     sim.bake_target_grid()
