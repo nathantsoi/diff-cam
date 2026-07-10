@@ -443,6 +443,12 @@ class Args:
     """cutter radius in mm (default 1/4" end mill)"""
     tool_height_mm: float = 25.0
     """cutter flute length in mm"""
+    tool_cut_height_mm: float = 0.0
+    """height (mm) of the CUTTING TIP band over which the air-time metric/loss
+    integrates swept/air/engage volumes (see airfrac-shank-volume-bias). 0 =
+    use tool_radius_mm (one-radius tip band); the full tool_height shank is no
+    longer counted as air when it sits in already-carved empty space. The carve
+    itself is unaffected (still the full cylinder)."""
     dt: float = 0.45
     """seconds per simulator step; speed = |delta (.) envelope_mm| / dt. THE decisive
     lever: at low dt (0.12/0.01) the swept-cylinder tool is speed-limited -- its
@@ -735,6 +741,10 @@ def main():
                           sub_radius_mm=args.target_sub_radius_mm)
     sim.tool_radius[None] = args.tool_radius_mm
     sim.tool_height[None] = args.tool_height_mm
+    # Cutting-tip band for the air-time metric/loss (0 -> one tool radius).
+    sim.tool_cut_height[None] = (
+        args.tool_cut_height_mm if args.tool_cut_height_mm > 0.0 else args.tool_radius_mm
+    )
     # Tool holder: 2.5 inch diameter cylinder above the cutter (mm; default).
     from cam.units import inch_to_mm
     sim.holder_radius[None] = inch_to_mm(2.5 / 2.0)
