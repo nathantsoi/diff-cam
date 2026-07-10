@@ -62,4 +62,65 @@ dice down), combine with a sharper k_final or a residual re-weight.
 
 ## Notes (updated as results come in)
 
-(none yet)
+### Wave 1 (sphere, 8-GPU batch) — IN PROGRESS
+
+**Confirmed references (final metrics.json):**
+- **Baseline** (random init, k=10 const, defaults, best_on_hard=OFF): hard_dice
+  **0.599**, soft 0.832 → soft/hard gap **0.23** (soft massively inflated;
+  soft-dice selector deployed a near-air checkpoint). Deployed gouge **0**,
+  air_frac **0.884** (88% air — barely cuts). dice_improvement 0.113. This is
+  the floor and the proof that soft dice masks failure.
+- **m1 (SOTA+tg8+margin1, seed1)**: hard_dice **0.725**, soft 0.743 (gap 0.018 —
+  best_on_hard working), deployed gouge **94.6**, air_frac 0.340, break 0.0001,
+  dice_imp 0.391. vs prior SOTA sphere gouge ~572-620 → **~6× less gouge at
+  0.725 dice**. The tradeoff-breaker works.
+
+**KEY DISTINCTION**: the log's `gouge:` column is the SOFT loss_gouge (training
+diagnostic, ~0.01). The DEPLOYED gouge is `metrics.json["gouge"]` (hard carve,
+dx³-scaled volume). Use the latter. b5 log showed gouge 0.014 but deployed 94.6.
+
+**Dose-response (current-iter, mid-training):**
+- margin {0, 0.5, 2, 4, 8} with tg8: ALL PINNED at hdice 0.5480 / resid 0.4462 /
+  grad 1e-4 (dead, k sharpened 11→36 with zero movement — killed). Only m1
+  escaped.
+- m1 repeats (seed 2,3,4): c2/c3 carving strong (0.64-0.66), c1 stalled (~0.56).
+  So m1 escape is partly reproducible but high-variance (bimodal succeed/stall).
+- tg4 m1, tg2 m1 (softer barriers): BOTH pinned. Softer tg does NOT fix pinning.
+
+**Insight**: w_tool_gouge is shape-INappropriate for sphere tangent-seam gouge —
+at correct tangent passes the barrier is spuriously active and pushes the tool
+off-surface, stalling the carve. The stall is also partly inherent to
+multidepth+k-anneal (b2 no-tg stalls too late). Pinning is stochastic, not a
+clean function of tg weight or margin.
+
+**Open**: b2 (SOTA no-tg) final + m1×3 finals needed to quantify variance and
+confirm the gouge reduction. Considering a w_tool_gouge WARMUP (0→full over
+early iters, mirroring w_prox warmup) to let carving establish before the
+barrier engages — principled, shape-agnostic fix for the pinning.
+
+### m1 (SOTA+tg8+margin1, k_init2, no-warmup) — CONFIRMED WIN over SOTA
+
+| seed | hard_dice | soft | gouge | air_frac | loss_tg | dice_imp |
+|------|-----------|------|-------|----------|---------|----------|
+| 1 | 0.725 | 0.743 | 94.6 | 0.340 | 0.916 | 0.391 |
+| 2 | 0.622 | 0.625 | 104.5 | 0.927 | 0.000 | 0.163 |
+| 3 | 0.663 | 0.681 | 115.8 | 0.827 | 0.000 | 0.254 |
+| 4 | 0.707 | 0.754 | 26.5 | 0.267 | 0.916 | 0.351 |
+
+Mean hard_dice **0.679** (min 0.622, max 0.725), gouge 26-116. vs SOTA 0.624/135
+→ **higher dice AND lower gouge**; worst m1 seed (0.622) ≈ SOTA dice at lower
+gouge. m1 is the new SOTA on sphere.
+
+**KEY**: best_on_hard captures the hard-dice PEAK during training even if the
+current-iter later stalls — c3 (s4) log showed a 0.548 stall at iter 4339 yet
+finished 0.707. Do NOT read current-iter hdice as the result; use metrics.json.
+The "stalls" are mostly current-iter transients, not final failures.
+
+Two checkpoint flavors: barrier-shaped (loss_tg=0.9, low air 0.27-0.34, s1/s4)
+vs pre-barrier high-air (loss_tg=0, air 0.83-0.93, s2/s3). Both ≥0.62 dice.
+
+### In-flight: warmup (e) + k_init sweep (d)
+- e2 (warmup0.3, s2) at iter 2056: hdice 0.711 — vs c1 (no-warmup s2) 0.622.
+  Warmup may lift the medium seeds. Watching finals.
+- d3 (k_init10) STALLED — higher k_init does NOT prevent stalls (stall is
+  stochastic, not k-driven). k_init sweep likely not the lever.
