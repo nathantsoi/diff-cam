@@ -119,8 +119,41 @@ The "stalls" are mostly current-iter transients, not final failures.
 Two checkpoint flavors: barrier-shaped (loss_tg=0.9, low air 0.27-0.34, s1/s4)
 vs pre-barrier high-air (loss_tg=0, air 0.83-0.93, s2/s3). Both ≥0.62 dice.
 
-### In-flight: warmup (e) + k_init sweep (d)
-- e2 (warmup0.3, s2) at iter 2056: hdice 0.711 — vs c1 (no-warmup s2) 0.622.
-  Warmup may lift the medium seeds. Watching finals.
-- d3 (k_init10) STALLED — higher k_init does NOT prevent stalls (stall is
-  stochastic, not k-driven). k_init sweep likely not the lever.
+### Warmup (e1/e2) + k_init sweep (d1/d2/d3) — RESOLVED
+
+**k_init sweep = DEAD END.** d1 (ki4) carved to 0.7286 at iter 3139 then
+CRASHED back to 0.5480 by iter 3709; d2 (ki6) and d3 (ki10) stalled at 0.5480
+throughout. All three k_init values (4/6/10) eventually pin at the floor.
+k_init is NOT the lever; the stall is stochastic, not k-driven.
+
+**Warmup0.3 = dice/gouge TRADEOFF, not a Pareto win.** Finals (best_on_hard):
+
+| config | seed | hard_dice | gouge | air_frac | loss_tg |
+|--------|------|-----------|-------|----------|---------|
+| no-warmup m1 | 1 | 0.7248 | 94.6 | 0.340 | 0.916 |
+| no-warmup m1 | 2 | 0.6219 | 104.5 | 0.927 | 0.000 |
+| no-warmup m1 | 3 | 0.6628 | 115.8 | 0.827 | 0.000 |
+| no-warmup m1 | 4 | 0.7066 | 26.5 | 0.267 | 0.916 |
+| warmup0.3 m1 | 1 | 0.7344 | 106.5 | 0.298 | 0.000 |
+| warmup0.3 m1 | 2 | 0.7468 | 135.2 | 0.583 | 0.000 |
+
+no-warmup: mean hd 0.679, mean gouge **85.4** (barrier-shaped, ltg=0.9, low air).
+warmup0.3: mean hd (s1,s2) **0.741**, mean gouge **120.9** (ltg=0 — best_on_hard
+selects pre-barrier aggressive checkpoints that gouge more). Warmup lifts dice
+(+0.06) but pushes gouge back toward SOTA level (135) — it RIDES the gouge/dice
+tradeoff, does NOT break it. The whole point of margin1+tg8 was LOW gouge
+(deployability); warmup sacrifices that for raw dice. e3/e4/e5 peaked 0.647/
+0.616/0.616 then regressed to 0.548 floor (best_on_hard retains the peak;
+metrics.json written only at run end so must let them finish).
+
+**Decision**: no-warmup m1 (margin1+tg8, NO warmup) is the DEPLOYABLE winner —
+highest dice at controlled low gouge, simplest (no warmup param). Warmup0.3 is
+the raw-hard_dice champion but gouge-regressed. Both break_prob=0. Generalizing
+BOTH to bowl/hole head-to-head to see which Pareto-front generalizes (bowl is
+the gouge-stress shape — the decider).
+
+### Wave 3 (generalize) — IN PROGRESS
+Running both configs per shape for direct comparison:
+- pyramid: warmup0.3 (w3_pyr)
+- bowl: warmup0.3 (w3_bowl) + no-warmup (nw_bowl) — gouge-stress decider
+- hole: warmup0.3 (w3_hole) + no-warmup (nw_hole)
