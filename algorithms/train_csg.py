@@ -325,6 +325,15 @@ class Args:
     the boolean union still over-erodes; a positive margin lifts the tool so the
     union of capsules stays tangent-only, trading a little uncut residual for
     no gouge. Shape-agnostic (target_sdf only). 0 = tangent-only (default)."""
+    w_tool_gouge_warmup_frac: float = 0.0
+    """fraction of iters before w_tool_gouge begins ramping (0 = on from start).
+    The tool-position gouge barrier is spuriously active at correct TANGENT
+    passes on convex parts (sphere), so a constant w_tool_gouge can pin the tool
+    off the surface during the low-k exploration phase and stall carving before
+    it establishes. With a warmup, carving is established first (residual falls,
+    dice peaks), THEN w_tool_gouge ramps linearly from 0 to --w-tool-gouge over
+    the remaining iters so the barrier suppresses gouge without pre-empting the
+    carve. Pairs naturally with --k-anneal (barrier ramps in as k sharpens)."""
 
     # ---- Trajectory-quality measures (time / air-cut time / breakage) ----
     # Three deployable measures reported alongside dice and (when their weight
@@ -1195,6 +1204,19 @@ def main():
                 else:
                     span = max(1, args.iters - warm_start)
                     sim.w_traj_prox[None] = args.w_traj_prox * ((it - warm_start) / span)
+            # w_tool_gouge warmup: keep w_tool_gouge at 0 until warmup_frac of
+            # iters, then ramp linearly to args.w_tool_gouge over the remaining
+            # iters. The tool-position barrier is spuriously active at tangent
+            # passes on convex parts, so a constant w_tool_gouge can pin the tool
+            # off-surface during low-k exploration and stall carving; ramping it
+            # in after carving establishes avoids that stall.
+            if args.w_tool_gouge > 0.0 and args.w_tool_gouge_warmup_frac > 0.0:
+                warm_start = int(args.iters * args.w_tool_gouge_warmup_frac)
+                if it < warm_start:
+                    sim.w_tool_gouge[None] = 0.0
+                else:
+                    span = max(1, args.iters - warm_start)
+                    sim.w_tool_gouge[None] = args.w_tool_gouge * ((it - warm_start) / span)
 
             # Push current displacements into Taichi, then forward+backward.
             # With restart_from_state, each iteration either starts fresh (optionally

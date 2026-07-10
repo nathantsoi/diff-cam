@@ -184,6 +184,9 @@ def main():
                     help="margin (mm) added to r_tool in the tool-position gouge barrier; lifts the "
                          "tool off the surface so overlapping tangent capsules don't gouge convex "
                          "parts at pass seams (sphere). 0 = tangent-only.")
+    ap.add_argument("--w-tool-gouge-warmup-frac", type=float, default=0.0,
+                    help="fraction of iters before w_tool_gouge ramps in (0 = on from start); "
+                         "lets carving establish before the barrier engages to avoid tool pinning")
     # --- Trajectory-quality measures (time / air-cut time / breakage) ---
     ap.add_argument("--w-time", type=float, default=1e-3,
                     help="weight on the total toolpath time soft term (seconds; 0 disables)")
@@ -398,6 +401,7 @@ def main():
             "--w_traj_prox_warmup_frac", str(args.w_traj_prox_warmup_frac),
             "--w_len", str(args.w_len),
             "--w_tool_gouge", str(args.w_tool_gouge),
+            "--w_tool_gouge_warmup_frac", str(args.w_tool_gouge_warmup_frac),
             "--tool_gouge_margin_mm", str(args.tool_gouge_margin_mm),
             "--w_time", str(args.w_time),
             "--w_air_time", str(args.w_air_time),
