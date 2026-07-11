@@ -452,6 +452,14 @@ class CSGSimulatorDelta:
         self.diag_broken = ti.field(dtype=ti.f32, shape=())
         self.diag_engage_max = ti.field(dtype=ti.f32, shape=())
         self.diag_engage_mean = ti.field(dtype=ti.f32, shape=())
+        # Idea 8: air-time split into early/mid/late thirds of the trajectory
+        # (seconds). Makes the #1 user complaint -- "air cutting at the END" --
+        # measurable: a high late/total ratio is the deployability fault that
+        # total air_time cannot distinguish from useful entry/reposition air.
+        # Pure diagnostic (computed on the hard carve, never feeds the loss).
+        self.diag_air_time_early = ti.field(dtype=ti.f32, shape=())
+        self.diag_air_time_mid = ti.field(dtype=ti.f32, shape=())
+        self.diag_air_time_late = ti.field(dtype=ti.f32, shape=())
 
         # Per-segment differentiable intermediates for the three new measures.
         # Written by compute_seg_time / compute_seg_volumes (inside the Tape)
@@ -1669,6 +1677,11 @@ class CSGSimulatorDelta:
         # Combine into diag fields.
         total_time = 0.0
         air_time = 0.0
+        air_early = 0.0
+        air_mid = 0.0
+        air_late = 0.0
+        t1 = T // 3
+        t2 = (2 * T) // 3
         psum = 0.0
         pmax = 0.0
         emax = 0.0
@@ -1695,6 +1708,14 @@ class CSGSimulatorDelta:
             is_air = ti.select(eng <= 0.5 * inv_n, 1.0, 0.0)
             total_time += st
             air_time += st * is_air
+            # Idea 8: accumulate the same per-segment air into early/mid/late
+            # thirds of the trajectory (seconds). t1/t2 are the third boundaries.
+            if t < t1:
+                air_early += st * is_air
+            elif t < t2:
+                air_mid += st * is_air
+            else:
+                air_late += st * is_air
             mu_F = kc * (eng * v_mm3) / (dt * D + 1e-12)
             fmax = ti.max(fmax, mu_F)
             emax = ti.max(emax, eng)
@@ -1706,6 +1727,9 @@ class CSGSimulatorDelta:
             pmax = ti.max(pmax, p_t)
         self.diag_time[None] = total_time
         self.diag_air_time[None] = air_time
+        self.diag_air_time_early[None] = air_early
+        self.diag_air_time_mid[None] = air_mid
+        self.diag_air_time_late[None] = air_late
         self.diag_break_prob_any[None] = 1.0 - ti.exp(-psum)
         self.diag_break_prob_max[None] = pmax
         self.diag_fcut_max[None] = fmax

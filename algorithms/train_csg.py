@@ -595,6 +595,13 @@ def eval_metrics(sim, T, dx):
     sim.compute_traj_diagnostics_hard(T - 1)
     m["air_time"] = float(sim.diag_air_time[None])
     m["total_time"] = float(sim.diag_time[None])
+    # Idea 8: early/mid/late third air-time split (seconds). diag_air_time
+    # = early+mid+late (same per-segment sum, just bucketed) so existing
+    # air_time/air_time_frac are unchanged. air_time_frac_late is the column
+    # that directly reflects the "air cutting at the END" complaint.
+    m["air_time_early"] = float(sim.diag_air_time_early[None])
+    m["air_time_mid"] = float(sim.diag_air_time_mid[None])
+    m["air_time_late"] = float(sim.diag_air_time_late[None])
     m["break_prob_any"] = float(sim.diag_break_prob_any[None])
     m["break_prob_max"] = float(sim.diag_break_prob_max[None])
     m["fcut_max"] = float(sim.diag_fcut_max[None])
@@ -2027,6 +2034,20 @@ def main():
             # air_time==total_time (i.e. the whole path is air). Use this one.
             "air_time_frac": (round(float(last_m["air_time"]) / max(float(last_m["total_time"]), 1e-8), 6)
                               if last_m and last_m.get("total_time", 0.0) > 0 else 0.0),
+            # Idea 8: air-time split into early/mid/late thirds (fraction of
+            # that third's time spent in air). air_time_frac_late is the
+            # measurable form of the "air cutting at the END" complaint: a high
+            # late fraction with low early/mid flags the deployability fault that
+            # total air_time_frac cannot distinguish from entry/reposition air.
+            "air_time_frac_early": (round(float(last_m.get("air_time_early", 0.0))
+                                     / max(float(last_m.get("total_time", 0.0)) / 3.0, 1e-8), 6)
+                                    if last_m and last_m.get("total_time", 0.0) > 0 else 0.0),
+            "air_time_frac_mid": (round(float(last_m.get("air_time_mid", 0.0))
+                                   / max(float(last_m.get("total_time", 0.0)) / 3.0, 1e-8), 6)
+                                  if last_m and last_m.get("total_time", 0.0) > 0 else 0.0),
+            "air_time_frac_late": (round(float(last_m.get("air_time_late", 0.0))
+                                   / max(float(last_m.get("total_time", 0.0)) / 3.0, 1e-8), 6)
+                                  if last_m and last_m.get("total_time", 0.0) > 0 else 0.0),
             "break_prob_any": round(float(last_m.get("break_prob_any", 0.0)), 6) if last_m else 0.0,
             "break_prob_max": round(float(last_m.get("break_prob_max", 0.0)), 6) if last_m else 0.0,
             "fcut_max": round(float(last_m.get("fcut_max", 0.0)), 6) if last_m else 0.0,
