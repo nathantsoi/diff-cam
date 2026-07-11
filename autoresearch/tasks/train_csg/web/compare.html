@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GradMill — pairwise trajectory comparison</title>
+<link rel="icon" href="data:,">
+<style>
+  :root {
+    --bg:#1b1f23; --panel:#252b32; --panel2:#2d343c; --ink:#e6edf3;
+    --muted:#9aa7b3; --accent:#58a6ff; --grid:#3a434d;
+    --a:#2ca02c; --b:#ff7f0e; --tie:#9aa7b3;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  header { padding:12px 22px; background:var(--panel); border-bottom:1px solid #000;
+    display:flex; flex-wrap:wrap; gap:14px; align-items:center; }
+  header h1 { font-size:17px; margin:0; font-weight:600; }
+  header .stats { color:var(--muted); font-size:13px; }
+  header .stats b { color:var(--ink); }
+  header a { color:var(--accent); font-size:13px; text-decoration:none; }
+  header a:hover { text-decoration:underline; }
+  .ctrls { margin-left:auto; display:flex; gap:8px; align-items:center; flex-wrap:wrap; font-size:13px; }
+  .ctrls label { color:var(--muted); }
+  select, button { background:var(--panel2); color:var(--ink); border:1px solid var(--grid);
+    border-radius:6px; padding:5px 9px; font-size:13px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button:disabled { opacity:.45; cursor:default; }
+  button.primary { background:var(--accent); color:#0b0e12; font-weight:600; border-color:var(--accent); }
+  main { padding:14px 22px; display:flex; flex-direction:column; gap:12px; }
+
+  /* pair prompt bar */
+  #pair-bar { background:var(--panel); border:1px solid #000; border-radius:10px; padding:10px 14px;
+    display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+  #pair-bar .prompt { font-size:14px; }
+  #pair-bar .prompt b { color:var(--accent); }
+  #pair-bar .pid { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
+  #pair-bar .spacer { flex:1; }
+
+  /* two side-by-side viewers */
+  .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
+  .side { background:var(--panel); border:2px solid var(--grid); border-radius:10px; padding:10px;
+    display:flex; flex-direction:column; gap:8px; }
+  .side.A { border-color:var(--a); }
+  .side.B { border-color:var(--b); }
+  .side .head { display:flex; align-items:baseline; gap:8px; }
+  .side .tag { font-weight:700; font-size:14px; padding:2px 8px; border-radius:5px; color:#0b0e12; }
+  .side.A .tag { background:var(--a); }
+  .side.B .tag { background:var(--b); }
+  .side .name { font-size:13px; word-break:break-all; }
+  .side .meta { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
+  .viewport-wrap { position:relative; width:100%; aspect-ratio:1/1; background:#0d1117;
+    border:1px solid var(--grid); border-radius:8px; overflow:hidden; touch-action:none; }
+  .viewport-wrap canvas { width:100%; height:100%; display:block; }
+  .vbadge { position:absolute; top:8px; left:8px; z-index:5; font-size:11px; padding:3px 8px;
+    border-radius:6px; font-variant-numeric:tabular-nums; pointer-events:none;
+    background:hsla(220,20%,15%,.78); backdrop-filter:blur(8px); border:1px solid hsla(220,20%,35%,.5); }
+  .vfall { position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    text-align:center; color:var(--muted); font-size:13px; padding:20px; }
+
+  /* master playback */
+  .playbar { display:flex; align-items:center; gap:10px; font-size:12px; color:var(--muted); }
+  .playbar input[type=range] { flex:1; }
+  .playbar .step { font-variant-numeric:tabular-nums; min-width:90px; text-align:right; }
+
+  /* answer bar */
+  #answer-bar { background:var(--panel); border:1px solid #000; border-radius:10px; padding:12px 14px;
+    display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
+  #answer-bar .hint { color:var(--muted); font-size:13px; }
+  #answer-bar .spacer { flex:1; }
+  .pick { font-size:15px; padding:9px 18px; border-radius:8px; font-weight:600; }
+  .pick.A { background:var(--a); color:#0b0e12; border-color:var(--a); }
+  .pick.B { background:var(--b); color:#0b0e12; border-color:var(--b); }
+  .pick.tie { background:var(--panel2); color:var(--ink); }
+  #ans-note { width:240px; font-size:12px; padding:5px 8px; background:var(--bg); color:var(--ink);
+    border:1px solid var(--grid); border-radius:5px; }
+
+  /* ad-hoc compare */
+  details.adhoc { background:var(--panel); border:1px solid #000; border-radius:10px; padding:4px 14px; }
+  details.adhoc summary { cursor:pointer; color:var(--muted); font-size:13px; padding:8px 0; }
+  .adhoc-row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; padding:0 0 12px; font-size:13px; }
+  .adhoc-row select { max-width:280px; }
+  .toast { position:fixed; bottom:18px; left:50%; transform:translateX(-50%); z-index:50;
+    background:var(--panel2); border:1px solid var(--accent); color:var(--ink); padding:8px 16px;
+    border-radius:8px; font-size:13px; opacity:0; transition:opacity .2s; pointer-events:none; }
+  .toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Pairwise trajectory comparison</h1>
+  <span class="stats" id="pair-stats">loading…</span>
+  <div class="ctrls">
+    <button id="btn-prev">◀ Prev</button>
+    <button id="btn-next" class="primary">Next pending ▶</button>
+    <a href="index.html">← dashboard</a>
+  </div>
+</header>
+
+<main>
+  <div id="pair-bar">
+    <span class="pid" id="pair-id">—</span>
+    <span class="prompt" id="pair-prompt">No pair loaded.</span>
+    <span class="spacer"></span>
+    <span class="pid" id="pair-answered"></span>
+  </div>
+
+  <div class="row">
+    <div class="side A">
+      <div class="head"><span class="tag">A</span><span class="name" id="name-a">—</span></div>
+      <div class="meta" id="meta-a"></div>
+      <div class="viewport-wrap" id="wrap-a">
+        <canvas id="canvas-a"></canvas>
+        <div class="vbadge" id="badge-a">WebGPU…</div>
+        <div class="vfall" id="fall-a" hidden></div>
+      </div>
+    </div>
+    <div class="side B">
+      <div class="head"><span class="tag">B</span><span class="name" id="name-b">—</span></div>
+      <div class="meta" id="meta-b"></div>
+      <div class="viewport-wrap" id="wrap-b">
+        <canvas id="canvas-b"></canvas>
+        <div class="vbadge" id="badge-b">WebGPU…</div>
+        <div class="vfall" id="fall-b" hidden></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="playbar">
+    <button id="pb-play">▶</button>
+    <input type="range" id="pb-scrub" min="0" max="1000" value="1000" step="1">
+    <span class="step" id="pb-step">— / —</span>
+    <button id="pb-sync" title="copy A's camera to B">sync views</button>
+  </div>
+
+  <div id="answer-bar">
+    <span class="hint" id="ans-hint">Pick the better trajectory.</span>
+    <span class="spacer"></span>
+    <input id="ans-note" type="text" placeholder="optional note (why)">
+    <button class="pick A" id="pick-a">◀ A is better</button>
+    <button class="pick tie" id="pick-tie">Tie / both bad</button>
+    <button class="pick B" id="pick-b">B is better ▶</button>
+  </div>
+
+  <details class="adhoc">
+    <summary>Ad-hoc compare (pick any two runs — not recorded)</summary>
+    <div class="adhoc-row">
+      <label>A</label><select id="adhoc-a"></select>
+      <label>B</label><select id="adhoc-b"></select>
+      <button id="adhoc-load">load pair</button>
+      <span class="hint" style="color:var(--muted);font-size:12px">loads two runs for viewing; answer buttons stay disabled (no queued pair).</span>
+    </div>
+  </details>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// Page lives 4 dirs deep under the repo root; API + static paths are repo-relative.
+const BASE = "../../../../";
+const TAN_HALF_FOV = Math.tan(Math.PI / 8);
+const MAX_PITCH = 1.45;
+const ORBIT_SENS = 0.01;
+const clamp = (v,a,b)=>Math.min(b,Math.max(a,v));
+const vsub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+const vadd=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]];
+const vscale=(v,s)=>[v[0]*s,v[1]*s,v[2]*s];
+const vdot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const camFwd=(y,p)=>{const cp=Math.cos(p);return [-cp*Math.sin(y),-cp*Math.cos(y),-Math.sin(p)];};
+const camUp =(y,p)=>{const sp=Math.sin(p);return [-sp*Math.sin(y),-sp*Math.cos(y),Math.cos(p)];};
+const camRight=(y)=>[-Math.cos(y),Math.sin(y),0];
+const camEye=(c)=>vsub(c.target, vscale(camFwd(c.yaw,c.pitch), c.distance));
+
+function homeCamera(pts){
+  let mn=[Infinity,Infinity,Infinity], mx=[-Infinity,-Infinity,-Infinity];
+  pts.forEach(p=>{for(let i=0;i<3;i++){mn[i]=Math.min(mn[i],p[i]);mx[i]=Math.max(mx[i],p[i]);}});
+  const center=[(mn[0]+mx[0])/2,(mn[1]+mx[1])/2,(mn[2]+mx[2])/2];
+  const radius = 0.5*Math.hypot(mx[0]-mn[0],mx[1]-mn[1],mx[2]-mn[2]) || 0.7;
+  return {target:center, distance: clamp((radius/TAN_HALF_FOV)*1.25, 0.8, 30), yaw:0.72, pitch:0.62};
+}
+
+const DEFAULT_TOOL_GEOM = { toolRadius:0.125, toolHeight:0.984, holderRadius:1.25, holderHeight:10.0 };
+function toolGeomForRun(d){ return d && d.tool_geom ? {...DEFAULT_TOOL_GEOM, ...d.tool_geom} : {...DEFAULT_TOOL_GEOM}; }
+function stockMmFromCommand(cmd){
+  const m = (cmd||"").match(/--stock-size-in\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+  const inch = m ? [parseFloat(m[1]),parseFloat(m[2]),parseFloat(m[3])] : [1,1,1];
+  return inch.map(v=>v*25.4);
+}
+
+// ---- toast ----
+let toastT = 0;
+function toast(msg){
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.classList.add("show");
+  clearTimeout(toastT); toastT = setTimeout(()=>t.classList.remove("show"), 2200);
+}
+
+// ---- Side abstraction: one WebGPU voxel viewer per column ----
+class Side {
+  constructor(key, canvasId, badgeId, fallId){
+    this.key = key;                 // "a" | "b"
+    this.canvas = document.getElementById(canvasId);
+    this.badge = document.getElementById(badgeId);
+    this.fall  = document.getElementById(fallId);
+    this.viewer = null; this.ready = false;
+    this.rec = null; this.traj = null; this.T = 0;
+    this.cam = {target:[0.5,0.5,0.5], distance:2.6, yaw:0.72, pitch:0.62};
+    this.lastStep = -1; this._renderErr = false;
+  }
+  async init(){
+    if (this.viewer) return;
+    try {
+      const mod = await import("./voxel.js");
+      const v = await mod.createVoxelViewer(this.canvas, {
+        gridResolution: 96,
+        ...toolGeomForRun(this.rec),
+        onStatus: (s)=>{ if (!s.available){ this._fallback(s.reason || "unavailable"); } },
+      });
+      if (v && v.available){ this.viewer = v; this.ready = true; this.setBadge("WebGPU · 96³", true); }
+      else this._fallback("WebGPU not available");
+    } catch (e){ this._fallback("init error: " + (e&&e.message||e)); }
+  }
+  _fallback(reason){
+    this.ready = false;
+    this.fall.hidden = false;
+    this.fall.textContent = "WebGPU unavailable (" + reason + "). Open this run's video from the dashboard.";
+    this.canvas.style.display = "none";
+    this.setBadge("no WebGPU", false);
+  }
+  setBadge(t, ok){ this.badge.textContent = t; this.badge.style.color = ok ? "#7ee787" : "#f0883e"; }
+
+  async loadRun(runName){
+    if (!runName){ this.reset(); return; }
+    this.setBadge("loading…", false);
+    const r = await fetch(`${BASE}__api/run?run=${encodeURIComponent(runName)}`);
+    if (!r.ok){ this.reset("HTTP "+r.status); return; }
+    const rec = await r.json();
+    if (rec.ok === false){ this.reset(rec.error||"run not found"); return; }
+    this.rec = rec;
+    this.traj = rec.trajectory ? rec.trajectory.traj : null;
+    this.T = this.traj ? this.traj.length : 0;
+    // header text
+    document.getElementById("name-"+this.key).textContent = rec.name || rec.run_dir || runName;
+    const m = rec.metrics || {};
+    const af = (m.air_time!=null && m.total_time>0) ? (m.air_time/m.total_time) : null;
+    document.getElementById("meta-"+this.key).textContent =
+      `${rec.shape||"?"} · iters ${rec.iters?? "?"} · hard_dice ${fmt(m.hard_dice)} · air ${af==null?"?":(af*100).toFixed(1)+"%"}`;
+    if (!this.traj){ this.reset("no trajectory"); return; }
+    if (!this.viewer) await this.init();
+    if (!this.ready) return;   // fallback message already shown
+    // tool geom + trajectory + target mesh onto this viewer
+    this.viewer.setToolGeometry(toolGeomForRun(rec));
+    const sb = (rec.trajectory.staged && rec.trajectory.stage_boundary!=null) ? rec.trajectory.stage_boundary : null;
+    this.viewer.setTrajectory(this.traj, sb);
+    this.lastStep = this.T-1;
+    this.loadTargetMesh(rec);
+    Object.assign(this.cam, homeCamera(this.traj));
+    this.lastStep = -1;   // force a carveToStep on next render
+  }
+  async loadTargetMesh(rec){
+    const path = rec && rec.stl && rec.stl.target;
+    if (!path){ this.viewer.setTargetMesh(null); return; }
+    try {
+      const res = await fetch(BASE + path);
+      if (!res.ok) throw new Error("HTTP "+res.status);
+      const buf = new DataView(await res.arrayBuffer());
+      const nTri = buf.getUint32(80, true);
+      const [sx,sy,sz] = stockMmFromCommand(rec.command);
+      const sc = [1/sx,1/sy,1/sz];
+      const TEAL = [0.25,0.85,0.75,0.35];
+      const out = new Float32Array(nTri*3*10); let o=0;
+      for (let i=0;i<nTri;i++){
+        const base = 84 + i*50; const v=[];
+        for (let k=0;k<3;k++){ const vb=base+12+k*12;
+          v.push([buf.getFloat32(vb,true)*sc[0],buf.getFloat32(vb+4,true)*sc[1],buf.getFloat32(vb+8,true)*sc[2]]); }
+        const ax=v[1][0]-v[0][0], ay=v[1][1]-v[0][1], az=v[1][2]-v[0][2];
+        const bx=v[2][0]-v[0][0], by=v[2][1]-v[0][1], bz=v[2][2]-v[0][2];
+        let nx=ay*bz-az*by, ny=az*bx-ax*bz, nz=ax*by-ay*bx;
+        const nl=Math.hypot(nx,ny,nz)||1; nx/=nl; ny/=nl; nz/=nl;
+        for (let k=0;k<3;k++){ out[o++]=v[k][0]; out[o++]=v[k][1]; out[o++]=v[k][2];
+          out[o++]=nx; out[o++]=ny; out[o++]=nz; out[o++]=TEAL[0]; out[o++]=TEAL[1]; out[o++]=TEAL[2]; out[o++]=TEAL[3]; }
+      }
+      this.viewer.setTargetMesh(out);
+    } catch (e){ this.viewer.setTargetMesh(null); }
+  }
+  reset(reason){
+    this.rec=null; this.traj=null; this.T=0; this.lastStep=-1;
+    document.getElementById("name-"+this.key).textContent = "—";
+    document.getElementById("meta-"+this.key).textContent = reason||"";
+    if (this.viewer) this.viewer.setTargetMesh(null);
+  }
+  stepForFrac(frac){
+    if (!this.T) return 0;
+    return clamp(Math.round(frac*(this.T-1)), 0, this.T-1);
+  }
+  render(cstep){
+    if (!this.ready || !this.traj) return;
+    if (cstep !== this.lastStep){ this.viewer.carveToStep(cstep); this.lastStep = cstep; }
+    const cmd = this.rec.trajectory && this.rec.trajectory.cmd ? this.rec.trajectory.cmd : null;
+    try {
+      this.viewer.render(this.cam, cstep, { showCube:true, showAxes:true, cmdPts:cmd, showStock:true, showTarget:true });
+    } catch (e){ if (!this._renderErr){ this._renderErr=true; console.error("[voxel "+this.key+"]", e); } }
+    const vc = this.viewer.vertexCount;
+    this.setBadge(`WebGPU · 96³ · ${Math.round(vc/3).toLocaleString()} tris`, true);
+  }
+}
+
+function fmt(v){ return typeof v==="number" && !Number.isNaN(v) ? (Math.abs(v)>=100?v.toFixed(1):v.toFixed(4)) : "?"; }
+
+// ---- pair queue state ----
+let PAIRS = [];            // full list from /__api/pairs
+let curIdx = -1;           // index into PAIRS currently shown
+let activePair = null;     // the pair object being judged (null => ad-hoc)
+let pendingOnly = true;    // "next" navigates pending pairs
+
+const sideA = new Side("a", "canvas-a", "badge-a", "fall-a");
+const sideB = new Side("b", "canvas-b", "badge-b", "fall-b");
+
+async function refreshPairs(){
+  const r = await fetch(`${BASE}__api/pairs`);
+  const j = await r.json();
+  PAIRS = (j && j.pairs) ? j.pairs : [];
+  updateStats();
+}
+function updateStats(){
+  const pend = PAIRS.filter(p=>!p.answer).length;
+  const ans = PAIRS.length - pend;
+  document.getElementById("pair-stats").innerHTML =
+    `<b>${pend}</b> pending · <b>${ans}</b> answered`;
+}
+
+async function showPair(pair){
+  activePair = pair || null;
+  const idEl = document.getElementById("pair-id");
+  const pEl  = document.getElementById("pair-prompt");
+  const aEl  = document.getElementById("pair-answered");
+  if (!pair){
+    idEl.textContent = "—"; pEl.textContent = "No pair loaded."; aEl.textContent = "";
+    setAnswerEnabled(false);
+    return;
+  }
+  curIdx = PAIRS.indexOf(pair);
+  idEl.textContent = pair.id + (pair.answer ? " · (answered: "+pair.answer+")" : "");
+  pEl.innerHTML = pair.prompt ? "Prompt: <b>"+escapeHtml(pair.prompt)+"</b>" : "Pick the better trajectory.";
+  aEl.textContent = pair.answer ? "answered "+pair.answer : "pending";
+  setAnswerEnabled(!pair.answer);
+  document.getElementById("ans-note").value = pair.note || "";
+  // Init the two WebGPU devices sequentially (concurrent adapter requests can
+  // race in some browsers); the fetches still overlap with the first render.
+  await sideA.loadRun(pair.run_a);
+  await sideB.loadRun(pair.run_b);
+  setStep(1.0);   // fully carved initially
+}
+
+function setAnswerEnabled(on){
+  document.getElementById("pick-a").disabled = !on;
+  document.getElementById("pick-b").disabled = !on;
+  document.getElementById("pick-tie").disabled = !on;
+  document.getElementById("ans-hint").textContent =
+    on ? "Pick the better trajectory." : (activePair ? "Already answered — use Next pending." : "Ad-hoc compare — not recorded.");
+}
+
+function escapeHtml(s){ return (""+s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+
+async function answer(ans){
+  if (!activePair || activePair.answer) return;
+  const note = document.getElementById("ans-note").value.trim();
+  const r = await fetch(`${BASE}__api/pairs`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ id: activePair.id, answer: ans, note })
+  });
+  const j = await r.json();
+  if (!j.ok){ toast("save failed: "+(j.error||"")); return; }
+  Object.assign(activePair, j.pair);
+  updateStats();
+  document.getElementById("pair-id").textContent = activePair.id + " · (answered: "+ans+")";
+  document.getElementById("pair-answered").textContent = "answered "+ans;
+  setAnswerEnabled(false);
+  toast("Saved: "+ans.toUpperCase()+". Loading next pending…");
+  setTimeout(nextPending, 600);
+}
+
+function nextPending(){
+  const pend = PAIRS.filter(p=>!p.answer);
+  if (!pend.length){ toast("No pending pairs — add some via the agent or ad-hoc."); return; }
+  showPair(pend[0]);
+}
+function prevPair(){
+  if (!PAIRS.length) return;
+  let i = curIdx <= 0 ? PAIRS.length-1 : curIdx-1;
+  showPair(PAIRS[i]);
+}
+function nextPair(){
+  if (!PAIRS.length) return;
+  let i = (curIdx<0) ? 0 : (curIdx+1) % PAIRS.length;
+  showPair(PAIRS[i]);
+}
+
+// ---- master playback (synced fraction across both sides) ----
+let pbFrac = 1.0, pbPlaying = false, pbRAF = 0, pbLastT = 0, pbSpeed = 1.5;
+function setStep(frac){
+  pbFrac = clamp(frac, 0, 1);
+  document.getElementById("pb-scrub").value = Math.round(pbFrac*1000);
+  const sa = sideA.stepForFrac(pbFrac), sb = sideB.stepForFrac(pbFrac);
+  document.getElementById("pb-step").textContent =
+    `A ${sa}/${Math.max(0,sideA.T-1)} · B ${sb}/${Math.max(0,sideB.T-1)}`;
+  renderFrame();
+}
+function renderFrame(){
+  const sa = sideA.stepForFrac(pbFrac), sb = sideB.stepForFrac(pbFrac);
+  sideA.render(sa); sideB.render(sb);
+}
+function playLoop(t){
+  if (!pbPlaying) return;
+  if (!pbLastT) pbLastT = t;
+  const dt = (t - pbLastT)/1000; pbLastT = t;
+  let nf = pbFrac + dt*pbSpeed/Math.max(1,(sideA.T+sideB.T)/2);
+  if (nf >= 1){ nf = 1; pbPlaying = false; updatePlayBtn(); }
+  setStep(nf);
+  if (pbPlaying) pbRAF = requestAnimationFrame(playLoop);
+}
+function updatePlayBtn(){ document.getElementById("pb-play").textContent = pbPlaying ? "⏸" : "▶"; }
+
+// continuous render loop keeps both canvases fresh (mesh extraction is async).
+let renderRAF = 0;
+function masterLoop(){
+  renderRAF = 0;
+  if (pbPlaying){ /* playLoop drives renders */ }
+  else renderFrame();
+  renderRAF = requestAnimationFrame(masterLoop);
+}
+
+// ---- per-canvas orbit/zoom (independent cameras) ----
+function bindOrbit(side){
+  const el = side.canvas;
+  let lx=0, ly=0, drag=false, pan=false;
+  el.addEventListener("pointerdown", ev=>{
+    el.setPointerCapture(ev.pointerId); lx=ev.clientX; ly=ev.clientY; pan=ev.shiftKey; drag=true; el.style.cursor="grabbing";
+  });
+  el.addEventListener("pointermove", ev=>{
+    if (!drag) return;
+    const dx=ev.clientX-lx, dy=ev.clientY-ly; lx=ev.clientX; ly=ev.clientY;
+    if (pan){ const W=el.clientWidth,H=el.clientHeight; const f=side.cam.distance/Math.max(1,Math.min(W,H));
+      const r=camRight(side.cam.yaw), u=camUp(side.cam.yaw,side.cam.pitch);
+      side.cam.target = vadd(side.cam.target, vsub(vscale(r,dx*f), vscale(u,dy*f)));
+    } else { side.cam.yaw += dx*ORBIT_SENS; side.cam.pitch = clamp(side.cam.pitch - dy*ORBIT_SENS, -MAX_PITCH, MAX_PITCH); }
+    renderFrame();
+  });
+  el.addEventListener("pointerup", ()=>{ drag=false; el.style.cursor="default"; });
+  el.addEventListener("pointercancel", ()=>{ drag=false; el.style.cursor="default"; });
+  el.addEventListener("wheel", ev=>{ ev.preventDefault();
+    side.cam.distance = clamp(side.cam.distance*Math.exp(ev.deltaY*0.01), 0.5, 30); renderFrame();
+  }, {passive:false});
+}
+
+// ---- ad-hoc run picker ----
+async function loadRunList(){
+  const r = await fetch(`${BASE}__api/runs`);
+  const j = await r.json();
+  const runs = (j && j.runs) ? j.runs : [];
+  const selA = document.getElementById("adhoc-a"), selB = document.getElementById("adhoc-b");
+  selA.innerHTML=""; selB.innerHTML="";
+  runs.forEach(r=>{
+    const va=document.createElement("option"); va.value=r.run_dir||r.name; va.textContent=(r.name||r.run_dir)+(r.shape?" · "+r.shape:"");
+    selA.appendChild(va);
+    selB.appendChild(va.cloneNode(true));
+  });
+  if (runs.length>=2){ selA.selectedIndex=0; selB.selectedIndex=1; }
+}
+async function adhocLoad(){
+  const a = document.getElementById("adhoc-a").value;
+  const b = document.getElementById("adhoc-b").value;
+  if (!a || !b || a===b){ toast("pick two different runs"); return; }
+  activePair = null;
+  document.getElementById("pair-id").textContent = "— ad-hoc —";
+  document.getElementById("pair-prompt").textContent = "Ad-hoc compare (not recorded).";
+  document.getElementById("pair-answered").textContent = "";
+  setAnswerEnabled(false);
+  await Promise.all([sideA.loadRun(a), sideB.loadRun(b)]);
+  setStep(1.0);
+}
+
+// ---- wiring ----
+function wire(){
+  document.getElementById("btn-prev").onclick = prevPair;
+  document.getElementById("btn-next").onclick = nextPending;
+  document.getElementById("pb-play").onclick = ()=>{
+    if (!sideA.T && !sideB.T){ toast("load a pair first"); return; }
+    pbPlaying = !pbPlaying; pbLastT = 0; updatePlayBtn();
+    if (pbPlaying){ if (pbFrac>=1) setStep(0); pbRAF = requestAnimationFrame(playLoop); }
+  };
+  document.getElementById("pb-scrub").oninput = (e)=>{ pbPlaying=false; updatePlayBtn(); setStep(e.target.value/1000); };
+  document.getElementById("pb-sync").onclick = ()=>{ Object.assign(sideB.cam, sideA.cam); renderFrame(); };
+  document.getElementById("pick-a").onclick  = ()=>answer("a");
+  document.getElementById("pick-b").onclick  = ()=>answer("b");
+  document.getElementById("pick-tie").onclick= ()=>answer("tie");
+  document.getElementById("adhoc-load").onclick = adhocLoad;
+  bindOrbit(sideA); bindOrbit(sideB);
+  setAnswerEnabled(false);
+}
+
+(async function init(){
+  wire();
+  masterLoop();
+  try { await refreshPairs(); await loadRunList(); } catch(e){ console.warn(e); }
+  // show first pending pair if any, else leave ad-hoc ready.
+  const pend = PAIRS.filter(p=>!p.answer);
+  if (pend.length) showPair(pend[0]);
+  else {
+    document.getElementById("pair-stats").textContent = "no pairs queued — use ad-hoc compare below";
+  }
+})();
+</script>
+</body>
+</html>

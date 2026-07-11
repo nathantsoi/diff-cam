@@ -296,6 +296,90 @@ def set_feedback(root: Path, run: str, stars=_UNSET, feedback=_UNSET) -> dict:
     return data.get(key, {})
 
 
+# ---------------------------------------------------------------------------
+# Pairwise comparison store (A/B trajectory preferences).
+#
+# The autoresearch agent enqueues pairs of runs it wants a human to compare;
+# compare.html fetches the pending pairs, renders both trajectories side by
+# side, and the user picks A / B / tie. Answers persist here so they can flow
+# back into future runs (train_csg.py reads the same file at startup, mirroring
+# the star-rating feedback path).
+#
+# Schema: a list of pair objects
+#   {"id": "p_0001", "run_a": "<basename>", "run_b": "<basename>",
+#    "prompt": "...", "ts": <epoch>, "answer": "a"|"b"|"tie"|null,
+#    "answer_ts": <epoch>|null, "note": ""}
+# run_a/run_b are stored as basenames (the unique key, same convention as the
+# star-rating store) so a pair survives regardless of batch folder moves.
+# ---------------------------------------------------------------------------
+def pairwise_path(root: Path) -> Path:
+    """Path to pairwise.json under the train_csg task dir."""
+    return root / "autoresearch" / "tasks" / "train_csg" / "pairwise.json"
+
+
+def load_pairs(root: Path) -> list:
+    """Read the pairwise store; returns [] if missing/corrupt (never raises)."""
+    p = pairwise_path(root)
+    if not p.is_file():
+        return []
+    try:
+        data = json.loads(p.read_text() or "[]")
+    except (OSError, ValueError):
+        return []
+    return data if isinstance(data, list) else []
+
+
+def save_pairs(root: Path, data: list) -> None:
+    """Atomically write the pairwise store (temp file + replace)."""
+    p = pairwise_path(root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+    os.replace(tmp, p)
+
+
+def _new_pair_id(pairs: list) -> str:
+    """Next unused p_NNNN id."""
+    used = {p.get("id") for p in pairs}
+    n = 1
+    while f"p_{n:04d}" in used:
+        n += 1
+    return f"p_{n:04d}"
+
+
+def add_pair(root: Path, run_a: str, run_b: str, prompt: str = "") -> dict:
+    """Append a new unanswered pair; returns the stored pair object."""
+    data = load_pairs(root)
+    pair = {
+        "id": _new_pair_id(data),
+        "run_a": _run_key_from_rel(run_a),
+        "run_b": _run_key_from_rel(run_b),
+        "prompt": (prompt or "").strip(),
+        "ts": time.time(),
+        "answer": None,
+        "answer_ts": None,
+        "note": "",
+    }
+    data.append(pair)
+    save_pairs(root, data)
+    return pair
+
+
+def record_pair_answer(root: Path, pair_id: str, answer: str, note: str = "") -> dict | None:
+    """Record a human answer for one pair. Returns the updated pair or None."""
+    if answer not in ("a", "b", "tie"):
+        return None
+    data = load_pairs(root)
+    for p in data:
+        if p.get("id") == pair_id:
+            p["answer"] = answer
+            p["answer_ts"] = time.time()
+            p["note"] = str(note).strip() if note is not None else ""
+            save_pairs(root, data)
+            return p
+    return None
+
+
 def generate_run_video(root: Path, run_rel: str, force: bool = False) -> dict:
     """Ensure runs/<run>/videos/run.mp4 exists; generate it if missing.
 
@@ -453,6 +537,19 @@ def main() -> None:
             # into future runs.
             if parsed.path == "/__api/feedback" or parsed.path.endswith("/__api/feedback"):
                 return self._json({"feedback": load_feedback(root)})
+            # Pairwise comparison pairs (agent-queued A/B trajectory
+            # comparisons + recorded human answers). ?status=pending returns
+            # only unanswered pairs; otherwise the full list (newest-aware
+            # order: as written).
+            if parsed.path == "/__api/pairs" or parsed.path.endswith("/__api/pairs"):
+                pairs = load_pairs(root)
+                qs = urllib.parse.parse_qs(parsed.query)
+                status = (qs.get("status", [""])[0] or "").strip()
+                if status == "pending":
+                    pairs = [p for p in pairs if not p.get("answer")]
+                elif status == "answered":
+                    pairs = [p for p in pairs if p.get("answer")]
+                return self._json({"pairs": pairs})
             return super().do_GET()
 
         def do_POST(self):
@@ -480,6 +577,27 @@ def main() -> None:
                     feedback=body["feedback"] if "feedback" in body else _UNSET,
                 )
                 return self._json({"ok": True, "entry": entry})
+            # Pairwise comparison actions. Body branches on intent:
+            #  - add a pair:        {"run_a": "...", "run_b": "...", "prompt": "..."}
+            #  - record an answer:  {"id": "p_0001", "answer": "a"|"b"|"tie", "note": "..."}
+            if parsed.path == "/__api/pairs" or parsed.path.endswith("/__api/pairs"):
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or "0")
+                    raw = self.rfile.read(length) if length > 0 else b"{}"
+                    body = json.loads(raw.decode() or "{}")
+                except (ValueError, OSError):
+                    return self._json({"ok": False, "error": "invalid JSON body"}, 400)
+                if "answer" in body and body.get("id"):
+                    pair = record_pair_answer(
+                        root, str(body["id"]).strip(), str(body["answer"]).strip(),
+                        body.get("note", ""))
+                    if pair is None:
+                        return self._json({"ok": False, "error": "invalid answer or unknown pair id"}, 400)
+                    return self._json({"ok": True, "pair": pair})
+                if body.get("run_a") and body.get("run_b"):
+                    pair = add_pair(root, str(body["run_a"]), str(body["run_b"]), body.get("prompt", ""))
+                    return self._json({"ok": True, "pair": pair})
+                return self._json({"ok": False, "error": "provide {run_a,run_b} to add a pair or {id,answer} to record an answer"}, 400)
             return self._json({"ok": False, "error": "unknown POST endpoint"}, 404)
 
     handler = NoCacheHandler

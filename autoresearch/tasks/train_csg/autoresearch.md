@@ -19,8 +19,8 @@ Size the target to fit **inside** the stock (1 in = 25.4 mm). The dice score is 
 
 To create a new experiment:
 
-1. **Choose run tag**: choose a new tag for your experiment that includes the date and a unique word description (e.g. `jul8-<idea>`). The branch `ar-agd/<tag>` must not already exist, this is a fresh run.
-2. **Create the branch**: `git checkout -b ar-agd/<tag>` from the `autoresearch` branch.
+1. **Choose run tag**: choose a new tag for your experiment that includes the date and a unique word description (e.g. `jul8-<idea>`). The branch `arq-agd/<tag>` must not already exist, this is a fresh run.
+2. **Create the branch**: `git checkout -b arq-agd/<tag>` from the `autoresearch` branch.
 3. **Clear the previous run's results**: the result artifacts from the last run still sit in `autoresearch/tasks/train_csg/` and will contaminate the new branch if not cleared — a new branch must start from a clean slate, with results recorded only for *this* run. Once you are on the new branch, reset/truncate them:
    - `results.tsv` → truncate to just the header row (`commit\tdice\tmemory_gb\tstatus\tdescription\tcommand`). Do NOT carry over any prior experiment rows. (Leave it untracked — do not commit it; see "Logging results".)
    - `idea.md` → overwrite with a fresh file (step 6 below) noting the new branch/tag, starting point, and plan. The old chronological working log does not apply to this run.
@@ -141,7 +141,7 @@ c3d4e5f	0.000000	0.0	crash	0.1mm voxels on 2in cube (OOM)	uv run python scripts/
 
 ## The experiment loop
 
-The experiment runs on a dedicated branch (e.g. `ar-agd/<tag>` or `ar-agd/<tag>-gpu0`).
+The experiment runs on a dedicated branch (e.g. `arq-agd/<tag>` or `arq-agd/<tag>-gpu0`).
 
 LOOP FOREVER:
 

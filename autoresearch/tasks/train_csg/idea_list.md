@@ -50,7 +50,13 @@ The **highest-praise runs**:
 interior → retract → exterior) is the winning direction — it got the only 5★
 on the hardest shape AND beat SOTA on sphere. The remaining problems are
 budget-allocation (end-air), coverage (finish the perimeter/bottom), stepover
-tightness, and missing CAM heuristics.
+tightness, and missing CAM heuristics. **A second signal cuts across all of
+these:** the feedback is fundamentally *comparative* ("learn more from *this*
+one," "which finishes the outside"), so a pairwise A/B preference loop
+(Idea 9) — with the agent actively querying near-tie and champion/challenger
+pairs and learning a Bradley-Terry ranking from the answers — is the right
+vehicle to capture the qualitative judgments (air-cutting, tightness, break
+safety) that `hard_dice` cannot measure.
 
 ---
 
@@ -193,6 +199,70 @@ a column that directly reflects their complaint.
 
 **Gate:** no performance gate — this is instrumentation. Ship alongside Idea 2.
 
+## Idea 9 (PRIORITY): Active pairwise preference learning (RLHF via A/B queries)
+
+**Feedback basis:** star ratings are coarse and force an absolute judgment per
+run ("is this a 4 or a 5?"), which is hard and noisy — humans are far better at
+*relative* judgments ("which of these two is better?"). The single clearest
+human signal in the feedback is *comparative* (the 5★ hole beats everything;
+"learn more from this one"). The pairwise-comparison webapp (`compare.html` +
+`/__api/pairs` + `pairwise.json` + `load_pairwise_preferences`) was built to
+elicit exactly this signal; this idea makes the autoresearch agent *actively
+generate* the pairs and *learn* from the answers rather than waiting for ad-hoc
+queries.
+
+**What (three layers, all in-scope selection/infra code — no optimizer/init/loss
+changes):**
+
+1. **Active pair selection (the agent asks good questions).** Instead of random
+   pairs, the agent enqueues pairs that maximize expected information:
+   - **Near-ties on `hard_dice` within the same shape+max_steps.** Two runs with
+     ~equal dice but visibly different trajectories (e.g. one air-cuts at the
+     end, one doesn't) are exactly where a human preference breaks the metric
+     tie — the highest-value query. Rank candidate pairs by `|dice_a − dice_b|`
+     ascending and by trajectory-structure distance (e.g. end-air-frac /
+     stepover / coverage diagnostics from Ideas 4/8) descending, so the user is
+     only asked about pairs they can actually tell apart and that the metric
+     can't.
+   - **Same-init, different-loss-weight runs** (e.g. two sphere runs that differ
+     only in `w_air_time`): a preference here directly tells the optimizer
+     which knob direction the human wants, decoupled from dice.
+   - **Champion vs. challenger:** the current best-on-hard_dice run for a shape
+     vs. a new candidate. A human "challenger wins" is a deployability signal
+     that dice alone misses (Idea 6's break-risk case is the canonical example:
+     a higher-dice run that the human flags as break-unsafe should NOT be the
+     champion).
+   Cap pending queue at a small N (e.g. 8) so the user isn't buried; the agent
+   POSTs `{run_a, run_b, prompt}` to `/__api/pairs` and the user answers in
+   `compare.html`.
+
+2. **Preference model (learn from the answers).** Maintain a lightweight
+   Bradley-Terry / Elo ranking over runs from the recorded A/B/tie outcomes
+   (`pairwise.json`, already read by `load_pairwise_preferences` — extend it from
+   a win-counter into a proper relative-skill score with confidence intervals).
+   Tie = 0.5 credit (already handled). This gives every run a
+   `human_preference_score` that is *comparative* and *calibrated against the
+   field*, unlike the absolute 1-7 stars. Shape-agnostic: the model operates on
+   run identities + outcomes, never on shape name.
+
+3. **Close the loop (preferences steer selection, not the loss).** Use the
+   preference score in the **selection layer only** — as a tiebreaker among
+   hard_dice-equal runs, as a gate on the "champion" (a run the human
+   consistently ranks below a break-safe alternative does not become the
+   deployed trajectory even if its dice is marginally higher), and as a richer
+   seed source for Idea 7's warm-start (prefer trajectories with high
+   preference score AND high dice, not dice alone). Never feed it into the
+   optimizer/loss — the deployable metric stays `hard_dice`; preferences are a
+   human-alignment overlay on top of it.
+
+**Gate:** the preference model's ranking agrees with the existing star ratings
+on the rated runs (≥80% concordance on pairs where both runs have stars) — i.e.
+the comparative signal recovers the absolute signal where one exists, and
+extends it where it doesn't. Deployability check: when the human preference
+champion differs from the hard_dice champion, the preference champion must read
+as break-safe (Idea 6) and not air-cut at the end (Idea 2/8) — the human is
+picking up qualitative faults dice misses.
+
 ---
 
 ## Suggested ordering
@@ -200,13 +270,20 @@ a column that directly reflects their complaint.
 1. **Idea 1** (promote `multidepth_cavity` to default) — cheapest, highest
    signal, unblocks everything by setting the new baseline init.
 2. **Idea 8** (late-air diagnostic) — cheap, makes 2/5 measurable.
-3. **Idea 2** (late-weighted air penalty) — attacks the #1 complaint.
-4. **Idea 3** (CAM heuristics: helix-in, facemill, perimeter finish) — explicit
+3. **Idea 9** (pairwise preference learning) — the infra is already built and
+   the query cost is near-zero; start enqueues on near-tie + champion/challenger
+   pairs in parallel with the structural fixes so the preference model has data
+   by the time Ideas 2-5 land. The Bradley-Terry layer + selection-layer
+   tiebreaker come once ≥15-20 pairs are answered.
+4. **Idea 2** (late-weighted air penalty) — attacks the #1 complaint.
+5. **Idea 3** (CAM heuristics: helix-in, facemill, perimeter finish) — explicit
    user request; structurally fixes entry-safety, top-facing, perimeter coverage.
-5. **Idea 4** (tighter stepover + finish passes) + **Idea 5** (coverage loss) —
+6. **Idea 4** (tighter stepover + finish passes) + **Idea 5** (coverage loss) —
    attack "material left / not tight / not finished."
-6. **Idea 6** (break recalibration) + **Idea 7** (RLHF warm-start) — polish,
-   once the structural fixes are in.
+7. **Idea 6** (break recalibration) + **Idea 7** (RLHF warm-start) — polish,
+   once the structural fixes are in; Idea 7's warm-start seed is improved by
+   Idea 9's preference-aware selection.
 
 Each step keeps the method shape-agnostic and advances only on `hard_dice`
-(with trajectory-qualia checks from user feedback as the deployability gate).
+(with trajectory-qualia checks from user feedback — and, once Idea 9 has data,
+the Bradley-Terry preference ranking — as the deployability gate).

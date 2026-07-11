@@ -765,6 +765,55 @@ def load_human_feedback(target_shape, max_steps):
     return None, summary
 
 
+# ---------------------------------------------------------------------------
+# Pairwise preferences (A/B trajectory comparisons).
+#
+# compare.html lets a human pick the better of two trajectories; answers land
+# in autoresearch/tasks/train_csg/pairwise.json. This reader mirrors the
+# star-rating path: every run reads the store, logs a win-rate summary to
+# stderr, and records it in metrics.json under "pairwise" so the autoresearch
+# agent has a human-preference signal to seed/rank future runs (selection-layer
+# only — the optimizer/init/loss code never sees this).
+# ---------------------------------------------------------------------------
+def _pairwise_store_path():
+    return os.path.join("autoresearch", "tasks", "train_csg", "pairwise.json")
+
+
+def load_pairwise_preferences():
+    """Read the pairwise comparison store; return a summary dict (never raises).
+
+    Counts answered pairs and per-run wins (a tie credits each side 0.5). The
+    summary is logged + recorded in metrics.json so human A/B preferences flow
+    into future runs alongside the star ratings.
+    """
+    try:
+        with open(_pairwise_store_path()) as f:
+            pairs = json.load(f)
+    except Exception:
+        pairs = []
+    if not isinstance(pairs, list):
+        pairs = []
+    answered = [p for p in pairs if p.get("answer") in ("a", "b", "tie")]
+    wins = {}
+    for p in answered:
+        ans = p.get("answer")
+        a, b = p.get("run_a"), p.get("run_b")
+        if ans == "a":
+            wins[a] = wins.get(a, 0.0) + 1.0
+        elif ans == "b":
+            wins[b] = wins.get(b, 0.0) + 1.0
+        elif ans == "tie":
+            wins[a] = wins.get(a, 0.0) + 0.5
+            wins[b] = wins.get(b, 0.0) + 0.5
+    ranked = sorted(wins.items(), key=lambda kv: -kv[1])[:8]
+    return {
+        "total": len(pairs),
+        "answered": len(answered),
+        "pending": len(pairs) - len(answered),
+        "top_winners": [{"run": r, "wins": w} for r, w in ranked],
+    }
+
+
 def main():
     args = tyro.cli(Args)
 
@@ -809,6 +858,14 @@ def main():
         else:
             print(f"[feedback] {ws['stars']}★ warm-start available ({ws['run']}); "
                   f"pass --use-feedback to apply", file=sys.stderr, flush=True)
+
+    # Pairwise A/B preferences: always read the store + log a win-rate summary.
+    pw_summary = load_pairwise_preferences()
+    if pw_summary["answered"]:
+        print(f"[pairwise] {pw_summary['answered']}/{pw_summary['total']} pairs answered "
+              f"({pw_summary['pending']} pending). Top winners:", file=sys.stderr, flush=True)
+        for t in pw_summary["top_winners"][:5]:
+            print(f"  {t['wins']:.1f} wins  {t['run']}", file=sys.stderr, flush=True)
 
     # Save reproduction command and arguments
     try:
@@ -1888,6 +1945,10 @@ def main():
             "feedback_used": bool(args.use_feedback and fb_warmstart is not None),
             "feedback_top_rated": fb_summary.get("top_rated", []) if fb_summary else [],
             "feedback_warmstart": fb_summary.get("warmstart") if fb_summary else None,
+            # Pairwise A/B preferences (load_pairwise_preferences): human
+            # comparison win-rates, logged + recorded for the autoresearch
+            # agent to seed/rank future runs (selection layer only).
+            "pairwise": pw_summary,
             # Final-iter (pre-best-checkpoint) trajectory metrics: exposes any
             # late-training polish (e.g. w_prox warmup) on the final trajectory,
             # independent of where the best-dice peak occurred.
