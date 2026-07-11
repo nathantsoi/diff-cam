@@ -1488,6 +1488,105 @@ def main():
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "multidepth_contour":
+        # Shape-agnostic CONTOUR-FOLLOWING helical roughing. Generalizes
+        # `multidepth`: instead of orbiting a single circle of radius
+        # r_cross(z) (the cross-section MAX -- which is a CORNER for non-
+        # circular parts), the orbit radius varies with ANGLE to match the
+        # actual target boundary at every azimuth. For a circular/spherical
+        # target r_boundary(theta,z) is constant so this reduces to plain
+        # multidepth (zero regression); for a prismatic box it traces a
+        # rounded-square orbit that reaches the WALLS (not just the corners),
+        # fixing the "circular helix leaves wall stock" regression on box.
+        # Reads only the baked target SDF grid; no shape names / params.
+        n = T - 1
+        stock_mm_x = args.stock_size_in[0] * 25.4
+        r_tool = args.tool_radius_mm / stock_mm_x
+        margin = args.multidepth_margin
+        feed_cap = args.feed_ipm * args.dt / 60.0 / args.stock_size_in[0]
+        grid = sim.target.to_numpy()
+        Nx, Ny, Nz = grid.shape
+        _solid = np.where(grid <= 0.0)[2]
+        z_top = (float(_solid.max()) / Nz + 1.0 / Nz) if len(_solid) else 0.95
+        z_bot = (float(_solid.min()) / Nz) if len(_solid) else 0.05
+        z_top = min(z_top + 2.0 * r_tool, 0.98)
+        z_bot = max(z_bot, 0.02)
+        r_outer = 0.5 + r_tool  # tangent to cube wall -> corner waste cleared
+
+        # Per-(z, theta) target boundary radius: for each z-slice and each
+        # angular bin, the max distance from stock center along rays in that
+        # bin at which the voxel is INSIDE the target (SDF<=0). This is the
+        # angularly-resolved generalization of target_cross_section_radii
+        # (which collapses to the cross-section max). 0 where no target voxel
+        # exists at that (z, theta) -- e.g. above the part or in a concavity.
+        N_th = 96
+        xs = (np.arange(Nx) + 0.5) / Nx - 0.5
+        ys = (np.arange(Ny) + 0.5) / Ny - 0.5
+        Rxy = np.sqrt(xs[:, None] ** 2 + ys[None, :] ** 2)       # (Nx,Ny)
+        Axy = np.arctan2(ys[None, :], xs[:, None])                # (Nx,Ny)
+        th_bins = (np.floor((Axy + np.pi) / (2.0 * np.pi) * N_th
+                            ).astype(np.int32)) % N_th             # (Nx,Ny)
+        r_bound = np.zeros((Nz, N_th), dtype=np.float32)
+        for iz in range(Nz):
+            m = inside_mask = grid[:, :, iz] <= 0.0
+            if m.any():
+                np.maximum.at(r_bound[iz], th_bins[m], Rxy[m])
+
+        u = np.linspace(0.0, 1.0, 4000)
+        z = z_top + (z_bot - z_top) * u
+        theta = 2.0 * np.pi * max(0.5, args.multidepth_revs) * u
+        iz_u = np.clip((z * Nz).astype(int), 0, Nz - 1)
+        it_u = (np.floor((theta % (2.0 * np.pi)) / (2.0 * np.pi) * N_th
+                         ).astype(np.int32)) % N_th
+        r_bnd_u = r_bound[iz_u, it_u]
+        # Safe orbit radius = boundary + tool + margin (tool stays outside the
+        # target surface at every angle). Where there is no target at this
+        # (z,theta) (r_bnd==0), orbit at the wall (r_outer) in air rather than
+        # plunging toward the center.
+        r_safe_u = np.where(r_bnd_u > 0.0,
+                            np.clip(r_bnd_u + r_tool + margin, 0.0, r_outer),
+                            r_outer)
+        # Same triangle-wave radial sweep as `multidepth`: tool sweeps between
+        # the contour (r_safe) and the cube wall (r_outer) to clear the waste
+        # annulus, touching the contour at the triangle extrema. For a circle
+        # r_safe_u is constant -> identical to plain multidepth.
+        radial_cycles = max(1.0, float(args.multidepth_levels))
+        tri = np.abs(1.0 - 2.0 * ((u * radial_cycles) % 1.0))
+        r = r_outer + (r_safe_u - r_outer) * tri
+        pts = np.stack([0.5 + r * np.cos(theta),
+                        0.5 + r * np.sin(theta), z], axis=1).astype(np.float32)
+        seg = np.diff(pts, axis=0)
+        cum = np.concatenate([[0.0], np.cumsum(np.sqrt((seg ** 2).sum(1)))])
+        total = float(cum[-1])
+        budget = max(1.0, (n - 1)) * feed_cap
+        # Resample (the path already fits -- contour arc ~ circular arc -- but
+        # constant-arc resampling guarantees every step <= feed_cap and spans
+        # the full z-extent. Shrink if a very wiggly contour over-runs budget.
+        if total > 0.95 * budget:
+            scale = (0.95 * budget) / total
+            # shorten by reducing angular revolutions (keep z descent full)
+            theta = 2.0 * np.pi * max(0.5, args.multidepth_revs) * scale * u
+            it_u = (np.floor((theta % (2.0 * np.pi)) / (2.0 * np.pi) * N_th
+                             ).astype(np.int32)) % N_th
+            r_bnd_u = r_bound[iz_u, it_u]
+            r_safe_u = np.where(r_bnd_u > 0.0,
+                                np.clip(r_bnd_u + r_tool + margin, 0.0, r_outer),
+                                r_outer)
+            r = r_outer + (r_safe_u - r_outer) * tri
+            pts = np.stack([0.5 + r * np.cos(theta),
+                            0.5 + r * np.sin(theta), z], axis=1
+                           ).astype(np.float32)
+            seg = np.diff(pts, axis=0)
+            cum = np.concatenate([[0.0], np.cumsum(np.sqrt((seg ** 2).sum(1)))])
+        s_targets = np.linspace(0.0, float(cum[-1]), n)
+        idx = np.clip(np.searchsorted(cum, s_targets) - 1, 0, len(pts) - 2)
+        frac = ((s_targets - cum[idx]) /
+                np.maximum(cum[idx + 1] - cum[idx], 1e-9))
+        positions = (pts[idx] + (pts[idx + 1] - pts[idx]) * frac[:, None]
+                     ).astype(np.float32)
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
     else:
         init = np.random.uniform(-args.init_scale, args.init_scale, size=(T - 1, 3)).astype(np.float32)
     # Human-feedback warm-start: with --use-feedback, replace the heuristic init

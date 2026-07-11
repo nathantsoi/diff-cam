@@ -146,7 +146,7 @@ def main():
                          "0.733@5k -> 0.607@8k). Holds the peak instead of drifting.")
     ap.add_argument("--init-scale", type=float, default=0.05,
                     help="half-range of the uniform random init for per-step displacements")
-    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "raster_fine", "raster_fine_wide", "spiral", "shell", "zlayer", "multidepth", "multidepth_cavity"),
+    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "raster_fine", "raster_fine_wide", "spiral", "shell", "zlayer", "multidepth", "multidepth_cavity", "multidepth_contour"),
                     help="trajectory init mode")
     ap.add_argument("--w-gouge", type=float, default=4.0,
                     help="loss weight on cutting INTO the part (barrier)")
