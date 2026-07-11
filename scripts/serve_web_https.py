@@ -164,12 +164,36 @@ def _safe_run_path(root: Path, run_rel: str) -> Path | None:
     return candidate if candidate.is_dir() else None
 
 
+def _resolve_run_by_name(root: Path, name: str) -> Path | None:
+    """Resolve a bare run basename (e.g. ``CamEnvDiff-v0__train_csg__1__1783725757990``)
+    to its ``runs/<batch>/<name>`` dir, searching under ``runs/`` recursively.
+
+    Lets the dashboard be direct-linked with just the run name — no need to know
+    which batch subdir it lives under. Run names are unique across batches, so a
+    name maps to at most one dir; if several somehow match, the newest (by mtime)
+    wins. Returns None if nothing matches.
+    """
+    root_runs = (root / "runs").resolve()
+    if not root_runs.is_dir():
+        return None
+    hits = [p for p in root_runs.rglob(name) if p.is_dir() and p.name == name]
+    if not hits:
+        return None
+    if len(hits) > 1:
+        hits.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return hits[0]
+
+
 def _resolve_run_arg(root: Path, run: str) -> Path | None:
     """Resolve a `run` query value to a runs/<name> dir under root.
 
-    Accepts either an explicit ``runs/<name>`` path or the sentinel ``latest``,
-    which resolves to the newest viewable run dir (so the dashboard can offer a
-    one-click "view the last train_csg run" without knowing its name).
+    Accepts:
+      - the sentinel ``latest`` → newest viewable run dir;
+      - an explicit ``runs/<batch>/<name>`` path;
+      - a bare run basename (``<name>``) → resolved by searching under ``runs/``.
+
+    The bare-name form lets runs be direct-linked without knowing their batch
+    subdir, e.g. ``?run=CamEnvDiff-v0__train_csg__1__1783725757990``.
     """
     if not run:
         return None
@@ -185,7 +209,91 @@ def _resolve_run_arg(root: Path, run: str) -> Path | None:
         if not runs:
             return None
         return _safe_run_path(root, runs[0]["run_dir"])
-    return _safe_run_path(root, run)
+    # Explicit runs/<...> path (with traversal-escape guard).
+    resolved = _safe_run_path(root, run)
+    if resolved is not None:
+        return resolved
+    # Bare run basename: search runs/ for a matching dir.
+    return _resolve_run_by_name(root, run)
+
+
+# ---------------------------------------------------------------------------
+# Human feedback store (star ratings + free-text notes per run).
+#
+# The dashboard lets a user rate each run 1-7 stars and attach a note. The
+# store is a single JSON file under the task dir, keyed by run basename (run
+# names are unique across batches). train_csg.py reads the same file at startup
+# so human feedback flows into future runs (logged +, opt-in, warm-started).
+# ---------------------------------------------------------------------------
+def feedback_path(root: Path) -> Path:
+    """Path to the shared run_feedback.json under the train_csg task dir."""
+    return root / "autoresearch" / "tasks" / "train_csg" / "run_feedback.json"
+
+
+def load_feedback(root: Path) -> dict:
+    """Read the feedback store; returns {} if missing/corrupt (never raises)."""
+    p = feedback_path(root)
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text() or "{}")
+    except (OSError, ValueError):
+        return {}
+
+
+def save_feedback(root: Path, data: dict) -> None:
+    """Atomically write the feedback store (temp file + replace)."""
+    p = feedback_path(root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, sort_keys=True))
+    os.replace(tmp, p)
+
+
+def _run_key_from_rel(run_rel: str) -> str:
+    """Normalize a runs/<batch>/<name> path (or bare <name>) to its basename.
+
+    The basename is the unique key into the feedback store; the batch subdir is
+    not part of the identity so a run keeps its rating regardless of how it was
+    addressed.
+    """
+    return run_rel.rstrip("/").rsplit("/", 1)[-1]
+
+
+# Sentinel for "field not provided" (distinct from None, which means "clear").
+_UNSET = object()
+
+
+def set_feedback(root: Path, run: str, stars=_UNSET, feedback=_UNSET) -> dict:
+    """Set/clear one run's feedback entry. Returns the stored entry.
+
+    `stars` is an integer 1-7 (or None to clear); `feedback` is a free-text
+    string (or "" to clear). Either may be omitted (_UNSET) to leave that field
+    unchanged. An entry left with no stars and empty text is removed so the
+    store stays clean.
+    """
+    data = load_feedback(root)
+    key = _run_key_from_rel(run)
+    entry = data.get(key, {})
+    if stars is not _UNSET:
+        if stars is None:
+            entry["stars"] = None
+        else:
+            try:
+                s = int(stars)
+            except (TypeError, ValueError):
+                s = None
+            # Accept only the documented 1-7 ratings; anything else -> null.
+            entry["stars"] = s if (s is not None and 1 <= s <= 7) else None
+    if feedback is not _UNSET:
+        entry["feedback"] = str(feedback).strip()
+    entry["ts"] = time.time()
+    if not entry.get("stars") and not entry.get("feedback"):
+        data.pop(key, None)
+    else:
+        data[key] = entry
+    save_feedback(root, data)
+    return data.get(key, {})
 
 
 def generate_run_video(root: Path, run_rel: str, force: bool = False) -> dict:
@@ -339,7 +447,40 @@ def main() -> None:
                 if rec is None:
                     return self._json({"ok": False, "error": f"no viewable artifacts in {run}"}, 404)
                 return self._json(rec)
+            # All human feedback (star ratings + notes), keyed by run basename.
+            # The dashboard fetches this once at load and merges it into the run
+            # rows; train_csg.py reads the same file directly to feed ratings
+            # into future runs.
+            if parsed.path == "/__api/feedback" or parsed.path.endswith("/__api/feedback"):
+                return self._json({"feedback": load_feedback(root)})
             return super().do_GET()
+
+        def do_POST(self):
+            parsed = urllib.parse.urlparse(self.path)
+            # Save one run's star rating / feedback note. Body is JSON:
+            # {"run": "runs/<batch>/<name>" | "<name>", "stars": 1-7|null,
+            #  "feedback": "..."}. Returns the stored entry.
+            if parsed.path == "/__api/feedback" or parsed.path.endswith("/__api/feedback"):
+                try:
+                    length = int(self.headers.get("Content-Length", "0") or "0")
+                    raw = self.rfile.read(length) if length > 0 else b"{}"
+                    body = json.loads(raw.decode() or "{}")
+                except (ValueError, OSError):
+                    return self._json({"ok": False, "error": "invalid JSON body"}, 400)
+                run = (body.get("run") or "").strip()
+                if not run:
+                    return self._json({"ok": False, "error": "missing run param"}, 400)
+                # Only override a field when its key is present in the body — a
+                # present null clears it, an absent key leaves it unchanged (so a
+                # star click doesn't wipe the note, and a note save doesn't touch
+                # the stars).
+                entry = set_feedback(
+                    root, run,
+                    stars=body["stars"] if "stars" in body else _UNSET,
+                    feedback=body["feedback"] if "feedback" in body else _UNSET,
+                )
+                return self._json({"ok": True, "entry": entry})
+            return self._json({"ok": False, "error": "unknown POST endpoint"}, 404)
 
     handler = NoCacheHandler
 

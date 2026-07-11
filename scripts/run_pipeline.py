@@ -146,7 +146,7 @@ def main():
                          "0.733@5k -> 0.607@8k). Holds the peak instead of drifting.")
     ap.add_argument("--init-scale", type=float, default=0.05,
                     help="half-range of the uniform random init for per-step displacements")
-    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "raster_fine", "raster_fine_wide", "spiral", "shell", "zlayer", "multidepth"),
+    ap.add_argument("--init-mode", default="random", choices=("random", "raster", "raster_fine", "raster_fine_wide", "spiral", "shell", "zlayer", "multidepth", "multidepth_cavity"),
                     help="trajectory init mode")
     ap.add_argument("--w-gouge", type=float, default=4.0,
                     help="loss weight on cutting INTO the part (barrier)")
@@ -184,6 +184,9 @@ def main():
                     help="margin (mm) added to r_tool in the tool-position gouge barrier; lifts the "
                          "tool off the surface so overlapping tangent capsules don't gouge convex "
                          "parts at pass seams (sphere). 0 = tangent-only.")
+    ap.add_argument("--w-tool-gouge-warmup-frac", type=float, default=0.0,
+                    help="fraction of iters before w_tool_gouge ramps in (0 = on from start); "
+                         "lets carving establish before the barrier engages to avoid tool pinning")
     # --- Trajectory-quality measures (time / air-cut time / breakage) ---
     ap.add_argument("--w-time", type=float, default=1e-3,
                     help="weight on the total toolpath time soft term (seconds; 0 disables)")
@@ -240,6 +243,11 @@ def main():
                     help="don't pass --save_model (trajectory won't be written to the run dir)")
     ap.add_argument("--track", action="store_true",
                     help="enable W&B tracking in training (default off for a clean one-step run)")
+    ap.add_argument("--use-feedback", action="store_true",
+                    help="warm-start the trajectory from the highest-starred prior run "
+                         "(human RLHF) that matches this target_shape+max_steps, then keep "
+                         "optimizing. The feedback store is always read/logged; this flag "
+                         "only gates whether the warm-start deltas are applied.")
     # --- Collision safety (z-floor during training + post-process truncation) ---
     ap.add_argument("--z-floor-epsilon-mm", type=float, default=1.0,
                     help="allowed tool-base travel below the part bottom (mm). "
@@ -398,6 +406,7 @@ def main():
             "--w_traj_prox_warmup_frac", str(args.w_traj_prox_warmup_frac),
             "--w_len", str(args.w_len),
             "--w_tool_gouge", str(args.w_tool_gouge),
+            "--w_tool_gouge_warmup_frac", str(args.w_tool_gouge_warmup_frac),
             "--tool_gouge_margin_mm", str(args.tool_gouge_margin_mm),
             "--w_time", str(args.w_time),
             "--w_air_time", str(args.w_air_time),
@@ -439,6 +448,8 @@ def main():
         ]
         if not args.no_save_model:
             cmd.append("--save_model")
+        if args.use_feedback:
+            cmd.append("--use_feedback")
         cmd.append("--track" if args.track else "--no-track")
         cmd.append("--eval")
         if args.k_anneal:

@@ -54,6 +54,16 @@
   .batch-table td.miss { color:var(--muted); }
   .batch-shape-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
     margin-right:5px; vertical-align:middle; }
+  /* human-feedback (rate) cell: star toggles + note input */
+  .fb-cell { display:flex; flex-direction:column; gap:2px; min-width:124px; }
+  .fb-stars { display:flex; gap:0; font-size:13px; line-height:1; user-select:none;
+    flex-wrap:wrap; }
+  .fb-star { cursor:pointer; color:var(--muted); padding:0; }
+  .fb-star:hover { color:var(--accent); }
+  .fb-star.on { color:#f5c518; }   /* gold for filled stars */
+  .fb-text { width:116px; font-size:11px; padding:2px 4px; white-space:normal;
+    background:var(--bg); color:var(--ink); border:1px solid var(--grid);
+    border-radius:4px; }
   /* filter row (second thead row) — per-column value filters */
   .batch-table th.filter-cell { cursor:default; user-select:text; padding:3px 4px;
     text-align:right; font-weight:400; }
@@ -254,6 +264,10 @@
           <div class="vp-settings">
             <button class="tool-btn glass" id="vp-settings-btn" title="View settings">&#9881;</button>
             <div class="settings-menu glass" id="vp-settings-menu">
+              <label class="settings-row"><span>Show carved stock</span>
+                <input type="checkbox" id="opt-stock" checked></label>
+              <label class="settings-row"><span>Show target shape</span>
+                <input type="checkbox" id="opt-target" checked></label>
               <label class="settings-row"><span>Show stock cube</span>
                 <input type="checkbox" id="opt-cube" checked></label>
               <label class="settings-row"><span>Show axes</span>
@@ -380,6 +394,48 @@ let BATCHES = [];
 // batch is selected). Empty array means no batch filter → use DATA.experiments.
 let CURRENT_BATCH_RUNS = [];
 
+// Human feedback (star ratings + notes) per run, keyed by run basename.
+// Loaded once from /__api/feedback at startup; the batch table renders a
+// "rate" column whose stars/notes POST back here. train_csg.py reads the same
+// store file so feedback flows into future runs. Stays {} if the API/server is
+// unavailable (e.g. file://) — the column renders empty and POSTs no-op.
+let FEEDBACK = {};
+const FEEDBACK_STARS = [1, 2, 3, 4, 5, 6, 7];   // 1=bad ... 4=average ... 7=great
+function fbKey(d){ const n = d && (d.name || (d.run_dir ? (""+d.run_dir).split("/").pop() : null)); return n || null; }
+function fbEntry(d){ const k = fbKey(d); return (k && FEEDBACK[k]) || {}; }
+function fbStars(d){ return fbEntry(d).stars || null; }
+// Label for a 1-7 star count (tooltip on each star).
+function fbStarLabel(s){
+  return s<=2 ? "bad" : s<=3 ? "below avg" : s===4 ? "average" : s===5 ? "above avg" : s===6 ? "great" : "excellent";
+}
+// HTML for the rate cell: seven star toggles (1-7) + a free-text note input.
+// Clicking the active rating again clears it. Notes save on change (blur/Enter).
+function feedbackCellHtml(d){
+  const k = fbKey(d); if (!k) return "—";
+  const e = fbEntry(d);
+  const cur = e.stars || 0;
+  const btns = FEEDBACK_STARS.map(s => {
+    const on = cur && s <= cur;
+    return `<span class="fb-star${on?" on":""}" data-run="${escAttr(k)}" data-stars="${s}" title="${s} star${s>1?"s":""}: ${fbStarLabel(s)}">${on?"★":"☆"}</span>`;
+  }).join("");
+  return `<div class="fb-cell">` +
+    `<div class="fb-stars">${btns}</div>` +
+    `<input class="fb-text" data-run="${escAttr(k)}" placeholder="note…" value="${escAttr(e.feedback||"")}">` +
+    `</div>`;
+}
+// Persist one field of a run's feedback to the server. `stars`/`feedback` are
+// each optional (undefined = leave unchanged). Silently no-ops if the server is
+// absent so the dashboard stays usable from file:// too.
+async function fbPost(run, stars, feedback){
+  if (!run) return;
+  try {
+    const body = {run};
+    if (stars !== undefined) body.stars = stars;
+    if (feedback !== undefined) body.feedback = feedback;
+    await fetch(BASE+"__api/feedback", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  } catch(e){ /* server absent (file://) — keep working offline */ }
+}
+
 // Track whether the page is viewing a single arbitrary run (loaded via the
 // run-picker / ?run= URL param) rather than an autoresearch experiment row.
 let RUN_VIEW = false;
@@ -410,6 +466,14 @@ function updateStats() {
     el.innerHTML = `<span class="hint">Loading…</span>`;
   }
 }
+
+// Load human feedback (star ratings + notes) once, independent of data.json.
+// Re-renders the batch table when it lands so stars/notes appear against runs;
+// stays {} (empty cells) if the API is absent (file://).
+fetch(BASE + "__api/feedback").then(r => r.json()).then(j => {
+  FEEDBACK = (j && j.feedback) || {};
+  renderBatchTable();
+}).catch(() => { /* offline / file:// — leave FEEDBACK empty */ });
 
 d3.json("data.json").then(raw => {
   DATA = raw;
@@ -1246,6 +1310,10 @@ const BATCH_COLS = [
   {key:"training_seconds", hdr:"train s", better:-1, filter:"range",
    tip:"Wall-clock training time in seconds (lower better).",
    get:d=>d.metrics&&d.metrics.training_seconds, fmt:v=>fmtNum(v,1)},
+  // ---- human feedback (persists to run_feedback.json via /__api/feedback) ----
+  {key:"feedback", hdr:"rate", left:true, better:+1,
+   tip:"Your rating: click 1-7 stars (1=bad, 4=average, 7=great); click the active star again to clear. Type a note in the box to capture what was good/bad — notes are read by future training runs to steer policy selection. Sortable (top-rated first).",
+   get:d=>fbStars(d), fmt:v=>v==null?"—":(v+"★")},
 ];
 
 // Numeric formatter shared with the detail metrics box: tight for small
@@ -1428,8 +1496,10 @@ function renderBatchBody(){
       const td = document.createElement("td");
       if (c.left) td.className = "left";
       // Shape column gets a colored dot prefix matching the scatter/legend.
+      // Feedback column renders interactive stars + a note input (not plain text).
       td.innerHTML = c.key === "shape" && d.shape && SHAPE_COLOR[d.shape]
         ? `<span class="batch-shape-dot" style="background:${SHAPE_COLOR[d.shape]}"></span>${c.fmt(v)}`
+        : c.key === "feedback" ? feedbackCellHtml(d)
         : c.fmt(v);
       // Highlight the best-in-column value (ties both highlight).
       if (c.better && bestOf[c.key] != null && v === bestOf[c.key]) td.classList.add("best");
@@ -1439,6 +1509,36 @@ function renderBatchBody(){
     tbody.appendChild(tr);
   });
   tbl.appendChild(tbody);
+
+  // Wire the rate column: star toggles + note input. stopPropagation keeps a
+  // click/keystroke inside the cell from selecting the run (the row's onclick).
+  tbody.querySelectorAll(".fb-star").forEach(el => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const run = el.dataset.run;
+      const s = parseInt(el.dataset.stars, 10);
+      const cur = (FEEDBACK[run] && FEEDBACK[run].stars) || 0;
+      const next = (cur === s) ? null : s;            // toggle off if re-clicked
+      const e = FEEDBACK[run] = FEEDBACK[run] || {};
+      e.stars = next;                                  // null clears the stars
+      if (!e.stars && !e.feedback) delete FEEDBACK[run];
+      fbPost(run, next, undefined);
+      renderBatchBody();                               // refresh star fill
+    };
+  });
+  tbody.querySelectorAll(".fb-text").forEach(el => {
+    el.onclick = (ev) => ev.stopPropagation();
+    el.onkeydown = (ev) => ev.stopPropagation();
+    el.onchange = (ev) => {
+      ev.stopPropagation();
+      const run = el.dataset.run;
+      const txt = el.value;
+      const e = FEEDBACK[run] = FEEDBACK[run] || {};
+      e.feedback = txt;
+      if (!e.stars && !e.feedback) delete FEEDBACK[run];
+      fbPost(run, undefined, txt);
+    };
+  });
 }
 
 // Full render: rebuild header (tooltips + filter controls + sort arrows) and body.
@@ -1741,7 +1841,7 @@ const CUBE_EDGES = [
 let cam = {target:[0.5,0.5,0.5], distance:2.6, yaw:0.72, pitch:0.62};
 let curD = null;            // currently selected experiment
 let pbStep = 0, pbPlaying = false, pbSpeed = 1, pbLastT = 0, pbRAF = 0;
-let opt = {cube:true, axes:true, cmd:false};
+let opt = {cube:true, axes:true, cmd:false, stock:true, target:true};
 let vpInited = false;
 
 // WebGPU voxel viewer state. When `ready` is true the carved-stock mesh is rendered
@@ -1790,7 +1890,7 @@ function startVoxelLoop(){
     if (cstep !== voxel.lastStep){ voxel.viewer.carveToStep(cstep); voxel.lastStep = cstep; }
     const cmd = opt.cmd && curD.trajectory.cmd ? curD.trajectory.cmd : null;
     try {
-      voxel.viewer.render(cam, cstep, { showCube: opt.cube, showAxes: opt.axes, cmdPts: cmd });
+      voxel.viewer.render(cam, cstep, { showCube: opt.cube, showAxes: opt.axes, cmdPts: cmd, showStock: opt.stock, showTarget: opt.target });
     } catch (e) {
       // A validation error in one frame (e.g. a bad bind group) must not kill the
       // render loop — log once and keep the canvas alive.
@@ -1915,6 +2015,8 @@ function initViewport(){
   document.getElementById("opt-cube").onchange = e=>{opt.cube=e.target.checked; renderViewport();};
   document.getElementById("opt-axes").onchange  = e=>{opt.axes =e.target.checked; renderViewport();};
   document.getElementById("opt-cmd").onchange   = e=>{opt.cmd  =e.target.checked; renderViewport();};
+  document.getElementById("opt-stock").onchange = e=>{opt.stock=e.target.checked; renderViewport();};
+  document.getElementById("opt-target").onchange= e=>{opt.target=e.target.checked; renderViewport();};
 
   // Nav-cube: mirror orientation; click faces to snap.
   document.querySelectorAll("#nav-cube .cube-face").forEach(face=>{
@@ -1936,8 +2038,68 @@ function initViewport(){
   scrub.oninput = ()=>{ if(curD) setStep(parseInt(scrub.value)); };
 }
 
+// Load the selected run's target STL, parse it into solid-pipeline vertices
+// (pos3 + normal3 + color4 = 10 floats/vtx), normalize mm → [0,1]^3 by the run's
+// stock size, and upload it to the voxel viewer as a transparent teal shell overlaid
+// on the carved stock. This makes gouge (overcut into the target) visually obvious:
+// the gray stock shell should sit ON the teal target shell; where it punches through
+// into the teal volume, the tool overcut the target. Cached per run_dir.
+const _targetMeshCache = new Map();
+function stockMmFromCommand(cmd){
+  // --stock-size-in X Y Z (inches) → mm. Fall back to 1" if absent.
+  const m = (cmd||"").match(/--stock-size-in\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+  const inch = m ? [parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])] : [1,1,1];
+  return inch.map(v => v * 25.4);
+}
+async function loadTargetMesh(d){
+  if (!voxel.viewer) return;                       // SVG fallback path: no target overlay
+  const path = d && d.stl && d.stl.target;
+  if (!path) { voxel.viewer.setTargetMesh(null); return; }
+  let data = _targetMeshCache.get(path);
+  if (!data) {
+    try {
+      const res = await fetch(BASE + path);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const buf = new DataView(await res.arrayBuffer());
+      // Binary STL: 80-byte header, u32 tri count, then 50 bytes/tri (12 f32 + u16 attr).
+      const nTri = buf.getUint32(80, true);
+      const [sx, sy, sz] = stockMmFromCommand(d.command);
+      const scale = [1/sx, 1/sy, 1/sz];
+      const TEAL = [0.25, 0.85, 0.75, 0.35];
+      const out = new Float32Array(nTri * 3 * 10);
+      let o = 0;
+      for (let i = 0; i < nTri; i++){
+        const base = 84 + i*50;
+        // Per-triangle face normal from the vertex positions (robust to stale STL normals).
+        const v = [];
+        for (let k = 0; k < 3; k++){
+          const vb = base + 12 + k*12;
+          v.push([buf.getFloat32(vb, true)*scale[0], buf.getFloat32(vb+4, true)*scale[1], buf.getFloat32(vb+8, true)*scale[2]]);
+        }
+        const ax=v[1][0]-v[0][0], ay=v[1][1]-v[0][1], az=v[1][2]-v[0][2];
+        const bx=v[2][0]-v[0][0], by=v[2][1]-v[0][1], bz=v[2][2]-v[0][2];
+        let nx=ay*bz-az*by, ny=az*bx-ax*bz, nz=ax*by-ay*bx;
+        const nl = Math.hypot(nx,ny,nz) || 1; nx/=nl; ny/=nl; nz/=nl;
+        for (let k = 0; k < 3; k++){
+          out[o++]=v[k][0]; out[o++]=v[k][1]; out[o++]=v[k][2];
+          out[o++]=nx; out[o++]=ny; out[o++]=nz;
+          out[o++]=TEAL[0]; out[o++]=TEAL[1]; out[o++]=TEAL[2]; out[o++]=TEAL[3];
+        }
+      }
+      data = out;
+      _targetMeshCache.set(path, data);
+    } catch (e) {
+      console.warn("[voxel] target STL load failed:", e);
+      voxel.viewer.setTargetMesh(null);
+      return;
+    }
+  }
+  voxel.viewer.setTargetMesh(data);
+}
+
 function loadTrajectory(d){
   curD = d;
+  loadTargetMesh(d);
   const T = d.trajectory ? d.trajectory.traj.length : 0;
   const scrub = document.getElementById("pb-scrub");
   scrub.min = 0; scrub.max = Math.max(0, T-1);

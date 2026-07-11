@@ -243,9 +243,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let e2 = triTable[cubeIndex * 16u + i + 2u];
     let tIdx = atomicAdd(&counter, 3u);
     let n = normalize(cross(vertList[e1] - vertList[e0], vertList[e2] - vertList[e0]));
-    vertices[tIdx] = Vertex(vertList[e0].x * params.uiScale, vertList[e0].y * params.uiScale, vertList[e0].z * params.uiScale, n.x, n.y, n.z, 0.5, 0.5, 0.5, 1.0);
-    vertices[tIdx+1u] = Vertex(vertList[e1].x * params.uiScale, vertList[e1].y * params.uiScale, vertList[e1].z * params.uiScale, n.x, n.y, n.z, 0.5, 0.5, 0.5, 1.0);
-    vertices[tIdx+2u] = Vertex(vertList[e2].x * params.uiScale, vertList[e2].y * params.uiScale, vertList[e2].z * params.uiScale, n.x, n.y, n.z, 0.5, 0.5, 0.5, 1.0);
+    // Stock shell alpha 0.5: the carved stock is drawn as a 50% transparent shell
+    // (see stockPipeline / shellPipeline) so the overlaid target shape shows through,
+    // making gouge (overcut into the target) visually obvious.
+    vertices[tIdx] = Vertex(vertList[e0].x * params.uiScale, vertList[e0].y * params.uiScale, vertList[e0].z * params.uiScale, n.x, n.y, n.z, 0.5, 0.5, 0.5, 0.5);
+    vertices[tIdx+1u] = Vertex(vertList[e1].x * params.uiScale, vertList[e1].y * params.uiScale, vertList[e1].z * params.uiScale, n.x, n.y, n.z, 0.5, 0.5, 0.5, 0.5);
+    vertices[tIdx+2u] = Vertex(vertList[e2].x * params.uiScale, vertList[e2].y * params.uiScale, vertList[e2].z * params.uiScale, n.x, n.y, n.z, 0.5, 0.5, 0.5, 0.5);
     indices[tIdx] = tIdx;
     indices[tIdx+1u] = tIdx+1u;
     indices[tIdx+2u] = tIdx+2u;
@@ -514,6 +517,29 @@ export async function createVoxelViewer(canvas, options = {}) {
     primitive: { topology: "triangle-list", cullMode: "back" },
     depthStencil: { format: "depth24plus", depthWriteEnabled: false, depthCompare: "always" },
   });
+  // Transparent shell pipeline for the carved stock AND the overlaid target shape.
+  // Blend on, depthWrite OFF (so transparent surfaces don't occlude each other or the
+  // tool/lines), depthCompare "less" (shells are still clipped by the depth-clear at 1.0
+  // and by any future opaque writer), cullMode "none" so both front and back faces of the
+  // shell render — an X-ray view that lets the target show through the 50% stock and vice
+  // versa. Vertex color (rgb+alpha) is baked per-mesh: stock = gray 0.5, target = teal.
+  const shellPipeline = device.createRenderPipeline({
+    layout: pipelineLayout,
+    vertex: { module: shader, entryPoint: "solid_main", buffers: [{
+      arrayStride: 40,
+      attributes: [
+        { shaderLocation:0, offset:0,  format:"float32x3" },
+        { shaderLocation:1, offset:12, format:"float32x3" },
+        { shaderLocation:2, offset:24, format:"float32x4" },
+      ],
+    }]},
+    fragment: { module: shader, entryPoint: "fragment_main", targets: [{ format, blend: {
+      color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
+      alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
+    }}] },
+    primitive: { topology: "triangle-list", cullMode: "none" },
+    depthStencil: { format: "depth24plus", depthWriteEnabled: false, depthCompare: "less" },
+  });
   // Toolholder pipeline: its own shader module (HOLDER_CODE) that binds the carved-stock
   // SDF grid + params so the fragment can recolor the holder red where it gouges the
   // stock (density < 0). Separate bind group: viewProj uniform + grid (read-only
@@ -606,6 +632,20 @@ export async function createVoxelViewer(canvas, options = {}) {
     }
     device.queue.writeBuffer(holderBuffer, 0, data);
     holderVertexCount = data.length / 10;
+  };
+  // Target-shape mesh (loaded from the run's target STL, normalized to [0,1]^3 by the
+  // page). Drawn as a transparent teal shell alongside the carved stock so gouge
+  // (overcut into the target) is visible. Solid-pipeline layout: 10 floats/vtx.
+  let targetBuffer = null, targetVertexCount = 0;
+  const uploadTarget = (data) => {
+    if (!data || !data.length) { targetVertexCount = 0; return; }
+    const size = Math.max(4, data.byteLength);
+    if (!targetBuffer || targetBuffer.size < size) {
+      targetBuffer?.destroy();
+      targetBuffer = device.createBuffer({ size, usage: U.VERTEX | U.COPY_DST });
+    }
+    device.queue.writeBuffer(targetBuffer, 0, data);
+    targetVertexCount = data.length / 10;
   };
 
   // ---- cut application + mesh extraction ----
@@ -704,6 +744,11 @@ export async function createVoxelViewer(canvas, options = {}) {
     }
   };
 
+  // Upload (or clear) the target-shape mesh. `data` is a Float32Array of solid-pipeline
+  // vertices (pos3 + normal3 + color4 = 10 floats/vtx) already normalized to [0,1]^3 by
+  // the page (STL mm / stock_mm). Pass null/empty to clear the target between runs.
+  const setTargetMesh = (data) => { uploadTarget(data); };
+
   // Render one frame with the given orbit camera. opts:
   //   showCube : bool        — draw the stock wireframe (default true)
   //   showAxes : bool        — draw the XYZ triad at the stock origin (default false)
@@ -739,9 +784,19 @@ export async function createVoxelViewer(canvas, options = {}) {
       depthStencilAttachment: { view: depthTex.createView(), depthClearValue:1.0, depthLoadOp:"clear", depthStoreOp:"store" },
     });
     pass.setBindGroup(0, bindGroup);
-    // Carved stock mesh.
-    if (vertexCount > 0) {
-      pass.setPipeline(solidPipeline);
+    const showStock = opts.showStock !== false;
+    const showTarget = !!opts.showTarget;
+    // Target shape (transparent teal shell) — drawn first so the 50% stock shell blends
+    // over it. Lets you see where the carved stock overcuts INTO the target (gouge) and
+    // where it undercuts (residual, stock still outside the target).
+    if (showTarget && targetVertexCount > 0) {
+      pass.setPipeline(shellPipeline);
+      pass.setVertexBuffer(0, targetBuffer);
+      pass.draw(targetVertexCount);
+    }
+    // Carved stock mesh (50% transparent gray shell).
+    if (showStock && vertexCount > 0) {
+      pass.setPipeline(shellPipeline);
       pass.setVertexBuffer(0, vertexBuffer);
       pass.setIndexBuffer(indexBuffer, "uint32");
       pass.drawIndexed(vertexCount);
@@ -827,12 +882,13 @@ export async function createVoxelViewer(canvas, options = {}) {
     available: true,
     setTrajectory,
     setToolGeometry,
+    setTargetMesh,
     carveToStep,
     render,
     resize,
     get vertexCount() { return vertexCount; },
     destroy() {
-      [gridBuffer, edgeTableBuffer, triTableBuffer, vertexBuffer, indexBuffer, counterBuffer, volumeCounterBuffer, paramsBuffer, cutBuffer, countRead, uniformBuffer, lineBuffer, toolBuffer, holderBuffer].forEach(b => b?.destroy?.());
+      [gridBuffer, edgeTableBuffer, triTableBuffer, vertexBuffer, indexBuffer, counterBuffer, volumeCounterBuffer, paramsBuffer, cutBuffer, countRead, uniformBuffer, lineBuffer, toolBuffer, holderBuffer, targetBuffer].forEach(b => b?.destroy?.());
       depthTex?.destroy();
     },
   };

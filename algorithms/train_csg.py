@@ -31,6 +31,7 @@ eval_freq=10 + best-checkpoint saving capture the transient dice peak:
 import math
 import os
 import random
+import sys
 import time
 from dataclasses import dataclass
 
@@ -117,6 +118,15 @@ class Args:
     """run-name prefix; same env/simulator as csg_ppo (exp_name distinguishes the method)"""
     save_model: bool = False
     """whether to save the learned trajectory into the `runs/{run_name}` folder"""
+    use_feedback: bool = False
+    """if True, warm-start the trajectory from the highest-rated prior run (by
+    human star rating) that matches this target_shape + max_steps, then continue
+    optimizing — a lightweight RLHF-style policy improvement. The feedback store
+    (autoresearch/tasks/train_csg/run_feedback.json, written by the web
+    dashboard's star/note UI) is ALWAYS read and logged + recorded in
+    metrics.json; this flag only gates whether the warm-start deltas are applied.
+    Shape-agnostic in the method: matching is in this selection layer (reading
+    prior args.json metadata), not in the optimizer/init/loss code."""
     autoresearch: bool = False
     """if True, prefix the run name with 'AR-' for tracking experiments"""
     runs_subdir: str = ""
@@ -325,6 +335,15 @@ class Args:
     the boolean union still over-erodes; a positive margin lifts the tool so the
     union of capsules stays tangent-only, trading a little uncut residual for
     no gouge. Shape-agnostic (target_sdf only). 0 = tangent-only (default)."""
+    w_tool_gouge_warmup_frac: float = 0.0
+    """fraction of iters before w_tool_gouge begins ramping (0 = on from start).
+    The tool-position gouge barrier is spuriously active at correct TANGENT
+    passes on convex parts (sphere), so a constant w_tool_gouge can pin the tool
+    off the surface during the low-k exploration phase and stall carving before
+    it establishes. With a warmup, carving is established first (residual falls,
+    dice peaks), THEN w_tool_gouge ramps linearly from 0 to --w-tool-gouge over
+    the remaining iters so the barrier suppresses gouge without pre-empting the
+    carve. Pairs naturally with --k-anneal (barrier ramps in as k sharpens)."""
 
     # ---- Trajectory-quality measures (time / air-cut time / breakage) ----
     # Three deployable measures reported alongside dice and (when their weight
@@ -637,6 +656,115 @@ def export_stls(sim, T, dx, run_dir, step, track):
             wandb.save(path, base_path=os.path.dirname(path), policy="now")
     return written
 
+
+# ---------------------------------------------------------------------------
+# Human-feedback warm-start (RLHF-style policy improvement).
+#
+# The web dashboard lets a user rate each run 1-7 stars + a free-text note;
+# those ratings persist to autoresearch/tasks/train_csg/run_feedback.json (keyed
+# by run basename). Every training run reads that store here so the human's
+# qualitative judgments are (a) logged to stderr and (b) recorded in the new
+# run's metrics.json under "feedback". With --use-feedback, the run additionally
+# warm-starts its trajectory from the highest-rated prior run that matches this
+# target_shape + max_steps (matching is in THIS selection layer — reading prior
+# args.json metadata — so the optimizer/init/loss code stays shape-agnostic).
+# ---------------------------------------------------------------------------
+def _feedback_store_path():
+    return os.path.join("autoresearch", "tasks", "train_csg", "run_feedback.json")
+
+
+def _load_feedback_store():
+    """Read the feedback store; returns {} if missing/corrupt (never raises)."""
+    try:
+        with open(_feedback_store_path()) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _find_run_dir_by_name(name):
+    """Locate runs/<batch>/<name> by basename (newest on ties), or None."""
+    import glob
+    hits = [d for d in glob.glob(f"runs/**/{name}", recursive=True) if os.path.isdir(d)]
+    if not hits:
+        return None
+    hits.sort(key=lambda d: os.path.getmtime(d), reverse=True)
+    return hits[0]
+
+
+def _read_run_args(run_dir):
+    """Read a prior run's args.json, or None if unreadable."""
+    p = os.path.join(run_dir, "args.json")
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def load_human_feedback(target_shape, max_steps):
+    """Read the feedback store and find a warm-start trajectory.
+
+    Returns (warmstart_deltas_or_None, summary). `summary` always carries the
+    top-rated prior runs (for logging + metrics.json). `warmstart_deltas` is the
+    (T-1, 3) float32 delta array from the highest-starred prior run whose
+    target_shape + max_steps match, or None when no match / no saved trajectory.
+    Deltas that don't exactly fit T-1 are truncated or last-padded (never
+    rescaled — per-step displacements don't interpolate cleanly).
+    """
+    store = _load_feedback_store()
+    # Rank rated entries by stars desc, then recency desc.
+    ranked = sorted(
+        [(k, v) for k, v in store.items() if v.get("stars")],
+        key=lambda kv: (-int(kv[1]["stars"]), -float(kv[1].get("ts", 0.0))),
+    )
+    summary = {
+        "top_rated": [
+            {"run": k, "stars": int(v["stars"]), "feedback": str(v.get("feedback", ""))}
+            for k, v in ranked[:8]
+        ],
+        "warmstart": None,
+    }
+    for k, v in ranked:
+        # Warm-start only from above-average runs (5-7 stars on the 1-7 scale).
+        if int(v["stars"]) < 5:
+            break
+        run_dir = _find_run_dir_by_name(k)
+        if not run_dir:
+            continue
+        pa = _read_run_args(run_dir) or {}
+        if pa.get("target_shape") != target_shape:
+            continue
+        try:
+            if int(pa.get("max_steps", -1)) != int(max_steps):
+                continue
+        except (TypeError, ValueError):
+            continue
+        dp = os.path.join(run_dir, "trajectory_deltas.npy")
+        if not os.path.exists(dp):
+            continue
+        try:
+            arr = np.load(dp)
+        except Exception:
+            continue
+        if arr.ndim != 2 or arr.shape[1] != 3:
+            continue
+        arr = arr.astype(np.float32)
+        need = int(max_steps) - 1
+        if arr.shape[0] >= need:
+            init = arr[:need].copy()
+        else:
+            pad = np.tile(arr[-1:], (need - arr.shape[0], 1))
+            init = np.vstack([arr, pad]).astype(np.float32)
+        summary["warmstart"] = {
+            "run": k, "stars": int(v["stars"]),
+            "feedback": str(v.get("feedback", "")),
+            "shape": target_shape, "max_steps": int(max_steps),
+        }
+        return init, summary
+    return None, summary
+
+
 def main():
     args = tyro.cli(Args)
 
@@ -663,6 +791,24 @@ def main():
     video_dir = os.path.join(run_dir, "videos")
     os.makedirs(video_dir, exist_ok=True)
     print(f"[run] writing outputs to {run_dir}")
+
+    # Human feedback: always read the rating store, log top-rated prior runs,
+    # and (with --use-feedback) warm-start from the best matching trajectory.
+    fb_warmstart, fb_summary = load_human_feedback(args.target_shape, args.max_steps)
+    if fb_summary["top_rated"]:
+        print("[feedback] top-rated prior runs (human stars):", file=sys.stderr, flush=True)
+        for t in fb_summary["top_rated"][:5]:
+            print(f"  {t['stars']}★ {t['run']}: {t['feedback'] or '(no note)'}",
+                  file=sys.stderr, flush=True)
+    if fb_summary["warmstart"]:
+        ws = fb_summary["warmstart"]
+        if args.use_feedback:
+            print(f"[feedback] --use-feedback: warm-starting from {ws['stars']}★ "
+                  f"run {ws['run']} (shape={ws['shape']}, max_steps={ws['max_steps']})",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"[feedback] {ws['stars']}★ warm-start available ({ws['run']}); "
+                  f"pass --use-feedback to apply", file=sys.stderr, flush=True)
 
     # Save reproduction command and arguments
     try:
@@ -1118,8 +1264,185 @@ def main():
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "multidepth_cavity":
+        # Shape-agnostic MULTI-DEPTH helical roughing WITH an interior-cavity
+        # pass. Identical to `multidepth` for targets with NO interior cavity
+        # (solid sphere/box/cyl/pyramid/bowl): the cavity detection finds none,
+        # so the path is the plain exterior helix -- zero regression on the 5
+        # working shapes. For targets with an interior concave cavity (e.g. a
+        # through-hole), the outer-envelope r_safe(z)=r_cross(z)+r_tool+margin
+        # keeps the tool OUTSIDE the cavity, so plain multidepth can never clear
+        # the cavity's waste (this is the hole root cause; see idea.md Wave 5).
+        # This mode detects the cavity shape-agnostically -- target SDF>0 voxels
+        # INSIDE the outer envelope r_cross -- and appends a retract -> rapid ->
+        # plunge -> small-radius spiral through the cavity centroid so the
+        # interior waste is reached. Reads only the baked target SDF grid; no
+        # shape names / shape params.
+        n = T - 1
+        stock_mm_x = args.stock_size_in[0] * 25.4
+        r_tool = args.tool_radius_mm / stock_mm_x
+        margin = args.multidepth_margin
+        feed_cap = args.feed_ipm * args.dt / 60.0 / args.stock_size_in[0]
+        grid = sim.target.to_numpy()
+        Nx, Ny, Nz = grid.shape
+        _solid = np.where(grid <= 0.0)[2]
+        z_top = (float(_solid.max()) / Nz + 1.0 / Nz) if len(_solid) else 0.95
+        z_bot = (float(_solid.min()) / Nz) if len(_solid) else 0.05
+        z_top = min(z_top + 2.0 * r_tool, 0.98)
+        z_bot = max(z_bot, 0.02)
+        r_cross = target_cross_section_radii(sim)
+        r_outer = 0.5 + r_tool
+
+        def r_safe_at(z):
+            return _r_cross_at(r_cross, z) + r_tool + margin
+
+        budget = max(1.0, (n - 1)) * feed_cap
+        radial_cycles = max(1.0, float(args.multidepth_levels))
+
+        def helix(revs, z_arr, r_low, r_high, cx, cy):
+            # radius sweeps [r_low, r_high] via a triangle wave; (cx,cy) center.
+            m = max(8, len(z_arr))
+            u = np.linspace(0.0, 1.0, m)
+            theta = 2.0 * np.pi * revs * u
+            tri = np.abs(1.0 - 2.0 * ((u * radial_cycles) % 1.0))
+            r = r_low + (r_high - r_low) * tri
+            pts = np.stack([cx + r * np.cos(theta), cy + r * np.sin(theta),
+                            z_arr], axis=1).astype(np.float32)
+            seg = np.diff(pts, axis=0)
+            cum = np.concatenate([[0.0], np.cumsum(np.sqrt((seg ** 2).sum(1)))])
+            return pts, cum, float(cum[-1])
+
+        def resample(pts, cum, npts):
+            s = np.linspace(0.0, cum[-1], npts)
+            idx = np.clip(np.searchsorted(cum, s) - 1, 0, len(pts) - 2)
+            frac = (s - cum[idx]) / np.maximum(cum[idx + 1] - cum[idx], 1e-9)
+            return (pts[idx] + (pts[idx + 1] - pts[idx]) * frac[:, None]
+                    ).astype(np.float32)
+
+        # --- exterior helix (same construction as multidepth) ---
+        u1 = np.linspace(0.0, 1.0, 4000)
+        z1 = z_top + (z_bot - z_top) * u1
+        rs1 = np.clip(np.array([r_safe_at(zz) for zz in z1]), 0.0, r_outer)
+        c1 = np.full_like(z1, 0.5)
+        revs = max(0.5, args.multidepth_revs)
+        _, _, te = helix(revs, z1, rs1, r_outer, c1, c1)
+        if te > 0.95 * budget:
+            revs = max(0.5, revs * (0.95 * budget) / te)
+            revs = max(0.5, revs * (0.95 * budget) / helix(revs, z1, rs1, r_outer, c1, c1)[2])
+        pts_e, cum_e, te = helix(revs, z1, rs1, r_outer, c1, c1)
+
+        # --- interior cavity detection (shape-agnostic, from the SDF grid) ---
+        xs = (np.arange(Nx) + 0.5) / Nx - 0.5
+        ys = (np.arange(Ny) + 0.5) / Ny - 0.5
+        Rxy = np.sqrt(xs[:, None] ** 2 + ys[None, :] ** 2)         # (Nx,Ny) from center
+        rc_z = np.clip(r_cross, 0.0, None)                          # (Nz,) outer envelope
+        empty_in = (grid > 0.0) & (Rxy[:, :, None] < rc_z[None, None, :])
+        cav_R = np.where(empty_in, Rxy[:, :, None], -1.0).max(axis=(0, 1))
+        r_cav_z = np.clip(cav_R, 0.0, None)                          # cavity outer radius/z
+        has_cav = r_cav_z > r_tool + 1e-3                            # tool fits in cavity
+
+        if has_cav.any():
+            cx_v = (np.arange(Nx) + 0.5) / Nx
+            cy_v = (np.arange(Ny) + 0.5) / Ny
+            sx = np.where(empty_in, cx_v[:, None, None], 0.0).sum(axis=(0, 1))
+            sy = np.where(empty_in, cy_v[None, :, None], 0.0).sum(axis=(0, 1))
+            cn = empty_in.sum(axis=(0, 1))
+            cxz = np.where(cn > 0, sx / np.maximum(cn, 1), 0.5)
+            cyz = np.where(cn > 0, sy / np.maximum(cn, 1), 0.5)
+            zk = (np.arange(Nz) + 0.5) / Nz
+            kc = np.where(has_cav)[0]
+            z_ct = min(z_top, kc.max() / Nz + 1.0 / Nz)
+            z_cb = max(z_bot, kc.min() / Nz)
+            u2 = np.linspace(0.0, 1.0, 2000)
+            z2 = z_ct + (z_cb - z_ct) * u2
+            cx2 = np.interp(z2, zk, cxz)
+            cy2 = np.interp(z2, zk, cyz)
+            # interior spiral radius stays INSIDE the cavity (<= r_cav - r_tool),
+            # so the tool clears cavity waste without gouging the solid ring.
+            r_in2 = np.clip(np.interp(z2, zk, r_cav_z) - r_tool - margin, 0.0, None)
+            z_ret = 1.0 + 2.0 * r_tool                              # just above stock top
+            # INTERIOR-FIRST ordering. tool_start [0.5,0.5,1.0] is already
+            # centered above the cavity mouth, so the path opens with an axial
+            # PLUNGE down the channel center, then the interior spiral, then a
+            # retract, then the exterior skin. The prior exterior-first ordering
+            # stranded the tool: the exterior orbits at r_safe=r_cross+r_tool+
+            # margin which, for a near-filling sphere (r_cross up to 0.45, tool
+            # 0.125), lies OUTSIDE the stock box (half-width 0.5) -> rapid air-
+            # cut, so 40+ steps vanished and the interior spiral -- the whole
+            # point of this mode -- never executed (commanded into the channel
+            # at steps 93-127 but the tool was still lagging at r~1.0). Interior-
+            # first guarantees the channel is carved before budget expires.
+            #
+            # tool_start is prepended to allpts so the plunge is resampled into
+            # ~feed_cap-sized steps (a single 0.25-mag plunge delta would be
+            # speed-clipped to 0.075 and the z-lag would accumulate, never
+            # reaching the cavity). positions[0]==tool_start -> delta[0]=0.
+            # HELICAL plunge from tool_start z=1.0 down to the cavity mouth
+            # z2[0], circling at radius r_in2[0] (tool edge r_in2[0]+r_tool <<
+            # hole radius, so it clears the cavity mouth on the way down). This
+            # MUST be helical, not a straight axial plunge: tool_sdf's capsule
+            # projection uses h_param = pa.ba/(ba.ba+1e-12); an axial segment has
+            # ba_xy=[0,0] so the gradient ~pa/1e-12 overflows the autodiff to NaN
+            # (simulator code, not modifiable). Circling keeps every segment's XY
+            # displacement non-zero so ba.ba stays finite. positions[0] differs
+            # from tool_start (small XY offset) so delta[0] is non-zero too.
+            # Built before the budget-fit loop so the loop accounts for the real
+            # (longer, circling) plunge arc, not a straight-line underestimate.
+            r_plunge = float(r_in2[0]) if float(r_in2[0]) > 1e-4 else 0.5 * r_tool
+            n_pz = max(12, int(np.ceil(abs(float(z2[0]) - 1.0) / feed_cap)) * 4)
+            uz = np.linspace(0.0, 1.0, n_pz)
+            zp = (1.0 + (float(z2[0]) - 1.0) * uz).astype(np.float32)
+            plunge, _, plunge_arc = helix(1.5, zp,
+                                          np.full_like(zp, r_plunge),
+                                          np.full_like(zp, r_plunge),
+                                          float(cx2[0]), float(cy2[0]))
+            revs_i = max(2.0, revs * 0.6)
+            scale = 1.0
+            for _ in range(4):
+                pi, _, ti_s = helix(revs_i * scale, z2, np.zeros_like(z2), r_in2, cx2, cy2)
+                pe, _, te_s = helix(revs * scale, z1, rs1, r_outer, c1, c1)
+                p_end = pi[-1]
+                ext0 = pe[0]
+                ret = np.stack([p_end,
+                                [p_end[0], p_end[1], z_ret],
+                                [ext0[0], ext0[1], z_ret],
+                                ext0], axis=0).astype(np.float32)
+                rseg = np.diff(ret, axis=0)
+                tr = float(np.sqrt((rseg ** 2).sum(1)).sum())
+                total = plunge_arc + ti_s + tr + te_s
+                if total <= 0.95 * budget:
+                    break
+                scale *= (0.95 * budget) / total
+            pts_i, _, _ = helix(revs_i * scale, z2, np.zeros_like(z2), r_in2, cx2, cy2)
+            pts_e, _, _ = helix(revs * scale, z1, rs1, r_outer, c1, c1)
+            p_end = pts_i[-1]
+            ext0 = pts_e[0]
+            ret = np.stack([p_end,
+                            [p_end[0], p_end[1], z_ret],
+                            [ext0[0], ext0[1], z_ret],
+                            ext0], axis=0).astype(np.float32)
+            allpts = np.concatenate([plunge, pts_i, ret[1:], pts_e], axis=0)
+            seg = np.diff(allpts, axis=0)
+            cum = np.concatenate([[0.0], np.cumsum(np.sqrt((seg ** 2).sum(1)))])
+            positions = resample(allpts, cum, n)
+        else:
+            # No interior cavity -> identical to plain multidepth.
+            positions = resample(pts_e, cum_e, n)
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
     else:
         init = np.random.uniform(-args.init_scale, args.init_scale, size=(T - 1, 3)).astype(np.float32)
+    # Human-feedback warm-start: with --use-feedback, replace the heuristic init
+    # with the highest-rated prior run's learned deltas (matched on shape +
+    # max_steps). The optimizer then refines a human-approved trajectory instead
+    # of starting from the heuristic — the concrete "feedback improves policy"
+    # loop. init is (T-1, 3) per-step displacements; the warm-start array is
+    # already sized to T-1 by load_human_feedback.
+    if args.use_feedback and fb_warmstart is not None:
+        init = fb_warmstart.astype(np.float32)
+        print(f"[feedback] warm-start deltas applied: shape={init.shape} "
+              f"from {fb_summary['warmstart']['run']}", file=sys.stderr, flush=True)
     params = torch.tensor(init, requires_grad=True)
     opt = torch.optim.Adam([params], lr=args.learning_rate)
 
@@ -1195,6 +1518,19 @@ def main():
                 else:
                     span = max(1, args.iters - warm_start)
                     sim.w_traj_prox[None] = args.w_traj_prox * ((it - warm_start) / span)
+            # w_tool_gouge warmup: keep w_tool_gouge at 0 until warmup_frac of
+            # iters, then ramp linearly to args.w_tool_gouge over the remaining
+            # iters. The tool-position barrier is spuriously active at tangent
+            # passes on convex parts, so a constant w_tool_gouge can pin the tool
+            # off-surface during low-k exploration and stall carving; ramping it
+            # in after carving establishes avoids that stall.
+            if args.w_tool_gouge > 0.0 and args.w_tool_gouge_warmup_frac > 0.0:
+                warm_start = int(args.iters * args.w_tool_gouge_warmup_frac)
+                if it < warm_start:
+                    sim.w_tool_gouge[None] = 0.0
+                else:
+                    span = max(1, args.iters - warm_start)
+                    sim.w_tool_gouge[None] = args.w_tool_gouge * ((it - warm_start) / span)
 
             # Push current displacements into Taichi, then forward+backward.
             # With restart_from_state, each iteration either starts fresh (optionally
@@ -1542,6 +1878,16 @@ def main():
             "engage_max": round(float(last_m.get("engage_max", 0.0)), 6) if last_m else 0.0,
             "engage_mean": round(float(last_m.get("engage_mean", 0.0)), 6) if last_m else 0.0,
             "best_score": round(best_score, 6),
+            # Human feedback that informed this run. Recorded on EVERY run
+            # (even without --use-feedback) so the dashboard/metrics log which
+            # prior runs a human rated and whether a warm-start was available.
+            # warmstart is None when no >=5★ prior run matched this
+            # target_shape+max_steps. Shape-agnostic: matching lives only in the
+            # feedback selection layer (load_human_feedback), never in
+            # optimizer/init/loss.
+            "feedback_used": bool(args.use_feedback and fb_warmstart is not None),
+            "feedback_top_rated": fb_summary.get("top_rated", []) if fb_summary else [],
+            "feedback_warmstart": fb_summary.get("warmstart") if fb_summary else None,
             # Final-iter (pre-best-checkpoint) trajectory metrics: exposes any
             # late-training polish (e.g. w_prox warmup) on the final trajectory,
             # independent of where the best-dice peak occurred.
