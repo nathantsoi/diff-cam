@@ -54,6 +54,15 @@
   .batch-table td.miss { color:var(--muted); }
   .batch-shape-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
     margin-right:5px; vertical-align:middle; }
+  /* human-feedback (rate) cell: star toggles + note input */
+  .fb-cell { display:flex; flex-direction:column; gap:2px; min-width:96px; }
+  .fb-stars { display:flex; gap:1px; font-size:14px; line-height:1; user-select:none; }
+  .fb-star { cursor:pointer; color:var(--muted); padding:0 1px; }
+  .fb-star:hover { color:var(--accent); }
+  .fb-star.on { color:#f5c518; }   /* gold for filled stars */
+  .fb-text { width:92px; font-size:11px; padding:2px 4px; white-space:normal;
+    background:var(--bg); color:var(--ink); border:1px solid var(--grid);
+    border-radius:4px; }
   /* filter row (second thead row) — per-column value filters */
   .batch-table th.filter-cell { cursor:default; user-select:text; padding:3px 4px;
     text-align:right; font-weight:400; }
@@ -384,6 +393,44 @@ let BATCHES = [];
 // batch is selected). Empty array means no batch filter → use DATA.experiments.
 let CURRENT_BATCH_RUNS = [];
 
+// Human feedback (star ratings + notes) per run, keyed by run basename.
+// Loaded once from /__api/feedback at startup; the batch table renders a
+// "rate" column whose stars/notes POST back here. train_csg.py reads the same
+// store file so feedback flows into future runs. Stays {} if the API/server is
+// unavailable (e.g. file://) — the column renders empty and POSTs no-op.
+let FEEDBACK = {};
+const FEEDBACK_STARS = [1, 3, 5];   // 1=bad, 3=average, 5=great
+function fbKey(d){ const n = d && (d.name || (d.run_dir ? (""+d.run_dir).split("/").pop() : null)); return n || null; }
+function fbEntry(d){ const k = fbKey(d); return (k && FEEDBACK[k]) || {}; }
+function fbStars(d){ return fbEntry(d).stars || null; }
+// HTML for the rate cell: three star toggles (1/3/5) + a free-text note input.
+// Clicking the active rating again clears it. Notes save on change (blur/Enter).
+function feedbackCellHtml(d){
+  const k = fbKey(d); if (!k) return "—";
+  const e = fbEntry(d);
+  const cur = e.stars || 0;
+  const btns = FEEDBACK_STARS.map(s => {
+    const on = cur && s <= cur;
+    return `<span class="fb-star${on?" on":""}" data-run="${escAttr(k)}" data-stars="${s}" title="${s} star${s>1?"s":""}: ${s===1?"bad":s===3?"average":"great"}">${on?"★":"☆"}</span>`;
+  }).join("");
+  return `<div class="fb-cell">` +
+    `<div class="fb-stars">${btns}</div>` +
+    `<input class="fb-text" data-run="${escAttr(k)}" placeholder="note…" value="${escAttr(e.feedback||"")}">` +
+    `</div>`;
+}
+// Persist one field of a run's feedback to the server. `stars`/`feedback` are
+// each optional (undefined = leave unchanged). Silently no-ops if the server is
+// absent so the dashboard stays usable from file:// too.
+async function fbPost(run, stars, feedback){
+  if (!run) return;
+  try {
+    const body = {run};
+    if (stars !== undefined) body.stars = stars;
+    if (feedback !== undefined) body.feedback = feedback;
+    await fetch(BASE+"__api/feedback", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+  } catch(e){ /* server absent (file://) — keep working offline */ }
+}
+
 // Track whether the page is viewing a single arbitrary run (loaded via the
 // run-picker / ?run= URL param) rather than an autoresearch experiment row.
 let RUN_VIEW = false;
@@ -414,6 +461,14 @@ function updateStats() {
     el.innerHTML = `<span class="hint">Loading…</span>`;
   }
 }
+
+// Load human feedback (star ratings + notes) once, independent of data.json.
+// Re-renders the batch table when it lands so stars/notes appear against runs;
+// stays {} (empty cells) if the API is absent (file://).
+fetch(BASE + "__api/feedback").then(r => r.json()).then(j => {
+  FEEDBACK = (j && j.feedback) || {};
+  renderBatchTable();
+}).catch(() => { /* offline / file:// — leave FEEDBACK empty */ });
 
 d3.json("data.json").then(raw => {
   DATA = raw;
@@ -1250,6 +1305,10 @@ const BATCH_COLS = [
   {key:"training_seconds", hdr:"train s", better:-1, filter:"range",
    tip:"Wall-clock training time in seconds (lower better).",
    get:d=>d.metrics&&d.metrics.training_seconds, fmt:v=>fmtNum(v,1)},
+  // ---- human feedback (persists to run_feedback.json via /__api/feedback) ----
+  {key:"feedback", hdr:"rate", left:true, better:+1,
+   tip:"Your rating: click ★ (1=bad), the middle ★ (3=average), or ★★★ (5=great); click the active star again to clear. Type a note in the box to capture what was good/bad — notes are read by future training runs to steer policy selection. Sortable (top-rated first).",
+   get:d=>fbStars(d), fmt:v=>v==null?"—":(v+"★")},
 ];
 
 // Numeric formatter shared with the detail metrics box: tight for small
@@ -1432,8 +1491,10 @@ function renderBatchBody(){
       const td = document.createElement("td");
       if (c.left) td.className = "left";
       // Shape column gets a colored dot prefix matching the scatter/legend.
+      // Feedback column renders interactive stars + a note input (not plain text).
       td.innerHTML = c.key === "shape" && d.shape && SHAPE_COLOR[d.shape]
         ? `<span class="batch-shape-dot" style="background:${SHAPE_COLOR[d.shape]}"></span>${c.fmt(v)}`
+        : c.key === "feedback" ? feedbackCellHtml(d)
         : c.fmt(v);
       // Highlight the best-in-column value (ties both highlight).
       if (c.better && bestOf[c.key] != null && v === bestOf[c.key]) td.classList.add("best");
@@ -1443,6 +1504,36 @@ function renderBatchBody(){
     tbody.appendChild(tr);
   });
   tbl.appendChild(tbody);
+
+  // Wire the rate column: star toggles + note input. stopPropagation keeps a
+  // click/keystroke inside the cell from selecting the run (the row's onclick).
+  tbody.querySelectorAll(".fb-star").forEach(el => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const run = el.dataset.run;
+      const s = parseInt(el.dataset.stars, 10);
+      const cur = (FEEDBACK[run] && FEEDBACK[run].stars) || 0;
+      const next = (cur === s) ? null : s;            // toggle off if re-clicked
+      const e = FEEDBACK[run] = FEEDBACK[run] || {};
+      e.stars = next;                                  // null clears the stars
+      if (!e.stars && !e.feedback) delete FEEDBACK[run];
+      fbPost(run, next, undefined);
+      renderBatchBody();                               // refresh star fill
+    };
+  });
+  tbody.querySelectorAll(".fb-text").forEach(el => {
+    el.onclick = (ev) => ev.stopPropagation();
+    el.onkeydown = (ev) => ev.stopPropagation();
+    el.onchange = (ev) => {
+      ev.stopPropagation();
+      const run = el.dataset.run;
+      const txt = el.value;
+      const e = FEEDBACK[run] = FEEDBACK[run] || {};
+      e.feedback = txt;
+      if (!e.stars && !e.feedback) delete FEEDBACK[run];
+      fbPost(run, undefined, txt);
+    };
+  });
 }
 
 // Full render: rebuild header (tooltips + filter controls + sort arrows) and body.

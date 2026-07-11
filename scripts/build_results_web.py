@@ -137,6 +137,7 @@ def load_run(run_dir):
         "iters": int(args["iters"]) if args.get("iters") is not None else None,
         "seed": int(args["seed"]) if args.get("seed") is not None else None,
         "dice": float(metrics["dice"]),
+        "hard_dice": float(metrics["hard_dice"]) if metrics.get("hard_dice") is not None else None,
         "metrics": clean_for_json(metrics),
         "args": args,
         "mtime": os.path.getmtime(tp),
@@ -231,6 +232,45 @@ def list_runs(batch=None):
     return out
 
 
+def find_results_row(run_rec):
+    """Reverse-lookup: which results.tsv row (if any) matches this run dir?
+
+    ``match_row`` goes results.tsv-row -> run dir; this inverts it so a clicked
+    run's detail view can show its real logged status/command/description
+    instead of the generic "arbitrary" label. A row matches when it shares the
+    run's (shape, iters, seed) AND its (hard) dice is within DICE_TOL of the
+    run's hard_dice/dice -- the same test ``match_row`` applies. If several rows
+    qualify, the closest-by-dice wins.
+    """
+    shape, iters, seed = run_rec["shape"], run_rec["iters"], run_rec["seed"]
+    if shape is None or iters is None:
+        return None
+    if not os.path.exists(RESULTS):
+        return None
+    hd = run_rec.get("hard_dice")
+    rd = run_rec.get("dice", 0.0)
+    best, best_d = None, DICE_TOL
+    with open(RESULTS, newline="") as f:
+        for r in csv.DictReader(f, delimiter="\t"):
+            try:
+                row_dice = float(r["dice"])
+            except (ValueError, KeyError):
+                continue
+            p = parse_cmd(r.get("command", "") or "")
+            if p["shape"] != shape or p["iters"] != iters:
+                # description may abbreviate shape ("cyl") and omit iters; only
+                # accept the mismatch if the row's command lacks the field.
+                continue
+            if p["seed"] is not None and seed is not None and p["seed"] != seed:
+                continue
+            d = abs(row_dice - rd)
+            if hd is not None:
+                d = min(d, abs(row_dice - hd))
+            if d <= best_d:
+                best_d, best = d, r
+    return best
+
+
 def run_record(run_dir, generate_gcode=True):
     """Full experiment-shaped record for one arbitrary run dir, or None.
 
@@ -253,14 +293,33 @@ def run_record(run_dir, generate_gcode=True):
         except OSError:
             pass
 
+    # If this run dir was logged in results.tsv, surface the real row (status,
+    # commit, command, description) so the detail view does not mislabel a
+    # promoted run as "arbitrary". Falls back to the generic arbitrary record
+    # only when no results.tsv row matches (the common case for ad-hoc runs).
+    row = find_results_row(rec)
+    if row is not None:
+        status = row.get("status", "OK") or "OK"
+        commit = row.get("commit", "") or ""
+        command = row.get("command", "") or ""
+        description = row.get("description", "") or rec["name"]
+        try:
+            row_dice = float(row["dice"])
+        except (ValueError, KeyError):
+            row_dice = rec["dice"]
+    else:
+        status, commit, command, description, row_dice = (
+            "arbitrary", "", repro_cmd, rec["name"], rec["dice"],
+        )
+
     return {
         "idx": None,
-        "commit": "",
-        "dice": rec["dice"],
+        "commit": commit,
+        "dice": row_dice,
         "memory_gb": 0.0,
-        "status": "arbitrary",
-        "description": rec["name"],
-        "command": repro_cmd,
+        "status": status,
+        "description": description,
+        "command": command,
         "shape": rec["shape"],
         "iters": rec["iters"],
         "seed": rec["seed"],
@@ -303,14 +362,27 @@ def build_run_index():
 
 
 def match_row(row_dice, shape, iters, seed, index):
-    """Find the run dir whose dice best matches the results.tsv row."""
+    """Find the run dir whose dice best matches the results.tsv row.
+
+    results.tsv's dice column is the HARD dice (the deployable metric). A run dir's
+    metrics.json ``dice`` field is the SOFT dice for normal runs but 0.0 for
+    best_on_hard runs (the best-checkpoint re-carve path doesn't populate soft_dice,
+    so the summary falls back to 0.0). So match against whichever of the run's
+    ``hard_dice`` / ``dice`` is closest to the row's (hard) dice.
+    """
     if shape is None or iters is None:
         return None
     cands = index.get((shape, iters, seed)) or index.get((shape, iters, None)) or []
     if not cands:
         return None
-    best = min(cands, key=lambda r: abs(r["dice"] - row_dice))
-    if abs(best["dice"] - row_dice) > DICE_TOL:
+    def dist(r):
+        d = abs(r["dice"] - row_dice)
+        hd = r.get("hard_dice")
+        if hd is not None:
+            d = min(d, abs(hd - row_dice))
+        return d
+    best = min(cands, key=dist)
+    if dist(best) > DICE_TOL:
         return None
     return best
 
