@@ -220,7 +220,7 @@ def _resolve_run_arg(root: Path, run: str) -> Path | None:
 # ---------------------------------------------------------------------------
 # Human feedback store (star ratings + free-text notes per run).
 #
-# The dashboard lets a user rate each run 1/3/5 stars and attach a note. The
+# The dashboard lets a user rate each run 1-7 stars and attach a note. The
 # store is a single JSON file under the task dir, keyed by run basename (run
 # names are unique across batches). train_csg.py reads the same file at startup
 # so human feedback flows into future runs (logged +, opt-in, warm-started).
@@ -267,9 +267,10 @@ _UNSET = object()
 def set_feedback(root: Path, run: str, stars=_UNSET, feedback=_UNSET) -> dict:
     """Set/clear one run's feedback entry. Returns the stored entry.
 
-    `stars` is 1/3/5 (or None to clear); `feedback` is a free-text string (or ""
-    to clear). Either may be omitted (_UNSET) to leave that field unchanged. An
-    entry left with no stars and empty text is removed so the store stays clean.
+    `stars` is an integer 1-7 (or None to clear); `feedback` is a free-text
+    string (or "" to clear). Either may be omitted (_UNSET) to leave that field
+    unchanged. An entry left with no stars and empty text is removed so the
+    store stays clean.
     """
     data = load_feedback(root)
     key = _run_key_from_rel(run)
@@ -282,8 +283,8 @@ def set_feedback(root: Path, run: str, stars=_UNSET, feedback=_UNSET) -> dict:
                 s = int(stars)
             except (TypeError, ValueError):
                 s = None
-            # Accept only the documented ratings; anything else is stored as null.
-            entry["stars"] = s if s in (1, 3, 5) else None
+            # Accept only the documented 1-7 ratings; anything else -> null.
+            entry["stars"] = s if (s is not None and 1 <= s <= 7) else None
     if feedback is not _UNSET:
         entry["feedback"] = str(feedback).strip()
     entry["ts"] = time.time()
@@ -457,7 +458,7 @@ def main() -> None:
         def do_POST(self):
             parsed = urllib.parse.urlparse(self.path)
             # Save one run's star rating / feedback note. Body is JSON:
-            # {"run": "runs/<batch>/<name>" | "<name>", "stars": 1|3|5|null,
+            # {"run": "runs/<batch>/<name>" | "<name>", "stars": 1-7|null,
             #  "feedback": "..."}. Returns the stored entry.
             if parsed.path == "/__api/feedback" or parsed.path.endswith("/__api/feedback"):
                 try:

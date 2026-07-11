@@ -327,16 +327,18 @@ fallback (plain multidepth) and match SOTA; verifying.
 
 ### Star-rating + RLHF warm-start feature (webapp + method, in scope)
 
-Per user request: dashboard rows now have a 1/3/5-star control + a feedback
-text box. Ratings/notes persist to `autoresearch/tasks/train_csg/run_feedback.json`
-(keyed by run basename; atomic temp+replace; `_UNSET` sentinel for partial
-updates so a star click never wipes a note). Server: serve_web_https.py
-GET/POST `/__api/feedback`. UI: index.html feedback column (gold ★ toggles,
-.fb-text input, startup fetch, sortable).
+Per user request: dashboard rows now have a 1-7-star control (1=bad, 4=average,
+7=great) + a feedback text box. Ratings/notes persist to
+`autoresearch/tasks/train_csg/run_feedback.json` (keyed by run basename; atomic
+temp+replace; `_UNSET` sentinel for partial updates so a star click never wipes
+a note). Server: serve_web_https.py GET/POST `/__api/feedback` (accepts 1-7).
+UI: index.html feedback column (gold ★ toggles, .fb-text input, startup fetch,
+sortable).
 
 **Feedback → policy loop (train_csg.py):** `load_human_feedback(target_shape,
 max_steps)` reads the store on EVERY run, logs the top-rated prior runs, and
-selects the highest ≥4★ prior run matching target_shape+max_steps; its saved
+selects the highest ≥5★ (above-average) prior run matching target_shape+
+max_steps; its saved
 `trajectory_deltas.npy` (T-1,3) seeds `init` when `--use-feedback` is passed
 (RLHF-style warm-start, then Adam refines). Shape-agnostic: matching is in this
 selection layer only, never in optimizer/init/loss. `--use-feedback` registered

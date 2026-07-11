@@ -55,12 +55,13 @@
   .batch-shape-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
     margin-right:5px; vertical-align:middle; }
   /* human-feedback (rate) cell: star toggles + note input */
-  .fb-cell { display:flex; flex-direction:column; gap:2px; min-width:96px; }
-  .fb-stars { display:flex; gap:1px; font-size:14px; line-height:1; user-select:none; }
-  .fb-star { cursor:pointer; color:var(--muted); padding:0 1px; }
+  .fb-cell { display:flex; flex-direction:column; gap:2px; min-width:124px; }
+  .fb-stars { display:flex; gap:0; font-size:13px; line-height:1; user-select:none;
+    flex-wrap:wrap; }
+  .fb-star { cursor:pointer; color:var(--muted); padding:0; }
   .fb-star:hover { color:var(--accent); }
   .fb-star.on { color:#f5c518; }   /* gold for filled stars */
-  .fb-text { width:92px; font-size:11px; padding:2px 4px; white-space:normal;
+  .fb-text { width:116px; font-size:11px; padding:2px 4px; white-space:normal;
     background:var(--bg); color:var(--ink); border:1px solid var(--grid);
     border-radius:4px; }
   /* filter row (second thead row) — per-column value filters */
@@ -399,11 +400,15 @@ let CURRENT_BATCH_RUNS = [];
 // store file so feedback flows into future runs. Stays {} if the API/server is
 // unavailable (e.g. file://) — the column renders empty and POSTs no-op.
 let FEEDBACK = {};
-const FEEDBACK_STARS = [1, 3, 5];   // 1=bad, 3=average, 5=great
+const FEEDBACK_STARS = [1, 2, 3, 4, 5, 6, 7];   // 1=bad ... 4=average ... 7=great
 function fbKey(d){ const n = d && (d.name || (d.run_dir ? (""+d.run_dir).split("/").pop() : null)); return n || null; }
 function fbEntry(d){ const k = fbKey(d); return (k && FEEDBACK[k]) || {}; }
 function fbStars(d){ return fbEntry(d).stars || null; }
-// HTML for the rate cell: three star toggles (1/3/5) + a free-text note input.
+// Label for a 1-7 star count (tooltip on each star).
+function fbStarLabel(s){
+  return s<=2 ? "bad" : s<=3 ? "below avg" : s===4 ? "average" : s===5 ? "above avg" : s===6 ? "great" : "excellent";
+}
+// HTML for the rate cell: seven star toggles (1-7) + a free-text note input.
 // Clicking the active rating again clears it. Notes save on change (blur/Enter).
 function feedbackCellHtml(d){
   const k = fbKey(d); if (!k) return "—";
@@ -411,7 +416,7 @@ function feedbackCellHtml(d){
   const cur = e.stars || 0;
   const btns = FEEDBACK_STARS.map(s => {
     const on = cur && s <= cur;
-    return `<span class="fb-star${on?" on":""}" data-run="${escAttr(k)}" data-stars="${s}" title="${s} star${s>1?"s":""}: ${s===1?"bad":s===3?"average":"great"}">${on?"★":"☆"}</span>`;
+    return `<span class="fb-star${on?" on":""}" data-run="${escAttr(k)}" data-stars="${s}" title="${s} star${s>1?"s":""}: ${fbStarLabel(s)}">${on?"★":"☆"}</span>`;
   }).join("");
   return `<div class="fb-cell">` +
     `<div class="fb-stars">${btns}</div>` +
@@ -1307,7 +1312,7 @@ const BATCH_COLS = [
    get:d=>d.metrics&&d.metrics.training_seconds, fmt:v=>fmtNum(v,1)},
   // ---- human feedback (persists to run_feedback.json via /__api/feedback) ----
   {key:"feedback", hdr:"rate", left:true, better:+1,
-   tip:"Your rating: click ★ (1=bad), the middle ★ (3=average), or ★★★ (5=great); click the active star again to clear. Type a note in the box to capture what was good/bad — notes are read by future training runs to steer policy selection. Sortable (top-rated first).",
+   tip:"Your rating: click 1-7 stars (1=bad, 4=average, 7=great); click the active star again to clear. Type a note in the box to capture what was good/bad — notes are read by future training runs to steer policy selection. Sortable (top-rated first).",
    get:d=>fbStars(d), fmt:v=>v==null?"—":(v+"★")},
 ];
 

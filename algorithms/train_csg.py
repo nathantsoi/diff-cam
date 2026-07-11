@@ -660,7 +660,7 @@ def export_stls(sim, T, dx, run_dir, step, track):
 # ---------------------------------------------------------------------------
 # Human-feedback warm-start (RLHF-style policy improvement).
 #
-# The web dashboard lets a user rate each run 1/3/5 stars + a free-text note;
+# The web dashboard lets a user rate each run 1-7 stars + a free-text note;
 # those ratings persist to autoresearch/tasks/train_csg/run_feedback.json (keyed
 # by run basename). Every training run reads that store here so the human's
 # qualitative judgments are (a) logged to stderr and (b) recorded in the new
@@ -726,7 +726,8 @@ def load_human_feedback(target_shape, max_steps):
         "warmstart": None,
     }
     for k, v in ranked:
-        if int(v["stars"]) < 4:           # only 4★ / 5★ are warm-start candidates
+        # Warm-start only from above-average runs (5-7 stars on the 1-7 scale).
+        if int(v["stars"]) < 5:
             break
         run_dir = _find_run_dir_by_name(k)
         if not run_dir:
@@ -1880,7 +1881,7 @@ def main():
             # Human feedback that informed this run. Recorded on EVERY run
             # (even without --use-feedback) so the dashboard/metrics log which
             # prior runs a human rated and whether a warm-start was available.
-            # warmstart is None when no >=4★ prior run matched this
+            # warmstart is None when no >=5★ prior run matched this
             # target_shape+max_steps. Shape-agnostic: matching lives only in the
             # feedback selection layer (load_human_feedback), never in
             # optimizer/init/loss.
