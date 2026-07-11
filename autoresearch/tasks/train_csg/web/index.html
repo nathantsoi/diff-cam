@@ -1,0 +1,2247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GradMill (train_csg) autoresearch — interactive results</title>
+<!-- Inline empty favicon so browsers don't request /favicon.ico (404). -->
+<link rel="icon" href="data:,">
+<script src="d3.v7.min.js"></script>
+<style>
+  :root {
+    --bg:#1b1f23; --panel:#252b32; --panel2:#2d343c; --ink:#e6edf3;
+    --muted:#9aa7b3; --accent:#58a6ff; --grid:#3a434d;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  header { padding:14px 22px; background:var(--panel); border-bottom:1px solid #000;
+    display:flex; flex-wrap:wrap; gap:16px; align-items:center; }
+  header h1 { font-size:18px; margin:0; font-weight:600; }
+  header .stats { color:var(--muted); font-size:13px; }
+  header .stats b { color:var(--ink); }
+  .ctrls { margin-left:auto; display:flex; gap:10px; align-items:center; flex-wrap:wrap; font-size:13px; }
+  .ctrls label { color:var(--muted); }
+  select, button { background:var(--panel2); color:var(--ink); border:1px solid var(--grid);
+    border-radius:6px; padding:4px 8px; font-size:13px; cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  .legend { display:flex; gap:14px; font-size:12px; color:var(--muted); }
+  .legend span { display:inline-flex; align-items:center; gap:5px; }
+  .legend i { width:11px; height:11px; border-radius:50%; display:inline-block; }
+  main { display:grid; grid-template-columns:1fr; padding:16px 22px; gap:16px; }
+  .card { background:var(--panel); border:1px solid #000; border-radius:10px; padding:14px; }
+  .card h2 { margin:0 0 10px 0; font-size:14px; color:var(--muted); font-weight:600;
+    text-transform:uppercase; letter-spacing:.04em; }
+  #scatter { width:100%; height:380px; }
+  #bars { width:100%; height:200px; }
+  /* ---- per-batch runs table (replaces the old best-dice-per-shape bar chart) ---- */
+  .batch-table-wrap { width:100%; max-height:380px; overflow:auto; border:1px solid var(--grid);
+    border-radius:8px; }
+  .batch-table { border-collapse:collapse; width:100%; font-size:12px;
+    font-variant-numeric:tabular-nums; }
+  .batch-table thead { position:sticky; top:0; z-index:2; background:var(--panel2); }
+  .batch-table th, .batch-table td { border-bottom:1px solid var(--grid); padding:5px 8px;
+    white-space:nowrap; text-align:right; }
+  .batch-table th { text-align:right; color:var(--muted); font-weight:600; cursor:pointer;
+    user-select:none; position:relative; }
+  .batch-table th:hover { color:var(--ink); }
+  .batch-table th.left, .batch-table td.left { text-align:left; }
+  .batch-table th .sort-arrow { color:var(--accent); font-size:10px; margin-left:3px; }
+  .batch-table tbody tr { cursor:pointer; }
+  .batch-table tbody tr:hover { background:var(--panel2); }
+  .batch-table tbody tr.sel { background:hsla(210,40%,30%,.4); }
+  .batch-table td.best { color:#7ee787; font-weight:600; }
+  .batch-table td.miss { color:var(--muted); }
+  .batch-shape-dot { display:inline-block; width:9px; height:9px; border-radius:50%;
+    margin-right:5px; vertical-align:middle; }
+  /* filter row (second thead row) — per-column value filters */
+  .batch-table th.filter-cell { cursor:default; user-select:text; padding:3px 4px;
+    text-align:right; font-weight:400; }
+  .batch-table th.filter-cell.left { text-align:left; }
+  .batch-table .bf-text, .batch-table .bf-sel { width:100%; max-width:130px; box-sizing:border-box;
+    background:var(--bg); color:var(--ink); border:1px solid var(--grid); border-radius:4px;
+    padding:2px 4px; font-size:11px; }
+  .batch-table .bf-text:focus, .batch-table .bf-sel:focus,
+  .batch-table .bf-range input:focus { outline:none; border-color:var(--accent); }
+  .batch-table .bf-range { display:flex; flex-direction:column; gap:2px; align-items:stretch;
+    min-width:56px; }
+  .batch-table .bf-range input { width:100%; box-sizing:border-box; background:var(--bg);
+    color:var(--ink); border:1px solid var(--grid); border-radius:4px; padding:2px 3px;
+    font-size:10px; text-align:right; }
+  #scatter3d { width:100%; height:440px; touch-action:none; cursor:grab; }
+  #scatter3d:active { cursor:grabbing; }
+  .s3d-hint { color:var(--muted); font-size:11px; margin-top:6px; }
+  .s3d-axis text { fill:var(--muted); font-size:10px; }
+  .s3d-axis line { stroke:var(--grid); stroke-width:1; }
+  .s3d-edge { stroke:var(--grid); stroke-width:1; fill:none; stroke-dasharray:3 3; opacity:.6; }
+  #detail .grid { display:grid; grid-template-columns:1.1fr 1fr; gap:18px; }
+  /* Empty-state placeholder: shown when no run is selected. The card stays
+     visible at the top of the dashboard; the viewport grid + downloads hide
+     and a centered prompt takes their place. */
+  #detail.empty .grid, #detail.empty #dl-title, #detail.empty .downloads { display:none; }
+  #detail-empty { display:none; min-height:360px; align-items:center; justify-content:center;
+    text-align:center; color:var(--muted); font-size:14px; line-height:1.6; }
+  #detail.empty #detail-empty { display:flex; }
+  #detail-empty .de-icon { font-size:34px; margin-bottom:10px; opacity:.7; }
+  #detail-empty .de-hint { max-width:560px; }
+  .meta dt { color:var(--muted); font-size:12px; margin-top:8px; }
+  .meta dd { margin:2px 0 0 0; font-family:"SFMono-Regular",Consolas,monospace; font-size:12px;
+    word-break:break-all; }
+  .metrics { display:grid; grid-template-columns:repeat(2,1fr); gap:6px 18px; font-size:13px; }
+  .metrics div { display:flex; justify-content:space-between; border-bottom:1px solid var(--grid); padding:3px 0; }
+  .metrics span:first-child { color:var(--muted); }
+  .downloads { margin-top:12px; }
+  .downloads a { display:inline-block; margin:4px 8px 4px 0; padding:6px 12px; border-radius:6px;
+    background:var(--panel2); color:var(--accent); text-decoration:none; font-size:13px;
+    border:1px solid var(--grid); }
+  .downloads a:hover { border-color:var(--accent); }
+  .downloads a.stl { color:#56d364; }
+  .downloads a.nc { color:#f0883e; }
+  .downloads button.vid { color:#d2a8ff; margin:4px 0; }
+  .downloads button.vid:disabled { opacity:.55; cursor:default; }
+  .vid-status { margin-top:6px; min-height:1em; }
+  #tooltip { position:absolute; pointer-events:none; background:#000d; color:var(--ink);
+    border:1px solid var(--grid); border-radius:6px; padding:8px 10px; font-size:12px;
+    max-width:360px; display:none; z-index:50; line-height:1.45; }
+  #tooltip .t-title { font-weight:600; color:var(--accent); margin-bottom:3px; }
+  #tooltip .t-cmd { color:var(--muted); font-family:monospace; font-size:11px; margin-top:4px; }
+  .hint { color:var(--muted); font-size:12px; }
+  .traj-tip { font-size:11px; color:var(--muted); margin-top:6px; }
+
+  /* ---- 3D viewport (controls ported from aim3d) ---- */
+  .viewport-wrap { position:relative; height:420px; }
+  #traj { position:absolute; inset:0; width:100%; height:100%;
+    background:#11161b; border-radius:8px; display:block; }
+  #voxel-canvas { position:absolute; inset:0; width:100%; height:100%;
+    background:#11161b; border-radius:8px; display:none; cursor:grab; }
+  .vp-toolbar { position:absolute; top:10px; right:10px; display:flex; gap:8px; align-items:flex-start; z-index:5; }
+  .glass { background:hsla(220,20%,15%,.78); backdrop-filter:blur(8px);
+    border:1px solid hsla(220,20%,35%,.5); border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,.4); }
+  .tool-btn { width:34px; height:34px; display:flex; align-items:center; justify-content:center;
+    font-size:16px; color:hsl(220,10%,80%); cursor:pointer; padding:0; }
+  .tool-btn:hover { color:#fff; border-color:var(--accent); }
+  .vp-settings { position:relative; }
+  .settings-menu { position:absolute; top:40px; right:0; padding:8px 10px; display:none;
+    flex-direction:column; gap:6px; font-size:12px; z-index:6; min-width:170px; }
+  .settings-menu.open { display:flex; }
+  .settings-row { display:flex; justify-content:space-between; align-items:center; gap:12px; color:var(--ink); }
+  .settings-row input { accent-color:var(--accent); }
+
+  /* nav-cube (CSS 3D, mirrors camera orientation; click faces to snap) */
+  .nav-cube { width:54px; height:54px; perspective:200px; cursor:pointer; }
+  .nav-cube-scene { width:100%; height:100%; transform-style:preserve-3d; }
+  .nav-cube-body { width:100%; height:100%; position:relative; transform-style:preserve-3d;
+    transition:transform .12s; }
+  .cube-face { position:absolute; width:54px; height:54px; display:flex; align-items:center;
+    justify-content:center; font-size:8px; font-weight:600; letter-spacing:.03em; color:#cfe3ff;
+    background:hsla(210,40%,30%,.55); border:1px solid hsla(210,40%,60%,.4); }
+  .cube-face:hover { background:hsla(200,90%,50%,.6); }
+  .cube-face.front  { transform: translateZ(27px); }
+  .cube-face.back   { transform: rotateY(180deg) translateZ(27px); }
+  .cube-face.right  { transform: rotateY(90deg)  translateZ(27px); }
+  .cube-face.left   { transform: rotateY(-90deg) translateZ(27px); }
+  .cube-face.top    { transform: rotateX(90deg)  translateZ(27px); }
+  .cube-face.bottom { transform: rotateX(-90deg) translateZ(27px); }
+
+  /* playback panel (ported from aim3d SimulationPlaybackPanel) */
+  .playback-panel { position:absolute; bottom:12px; left:50%; transform:translateX(-50%);
+    background:hsla(220,20%,15%,.85); backdrop-filter:blur(8px);
+    border:1px solid hsla(220,20%,35%,.5); border-radius:8px; padding:10px 16px;
+    display:flex; flex-direction:column; gap:8px; box-shadow:0 4px 12px rgba(0,0,0,.4);
+    z-index:5; width:min(420px, 86%); }
+  .playback-controls { display:flex; align-items:center; gap:10px; justify-content:center; }
+  .control-btn { background:transparent; border:none; color:hsl(220,10%,80%); cursor:pointer;
+    display:flex; align-items:center; justify-content:center; padding:5px; border-radius:4px; }
+  .control-btn:hover { background:hsla(220,20%,30%,.6); color:#fff; }
+  .control-btn:disabled { opacity:.35; cursor:default; }
+  .control-btn.play-btn { color:hsl(200,90%,65%); }
+  .control-btn.play-btn:hover { color:hsl(200,90%,78%); }
+  .speed-control { display:flex; align-items:center; gap:8px; margin-left:14px; }
+  .speed-label { font-size:.78rem; color:hsl(220,10%,70%); min-width:34px; font-variant-numeric:tabular-nums; }
+  .scrubber-container { display:flex; align-items:center; gap:10px; }
+  .step-label { font-size:.78rem; color:hsl(220,10%,70%); min-width:62px; text-align:right;
+    font-variant-numeric:tabular-nums; }
+  .scrubber { flex:1; }
+  input[type=range] { -webkit-appearance:none; background:transparent; height:18px; }
+  input[type=range]::-webkit-slider-thumb { -webkit-appearance:none; height:12px; width:12px;
+    border-radius:50%; background:hsl(200,90%,65%); cursor:pointer; margin-top:-4px; }
+  input[type=range]::-webkit-slider-runnable-track { width:100%; height:4px; cursor:pointer;
+    background:hsla(220,15%,35%,.8); border-radius:2px; }
+  @media (max-width:900px){ #detail .grid{ grid-template-columns:1fr; } }
+
+  /* ---- tab bar + markdown views ---- */
+  .tabs { display:flex; gap:2px; padding:0 22px; background:var(--panel); border-bottom:1px solid #000; }
+  .tab { background:transparent; border:none; border-bottom:2px solid transparent; border-radius:0;
+    color:var(--muted); padding:10px 16px; font-size:14px; cursor:pointer; }
+  .tab:hover { color:var(--ink); }
+  .tab.active { color:var(--ink); border-bottom-color:var(--accent); font-weight:600; }
+  .tab-view[hidden] { display:none; }
+  .md-card { max-width:980px; margin:16px 22px; padding:22px 30px; line-height:1.6; font-size:14px; }
+  .md-body h1 { font-size:22px; margin:0 0 12px; }
+  .md-body h2 { font-size:18px; margin:22px 0 8px; padding-bottom:4px; border-bottom:1px solid var(--grid); }
+  .md-body h3 { font-size:15px; margin:18px 0 6px; color:var(--accent); }
+  .md-body h4 { font-size:14px; margin:14px 0 4px; color:var(--muted); text-transform:uppercase; letter-spacing:.03em; }
+  .md-body p { margin:8px 0; }
+  .md-body ul, .md-body ol { margin:8px 0; padding-left:24px; }
+  .md-body li { margin:3px 0; }
+  .md-body li > ul, .md-body li > ol { margin:3px 0; }
+  .md-body code { background:var(--panel2); padding:1px 5px; border-radius:4px;
+    font-family:"SFMono-Regular",Consolas,monospace; font-size:12px; }
+  .md-body pre { background:#11161b; border:1px solid var(--grid); border-radius:8px; padding:12px 14px;
+    overflow:auto; margin:10px 0; }
+  .md-body pre code { background:none; padding:0; font-size:12px; color:#c9d6e0; }
+  .md-body a { color:var(--accent); }
+  .md-body blockquote { border-left:3px solid var(--grid); margin:8px 0; padding:2px 12px; color:var(--muted); }
+  .md-body hr { border:none; border-top:1px solid var(--grid); margin:14px 0; }
+  .md-table-wrap { overflow-x:auto; margin:10px 0; }
+  .md-body table { border-collapse:collapse; font-size:13px; }
+  .md-body th, .md-body td { border:1px solid var(--grid); padding:4px 10px; text-align:left; }
+  .md-body th { background:var(--panel2); }
+  .report-img { width:100%; max-width:920px; border:1px solid #000; border-radius:8px;
+    margin:0 0 16px; display:block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>GradMill (train_csg) autoresearch</h1>
+  <div class="stats" id="stats"></div>
+  <div class="ctrls">
+    <label>run</label>
+    <select id="run-picker" title="View any run dir under runs/, not just autoresearch experiments"></select>
+    <input type="text" id="run-search" placeholder="Filter runs..." title="Type to filter runs, or paste a custom run path and press Enter" style="background:var(--panel2); color:var(--ink); border:1px solid var(--grid); border-radius:6px; padding:4px 8px; font-size:13px; width: 140px; margin-left: -5px;">
+    <button id="view-latest" title="Open the most recent train_csg run">&#128193; latest run</button>
+    <label>shape</label>
+    <select id="shape-filter"></select>
+    <label>batch</label>
+    <select id="batch-selector" title="Auto-populated from runs/<branch>/ directories"></select>
+    <label>status</label>
+    <select id="status-filter">
+      <option value="all">all</option>
+      <option value="keep">keep</option>
+      <option value="discard">discard</option>
+      <option value="crash">crash</option>
+    </select>
+    <button id="reset-zoom">reset selection</button>
+  </div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button class="tab active" data-tab="dashboard">&#128202; Dashboard</button>
+  <button class="tab" data-tab="idea">&#128161; Idea</button>
+  <button class="tab" data-tab="report">&#128196; Report</button>
+</nav>
+
+<section id="view-dashboard" class="tab-view">
+<div class="legend" style="padding:8px 22px;" id="legend"></div>
+
+<main>
+  <div class="card empty" id="detail">
+    <h2 id="detail-title">Experiment detail</h2>
+    <div id="detail-empty">
+      <div class="de-hint">
+        <div class="de-icon">&#128269;</div>
+        <div>Select a run to inspect its trajectory, metrics, and artifacts here —
+        click a point in the dice scatter, a row in the batch table, or a point in
+        the 3D quality/air/breakage plot below.</div>
+      </div>
+    </div>
+    <div class="grid">
+      <div class="viewport-wrap">
+        <canvas id="voxel-canvas"></canvas>
+        <svg id="traj"></svg>
+        <div class="vp-toolbar">
+          <button class="tool-btn glass" id="vp-home" title="Home: re-center the view">&#8962;</button>
+          <div class="vp-settings">
+            <button class="tool-btn glass" id="vp-settings-btn" title="View settings">&#9881;</button>
+            <div class="settings-menu glass" id="vp-settings-menu">
+              <label class="settings-row"><span>Show carved stock</span>
+                <input type="checkbox" id="opt-stock" checked></label>
+              <label class="settings-row"><span>Show target shape</span>
+                <input type="checkbox" id="opt-target" checked></label>
+              <label class="settings-row"><span>Show stock cube</span>
+                <input type="checkbox" id="opt-cube" checked></label>
+              <label class="settings-row"><span>Show axes</span>
+                <input type="checkbox" id="opt-axes" checked></label>
+              <label class="settings-row"><span>Commanded (pre-clip) path</span>
+                <input type="checkbox" id="opt-cmd"></label>
+            </div>
+          </div>
+          <div class="nav-cube glass" id="nav-cube" title="Click a face for a standard view">
+            <div class="nav-cube-scene"><div class="nav-cube-body" id="nav-cube-body">
+              <span class="cube-face front"  data-view="front">FRONT</span>
+              <span class="cube-face back"   data-view="back">BACK</span>
+              <span class="cube-face right"  data-view="right">RIGHT</span>
+              <span class="cube-face left"   data-view="left">LEFT</span>
+              <span class="cube-face top"    data-view="top">TOP</span>
+              <span class="cube-face bottom" data-view="bottom">BOT</span>
+            </div></div>
+          </div>
+        </div>
+        <div class="playback-panel" id="playback">
+          <div class="playback-controls">
+            <button class="control-btn" id="pb-stop" title="Stop">&#9632;</button>
+            <button class="control-btn" id="pb-reset" title="Reset">&#8634;</button>
+            <button class="control-btn" id="pb-back" title="Step backward">&#9198;</button>
+            <button class="control-btn play-btn" id="pb-play" title="Play / Pause">&#9654;</button>
+            <button class="control-btn" id="pb-fwd" title="Step forward">&#9197;</button>
+            <div class="speed-control">
+              <span class="speed-label" id="pb-speed-label">1.0x</span>
+              <input type="range" class="speed-slider" id="pb-speed" min="0.1" max="5" step="0.1" value="1">
+            </div>
+          </div>
+          <div class="scrubber-container">
+            <span class="step-label" id="pb-step-label">0 / 0</span>
+            <input type="range" class="scrubber" id="pb-scrub" min="0" max="0" value="0">
+          </div>
+        </div>
+        <div class="traj-tip">drag = orbit · shift-drag = pan · wheel = zoom · click the nav-cube for standard views · use the playback bar to animate the tool path</div>
+      </div>
+      <div>
+        <dl class="meta" id="meta"></dl>
+        <h2 style="margin-top:14px;">metrics</h2>
+        <div class="metrics" id="metrics-box"></div>
+      </div>
+    </div>
+    <h2 id="dl-title" style="margin-top:16px;">Downloads</h2>
+    <div class="downloads" id="downloads"></div>
+  </div>
+
+  <div class="card">
+    <h2>Best per batch — one column per evaluation measure, click a header to sort</h2>
+    <div class="batch-table-wrap">
+      <table id="batch-table" class="batch-table"></table>
+    </div>
+    <div class="hint" style="margin-top:6px;">rows = all runs in the active batch (or all experiments when no batch is selected) · bold = best in column · hover a header for its description · use the row under the headers to filter by value · <a href="#" id="bf-clear" style="color:var(--accent)">clear filters</a> · click a row to inspect its trajectory &amp; artifacts</div>
+  </div>
+
+  <div class="card">
+    <h2>Dice over experiments — click a point to inspect its trajectory &amp; artifacts</h2>
+    <svg id="scatter"></svg>
+  </div>
+
+  <div class="card">
+    <h2>Quality vs air-cut time vs tool-breakage probability — drag to orbit</h2>
+    <svg id="scatter3d"></svg>
+    <div class="s3d-hint">x = dice (higher better) · y = air-cut time s (lower better) · z = break prob (lower better) · points colored by shape · click a point to inspect its run</div>
+  </div>
+</main>
+</section>
+
+<section id="view-idea" class="tab-view" hidden>
+  <div class="card md-card">
+    <article id="md-idea" class="md-body"><p class="hint">Loading idea.md…</p></article>
+  </div>
+</section>
+
+<section id="view-report" class="tab-view" hidden>
+  <div class="card md-card">
+    <h2 style="margin-top:0;">Summary plot</h2>
+    <img id="report-img" class="report-img" alt="results summary plot">
+    <article id="md-report" class="md-body"><p class="hint">Loading report.md…</p></article>
+  </div>
+</section>
+
+<div id="tooltip"></div>
+
+<script>
+// ---- Global error trap: render any uncaught JS error / rejected promise as a
+// visible banner so a silent empty dashboard is never silent again. Diagnostics
+// are also written to #stats once it exists. ----
+(function () {
+  const show = (kind, msg, where) => {
+    const line = `[diag] ${kind}: ${msg}${where ? "  @  " + where : ""}`;
+    try { console.error(line); } catch (e) {}
+    const banner = document.createElement("div");
+    banner.style.cssText = "position:fixed;left:8px;right:8px;top:8px;z-index:9999;padding:10px 12px;background:#3a0d0d;color:#ffd6d6;border:2px solid #e5534b;border-radius:8px;font:13px/1.5 ui-monospace,monospace;white-space:pre-wrap;";
+    banner.textContent = line;
+    document.body ? document.body.prepend(banner) : document.documentElement.prepend(banner);
+    const st = document.getElementById("stats");
+    if (st) st.innerHTML = `<span style="color:#e5534b">${line}</span>`;
+  };
+  window.addEventListener("error", e => show("JS ERROR", e.message, (e.filename || "") + ":" + (e.lineno || "?") + ":" + (e.colno || "?")));
+  window.addEventListener("unhandledrejection", e => show("PROMISE REJECT", (e.reason && (e.reason.stack || e.reason.message || String(e.reason))) || String(e.reason), ""));
+})();
+// Paths in data.json are relative to the repo root; the page lives 4 dirs deep.
+const BASE = "../../../../";
+const SHAPE_COLOR = {sphere:"#1f77b4", cylinder:"#ff7f0e", box:"#2ca02c", pyramid:"#d62728"};
+const STATUS_OPACITY = {keep:0.92, discard:0.45, crash:0.6};
+let DATA = null, selected = null;
+
+// Headline metric = HARD dice (the deployable sharp-carve dice; what the part
+// actually looks like). Soft dice (d.dice, the differentiable sigmoid-blurred
+// proxy) is kept as a secondary column/row — it is inflated by blur and masks
+// runs that don't boolean-cut (jul6 baselines scored soft 0.91 while removing
+// 0 voxels; hard dice == no-cut baseline). Fall back to soft dice only for the
+// few legacy runs / batch-API runs that carry no hard_dice in their metrics.
+const hd = d => {
+  const v = d.metrics && d.metrics.hard_dice;
+  return (typeof v === "number" && !Number.isNaN(v)) ? v : d.dice;
+};
+// Discovered experiment batch directories under runs/<name>/ — populated from
+// /__api/batches so new branches appear without code changes.
+let BATCHES = [];
+// All viewable runs for the currently-active batch (fetched from API when a
+// batch is selected). Empty array means no batch filter → use DATA.experiments.
+let CURRENT_BATCH_RUNS = [];
+
+// Track whether the page is viewing a single arbitrary run (loaded via the
+// run-picker / ?run= URL param) rather than an autoresearch experiment row.
+let RUN_VIEW = false;
+
+// Update the stats bar to reflect current view mode: shows batch name + count
+// when a batch is active, otherwise the full dataset summary from data.json.
+function updateStats() {
+  const el = document.getElementById("stats");
+  if (!el) return;
+  const qp = new URLSearchParams(location.search);
+  const batch = qp.get("batch") || "";
+  // d3.max returns undefined for an empty array (e.g. data.json failed to load
+  // and the catch branch set DATA.experiments=[], or a batch fetch came back
+  // empty); guard so .toFixed never throws on undefined.
+  const bestOf = arr => { const v = d3.max(arr, d => hd(d)); return (typeof v === "number" && !Number.isNaN(v)) ? v : null; };
+  if (batch && CURRENT_BATCH_RUNS.length > 0) {
+    const bestDice = bestOf(CURRENT_BATCH_RUNS);
+    el.innerHTML = `<b>${CURRENT_BATCH_RUNS.length}</b> runs in <b>${batch}</b> · best hard dice <b>${bestDice !== null ? bestDice.toFixed(4) : "—"}</b>`;
+  } else if (DATA && DATA.experiments && DATA.experiments.length > 0) {
+    const bestDice = bestOf(DATA.experiments);
+    el.innerHTML =
+      `<b>${DATA.n_experiments}</b> experiments · <b>${DATA.n_matched}</b> with artifacts · ` +
+      `overall best hard dice <b>${bestDice !== null ? bestDice.toFixed(4) : "—"}</b>`;
+  } else if (DATA && DATA.experiments) {
+    // data.json loaded but empty (no experiments yet) -- don't crash on max([]).
+    el.innerHTML = `<b>0</b> experiments · use the <b>run</b> picker or a <b>batch</b> to view runs.`;
+  } else {
+    el.innerHTML = `<span class="hint">Loading…</span>`;
+  }
+}
+
+d3.json("data.json").then(raw => {
+  DATA = raw;
+  buildLegend();
+  buildFilters();
+  updateStats();
+  renderScatter();
+  renderBatchTable();
+  renderScatter3D();
+}).catch(err => {
+  // data.json is the autoresearch experiment index; it may be absent or stale
+  // when the page is used just to inspect an arbitrary run. Fall back to an
+  // empty dashboard so the run-picker + ?run= path still work.
+  DATA = {experiments: [], n_experiments: 0, n_matched: 0};
+  document.getElementById("stats").innerHTML =
+    `<span class="hint">autoresearch data.json unavailable (${err.message || err}); ` +
+    `use the <b>run</b> picker or <b>latest run</b> to view any run dir.</span>`;
+  buildLegend();
+  buildFilters();
+  renderScatter();
+  renderBatchTable();
+  renderScatter3D();
+}).finally(() => {
+  initViewport();
+  initScatter3DControls();
+  renderDownloads(null);
+  // Populate the batch selector from the API (auto-discovers runs/<branch>/),
+  // then if there's a ?batch= in URL, fetch that branch's runs ONCE and feed
+  // the same list to both the dashboard plots and the run-picker (no second
+  // /__api/runs call).
+  fetchBatches().then(async () => {
+    const qp = new URLSearchParams(location.search);
+    const batch = qp.get("batch");
+    if (batch) {
+      // Set the selector to match so filtered() reads it correctly.
+      const sel = document.getElementById("batch-selector");
+      if (sel && [...sel.options].some(o => o.value === batch)) {
+        sel.value = batch;
+      }
+      await fetchBatchRuns(batch);
+      // Reuse the just-fetched batch runs for the picker (newest-first) so we
+      // don't re-request /__api/runs?batch=… a second time.
+      await initRunPicker(CURRENT_BATCH_RUNS.slice().reverse());
+    } else {
+      await initRunPicker();
+    }
+    updateStats();
+    renderScatter();
+    renderBatchTable();
+    renderScatter3D();
+  });
+});
+
+// Fetch discovered experiment batches from the server and populate the batch
+// selector dropdown. Falls back to a single "(no batches)" option if the API is
+// unavailable — the run-picker still works regardless.
+async function fetchBatches() {
+  const sel = document.getElementById("batch-selector");
+  try {
+    const r = await fetch(`${BASE}__api/batches`);
+    const data = await r.json();
+    BATCHES = (data && data.batches) || [];
+    if (!sel) return;
+    const qp = new URLSearchParams(location.search).get("batch") || "";
+    sel.innerHTML = `<option value="">all branches</option>` +
+      BATCHES.map(b =>
+        `<option value="${b.name}" ${b.name === qp ? "selected" : ""}>${b.name} (${b.count})</option>`
+      ).join("");
+  } catch (e) {
+    if (sel) sel.innerHTML = `<option value="">(batch API unavailable)</option>`;
+  }
+}
+
+// Fetch all viewable runs for the currently-active batch. When a batch is
+// selected, the scatter plot shows ALL runs from that branch (not just the
+// matched experiments in data.json), so users can browse any branch's full
+// experiment history. Merges status/metrics from DATA.experiments where
+// available so keep/discard markers still apply.
+async function fetchBatchRuns(batch) {
+  if (!batch) { CURRENT_BATCH_RUNS = []; return; }
+  try {
+    const r = await fetch(`${BASE}__api/runs?batch=${encodeURIComponent(batch)}`);
+    const data = await r.json();
+    const runs = (data && data.runs) || [];
+    // Merge in status/metrics from DATA.experiments where the run_dir matches.
+    const expByRunDir = {};
+    if (DATA && DATA.experiments) {
+      for (const e of DATA.experiments) {
+        if (e.run_dir) expByRunDir[e.run_dir] = e;
+      }
+    }
+    // Build run records, merging status/metrics from matched experiments. idx is
+    // assigned AFTER sorting (below) as a uniform 0..n-1 positional index in
+    // chronological (oldest-first) order — never null — so the scatter's x-scale
+    // (d.idx) always produces finite coordinates. Mixing DATA.experiments' idx
+    // (a results.tsv row number) with nulls here previously yielded NaN paths.
+    CURRENT_BATCH_RUNS = runs.map(run => {
+      const matched = expByRunDir[run.run_dir];
+      return {
+        ...run,
+        status: matched ? matched.status : "arbitrary",
+        description: matched ? matched.description : run.name,
+        // list_runs now ships metrics for every viewable run, so prefer the
+        // run's own metrics; fall back to the matched experiment's (they come
+        // from the same metrics.json) and only then to null.
+        metrics: run.metrics || (matched ? matched.metrics : null),
+        stl: matched ? matched.stl : {},
+        gcode: matched ? matched.gcode : null,
+        command: matched ? matched.command : "",
+      };
+    });
+    // API returns runs newest-first by mtime; reverse to oldest-first so the
+    // scatter's "chronological run order" x-axis reads left→right.
+    CURRENT_BATCH_RUNS.sort((a, b) => (a.mtime || 0) - (b.mtime || 0));
+    CURRENT_BATCH_RUNS.forEach((d, i) => { d.idx = i; });
+  } catch (e) {
+    CURRENT_BATCH_RUNS = [];
+  }
+}
+
+// ---- arbitrary-run viewer ----
+// Populates the run picker and supports ?run=runs/<name> or ?run=latest to
+// open a run directly. Pass `runs` to reuse an already-fetched list
+// (CURRENT_BATCH_RUNS when a batch is active) so the picker does NOT issue a
+// second /__api/runs?batch=… call alongside fetchBatchRuns — the dashboard
+// plots and the picker share one fetch. Omit `runs` to fetch the full
+// viewable-runs list (no batch filter) for the no-batch view. Requires
+// scripts/serve_web_https.py (plain http.server has no API).
+async function initRunPicker(runs){
+  const sel = document.getElementById("run-picker");
+  const searchInput = document.getElementById("run-search");
+  sel.innerHTML = `<option value="">(arbitrary run…)</option>`;
+  const wireButtons = () => {
+    sel.onchange = () => { if (sel.value) openRun(sel.value); };
+    document.getElementById("view-latest").onclick = () => openRun("latest");
+  };
+  if (runs === undefined) {
+    try {
+      const r = await fetch(`${BASE}__api/runs`);
+      const data = await r.json();
+      runs = (data && data.runs) || [];
+    } catch (e) {
+      sel.innerHTML = `<option value="">(run API unavailable — serve via serve_web_https.py)</option>`;
+      wireButtons();
+      return;
+    }
+  }
+  if (!runs.length){
+    sel.innerHTML = `<option value="">(no runs found)</option>`;
+    wireButtons();
+    return;
+  }
+
+  const populateOptions = (list) => {
+    sel.innerHTML = `<option value="">(arbitrary run…)</option>` + list.map(r =>
+      `<option value="${r.run_dir}">${r.name} · ${r.shape||"?"} · hdice ${(hd(r)||0).toFixed(4)}</option>`
+    ).join("");
+  };
+
+  populateOptions(runs);
+
+  if (searchInput) {
+    searchInput.oninput = () => {
+      const term = searchInput.value.toLowerCase().trim();
+      const filtered = runs.filter(r =>
+        r.name.toLowerCase().includes(term) ||
+        (r.shape && r.shape.toLowerCase().includes(term)) ||
+        r.run_dir.toLowerCase().includes(term)
+      );
+      populateOptions(filtered);
+    };
+
+    searchInput.onkeydown = (ev) => {
+      if (ev.key === "Enter") {
+        const val = searchInput.value.trim();
+        if (val) {
+          const opt = [...sel.options].find(o => o.value === val || o.text.toLowerCase().includes(val.toLowerCase()));
+          if (opt && opt.value) {
+            sel.value = opt.value;
+            openRun(opt.value);
+          } else {
+            let path = val;
+            if (!path.startsWith("runs/")) path = "runs/" + path;
+            openRun(path);
+          }
+        }
+      }
+    };
+  }
+
+  // Honor ?run=runs/<name> (or ?run=latest) from the URL on first load. Resolve
+  // "latest" through the server (/__api/run?run=latest) rather than runs[0], so
+  // the result is independent of whether the list is newest- or oldest-first.
+  const qp = new URLSearchParams(location.search);
+  const want = qp.get("run");
+  if (want){
+    if (want === "latest"){
+      openRun("latest");
+    } else if ([...sel.options].some(o => o.value === want)){
+      sel.value = want;
+      openRun(want);
+    } else {
+      // Unknown name: try the API anyway (it may resolve latest, or 404).
+      openRun(want);
+    }
+  }
+  wireButtons();
+}
+
+async function openRun(run){
+  if (!run) return;
+  const sel = document.getElementById("run-picker");
+  const status = document.getElementById("stats");
+  const prev = status.innerHTML;
+  status.innerHTML = `<span class="hint">Loading run ${run}…</span>`;
+  try {
+    const r = await fetch(`${BASE}__api/run?run=${encodeURIComponent(run)}`);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const rec = await r.json();
+    if (rec.ok === false) throw new Error(rec.error || "run not found");
+    RUN_VIEW = true;
+    selectExperiment(rec);
+    // Reflect the resolved run in the picker + URL so it's shareable.
+    if (rec.run_dir && [...sel.options].some(o => o.value === rec.run_dir)) sel.value = rec.run_dir;
+    const qp = new URLSearchParams(location.search);
+    qp.set("run", rec.run_dir || run);
+    history.replaceState(null, "", "?" + qp.toString() + location.hash);
+    status.innerHTML = prev;
+  } catch (e) {
+    status.innerHTML = `<span class="hint" style="color:#f0883e">Could not load run ${run}: ${e.message}. ` +
+      `Serve via scripts/serve_web_https.py (the /__api/run endpoint is not available under plain http.server).</span>`;
+  }
+}
+
+// ---------- tabs + markdown rendering ----------
+// idea.md / report.md / results_plot.png live one dir up from the page (the
+// train_csg task dir). The page is served from the repo root, so these static
+// paths resolve without any build step.
+const MD = { idea: "../idea.md", report: "../report.md" };
+const REPORT_IMG = "../results_plot.png";
+const mdCache = {};
+
+// results_plot.png is optional (only present if a report plot was generated);
+// HEAD-check before assigning the img src so a missing file doesn't 404.
+fetch(REPORT_IMG, {method: "HEAD"}).then(r => {
+  if (r.ok) document.getElementById("report-img").src = REPORT_IMG;
+  else document.getElementById("report-img").style.display = "none";
+}).catch(() => { document.getElementById("report-img").style.display = "none"; });
+document.querySelectorAll(".tab").forEach(b =>
+  b.addEventListener("click", () => showTab(b.dataset.tab)));
+
+function showTab(name){
+  ["dashboard","idea","report"].forEach(t=>{
+    document.getElementById("view-"+t).hidden = (t!==name);
+    document.querySelector(`.tab[data-tab="${t}"]`).classList.toggle("active", t===name);
+  });
+  if (name === "idea")  loadMd("idea",  "#md-idea");
+  if (name === "report") loadMd("report", "#md-report");
+  window.scrollTo(0, 0);
+}
+
+async function loadMd(key, sel){
+  if (mdCache[key]) { document.querySelector(sel).innerHTML = mdCache[key]; return; }
+  try {
+    const r = await fetch(MD[key]);
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const html = renderMarkdown(await r.text());
+    mdCache[key] = html;
+    document.querySelector(sel).innerHTML = html;
+  } catch (e) {
+    document.querySelector(sel).innerHTML =
+      `<p class="hint">Could not load ${MD[key]}: ${e.message}. ` +
+      `Serve the page from the repo root (see web/README.md).</p>`;
+  }
+}
+
+// Minimal, dependency-free markdown renderer covering the constructs used in
+// idea.md / report.md: headings, paragraphs, fenced code, tables, ordered /
+// unordered lists (one level of nesting + wrapped continuation lines),
+// blockquotes, hr, and inline **bold**, *italic*, `code`, [links](url).
+function escapeHtml(s){
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+function inlineMd(s){
+  s = escapeHtml(s);
+  const codes = [];
+  s = s.replace(/`([^`]+)`/g, (m,c)=>{ codes.push(c); return `\u0000${codes.length-1}\u0000`; });
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+  s = s.replace(/\u0000(\d+)\u0000/g, (m,n)=>`<code>${codes[n]}</code>`);
+  return s;
+}
+function renderMarkdown(src){
+  const lines = src.replace(/\r\n/g,"\n").split("\n");
+  const blocks = [];
+  let para = null, list = null;
+  const closePara = ()=>{ if(para){ blocks.push("<p>"+inlineMd(para)+"</p>"); para=null; } };
+  const closeList = ()=>{ if(list){ blocks.push(renderList(list)); list=null; } };
+  let i = 0;
+  while (i < lines.length){
+    const line = lines[i], t = line.trim();
+    if (/^\s*```/.test(line)){                       // fenced code
+      closePara(); closeList();
+      const buf = []; i++;
+      while (i < lines.length && !/^\s*```/.test(lines[i])){ buf.push(lines[i]); i++; }
+      if (i < lines.length) i++;
+      blocks.push(`<pre><code>${escapeHtml(buf.join("\n"))}</code></pre>`);
+      continue;
+    }
+    const hm = /^(#{1,6})\s+(.*)$/.exec(t);          // heading
+    if (hm){ closePara(); closeList(); blocks.push(`<h${hm[1].length}>${inlineMd(hm[2])}</h${hm[1].length}>`); i++; continue; }
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)){           // hr
+      closePara(); closeList(); blocks.push("<hr>"); i++; continue;
+    }
+    if (/^\|/.test(t) && i+1 < lines.length &&       // table
+        /^\|[\s:|-]+\|$/.test(lines[i+1].trim()) && lines[i+1].includes("-")){
+      closePara(); closeList();
+      const parseRow = l => l.trim().replace(/^\|/,"").replace(/\|$/,"").split("|").map(c=>c.trim());
+      const header = parseRow(line);
+      i += 2;
+      const rows = [];
+      while (i < lines.length && /^\|/.test(lines[i].trim())){ rows.push(parseRow(lines[i])); i++; }
+      let tab = "<div class='md-table-wrap'><table><thead><tr>" +
+        header.map(c=>`<th>${inlineMd(c)}</th>`).join("") + "</tr></thead><tbody>";
+      rows.forEach(r=>{
+        while (r.length < header.length) r.push("");
+        tab += "<tr>" + r.map(c=>`<td>${inlineMd(c)}</td>`).join("") + "</tr>";
+      });
+      blocks.push(tab + "</tbody></table></div>");
+      continue;
+    }
+    if (t === ""){ closePara(); closeList(); i++; continue; }  // blank line
+    const ulm = /^([-*+])\s+(.*)$/.exec(t);
+    const olm = /^(\d+)\.\s+(.*)$/.exec(t);
+    if (ulm || olm){                                 // list item
+      closePara();
+      const type = ulm ? "ul" : "ol";
+      const content = ulm ? ulm[2] : olm[2];
+      const indent = line.match(/^\s*/)[0].length;
+      if (!list || list.type !== type) { closeList(); list = {type, items:[{text:content, subs:[], indent}]}; }
+      else if (indent > list.items[list.items.length-1].indent)
+        list.items[list.items.length-1].subs.push({text:content, subs:[], indent});
+      else list.items.push({text:content, subs:[], indent});
+      i++; continue;
+    }
+    if (list){                                       // wrapped continuation of last item
+      const top = list.items[list.items.length-1];
+      const tgt = top.subs.length ? top.subs[top.subs.length-1] : top;
+      tgt.text += " " + t; i++; continue;
+    }
+    para = para ? para + " " + t : t;                // paragraph (lazy continuation)
+    i++;
+  }
+  closePara(); closeList();
+  return blocks.join("\n");
+}
+function renderList(list){
+  const html = list.items.map(it =>
+    `<li>${inlineMd(it.text)}` +
+    (it.subs.length ? `<${list.type}>${it.subs.map(s=>`<li>${inlineMd(s.text)}</li>`).join("")}</${list.type}>` : "") +
+    `</li>`).join("");
+  return `<${list.type}>${html}</${list.type}>`;
+}
+
+// ---------- downloads (per-run artifacts at the bottom of the dashboard) ----------
+// On-demand video generation: the dashboard's "Generate video" button calls the
+// HTTPS server's /__api/video endpoint (scripts/serve_web_https.py), which runs
+// the Taichi CSG simulator (scripts/render_run_video.py) to render the run's
+// carve to an mp4 under runs/<run>/videos/run.mp4, then returns its path. The
+// mp4 is served statically thereafter, so re-viewing is instant. Requires the
+// HTTPS server (scripts/serve_web_https.py); plain `python3 -m http.server`
+// has no API endpoint and the button will report that.
+function triggerDownload(e, url, filename) {
+  if (e) e.preventDefault();
+  fetch(url)
+    .then(r => {
+      if (!r.ok) throw new Error(r.status || r.statusText);
+      return r.blob();
+    })
+    .then(blob => {
+      const bUrl = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = bUrl;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(bUrl), 5000);
+    })
+    .catch(err => {
+      console.warn("Fetch download failed, opening in new tab:", err);
+      window.open(url, "_blank");
+    });
+}
+
+function renderDownloads(d){
+  const dl = document.getElementById("downloads");
+  const title = document.getElementById("dl-title");
+  // Downloads live inside the detail card now (moved in from a standalone
+  // bottom card), so append the on-demand video region to #detail.
+  const card = document.getElementById("detail");
+  let html = "";
+  if (d && d.run_dir){
+    // Descriptive, run-unique download filenames. Every run's exported meshes
+    // share step-numbered names (e.g. target_step_000004999.stl), so without a
+    // shape+run prefix a sphere target downloaded earlier and a cylinder target
+    // downloaded now collide on disk / in the viewer and the stale sphere shows
+    // up instead of the just-downloaded file. Prefixing with shape + run name
+    // makes each download self-identifying.
+    const shape = d.shape || "run";
+    const runName = (d.run_dir.split("/").pop()) || (d.name || "run");
+    title.textContent = d.idx == null
+      ? `Downloads — ${d.name||"run"}`
+      : `Downloads — experiment #${d.idx} (${d.shape||"?"})`;
+    if (d.gcode) html += `<a class="nc" href="${BASE}${d.gcode}" onclick="triggerDownload(event, '${BASE}${d.gcode}', '${shape}_gcode_${runName}.nc')">⬇ G-code (${shape})</a>`;
+    for (const [label,p] of Object.entries(d.stl||{}))
+      html += `<a class="stl" href="${BASE}${p}" onclick="triggerDownload(event, '${BASE}${p}', '${shape}_${label}_${runName}.stl')">⬇ ${label} STL (${shape})</a>`;
+    html += `<a href="${BASE}${d.run_dir}/" target="_blank">📂 open run dir</a>`;
+    html += `<button id="gen-video-btn" class="vid">🎬 Generate run video</button>`;
+  } else {
+    title.textContent = d ? `Downloads — experiment #${d.idx} (no run artifacts)`
+                         : "Downloads";
+    html += `<span class="hint">Select an experiment above for its G-code &amp; STL files.</span> `;
+  }
+  dl.innerHTML = html;
+  // (Re)build the video region: a status line + a <video> that stays hidden
+  // until an mp4 is ready. Re-creating it each render drops any stale stream
+  // from a previously selected run.
+  let region = document.getElementById("video-region");
+  if (region) region.remove();
+  videoState.cached = false;
+  if (d && d.run_dir){
+    region = document.createElement("div");
+    region.id = "video-region";
+    region.innerHTML = `<div class="vid-status hint"></div>` +
+      `<video id="run-video" controls playsinline style="display:none;max-width:100%;border-radius:8px;border:1px solid var(--grid);margin-top:8px;"></video>`;
+    card.appendChild(region);
+    const btn = document.getElementById("gen-video-btn");
+    if (btn) btn.onclick = ()=>generateVideo(d, !!videoState.cached);
+  }
+}
+
+// Track whether the currently-selected run already has a cached mp4, so the
+// button can offer a force re-render on the second click.
+const videoState = { cached: false };
+
+async function generateVideo(d, force){
+  const btn = document.getElementById("gen-video-btn");
+  const status = document.querySelector(".vid-status");
+  const video = document.getElementById("run-video");
+  if (!d || !d.run_dir || !btn) return;
+  btn.disabled = true;
+  const setStat = (msg, ok=true)=>{
+    if (status){ status.textContent = msg; status.style.color = ok ? "var(--muted)" : "#f0883e"; }
+  };
+  setStat(force ? "Re-rendering run video (force) — running the Taichi simulator, ~30–60s …"
+                : "Generating run video — running the Taichi simulator, ~30–60s …");
+  video.style.display = "none";
+  try {
+    const url = `${BASE}__api/video?run=${encodeURIComponent(d.run_dir)}` + (force ? "&force=1" : "");
+    const r = await fetch(url);
+    const data = await r.json();
+    if (!data.ok) throw new Error(data.detail || data.error || "render failed");
+    // Cache-bust so a re-render of the same path actually reloads.
+    video.src = `${BASE}${data.path}?v=${Date.now()}`;
+    video.style.display = "block";
+    videoState.cached = true;
+    btn.textContent = "🎬 Re-render video";
+    setStat("Ready — press play. Click the button again to re-render from scratch.");
+    video.play().catch(()=>{});
+  } catch (e) {
+    setStat(`Could not generate video: ${e.message}. ` +
+            `Make sure the page is served by scripts/serve_web_https.py (the API endpoint is not available under plain http.server).`, false);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function buildLegend() {
+  const el = document.getElementById("legend");
+  const items = [
+    ...Object.entries(SHAPE_COLOR).map(([s,c])=>[`<i style="background:${c}"></i>${s}`, c]),
+    ['<i style="background:#9aa7b3;opacity:.9"></i>keep', null],
+    ['<i style="background:#9aa7b3;opacity:.45"></i>discard', null],
+  ];
+  el.innerHTML = items.map(([t])=>`<span>${t}</span>`).join("");
+}
+
+function buildFilters() {
+  const sel = document.getElementById("shape-filter");
+  sel.innerHTML = `<option value="all">all</option>` +
+    Object.keys(SHAPE_COLOR).map(s=>`<option value="${s}">${s}</option>`).join("");
+  sel.onchange = ()=>{ renderScatter(); renderBatchTable(); renderScatter3D(); };
+  document.getElementById("status-filter").onchange = ()=>{ renderScatter(); renderScatter3D(); };
+  // Batch selector: re-render on change, propagate to URL so it's shareable,
+  // and fetch the full run list for that batch.
+  const batchSel = document.getElementById("batch-selector");
+  if (batchSel) {
+    batchSel.onchange = async () => {
+      const qp = new URLSearchParams(location.search);
+      if (batchSel.value) qp.set("batch", batchSel.value);
+      else qp.delete("batch");
+      history.replaceState(null, "", "?" + qp.toString() + location.hash);
+      // Fetch all runs for the selected batch so scatter shows every experiment.
+      await fetchBatchRuns(batchSel.value);
+      // Keep the run-picker in sync with the new batch, reusing the runs we
+      // just fetched (no extra /__api/runs call). Newest-first for the dropdown.
+      if (batchSel.value) await initRunPicker(CURRENT_BATCH_RUNS.slice().reverse());
+      else await initRunPicker();
+      updateStats();
+      renderScatter();
+      renderBatchTable();
+      renderScatter3D();
+    };
+  }
+  document.getElementById("reset-zoom").onclick = ()=>{
+    selected = null;
+    RUN_VIEW = false;
+    // Restore the detail card's empty-state placeholder (card stays visible at
+    // the top; the viewport grid + downloads hide until a run is picked again).
+    const card = document.getElementById("detail");
+    card.classList.add("empty");
+    document.getElementById("detail-title").textContent = "Experiment detail";
+    renderDownloads(null);
+    const rp = document.getElementById("run-picker");
+    if (rp) rp.value = "";
+    // Also clear batch selector to restore the full view.
+    if (batchSel) { batchSel.value = ""; }
+    renderScatter();
+    renderScatter3D();
+  };
+}
+
+function filtered() {
+  const sh = document.getElementById("shape-filter").value;
+  const st = document.getElementById("status-filter").value;
+  // When a batch is active, use CURRENT_BATCH_RUNS (all runs from that branch).
+  // Otherwise fall back to DATA.experiments (matched experiments only).
+  let source;
+  const qp = new URLSearchParams(location.search);
+  const batch = qp.get("batch") || document.getElementById("batch-selector").value;
+  if (batch && CURRENT_BATCH_RUNS.length > 0) {
+    source = CURRENT_BATCH_RUNS;
+  } else {
+    source = DATA.experiments;
+  }
+  return source.filter(d => {
+    if (sh !== "all" && d.shape !== sh) return false;
+    if (st !== "all" && d.status !== st) return false;
+    // When using CURRENT_BATCH_RUNS, no further batch filter needed (already
+    // scoped to one branch by fetchBatchRuns). For DATA.experiments without a
+    // batch, include everything.
+    return true;
+  });
+}
+
+// ---------- scatter ----------
+function renderScatter() {
+  const svg = d3.select("#scatter");
+  svg.selectAll("*").remove();
+  const W = svg.node().clientWidth, H = 380;
+  const m = {t:18,r:18,b:38,l:48};
+  const data = filtered();
+  const xs = data.map(d=>d.idx);
+  const x = d3.scaleLinear().domain([d3.min(xs)-1, d3.max(xs)+1]).range([m.l, W-m.r]);
+  const y = d3.scaleLinear().domain([0, d3.max(data,d=>hd(d))*1.15]).range([H-m.b, m.t]);
+
+  let best=-1, run=[];
+  data.forEach(d=>{ best=Math.max(best,hd(d)); run.push(best); });
+  const line = d3.line().x((d,i)=>x(d.idx)).y((d,i)=>y(run[i]));
+  svg.append("path").datum(data).attr("d", line).attr("fill","none")
+    .attr("stroke","#e5534b").attr("stroke-width",1.6).attr("stroke-dasharray","5 4").attr("opacity",.85);
+
+  svg.append("g").attr("transform",`translate(0,${H-m.b})`)
+    .call(d3.axisBottom(x).ticks(10)).selectAll("text").attr("fill","var(--muted)");
+  svg.append("g").attr("transform",`translate(${m.l},0)`)
+    .call(d3.axisLeft(y).ticks(7)).selectAll("text").attr("fill","var(--muted)");
+  svg.selectAll(".domain,line,path").attr("stroke","var(--grid)");
+  svg.selectAll("text").attr("fill","var(--muted)");
+  svg.append("text").attr("x",W/2).attr("y",H-4).attr("text-anchor","middle")
+    .attr("fill","var(--muted)").attr("font-size",12).text("experiment # (chronological run order)");
+  svg.append("text").attr("transform",`translate(14,${H/2}) rotate(-90)`)
+    .attr("text-anchor","middle").attr("fill","var(--muted)").attr("font-size",12).text("hard dice");
+
+  const tip = document.getElementById("tooltip");
+  svg.append("g").selectAll("circle").data(data).join("circle")
+    .attr("cx", d=>x(d.idx)).attr("cy", d=>y(hd(d))).attr("r", d=>d.status==="keep"?4.5:3.2)
+    .attr("fill", d=>SHAPE_COLOR[d.shape]||"#888")
+    .attr("opacity", d=>STATUS_OPACITY[d.status]??0.5)
+    .attr("stroke", d=>selected && (d.idx===selected.idx || (d.run_dir && d.run_dir===selected.run_dir)) ? "#fff" : "none")
+    .attr("stroke-width", 1.6)
+    .style("cursor","pointer")
+    .on("mouseover",(ev,d)=>{
+      tip.style.display="block";
+      const m=d.metrics||{};
+      tip.innerHTML = `<div class="t-title">#${d.idx} · ${d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)}) · ${d.status}</div>` +
+        (m.air_time!=null ? `<div>air ${m.air_time.toFixed(2)} s · break ${fmtBreak(m.break_prob_any)}</div>` : ``) +
+        `<div>${d.description||"(no description)"}</div>` +
+        (d.run_dir ? `<div class="t-cmd">▶ click to view trajectory &amp; downloads</div>` :
+                     `<div class="t-cmd">no run artifacts (unmatched)</div>`);
+    })
+    .on("mousemove",(ev)=>{
+      tip.style.left=(ev.pageX+14)+"px"; tip.style.top=(ev.pageY+14)+"px";
+    })
+    .on("mouseout",()=>tip.style.display="none")
+    .on("click", async (ev,d) => {
+      // Batch runs (selected via the batch dropdown) come from /__api/runs and
+      // carry only run_dir + dice — no trajectory/stl/gcode/metrics, because
+      // they're not embedded in data.json. Fetch the full record via /__api/run
+      // and merge the artifacts onto d so the detail view, downloads, and 3D
+      // viewport populate. Matched data.json experiments already have these, so
+      // this only fires for batch runs and is a no-op otherwise.
+      if (!d.trajectory && d.run_dir) {
+        try {
+          const r = await fetch(`${BASE}__api/run?run=${encodeURIComponent(d.run_dir)}`);
+          const rec = await r.json();
+          if (rec && rec.ok !== false && rec.run_dir) {
+            d.trajectory = rec.trajectory || null;
+            d.stl = rec.stl || {};
+            d.gcode = rec.gcode || null;
+            d.metrics = rec.metrics || null;
+            d.tool_geom = rec.tool_geom || null;
+            d.args = rec.args || d.args;
+          }
+        } catch (e) { /* fall through; selectExperiment shows "no trajectory" */ }
+      }
+      selectExperiment(d);
+    });
+
+  const bi = data[d3.scan(data, (a,b)=>hd(b)-hd(a))];
+  if (bi) {
+    svg.append("text").attr("x", x(bi.idx)).attr("y", y(hd(bi))-9)
+      .attr("text-anchor","middle").attr("fill","#e5534b").attr("font-size",11).attr("font-weight","bold")
+      .text(`best ${hd(bi).toFixed(4)}`);
+  }
+
+  // Draw comparison dashed reference line for arbitrary runs
+  if (selected && selected.idx === null && !Number.isNaN(hd(selected))) {
+    const hsel = hd(selected);
+    svg.append("line")
+      .attr("x1", m.l)
+      .attr("x2", W - m.r)
+      .attr("y1", y(hsel))
+      .attr("y2", y(hsel))
+      .attr("stroke", "#ffd166")
+      .attr("stroke-dasharray", "4 4")
+      .attr("stroke-width", 1.5)
+      .attr("opacity", 0.85);
+
+    svg.append("text")
+      .attr("x", W - m.r - 6)
+      .attr("y", y(hsel) - 6)
+      .attr("text-anchor", "end")
+      .attr("fill", "#ffd166")
+      .attr("font-size", 11)
+      .attr("font-weight", "bold")
+      .text(`selected run: ${hsel.toFixed(4)}`);
+  }
+}
+
+// ---------- per-batch runs table (replaces the old per-shape bar chart) ----------
+// One row per run in the active view (CURRENT_BATCH_RUNS when a batch is
+// selected, else DATA.experiments), one column per evaluation measure. Headers
+// are clickable to sort (hover for a description tooltip) and each column has a
+// value filter in the row beneath the headers; the best value in each numeric
+// column is highlighted.
+let batchSort = {key:"hard_dice", dir:-1};  // dir: -1 = desc, 1 = asc
+// Per-column filter state. text/select columns store a string; range columns
+// store {min:number|null, max:number|null}. Persisted across re-renders so
+// external triggers (batch switch, selection, global shape filter) don't drop
+// the user's in-progress filters.
+let batchFilters = {};
+
+// Parse a CLI lever's value from a run's command string. argparse takes the
+// LAST occurrence of a repeated flag (the run commands sometimes override an
+// earlier flag, e.g. `--init_mode raster_fine ... --init_mode random`), so we
+// scan every match and return the final one. Returns null when the flag is
+// absent or the run has no command (arbitrary / unmatched runs show "—").
+function cmdFlag(d, flag){
+  if (!d || !d.command) return null;
+  const re = new RegExp("--" + flag + "\\s+(\\S+)", "g");
+  let m, last = null;
+  while ((m = re.exec(d.command)) !== null) last = m[1];
+  return last;
+}
+// Numeric lever value (parseFloat of cmdFlag). When the flag is OMITTED from an
+// otherwise-present command, return `def` (the code default) so the cell shows
+// what actually ran rather than "—". Returns null only when the run has no
+// command at all (arbitrary / unmatched runs).
+function cmdFlagNum(d, flag, def){
+  if (!d || !d.command) return null;
+  const s = cmdFlag(d, flag);
+  if (s == null) return def !== undefined ? def : null;
+  const v = parseFloat(s);
+  return Number.isFinite(v) ? v : (def !== undefined ? def : null);
+}
+// String lever value with the same omitted->default fallback (e.g. init_mode).
+function cmdFlagDef(d, flag, def){
+  if (!d || !d.command) return null;
+  const s = cmdFlag(d, flag);
+  return s == null ? (def !== undefined ? def : null) : s;
+}
+// --stock_size_in takes three space-separated inch values; compact to "X×Y×Z"
+// (last occurrence wins). e.g. "2.0 1.0 1.0" -> "2×1×1". Defaults to 1×1×1.
+function cmdStock(d){
+  if (!d || !d.command) return null;
+  const re = /--stock_size_in\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/g;
+  let m, last = null;
+  while ((m = re.exec(d.command)) !== null)
+    last = `${trimLevNum(m[1])}×${trimLevNum(m[2])}×${trimLevNum(m[3])}`;
+  return last !== null ? last : "1×1×1";
+}
+// Strip a numeric string to its most compact form ("1.0"->"1", "0.50"->"0.5").
+function trimLevNum(s){ const v = parseFloat(s); return Number.isFinite(v) ? ""+v : s; }
+// Format a lever value: null/empty -> "—"; numbers compact (drop trailing
+// zeros, keep tiny ones like 1e-3 readable); strings verbatim.
+function fmtLev(v){
+  if (v==null || v==="") return "—";
+  if (typeof v !== "number") return ""+v;
+  if (Number.isNaN(v)) return "—";
+  if (v === 0) return "0";
+  const r = parseFloat(v.toFixed(4));
+  return Number.isFinite(r) && r !== 0 ? ""+r : v.toExponential(1);
+}
+
+// Column spec. `better` = +1 (higher better) / -1 (lower better) drives sort
+// default direction + best-in-column highlighting. `filter` = "text" (substring),
+// "select" (distinct-value dropdown), or "range" (min/max). shape/status have no
+// table-local filter because the page-header dropdowns already filter every view
+// by them; their tooltip points there.
+const BATCH_COLS = [
+  {key:"idx",   hdr:"run",    left:true, filter:"text",
+   tip:"Positional index of the run in chronological (oldest-first) order within the active view. '—' for runs outside the autoresearch experiment matrix.",
+   get:d=>d.idx, fmt:v=>v==null?"—":""+v},
+  {key:"name",  hdr:"name",   left:true, filter:"text",
+   tip:"Run directory name (timestamped). Type here to filter by substring.",
+   get:d=>d.name||d.run_dir, fmt:v=>v||"—"},
+  {key:"shape", hdr:"shape",  left:true,
+   tip:"Target shape carved by this run. Filter with the 'shape' dropdown in the page header (it applies to every view).",
+   get:d=>d.shape, fmt:v=>v||"—"},
+  {key:"status",hdr:"status", left:true,
+   tip:"autoresearch verdict: keep / discard / crash. 'arbitrary' = run not matched to a results.tsv row. Filter with the 'status' dropdown in the page header.",
+   get:d=>d.status, fmt:v=>v||"—"},
+  {key:"seed",  hdr:"seed",   filter:"select",
+   tip:"Random seed used for training.",
+   get:d=>d.seed, fmt:v=>v==null?"—":""+v},
+  {key:"iters", hdr:"iters",  filter:"select",
+   tip:"Number of optimization steps trained.",
+   get:d=>d.iters, fmt:v=>v==null?"—":""+v},
+  // ---- input levers (parsed from the run command; argparse last-wins) ----
+  {key:"stock", hdr:"stock",  filter:"select",
+   tip:"Stock box size in inches (X×Y×Z). Set via --stock-size-in. The 1×1×1 default vs 2×1×1 tests generality across stock sizes.",
+   get:d=>cmdStock(d), fmt:v=>v||"—"},
+  {key:"lr",    hdr:"lr",     filter:"range",
+   tip:"Optimizer learning rate (--learning-rate). The single biggest lever: 1e-3 settles into the carving basin; the old 5e-3 default overshoots.",
+   get:d=>cmdFlagNum(d,"learning_rate",5e-3), fmt:v=>fmtLev(v)},
+  {key:"dt",    hdr:"dt",     filter:"range",
+   tip:"Time step per trajectory step (--dt). Foundational: 0.45 ≈ 1 voxel/step so the tool covers the part; low dt caps dice ~0.56.",
+   get:d=>cmdFlagNum(d,"dt",0.45), fmt:v=>fmtLev(v)},
+  {key:"gc",    hdr:"gc",     filter:"range",
+   tip:"Gradient clip (--grad-clip). 0.5 stabilizes the dice peak for best-checkpoint capture.",
+   get:d=>cmdFlagNum(d,"grad_clip",0.5), fmt:v=>fmtLev(v)},
+  {key:"init",  hdr:"init",   filter:"select",
+   tip:"Trajectory initialization mode (--init-mode). random vs raster_fine (clipping-aware boustrophedon).",
+   get:d=>cmdFlagDef(d,"init_mode","random"), fmt:v=>v||"—"},
+  {key:"maxstep", hdr:"mstep", filter:"select",
+   tip:"Max trajectory steps (--max-steps). 128 default; 256 for cylinder (coverage).",
+   get:d=>cmdFlagNum(d,"max_steps",128), fmt:v=>fmtLev(v)},
+  {key:"wlen",  hdr:"w_len",  filter:"range",
+   tip:"Path-length / minimal-motion penalty weight (--w-len). Fixes trailing-drift on cylinder; 0 elsewhere.",
+   get:d=>cmdFlagNum(d,"w_len",0), fmt:v=>fmtLev(v)},
+  {key:"w_airt", hdr:"w_airt", filter:"range",
+   tip:"Differentiable air-CUT-TIME loss weight (--w-air-time). The headline lever: 1.0 on sphere is a dice-NEUTRAL -58% air win; ≤1e-2 is a no-op; pyramid air is structural (trades dice).",
+   get:d=>cmdFlagNum(d,"w_air_time",1e-3), fmt:v=>fmtLev(v)},
+  {key:"w_time", hdr:"w_time", filter:"range",
+   tip:"Total toolpath-time loss weight (--w-time). Pyramid w_time=0.1 trades -0.020 dice for -10% total time; not dice-neutral. Note the 1e-3 code default leaks if not set explicitly.",
+   get:d=>cmdFlagNum(d,"w_time",1e-3), fmt:v=>fmtLev(v)},
+  {key:"w_break", hdr:"w_break", filter:"range",
+   tip:"Tool-breakage soft loss weight (--w-break). 0 in these runs (breakage is non-binding at 0.5mm voxels / 3.175mm tool).",
+   get:d=>cmdFlagNum(d,"w_break",1e-3), fmt:v=>fmtLev(v)},
+  {key:"bwa",   hdr:"b_air",  filter:"range",
+   tip:"Best-checkpoint weight on air-time (--best-w-airtime). Alone is NOT a robust win (seed-1 luck); on top of w_air_time=1.0 it picks the lowest-air checkpoint → air -86%. Code default 0.05 if omitted.",
+   get:d=>cmdFlagNum(d,"best_w_airtime",0.05), fmt:v=>fmtLev(v)},
+  {key:"bwt",   hdr:"b_time", filter:"range",
+   tip:"Best-checkpoint weight on total-time (--best-w-time). NO-OP: total_time is fixed by necessary cutting, not selectable away at equal dice.",
+   get:d=>cmdFlagNum(d,"best_w_time",0.05), fmt:v=>fmtLev(v)},
+  {key:"fref",  hdr:"f_ref",  filter:"range",
+   tip:"Breakage-model reference force (--f-ref). Default 50 gives fcut_max=0 (model doesn't fire); 5 (10× lower) makes it fire for nonzero reporting. Dice-neutral.",
+   get:d=>cmdFlagNum(d,"f_ref",50), fmt:v=>fmtLev(v)},
+  {key:"fmax",  hdr:"f_max",  filter:"range",
+   tip:"Breakage-model max force (--f-max). Lowered 10× to 10 (from 100) alongside f_ref for calibration.",
+   get:d=>cmdFlagNum(d,"f_max",100), fmt:v=>fmtLev(v)},
+  // ---- output metrics ----
+  {key:"hard_dice", hdr:"hdice", better:+1, filter:"range",
+   tip:"HARD Dice (the final/deployable metric): voxelized carved stock vs voxelized target at the final trajectory, sharp boolean carve. Stricter than soft dice — it equals the no-cut baseline when the tool removes nothing (0–1, higher better).",
+   get:d=>d.metrics&&d.metrics.hard_dice, fmt:v=>fmtNum(v,4)},
+  {key:"dice",  hdr:"dice*",  better:+1, filter:"range",
+   tip:"SOFT Dice (secondary, differentiable proxy): sigmoid-blurred carve vs target. INFLATED by blur — a run can score soft 0.91 while removing 0 voxels, so it masks the soft-collapse. Trust hdice, not this (0–1, higher better).",
+   get:d=>d.dice, fmt:v=>fmtNum(v,4)},
+  {key:"air_time", hdr:"air s", better:-1, filter:"range",
+   tip:"Estimated air-cut time in seconds — tool moving while not cutting stock (lower better).",
+   get:d=>d.metrics&&d.metrics.air_time, fmt:v=>fmtNum(v,2)},
+  {key:"total_time", hdr:"total s", better:-1, filter:"range",
+   tip:"Estimated total toolpath time in seconds (lower better).",
+   get:d=>d.metrics&&d.metrics.total_time, fmt:v=>fmtNum(v,2)},
+  {key:"air_time_frac", hdr:"air frac", better:-1, filter:"range",
+   tip:"Sharp air-time fraction = air_time / total_time, 0–1 (lower better). The fraction of toolpath TIME spent cutting air, computed from the hard carve. (The legacy soft air_cut_fraction — a blurred volume ratio that does NOT track this — is shown in the detail panel.)",
+   get:d=>{const a=d.metrics&&d.metrics.air_time,t=d.metrics&&d.metrics.total_time; return (a!=null&&t!=null&&t>0)?a/t:null;}, fmt:v=>v==null?"—":fmtNum(v,3)},
+  {key:"break_prob_any", hdr:"break any", better:-1, filter:"range",
+   tip:"Probability that any tool step exceeds the breakage threshold over the whole run (lower better).",
+   get:d=>d.metrics&&d.metrics.break_prob_any, fmt:v=>v==null?"—":fmtBreak(v)},
+  {key:"break_prob_max", hdr:"break max", better:-1, filter:"range",
+   tip:"Max single-step tool-breakage probability over the run (lower better).",
+   get:d=>d.metrics&&d.metrics.break_prob_max, fmt:v=>v==null?"—":fmtBreak(v)},
+  {key:"asd",   hdr:"asd",    better:-1, filter:"range",
+   tip:"Average surface distance between carved stock and target, in voxels (lower better).",
+   get:d=>d.metrics&&d.metrics.asd, fmt:v=>fmtNum(v,3)},
+  {key:"hd95",  hdr:"hd95",   better:-1, filter:"range",
+   tip:"95th-percentile Hausdorff distance between carved stock and target, in voxels (lower better).",
+   get:d=>d.metrics&&d.metrics.hd95, fmt:v=>fmtNum(v,3)},
+  {key:"loss",  hdr:"loss",   better:-1, filter:"range",
+   tip:"Final training loss (lower better).",
+   get:d=>d.metrics&&d.metrics.loss, fmt:v=>fmtNum(v,4)},
+  {key:"residual", hdr:"resid", better:-1, filter:"range",
+   tip:"Voxel count of uncarved target / leftover stock (lower better).",
+   get:d=>d.metrics&&d.metrics.residual, fmt:v=>fmtNum(v,1)},
+  {key:"gouge", hdr:"gouge",  better:-1, filter:"range",
+   tip:"Volume carved below the target surface — gouging into the part (0 ideal, lower better).",
+   get:d=>d.metrics&&d.metrics.gouge, fmt:v=>fmtNum(v,2)},
+  {key:"holder_overlap", hdr:"holder", better:-1, filter:"range",
+   tip:"Toolholder penetration into the stock volume (0 ideal, lower better).",
+   get:d=>d.metrics&&d.metrics.holder_overlap, fmt:v=>fmtNum(v,2)},
+  {key:"training_seconds", hdr:"train s", better:-1, filter:"range",
+   tip:"Wall-clock training time in seconds (lower better).",
+   get:d=>d.metrics&&d.metrics.training_seconds, fmt:v=>fmtNum(v,1)},
+];
+
+// Numeric formatter shared with the detail metrics box: tight for small
+// magnitudes, exponential for tiny non-zero values, plain for large ones.
+function fmtNum(v, p){
+  if (v==null || v==="" || Number.isNaN(v)) return "—";
+  if (typeof v !== "number") return ""+v;
+  if (v!==0 && Math.abs(v) < 1e-3) return v.toExponential(1);
+  return Math.abs(v) >= 100 ? v.toFixed(1) : v.toFixed(p);
+}
+// Escape a string for use inside an HTML attribute (title=, value=, option value).
+function escAttr(s){ return String(s).replace(/&/g,"&amp;").replace(/"/g,"&quot;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
+// Parse a filter input into a number, or null when blank/invalid.
+function parseNum(s){ const v = parseFloat(s); return Number.isFinite(v) ? v : null; }
+
+// Distinct non-null values a column takes over the current base set (filtered()),
+// sorted ascending — used to populate the "select" filter dropdowns.
+function batchDistinct(col){
+  const vals = new Set();
+  for (const d of filtered()){
+    const v = col.get(d);
+    if (v==null || v==="") continue;
+    vals.add(v);
+  }
+  const arr = [...vals];
+  arr.sort((a,b)=> typeof a==="number" && typeof b==="number" ? a-b : String(a).localeCompare(String(b)));
+  return arr;
+}
+
+// The base set (filtered()) narrowed by the table's per-column filters. Filters
+// compose with the page-header shape/status/batch controls (AND).
+function batchFiltered(){
+  return filtered().filter(d => {
+    for (const col of BATCH_COLS){
+      if (!col.filter) continue;
+      const f = batchFilters[col.key];
+      const v = col.get(d);
+      if (col.filter === "text"){
+        if (!f) continue;
+        if (v==null || !String(v).toLowerCase().includes(String(f).toLowerCase())) return false;
+      } else if (col.filter === "select"){
+        if (!f) continue;
+        if (v==null || String(v) !== String(f)) return false;
+      } else if (col.filter === "range"){
+        const min = f ? f.min : null, max = f ? f.max : null;
+        if (min==null && max==null) continue;
+        if (v==null || typeof v !== "number") return false;
+        if (min!=null && v < min) return false;
+        if (max!=null && v > max) return false;
+      }
+    }
+    return true;
+  });
+}
+
+// Build the table's thead: row 1 = sortable headers (with title tooltips + sort
+// arrows), row 2 = per-column filter controls. Called on full re-renders; the
+// filter inputs are restored from batchFilters so selections survive.
+function buildBatchHeader(tbl){
+  const arrow = c => c.key === batchSort.key
+    ? `<span class="sort-arrow">${batchSort.dir < 0 ? "▼" : "▲"}</span>` : "";
+  let html = `<thead><tr>`;
+  for (const c of BATCH_COLS){
+    html += `<th class="${c.left?"left":""}" data-key="${c.key}" title="${escAttr(c.tip||"")}">${c.hdr}${arrow(c)}</th>`;
+  }
+  html += `</tr><tr class="filter-row">`;
+  for (const c of BATCH_COLS){
+    html += `<th class="filter-cell ${c.left?"left":""}" data-key="${c.key}">${filterCellHtml(c)}</th>`;
+  }
+  html += `</tr></thead>`;
+  tbl.innerHTML = html;
+
+  // Sort on header click: same column toggles direction; a new column resets to
+  // its natural direction (desc for higher-better, asc otherwise).
+  tbl.querySelectorAll("thead tr:first-child th").forEach(th => {
+    th.onclick = () => {
+      const key = th.dataset.key;
+      if (key === batchSort.key) batchSort.dir = -batchSort.dir;
+      else { batchSort.key = key; batchSort.dir = BATCH_COLS.find(c=>c.key===key)?.better > 0 ? -1 : 1; }
+      renderBatchTable();   // refresh arrows (click — no text input focus to lose)
+    };
+  });
+
+  // Filter input/select → update state, re-render body only (NOT the header) so
+  // typing in a text field doesn't drop focus. Range inputs read both min & max
+  // from their shared cell so each keystroke sees the other bound.
+  tbl.querySelectorAll(".filter-cell input, .filter-cell select").forEach(el => {
+    const key = el.dataset.key;
+    const col = BATCH_COLS.find(c => c.key === key);
+    if (!col) return;
+    const ev = el.tagName === "SELECT" ? "change" : "input";
+    el.addEventListener(ev, () => {
+      if (col.filter === "range"){
+        const cell = el.closest(".filter-cell");
+        const minEl = cell.querySelector(".bf-min"), maxEl = cell.querySelector(".bf-max");
+        batchFilters[key] = { min: parseNum(minEl.value), max: parseNum(maxEl.value) };
+      } else {
+        batchFilters[key] = el.value;
+      }
+      renderBatchBody();
+    });
+  });
+
+  // "clear filters" link under the table.
+  const clr = document.getElementById("bf-clear");
+  if (clr) clr.onclick = (e) => { e.preventDefault(); batchFilters = {}; renderBatchTable(); };
+}
+
+// HTML for one column's filter control, restored from batchFilters.
+function filterCellHtml(c){
+  if (!c.filter) return "";
+  const f = batchFilters[c.key];
+  if (c.filter === "text"){
+    return `<input type="text" class="bf-text" data-key="${c.key}" placeholder="filter…" value="${escAttr(f||"")}">`;
+  }
+  if (c.filter === "select"){
+    const cur = f || "";
+    const opts = batchDistinct(c).map(v => {
+      const vs = String(v);
+      return `<option value="${escAttr(vs)}" ${vs===cur?"selected":""}>${escAttr(vs)}</option>`;
+    }).join("");
+    return `<select class="bf-sel" data-key="${c.key}"><option value="">all</option>${opts}</select>`;
+  }
+  if (c.filter === "range"){
+    const min = f ? f.min : null, max = f ? f.max : null;
+    return `<div class="bf-range">` +
+      `<input type="number" class="bf-min" data-key="${c.key}" placeholder="min" value="${min!=null?min:""}">` +
+      `<input type="number" class="bf-max" data-key="${c.key}" placeholder="max" value="${max!=null?max:""}">` +
+      `</div>`;
+  }
+  return "";
+}
+
+// Re-render only the body (rows). Safe to call rapidly from filter input events
+// without disturbing the header's filter controls or their focus.
+function renderBatchBody(){
+  const tbl = document.getElementById("batch-table");
+  if (!tbl) return;
+  tbl.querySelectorAll("tbody").forEach(tb => tb.remove());
+  const data = batchFiltered();
+
+  // Best-in-column over the visible (filtered) set, so the highlight tracks what
+  // the user is currently looking at rather than the whole batch.
+  const bestOf = {};
+  for (const c of BATCH_COLS){
+    if (!c.better) continue;
+    let best = null;
+    for (const d of data){
+      const v = c.get(d);
+      if (v==null || v==="" || (typeof v==="number" && Number.isNaN(v))) continue;
+      if (best === null || (c.better > 0 ? v > best : v < best)) best = v;
+    }
+    bestOf[c.key] = best;
+  }
+
+  // Sort the filtered set by the active column (nulls last both directions).
+  const col = BATCH_COLS.find(c => c.key === batchSort.key) || BATCH_COLS.find(c => c.key === "hard_dice");
+  const sorted = data.slice().sort((a,b) => {
+    const av = col.get(a), bv = col.get(b);
+    const an = av==null || av==="" || (typeof av==="number" && Number.isNaN(av));
+    const bn = bv==null || bv==="" || (typeof bv==="number" && Number.isNaN(bv));
+    if (an && bn) return 0;
+    if (an) return 1;
+    if (bn) return -1;
+    if (typeof av === "number" && typeof bv === "number") return (av - bv) * batchSort.dir;
+    return String(av).localeCompare(String(bv)) * batchSort.dir;
+  });
+
+  const tbody = document.createElement("tbody");
+  if (!sorted.length){
+    tbody.innerHTML = `<tr><td class="left" style="text-align:left;padding:10px;">no runs match the current filters</td></tr>`;
+    tbl.appendChild(tbody);
+    return;
+  }
+  sorted.forEach(d => {
+    const tr = document.createElement("tr");
+    if (selected && (d.idx===selected.idx || (d.run_dir && d.run_dir===selected.run_dir))) tr.className = "sel";
+    for (const c of BATCH_COLS){
+      const v = c.get(d);
+      const td = document.createElement("td");
+      if (c.left) td.className = "left";
+      // Shape column gets a colored dot prefix matching the scatter/legend.
+      td.innerHTML = c.key === "shape" && d.shape && SHAPE_COLOR[d.shape]
+        ? `<span class="batch-shape-dot" style="background:${SHAPE_COLOR[d.shape]}"></span>${c.fmt(v)}`
+        : c.fmt(v);
+      // Highlight the best-in-column value (ties both highlight).
+      if (c.better && bestOf[c.key] != null && v === bestOf[c.key]) td.classList.add("best");
+      tr.appendChild(td);
+    }
+    tr.onclick = () => selectRunRow(d);
+    tbody.appendChild(tr);
+  });
+  tbl.appendChild(tbody);
+}
+
+// Full render: rebuild header (tooltips + filter controls + sort arrows) and body.
+// Called by external triggers (initial load, batch switch, global shape/status
+// filter change, selection). Filter typing instead calls renderBatchBody() only,
+// so the header inputs keep focus.
+function renderBatchTable(){
+  const tbl = document.getElementById("batch-table");
+  if (!tbl) return;
+  buildBatchHeader(tbl);
+  renderBatchBody();
+}
+
+// Fetch the full run record (trajectory/stl/gcode/tool_geom) for a table row
+// when it isn't already on the datum — batch runs from /__api/runs ship metrics
+// but not the heavy artifacts. Mirrors the lazy-load the scatter/3D plots do.
+async function selectRunRow(d) {
+  if (!d.trajectory && d.run_dir) {
+    try {
+      const r = await fetch(`${BASE}__api/run?run=${encodeURIComponent(d.run_dir)}`);
+      const rec = await r.json();
+      if (rec && rec.ok !== false && rec.run_dir) {
+        d.trajectory = rec.trajectory || null;
+        d.stl = rec.stl || {};
+        d.gcode = rec.gcode || null;
+        d.metrics = d.metrics || rec.metrics || null;
+        d.tool_geom = rec.tool_geom || null;
+        d.args = rec.args || d.args;
+      }
+    } catch (e) { /* fall through; selectExperiment shows "no trajectory" */ }
+  }
+  selectExperiment(d);   // selectExperiment re-renders the table (.sel highlight)
+}
+
+// ---------- 3D objective scatter (dice × air-cut time × break prob) ----------
+// Reuses the perspective projection helpers defined further down
+// (camFwd/camUp/camRight/camEye/project). They are const arrow functions, but
+// this is only ever called from async callbacks (.then / event handlers), so
+// they are initialized by the time we run.
+let CAM3D = {target:[0.5,0.5,0.5], distance:3.4, yaw:0.72, pitch:0.62};
+const fmtBreak = v => v==null ? "—" : (v>=1e-3 ? v.toFixed(4) : v.toExponential(1));
+
+function renderScatter3D() {
+  const svg = d3.select("#scatter3d");
+  svg.selectAll("*").remove();
+  const W = svg.node().clientWidth || 600, H = 440;
+  svg.attr("viewBox", `0 0 ${W} ${H}`);
+  const data = filtered().filter(d => d.metrics && d.metrics.air_time!=null
+    && d.metrics.break_prob_any!=null && d.dice!=null);
+  if (!data.length) {
+    svg.append("text").attr("x",W/2).attr("y",H/2).attr("text-anchor","middle")
+      .attr("fill","var(--muted)").attr("font-size",13)
+      .text("no runs with air-time / break-probability metrics in this view");
+    return;
+  }
+  // Domains. Break probability spans many orders of magnitude; use a sqrt scale
+  // so tiny values don't all collapse onto the floor.
+  const maxAir  = d3.max(data, d=>d.metrics.air_time) || 1;
+  const maxBreak= d3.max(data, d=>d.metrics.break_prob_any) || 1;
+  const sx = v => v;                         // hard dice already 0..1
+  const sy = v => v / maxAir;                // air time 0..1
+  const sz = v => Math.sqrt(Math.max(0,v) / maxBreak); // break: sqrt-spread 0..1
+  const P = d => [sx(hd(d)), sy(d.metrics.air_time), sz(d.metrics.break_prob_any)];
+
+  const cam = CAM3D;
+  const pj = p => project(p, cam, W, H);
+
+  // --- cube wireframe (unit cube [0,1]^3) + axis ticks ---
+  const edges = [
+    [[0,0,0],[1,0,0]],[[0,0,0],[0,1,0]],[[0,0,0],[0,0,1]],
+    [[1,0,0],[1,1,0]],[[1,0,0],[1,0,1]],[[0,1,0],[1,1,0]],
+    [[0,1,0],[0,1,1]],[[0,0,1],[1,0,1]],[[0,0,1],[0,1,1]],
+    [[1,1,0],[1,1,1]],[[1,0,1],[1,1,1]],[[0,1,1],[1,1,1]],
+  ];
+  const gEdge = svg.append("g").attr("class","s3d-edge");
+  edges.forEach(([a,b])=>{
+    const pa=pj(a), pb=pj(b);
+    if (pa && pb) gEdge.append("line").attr("x1",pa[0]).attr("y1",pa[1])
+      .attr("x2",pb[0]).attr("y2",pb[1]);
+  });
+
+  // Axis ticks + labels along the three edges from the origin corner.
+  const ticks = [0,0.25,0.5,0.75,1];
+  const axisSpec = [
+    {edge:[[0,0,0],[1,0,0]], dim:0, name:"hard dice", inv:v=>v, fmt:v=>v.toFixed(2)},
+    {edge:[[0,0,0],[0,1,0]], dim:1, name:"air time (s)", inv:v=>v*maxAir, fmt:v=>v.toFixed(1)},
+    {edge:[[0,0,0],[0,0,1]], dim:2, name:"break prob", inv:v=>(v*v)*maxBreak, fmt:fmtBreak},
+  ];
+  axisSpec.forEach(ax=>{
+    const [a,b]=ax.edge;
+    ticks.forEach(t=>{
+      const p = a.map((c,i)=>c+(b[i]-c)*t);
+      const tickEnd = a.map((c,i)=>c+(b[i]-c)*t) ; // base point
+      // small tick mark perpendicular-ish: nudge +0.04 in the next axis dim
+      const nudge = [0,0,0]; nudge[(ax.dim+1)%3]=0.04;
+      const ps=pj(p), pe=pj(p.map((c,i)=>c+nudge[i]));
+      const g = svg.append("g").attr("class","s3d-axis");
+      if (ps && pe) g.append("line").attr("x1",ps[0]).attr("y1",ps[1]).attr("x2",pe[0]).attr("y2",pe[1]);
+      if (ps) g.append("text").attr("x",ps[0]+3).attr("y",ps[1]-2)
+        .text(ax.fmt(ax.inv(tickEnd[ax.dim])));
+    });
+    // axis name at the far end
+    const lab = pj(b);
+    if (lab) svg.append("text").attr("class","s3d-axis").attr("x",lab[0])
+      .attr("y",lab[1]+4).attr("font-weight","bold").text(ax.name);
+  });
+
+  // --- points (painter's algorithm: sort by depth, far first) ---
+  const pts = data.map(d=>({d, p:pj(P(d))})).filter(o=>o.p);
+  pts.sort((a,b)=>b.p[2]-a.p[2]); // painter's: far (large depth) drawn first
+  const tip = document.getElementById("tooltip");
+  svg.append("g").selectAll("circle").data(pts).join("circle")
+    .attr("cx",o=>o.p[0]).attr("cy",o=>o.p[1])
+    .attr("r", o=>o.d.status==="keep"?5:3.5)
+    .attr("fill", o=>SHAPE_COLOR[o.d.shape]||"#888")
+    .attr("opacity", o=>STATUS_OPACITY[o.d.status]??0.5)
+    .attr("stroke", o=>selected && (o.d.idx===selected.idx || (o.d.run_dir&&o.d.run_dir===selected.run_dir)) ? "#fff":"none")
+    .attr("stroke-width",1.6)
+    .style("cursor","pointer")
+    .on("mouseover",(ev,o)=>{
+      tip.style.display="block";
+      const m=o.d.metrics;
+      tip.innerHTML = `<div class="t-title">#${o.d.idx} · ${o.d.shape||"?"} · hdice ${hd(o.d).toFixed(4)} (soft ${o.d.dice.toFixed(4)}) · ${o.d.status}</div>` +
+        `<div>air-cut time <b>${m.air_time.toFixed(2)} s</b> · total <b>${(m.total_time||0).toFixed(1)} s</b></div>` +
+        `<div>break prob (any) <b>${fmtBreak(m.break_prob_any)}</b> · max <b>${fmtBreak(m.break_prob_max)}</b></div>` +
+        `<div>${o.d.description||"(no description)"}</div>` +
+        (o.d.run_dir ? `<div class="t-cmd">▶ click to view trajectory &amp; downloads</div>` : "");
+    })
+    .on("mousemove",(ev)=>{ tip.style.left=(ev.pageX+14)+"px"; tip.style.top=(ev.pageY+14)+"px"; })
+    .on("mouseout",()=>tip.style.display="none")
+    .on("click", async (ev,o) => {
+      // Batch runs (from /__api/runs) carry no trajectory/stl/gcode/metrics.
+      // Fetch the full record via /__api/run and merge onto the point's record
+      // so the detail view + 3D viewport populate. data.json experiments
+      // already have these, so this is a no-op for them. Mirrors the 2D scatter.
+      if (!o.d.trajectory && o.d.run_dir) {
+        try {
+          const r = await fetch(`${BASE}__api/run?run=${encodeURIComponent(o.d.run_dir)}`);
+          const rec = await r.json();
+          if (rec && rec.ok !== false && rec.run_dir) {
+            o.d.trajectory = rec.trajectory || null;
+            o.d.stl = rec.stl || {};
+            o.d.gcode = rec.gcode || null;
+            o.d.metrics = rec.metrics || o.d.metrics;
+            o.d.tool_geom = rec.tool_geom || o.d.tool_geom;
+            o.d.args = rec.args || o.d.args;
+          }
+        } catch (e) { /* fall through; selectExperiment shows "no trajectory" */ }
+      }
+      selectExperiment(o.d);
+    });
+
+  // Highlight the Pareto-best (max hard dice, min air, min break) with a ring.
+  const pareto = data[d3.scan(data,(a,b)=>{
+    // "better" = higher hard dice, lower air, lower break → composite rank
+    const sa = hd(a) - a.metrics.air_time/maxAir - a.metrics.break_prob_any/maxBreak;
+    const sb = hd(b) - b.metrics.air_time/maxAir - b.metrics.break_prob_any/maxBreak;
+    return sb - sa;
+  })];
+  if (pareto) {
+    const pp = pj(P(pareto));
+    if (pp) svg.append("circle").attr("cx",pp[0]).attr("cy",pp[1]).attr("r",9)
+      .attr("fill","none").attr("stroke","#ffd166").attr("stroke-width",1.8)
+      .attr("opacity",.9).attr("pointer-events","none");
+  }
+}
+
+// Orbit / zoom interaction for the 3D scatter. State persists in CAM3D across
+// re-renders so the view angle survives filter changes.
+function initScatter3DControls() {
+  const svg = d3.select("#scatter3d");
+  let dragging=false, lx=0, ly=0;
+  svg.on("mousedown", ev=>{ dragging=true; lx=ev.clientX; ly=ev.clientY; })
+    .on("mouseup", ()=>dragging=false)
+    .on("mouseleave",()=>dragging=false)
+    .on("mousemove", ev=>{
+      if(!dragging) return;
+      const dx=ev.clientX-lx, dy=ev.clientY-ly; lx=ev.clientX; ly=ev.clientY;
+      CAM3D.yaw   = clamp(CAM3D.yaw   + dx*ORBIT_SENS, -Math.PI, Math.PI);
+      CAM3D.pitch = clamp(CAM3D.pitch + dy*ORBIT_SENS, -MAX_PITCH, MAX_PITCH);
+      renderScatter3D();
+    });
+  svg.on("wheel", ev=>{
+    ev.preventDefault();
+    CAM3D.distance = clamp(CAM3D.distance * (ev.deltaY>0?1.1:0.9), 1.5, 12);
+    renderScatter3D();
+  }, {passive:false});
+}
+
+// ---------- selection / detail ----------
+function selectExperiment(d) {
+  selected = d;
+  renderScatter();
+  renderBatchTable();   // keep the per-batch table's .sel row in sync with any selection path
+  const card = document.getElementById("detail");
+  card.classList.remove("empty");
+  card.style.display = "block";
+  const isRun = d.idx == null;
+  document.getElementById("detail-title").textContent = isRun
+    ? `Run — ${d.name||d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)})`
+    : `Experiment #${d.idx} — ${d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)}) · ${d.status}`;
+
+  const meta = document.getElementById("meta");
+  meta.innerHTML = `
+    <dt>description</dt><dd>${d.description||"(none)"}</dd>
+    ${isRun ? "" : `<dt>commit</dt><dd>${d.commit||"?"}</dd>`}
+    <dt>shape · seed · iters</dt><dd>${d.shape||"?"} · ${d.seed?? "?"} · ${d.iters?? "?"}</dd>
+    <dt>run dir</dt><dd>${d.run_dir||"(unmatched — no artifacts)"}</dd>
+    <dt>command</dt><dd>${d.command||""}</dd>`;
+
+  const mb = document.getElementById("metrics-box");
+  if (d.metrics) {
+    const f = v => typeof v==="number" ? (Math.abs(v)>=100 ? v.toFixed(1)
+      : (v!==0 && Math.abs(v)<1e-3 ? v.toExponential(2) : v.toFixed(4))) : v;
+    const rows = [
+      ["hard_dice (final)", d.metrics.hard_dice],
+      ["dice (soft)", d.dice],
+      ["air_time (s)", d.metrics.air_time],
+      ["total_time (s)", d.metrics.total_time],
+      ["air_time_frac", (d.metrics.air_time!=null&&d.metrics.total_time>0)?d.metrics.air_time/d.metrics.total_time:null],
+      ["break_prob_any", d.metrics.break_prob_any],
+      ["break_prob_max", d.metrics.break_prob_max],
+      ["air_cut_frac (soft, legacy)", d.metrics.air_cut_fraction],
+      ["asd", d.metrics.asd],
+      ["hd95", d.metrics.hd95],
+      ["loss", d.metrics.loss],
+      ["residual", d.metrics.residual],
+      ["gouge", d.metrics.gouge],
+      ["holder_overlap", d.metrics.holder_overlap],
+      ["training_seconds", d.metrics.training_seconds],
+    ];
+    mb.innerHTML = rows.map(([k,v])=>`<div><span>${k}</span><span>${f(v)}</span></div>`).join("");
+  } else { mb.innerHTML = `<div><span>—</span><span>no metrics (unmatched)</span></div>`; }
+
+  renderDownloads(d);
+
+  loadTrajectory(d);
+  card.scrollIntoView({behavior:"smooth", block:"start"});
+}
+
+// ===========================================================================
+// 3D viewport — orbit camera, nav-cube and playback bar
+// (control model ported from aim3d ui/frontend/src/services/viewportControls.js
+//  and components/SimulationPlaybackPanel.vue). Z-up, right-handed.
+// ===========================================================================
+const TAN_HALF_FOV = Math.tan(Math.PI / 8);
+const MAX_PITCH = 1.45;
+const ORBIT_SENS = 0.01;
+const clamp = (v,a,b)=>Math.min(b,Math.max(a,v));
+const vsub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]];
+const vadd=(a,b)=>[a[0]+b[0],a[1]+b[1],a[2]+b[2]];
+const vscale=(v,s)=>[v[0]*s,v[1]*s,v[2]*s];
+const vdot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const vlen=(v)=>Math.hypot(v[0],v[1],v[2]);
+// forward = into-screen; at yaw=0,pitch=0 eye sits on +Y looking toward -Y.
+const camFwd=(y,p)=>{const cp=Math.cos(p);return [-cp*Math.sin(y),-cp*Math.cos(y),-Math.sin(p)];};
+const camUp =(y,p)=>{const sp=Math.sin(p);return [-sp*Math.sin(y),-sp*Math.cos(y),Math.cos(p)];};
+const camRight=(y)=>[-Math.cos(y),Math.sin(y),0];
+const camEye=(c)=>{const f=camFwd(c.yaw,c.pitch);return vsub(c.target, vscale(f,c.distance));};
+
+// Perspective projection of a world point to canvas pixels (+ depth), or null.
+function project(p, c, W, H){
+  const e=camEye(c); const f=camFwd(c.yaw,c.pitch); const r=camRight(c.yaw); const u=camUp(c.yaw,c.pitch);
+  const rel=vsub(p,e);
+  const depth=vdot(rel,f);
+  if (depth <= 1e-4) return null;
+  const aspect = W / Math.max(1,H);
+  const ndcX = vdot(rel,r) / depth / (aspect * TAN_HALF_FOV);
+  const ndcY = vdot(rel,u) / depth / TAN_HALF_FOV;
+  return [((ndcX+1)/2)*W, ((1-ndcY)/2)*H, depth];
+}
+
+// Re-center on the trajectory's bounding sphere at the default isometric view.
+function homeCamera(pts){
+  let mn=[Infinity,Infinity,Infinity], mx=[-Infinity,-Infinity,-Infinity];
+  pts.forEach(p=>{for(let i=0;i<3;i++){mn[i]=Math.min(mn[i],p[i]);mx[i]=Math.max(mx[i],p[i]);}});
+  const center=[(mn[0]+mx[0])/2,(mn[1]+mx[1])/2,(mn[2]+mx[2])/2];
+  const radius = 0.5*Math.hypot(mx[0]-mn[0],mx[1]-mn[1],mx[2]-mn[2]) || 0.7;
+  return { target:center, distance: clamp((radius/TAN_HALF_FOV)*1.25, 0.8, 30), yaw:0.72, pitch:0.62 };
+}
+
+// Standard ortho views (Z up). yaw/pitch chosen so the eye looks at that face.
+const VIEWS = {
+  iso:   {yaw:0.72,         pitch:0.62},
+  front: {yaw:0,            pitch:0},
+  back:  {yaw:Math.PI,      pitch:0},
+  right: {yaw:Math.PI/2,    pitch:0},
+  left:  {yaw:-Math.PI/2,   pitch:0},
+  top:   {yaw:0,            pitch:MAX_PITCH},
+  bottom:{yaw:0,            pitch:-MAX_PITCH},
+};
+
+const CUBE_EDGES = [
+  [[0,0,0],[1,0,0]],[[1,0,0],[1,1,0]],[[1,1,0],[0,1,0]],[[0,1,0],[0,0,0]],
+  [[0,0,1],[1,0,1]],[[1,0,1],[1,1,1]],[[1,1,1],[0,1,1]],[[0,1,1],[0,0,1]],
+  [[0,0,0],[0,0,1]],[[1,0,0],[1,0,1]],[[1,1,0],[1,1,1]],[[0,1,0],[0,1,1]],
+];
+
+// Viewport state.
+let cam = {target:[0.5,0.5,0.5], distance:2.6, yaw:0.72, pitch:0.62};
+let curD = null;            // currently selected experiment
+let pbStep = 0, pbPlaying = false, pbSpeed = 1, pbLastT = 0, pbRAF = 0;
+let opt = {cube:true, axes:true, cmd:false, stock:true, target:true};
+let vpInited = false;
+
+// WebGPU voxel viewer state. When `ready` is true the carved-stock mesh is rendered
+// on #voxel-canvas (ported from aim3d webgpuVoxelizer.js); otherwise the SVG
+// painter's-algorithm viewer is used as a fallback.
+let voxel = { viewer:null, ready:false, lastStep:-1, lastVc:-1, raf:0 };
+let voxelBadge = null;
+
+// Tool + holder geometry for the currently selected run, in stock-normalized
+// [0,1]^3 units. The Taichi CSGSimulatorDelta (simulator/csg_simulator.py) that
+// renders each run's run.mp4 measures SDFs in voxel space (radius_mm / voxel_mm)
+// over Nx = stock_mm / voxel_mm cells, so a normalized radius = radius_mm /
+// stock_mm. build_results_web.py embeds that conversion per-run as `tool_geom`
+// (so non-default stock/tool sizes match their video too); we fall back to the
+// sim's own defaults (tool_radius_mm 3.175, tool_height_mm 25.0, 2.5"-diameter
+// holder, 10"-Z work volume, 1" stock) when the field is absent.
+const DEFAULT_TOOL_GEOM = { toolRadius: 0.125, toolHeight: 0.984, holderRadius: 1.25, holderHeight: 10.0 };
+let curToolGeom = { ...DEFAULT_TOOL_GEOM };
+function toolGeomForRun(d){
+  if (d && d.tool_geom) return { ...DEFAULT_TOOL_GEOM, ...d.tool_geom };
+  return { ...DEFAULT_TOOL_GEOM };
+}
+
+function setVoxelBadge(text, ok){
+  if (!voxelBadge){
+    voxelBadge = document.createElement("div");
+    voxelBadge.style.cssText = "position:absolute;top:10px;left:10px;z-index:5;font-size:11px;" +
+      "padding:3px 8px;border-radius:6px;font-variant-numeric:tabular-nums;pointer-events:none;" +
+      "background:hsla(220,20%,15%,.78);backdrop-filter:blur(8px);border:1px solid hsla(220,20%,35%,.5)";
+    document.querySelector(".viewport-wrap").appendChild(voxelBadge);
+  }
+  voxelBadge.textContent = text;
+  voxelBadge.style.color = ok ? "#7ee787" : "#f0883e";
+}
+
+// Continuous render loop for the GPU canvas. Mesh extraction is async (mapAsync), so a
+// one-shot render would draw before the carved stock is ready; this loop keeps the
+// canvas fresh until the mesh lands and also drives playback animation on the GPU path.
+function startVoxelLoop(){
+  if (voxel.raf) return;
+  const frame = ()=>{
+    voxel.raf = 0;
+    if (!voxel.ready || !curD || !curD.trajectory){ return; }
+    const pts = curD.trajectory.traj;
+    const cstep = Math.max(0, Math.min(pts.length-1, Math.round(pbStep)));
+    if (cstep !== voxel.lastStep){ voxel.viewer.carveToStep(cstep); voxel.lastStep = cstep; }
+    const cmd = opt.cmd && curD.trajectory.cmd ? curD.trajectory.cmd : null;
+    try {
+      voxel.viewer.render(cam, cstep, { showCube: opt.cube, showAxes: opt.axes, cmdPts: cmd, showStock: opt.stock, showTarget: opt.target });
+    } catch (e) {
+      // A validation error in one frame (e.g. a bad bind group) must not kill the
+      // render loop — log once and keep the canvas alive.
+      if (!voxel._renderErr) { voxel._renderErr = true; console.error("[voxel] render error:", e); }
+    }
+    // Live triangle count so it's visible that the carved stock has geometry.
+    const vc = voxel.viewer.vertexCount;
+    if (vc !== voxel.lastVc){
+      voxel.lastVc = vc;
+      setVoxelBadge(`WebGPU · 96³ · ${Math.round(vc/3).toLocaleString()} tris`, true);
+    }
+    voxel.raf = requestAnimationFrame(frame);
+  };
+  voxel.raf = requestAnimationFrame(frame);
+}
+function stopVoxelLoop(){ if (voxel.raf){ cancelAnimationFrame(voxel.raf); voxel.raf=0; } }
+
+async function initVoxelViewer(){
+  if (voxel.viewer) return;
+  const canvas = document.getElementById("voxel-canvas");
+  setVoxelBadge("WebGPU…", false);
+  try {
+    const mod = await import("./voxel.js");
+    const viewer = await mod.createVoxelViewer(canvas, {
+      gridResolution: 96,
+      toolRadius: curToolGeom.toolRadius, toolHeight: curToolGeom.toolHeight,
+      holderRadius: curToolGeom.holderRadius, holderHeight: curToolGeom.holderHeight,
+      onStatus: (s)=>{ if (!s.available) console.warn("[voxel]", s.reason); },
+    });
+    if (viewer && viewer.available) {
+      voxel.viewer = viewer;
+      voxel.ready = true;
+      setVoxelBadge("WebGPU · 96³", true);
+      // If an experiment is already shown, switch it onto the GPU viewer now.
+      if (curD && curD.trajectory) loadTrajectory(curD);
+      else renderViewport();
+    } else {
+      setVoxelBadge("SVG fallback (no WebGPU)", false);
+    }
+  } catch (e) {
+    console.warn("[voxel] init failed, using SVG fallback:", e);
+    setVoxelBadge("SVG fallback (init error)", false);
+  }
+}
+
+function initViewport(){
+  if (vpInited) return;
+  vpInited = true;
+  const svg = d3.select("#traj");
+
+  // One persistent content group; geometry rebuilds inside it on every frame.
+  svg.append("rect").attr("class","drag-bg").attr("x",0).attr("y",0)
+    .attr("width","100%").attr("height","100%").attr("fill","transparent").style("cursor","grab");
+  svg.append("g").attr("class","traj-content");
+
+  // Orbit (drag) / pan (shift-drag) via pointer; zoom via wheel.
+  let lx=0, ly=0, panning=false;
+  svg.call(d3.drag()
+    .on("start", ev=>{
+      lx=ev.x; ly=ev.y; panning=ev.sourceEvent && ev.sourceEvent.shiftKey;
+      svg.select(".drag-bg").style("cursor", panning?"grabbing":"grabbing");
+    })
+    .on("drag", ev=>{
+      const dx=ev.x-lx, dy=ev.y-ly; lx=ev.x; ly=ev.y;
+      if (panning){
+        const W=svg.node().clientWidth, H=svg.node().clientHeight;
+        const factor = cam.distance / Math.max(1, Math.min(W,H));
+        const r=camRight(cam.yaw), u=camUp(cam.yaw,cam.pitch);
+        cam.target = vadd(cam.target, vsub(vscale(r, dx*factor), vscale(u, dy*factor)));
+      } else {
+        cam.yaw   += dx * ORBIT_SENS;
+        cam.pitch  = clamp(cam.pitch - dy*ORBIT_SENS, -MAX_PITCH, MAX_PITCH);
+      }
+      renderViewport();
+    })
+    .on("end", ()=>svg.select(".drag-bg").style("cursor","grab")));
+
+  svg.node().addEventListener("wheel", ev=>{
+    ev.preventDefault();
+    cam.distance = clamp(cam.distance * Math.exp(ev.deltaY * 0.01), 0.5, 30);
+    renderViewport();
+  }, {passive:false});
+
+  // Same orbit/pan/zoom controls bound to the WebGPU canvas (active when the voxel
+  // viewer is ready). Native pointer events mirror the d3.drag logic on the SVG.
+  const vc = document.getElementById("voxel-canvas");
+  let vlx=0, vly=0, vdrag=false, vpan=false;
+  vc.addEventListener("pointerdown", ev=>{
+    vc.setPointerCapture(ev.pointerId); vlx=ev.clientX; vly=ev.clientY;
+    vpan=ev.shiftKey; vdrag=true; vc.style.cursor="grabbing";
+  });
+  vc.addEventListener("pointermove", ev=>{
+    if (!vdrag) return;
+    const dx=ev.clientX-vlx, dy=ev.clientY-vly; vlx=ev.clientX; vly=ev.clientY;
+    if (vpan){
+      const W=vc.clientWidth, H=vc.clientHeight;
+      const factor = cam.distance / Math.max(1, Math.min(W,H));
+      const r=camRight(cam.yaw), u=camUp(cam.yaw,cam.pitch);
+      cam.target = vadd(cam.target, vsub(vscale(r, dx*factor), vscale(u, dy*factor)));
+    } else {
+      cam.yaw   -= dx * ORBIT_SENS;
+      cam.pitch  = clamp(cam.pitch - dy*ORBIT_SENS, -MAX_PITCH, MAX_PITCH);
+    }
+    renderViewport();
+  });
+  const vcEnd = ()=>{ if(!vdrag) return; vdrag=false; vc.style.cursor="grab"; };
+  vc.addEventListener("pointerup", vcEnd);
+  vc.addEventListener("pointercancel", vcEnd);
+  vc.addEventListener("wheel", ev=>{
+    ev.preventDefault();
+    cam.distance = clamp(cam.distance * Math.exp(ev.deltaY * 0.01), 0.5, 30);
+    renderViewport();
+  }, {passive:false});
+
+  // Kick off the async WebGPU viewer init (falls back to SVG if unavailable).
+  initVoxelViewer();
+
+  // Toolbar: home + settings.
+  document.getElementById("vp-home").onclick = ()=>{ if (curD && curD.trajectory) Object.assign(cam, homeCamera(curD.trajectory.traj)); renderViewport(); };
+  const menu = document.getElementById("vp-settings-menu");
+  document.getElementById("vp-settings-btn").onclick = ()=>menu.classList.toggle("open");
+  document.getElementById("opt-cube").onchange = e=>{opt.cube=e.target.checked; renderViewport();};
+  document.getElementById("opt-axes").onchange  = e=>{opt.axes =e.target.checked; renderViewport();};
+  document.getElementById("opt-cmd").onchange   = e=>{opt.cmd  =e.target.checked; renderViewport();};
+  document.getElementById("opt-stock").onchange = e=>{opt.stock=e.target.checked; renderViewport();};
+  document.getElementById("opt-target").onchange= e=>{opt.target=e.target.checked; renderViewport();};
+
+  // Nav-cube: mirror orientation; click faces to snap.
+  document.querySelectorAll("#nav-cube .cube-face").forEach(face=>{
+    face.addEventListener("click", ()=>{
+      const v = VIEWS[face.dataset.view]; if (!v) return;
+      cam.yaw=v.yaw; cam.pitch=v.pitch; renderViewport();
+    });
+  });
+
+  // Playback controls.
+  document.getElementById("pb-play").onclick = togglePlay;
+  document.getElementById("pb-stop").onclick = ()=>{ pbPlaying=false; updatePlayBtn(); stopRAF(); setStep(curD ? (curD.trajectory?curD.trajectory.traj.length-1:0):0); };
+  document.getElementById("pb-reset").onclick = ()=>{ pbPlaying=false; updatePlayBtn(); stopRAF(); setStep(0); };
+  document.getElementById("pb-back").onclick = ()=>{ if(curD) setStep(Math.max(0, Math.floor(pbStep)-1)); };
+  document.getElementById("pb-fwd").onclick  = ()=>{ if(curD) setStep(Math.min((curD.trajectory?curD.trajectory.traj.length-1:0), Math.floor(pbStep)+1)); };
+  const speed = document.getElementById("pb-speed");
+  speed.oninput = ()=>{ pbSpeed = parseFloat(speed.value); document.getElementById("pb-speed-label").textContent = pbSpeed.toFixed(1)+"x"; };
+  const scrub = document.getElementById("pb-scrub");
+  scrub.oninput = ()=>{ if(curD) setStep(parseInt(scrub.value)); };
+}
+
+// Load the selected run's target STL, parse it into solid-pipeline vertices
+// (pos3 + normal3 + color4 = 10 floats/vtx), normalize mm → [0,1]^3 by the run's
+// stock size, and upload it to the voxel viewer as a transparent teal shell overlaid
+// on the carved stock. This makes gouge (overcut into the target) visually obvious:
+// the gray stock shell should sit ON the teal target shell; where it punches through
+// into the teal volume, the tool overcut the target. Cached per run_dir.
+const _targetMeshCache = new Map();
+function stockMmFromCommand(cmd){
+  // --stock-size-in X Y Z (inches) → mm. Fall back to 1" if absent.
+  const m = (cmd||"").match(/--stock-size-in\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)/);
+  const inch = m ? [parseFloat(m[1]), parseFloat(m[2]), parseFloat(m[3])] : [1,1,1];
+  return inch.map(v => v * 25.4);
+}
+async function loadTargetMesh(d){
+  if (!voxel.viewer) return;                       // SVG fallback path: no target overlay
+  const path = d && d.stl && d.stl.target;
+  if (!path) { voxel.viewer.setTargetMesh(null); return; }
+  let data = _targetMeshCache.get(path);
+  if (!data) {
+    try {
+      const res = await fetch(BASE + path);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const buf = new DataView(await res.arrayBuffer());
+      // Binary STL: 80-byte header, u32 tri count, then 50 bytes/tri (12 f32 + u16 attr).
+      const nTri = buf.getUint32(80, true);
+      const [sx, sy, sz] = stockMmFromCommand(d.command);
+      const scale = [1/sx, 1/sy, 1/sz];
+      const TEAL = [0.25, 0.85, 0.75, 0.35];
+      const out = new Float32Array(nTri * 3 * 10);
+      let o = 0;
+      for (let i = 0; i < nTri; i++){
+        const base = 84 + i*50;
+        // Per-triangle face normal from the vertex positions (robust to stale STL normals).
+        const v = [];
+        for (let k = 0; k < 3; k++){
+          const vb = base + 12 + k*12;
+          v.push([buf.getFloat32(vb, true)*scale[0], buf.getFloat32(vb+4, true)*scale[1], buf.getFloat32(vb+8, true)*scale[2]]);
+        }
+        const ax=v[1][0]-v[0][0], ay=v[1][1]-v[0][1], az=v[1][2]-v[0][2];
+        const bx=v[2][0]-v[0][0], by=v[2][1]-v[0][1], bz=v[2][2]-v[0][2];
+        let nx=ay*bz-az*by, ny=az*bx-ax*bz, nz=ax*by-ay*bx;
+        const nl = Math.hypot(nx,ny,nz) || 1; nx/=nl; ny/=nl; nz/=nl;
+        for (let k = 0; k < 3; k++){
+          out[o++]=v[k][0]; out[o++]=v[k][1]; out[o++]=v[k][2];
+          out[o++]=nx; out[o++]=ny; out[o++]=nz;
+          out[o++]=TEAL[0]; out[o++]=TEAL[1]; out[o++]=TEAL[2]; out[o++]=TEAL[3];
+        }
+      }
+      data = out;
+      _targetMeshCache.set(path, data);
+    } catch (e) {
+      console.warn("[voxel] target STL load failed:", e);
+      voxel.viewer.setTargetMesh(null);
+      return;
+    }
+  }
+  voxel.viewer.setTargetMesh(data);
+}
+
+function loadTrajectory(d){
+  curD = d;
+  loadTargetMesh(d);
+  const T = d.trajectory ? d.trajectory.traj.length : 0;
+  const scrub = document.getElementById("pb-scrub");
+  scrub.min = 0; scrub.max = Math.max(0, T-1);
+
+  // Use the WebGPU carved-stock viewer when available; otherwise the SVG fallback.
+  const useVoxel = voxel.ready && d.trajectory;
+  document.getElementById("voxel-canvas").style.display = useVoxel ? "block" : "none";
+  document.getElementById("traj").style.display = useVoxel ? "none" : "block";
+  // Size the tool + holder to this run's args (matches the Taichi run.mp4 video).
+  curToolGeom = toolGeomForRun(d);
+  if (useVoxel) {
+    voxel.viewer.setToolGeometry(curToolGeom);
+    voxel.viewer.setTrajectory(d.trajectory.traj,
+      (d.trajectory.staged && d.trajectory.stage_boundary != null) ? d.trajectory.stage_boundary : null);
+    voxel.lastStep = T-1;            // setTrajectory already carves the full path
+  }
+
+  // Show the fully-carved path initially; playback restarts from step 0 on play.
+  setStep(T-1);
+  if (d.trajectory) Object.assign(cam, homeCamera(d.trajectory.traj));
+  renderViewport();
+}
+
+function setStep(s){
+  pbStep = s;
+  const T = curD && curD.trajectory ? curD.trajectory.traj.length : 0;
+  document.getElementById("pb-step-label").textContent = `${Math.round(s)} / ${Math.max(0,T-1)}${stageLabelFor(s)}`;
+  document.getElementById("pb-scrub").value = s;
+  renderViewport();
+}
+
+function stageLabelFor(step){
+  if (!curD || !curD.trajectory || !curD.trajectory.staged || curD.trajectory.stage_boundary == null) return "";
+  const b = curD.trajectory.stage_boundary;
+  return ` · Stage ${step <= b ? 1 : 2}`;
+}
+
+function updatePlayBtn(){ document.getElementById("pb-play").textContent = pbPlaying ? "⏸" : "▶"; }
+
+function stopRAF(){ if (pbRAF){ cancelAnimationFrame(pbRAF); pbRAF=0; } }
+
+function togglePlay(){
+  if (!curD || !curD.trajectory) return;
+  pbPlaying = !pbPlaying;
+  updatePlayBtn();
+  if (pbPlaying){
+    const T = curD.trajectory.traj.length;
+    if (pbStep >= T-1) setStep(0);      // restart from the beginning if at the end
+    pbLastT = performance.now();
+    pbRAF = requestAnimationFrame(playFrame);
+  } else { stopRAF(); }
+}
+
+function playFrame(now){
+  if (!pbPlaying || !curD || !curD.trajectory) return;
+  const T = curD.trajectory.traj.length;
+  const dt = (now - pbLastT) / 1000; pbLastT = now;
+  // ~24 base steps/sec, scaled by speed.
+  pbStep += dt * 24 * pbSpeed;
+  if (pbStep >= T-1){ pbStep = T-1; setStep(pbStep); pbPlaying=false; updatePlayBtn(); stopRAF(); return; }
+  setStep(pbStep);
+  pbRAF = requestAnimationFrame(playFrame);
+}
+
+// Render the whole 3D scene with painter's-algorithm depth sort.
+function renderViewport(){
+  updateNavCube();
+
+  // WebGPU path: carved voxel stock + overlays on the canvas. Handled by the
+  // continuous render loop (mesh extraction is async, so a one-shot render would
+  // draw before the carved stock is ready). Just ensure the loop is running.
+  if (voxel.ready && curD && curD.trajectory) {
+    startVoxelLoop();
+    return;
+  }
+
+  const svg = d3.select("#traj");
+  const content = svg.select(".traj-content");
+  content.selectAll("*").remove();
+
+  if (!curD || !curD.trajectory){
+    content.append("text").attr("x","50%").attr("y","50%").attr("text-anchor","middle")
+      .attr("fill","var(--muted)").text("No trajectory data for this experiment.");
+    return;
+  }
+  const W = svg.node().clientWidth, H = svg.node().clientHeight;
+  const pts = curD.trajectory.traj;
+  const cmd = opt.cmd ? curD.trajectory.cmd : null;
+  const cstep = Math.max(0, Math.min(pts.length-1, Math.round(pbStep)));
+
+  // Pre-project everything (with depth) for sorting.
+  const P = p => project(p, cam, W, H);
+  const projPts = pts.map(P);
+  const projCmd = cmd ? cmd.map(P) : null;
+
+  // Collect drawables as {depth, draw:(g)=>node} and sort far→near.
+  const draws = [];
+  const add = (depth, fn)=>{ if (depth!=null && !Number.isNaN(depth)) draws.push({depth, fn}); };
+
+  // Stock cube wireframe.
+  if (opt.cube){
+    CUBE_EDGES.forEach(([a,b])=>{
+      const pa=P(a), pb=P(b);
+      if (!pa||!pb) return;
+      add((pa[2]+pb[2])/2, g=>g.append("line")
+        .attr("x1",pa[0]).attr("y1",pa[1]).attr("x2",pb[0]).attr("y2",pb[1])
+        .attr("stroke","var(--grid)").attr("stroke-width",1).attr("opacity",.55));
+    });
+  }
+
+  // Axis triad at the stock origin corner.
+  if (opt.axes){
+    [["#e5534b",[1,0,0],"X"],["#56d364",[0,1,0],"Y"],["#58a6ff",[0,0,1],"Z"]].forEach(([col,end,lbl])=>{
+      const o=P([0,0,0]), e=P(end); if(!o||!e) return;
+      add((o[2]+e[2])/2, g=>{
+        g.append("line").attr("x1",o[0]).attr("y1",o[1]).attr("x2",e[0]).attr("y2",e[1])
+          .attr("stroke",col).attr("stroke-width",1.5).attr("opacity",.85);
+        g.append("text").attr("x",e[0]+4).attr("y",e[1]+4).attr("fill",col).attr("font-size",11).attr("font-weight","bold").text(lbl);
+      });
+    });
+  }
+
+  // Commanded (pre-clip) path, dashed.
+  if (projCmd){
+    for (let i=1;i<projCmd.length;i++){
+      const a=projCmd[i-1], b=projCmd[i]; if(!a||!b) continue;
+      add((a[2]+b[2])/2, g=>g.append("line")
+        .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
+        .attr("stroke","#9aa7b3").attr("stroke-width",1.1).attr("stroke-dasharray","4 4").attr("opacity",.45));
+    }
+  }
+
+  // Actual tool path, depth-colored. Reached prefix is bright; the not-yet-carved
+  // suffix is dim so playback progress is visible. Staged runs color stage 2 in
+  // amber so the two trajectories are visually distinct.
+  const staged = curD.trajectory.staged && curD.trajectory.stage_boundary != null;
+  const boundary = staged ? curD.trajectory.stage_boundary : -1;
+  const zdepths = projPts.map(p=>p?p[2]:0);
+  const zscale = d3.scaleLinear().domain(d3.extent(zdepths).map(v=>v||0)).range([0.4,1]).clamp(true);
+  const stageColor = (i, z) => {
+    const ramp = (staged && i > boundary)
+      ? d3.interpolateRgb("#d97706","#fbbf24")
+      : d3.interpolateRgb("#1f6feb","#7cc0ff");
+    return ramp(zscale(z));
+  };
+  for (let i=1;i<projPts.length;i++){
+    const a=projPts[i-1], b=projPts[i]; if(!a||!b) continue;
+    const reached = i <= cstep;
+    add((a[2]+b[2])/2, g=>g.append("line")
+      .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
+      .attr("stroke", stageColor(i, b[2]))
+      .attr("stroke-width", reached?2.2:1.4)
+      .attr("opacity", reached?0.95:0.22));
+  }
+
+  // Stage boundary marker (staged runs): where stage 1 ends and stage 2 begins.
+  if (staged && boundary >= 0 && boundary < projPts.length) {
+    const bp = projPts[boundary];
+    if (bp) add(bp[2]-1e-6, g=>{
+      g.append("circle").attr("cx",bp[0]).attr("cy",bp[1]).attr("r",6).attr("fill","none")
+        .attr("stroke","#fbbf24").attr("stroke-width",2).attr("opacity",.95);
+      g.append("text").attr("x",bp[0]+8).attr("y",bp[1]-6).attr("fill","#fbbf24")
+        .attr("font-size",10).attr("font-weight","bold").text("stage 1→2");
+    });
+  }
+
+  // Start marker.
+  const sp = projPts[0];
+  if (sp) add(sp[2], g=>{
+    g.append("circle").attr("cx",sp[0]).attr("cy",sp[1]).attr("r",5).attr("fill","#56d364").attr("stroke","#000").attr("stroke-width",1);
+    g.append("text").attr("x",sp[0]+7).attr("y",sp[1]+4).attr("fill","#56d364").attr("font-size",10).text("start");
+  });
+
+  // End marker (only when fully reached).
+  const ep = projPts[pts.length-1];
+  if (ep && cstep >= pts.length-1) add(ep[2], g=>{
+    g.append("circle").attr("cx",ep[0]).attr("cy",ep[1]).attr("r",5).attr("fill","#e5534b").attr("stroke","#000").attr("stroke-width",1);
+    g.append("text").attr("x",ep[0]+7).attr("y",ep[1]+4).attr("fill","#e5534b").attr("font-size",10).text("end");
+  });
+
+  // Cutting tool + toolholder at the current tip, sized to this run's args (matches
+  // the Taichi sim: a flat-end Z-axis tool cylinder rising +Z by curToolGeom.toolHeight,
+  // with a wider holder cylinder stacked on top — holder radius/height are the 2.5"-
+  // diameter spindle and machine-Z travel). Drawn as 50%-opaque faces so they read
+  // over the stock on the SVG path (the WebGPU path draws its own in voxel.js).
+  const tipPt = pts[cstep];
+  if (tipPt) {
+    const N = 24;
+    // Draw a vertical Z cylinder from bottomZ..topZ on the tip axis in `fill` color.
+    const drawCyl = (bottomZ, topZ, R, fill) => {
+      const ring = (zz) => {
+        const out = [];
+        for (let i=0;i<N;i++){ const a=(i/N)*Math.PI*2; out.push([tipPt[0]+R*Math.cos(a), tipPt[1]+R*Math.sin(a), zz]); }
+        return out;
+      };
+      const Pb = ring(bottomZ).map(P), Pt = ring(topZ).map(P);
+      for (let i=0;i<N;i++){
+        const j=(i+1)%N;
+        const a=Pb[i], b=Pb[j], c=Pt[j], d=Pt[i];
+        if (!a||!b||!c||!d) continue;
+        add((a[2]+b[2]+c[2]+d[2])/4, g=>g.append("polygon")
+          .attr("points",`${a[0]},${a[1]} ${b[0]},${b[1]} ${c[0]},${c[1]} ${d[0]},${d[1]}`)
+          .attr("fill",fill).attr("fill-opacity",0.5)
+          .attr("stroke",fill).attr("stroke-width",0.5).attr("opacity",1.0));
+      }
+      if (Pt.every(p=>p)){
+        const depth = Pt.reduce((s,p)=>s+p[2],0)/N;
+        add(depth, g=>g.append("polygon")
+          .attr("points", Pt.map(p=>`${p[0]},${p[1]}`).join(" "))
+          .attr("fill",fill).attr("fill-opacity",0.5)
+          .attr("stroke",fill).attr("stroke-width",0.5));
+      }
+    };
+    const toolTop = tipPt[2] + curToolGeom.toolHeight;
+    drawCyl(tipPt[2], toolTop, curToolGeom.toolRadius, "#e63333");
+    drawCyl(toolTop, toolTop + curToolGeom.holderHeight, curToolGeom.holderRadius, "#8c939c");
+  }
+
+  // Moving tool marker at the current step.
+  const tp = projPts[cstep];
+  if (tp) add(tp[2]-1e-6, g=>{
+    g.append("circle").attr("cx",tp[0]).attr("cy",tp[1]).attr("r",8).attr("fill","none")
+      .attr("stroke","#ffd166").attr("stroke-width",1.5).attr("opacity",.9);
+    g.append("circle").attr("cx",tp[0]).attr("cy",tp[1]).attr("r",4).attr("fill","#ffd166").attr("stroke","#000").attr("stroke-width",1);
+  });
+
+  // Painter's algorithm: far first.
+  draws.sort((a,b)=>b.depth - a.depth);
+  const g = content;
+  draws.forEach(d=>d.fn(g));
+}
+
+function updateNavCube(){
+  const yawDeg = (cam.yaw * 180/Math.PI);
+  const pitchDeg = (cam.pitch * 180/Math.PI);
+  const body = document.getElementById("nav-cube-body");
+  if (body) body.style.transform = `rotateX(${-pitchDeg}deg) rotateY(${yawDeg}deg)`;
+}
+</script>
+</body>
+</html>
