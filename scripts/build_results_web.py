@@ -44,6 +44,30 @@ OUT = os.path.join(WEB, "data.json")
 DICE_TOL = 0.05  # results.tsv dice must be within this of a run's metrics dice
 
 
+def clean_for_json(obj):
+    """Recursively replace non-finite floats (inf / -inf / NaN) with None.
+
+    Python's ``json`` renders these as ``Infinity`` / ``-Infinity`` / ``NaN`` by
+    default, which are NOT valid JSON — the browser's ``JSON.parse`` (used by
+    ``d3.json`` and ``response.json()``) rejects the WHOLE response with
+    "Unexpected token 'I'". That silently empties the dashboard: every fetch's
+    ``.json()`` rejects into a local catch, leaving ``DATA.experiments`` and
+    ``CURRENT_BATCH_RUNS`` empty. ``metrics.asd`` / ``hd95`` are ``+inf`` for any
+    run whose carve never overlaps the target (no surface distance), so this
+    fires routinely. ``null`` is the standards-compliant rendering the page
+    already displays as "—".
+    """
+    if isinstance(obj, dict):
+        return {k: clean_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [clean_for_json(v) for v in obj]
+    # numpy scalars subclass float, so this covers them too.
+    if isinstance(obj, float):
+        if obj != obj or obj == float("inf") or obj == float("-inf"):
+            return None
+    return obj
+
+
 def parse_cmd(cmd):
     """Pull shape / iters / seed out of a results.tsv command string."""
     if not isinstance(cmd, str):
@@ -115,7 +139,8 @@ def load_run(run_dir):
         "iters": int(args["iters"]) if args.get("iters") is not None else None,
         "seed": int(args["seed"]) if args.get("seed") is not None else None,
         "dice": float(metrics["dice"]),
-        "metrics": metrics,
+        "hard_dice": float(metrics["hard_dice"]) if metrics.get("hard_dice") is not None else None,
+        "metrics": clean_for_json(metrics),
         "args": args,
         "mtime": os.path.getmtime(tp),
     }
@@ -193,6 +218,10 @@ def list_runs(batch=None):
                 "iters": rec["iters"],
                 "seed": rec["seed"],
                 "dice": rec["dice"],
+                # Full metrics dict so the dashboard's per-batch table can show
+                # every evaluation measure (hard_dice, air_time, break_prob, …)
+                # for every run without a per-row /__api/run fetch.
+                "metrics": rec["metrics"],
                 "mtime": rec["mtime"],
             })
 
@@ -203,6 +232,45 @@ def list_runs(batch=None):
 
     out.sort(key=lambda r: r["mtime"], reverse=True)
     return out
+
+
+def find_results_row(run_rec):
+    """Reverse-lookup: which results.tsv row (if any) matches this run dir?
+
+    ``match_row`` goes results.tsv-row -> run dir; this inverts it so a clicked
+    run's detail view can show its real logged status/command/description
+    instead of the generic "arbitrary" label. A row matches when it shares the
+    run's (shape, iters, seed) AND its (hard) dice is within DICE_TOL of the
+    run's hard_dice/dice -- the same test ``match_row`` applies. If several rows
+    qualify, the closest-by-dice wins.
+    """
+    shape, iters, seed = run_rec["shape"], run_rec["iters"], run_rec["seed"]
+    if shape is None or iters is None:
+        return None
+    if not os.path.exists(RESULTS):
+        return None
+    hd = run_rec.get("hard_dice")
+    rd = run_rec.get("dice", 0.0)
+    best, best_d = None, DICE_TOL
+    with open(RESULTS, newline="") as f:
+        for r in csv.DictReader(f, delimiter="\t"):
+            try:
+                row_dice = float(r["dice"])
+            except (ValueError, KeyError):
+                continue
+            p = parse_cmd(r.get("command", "") or "")
+            if p["shape"] != shape or p["iters"] != iters:
+                # description may abbreviate shape ("cyl") and omit iters; only
+                # accept the mismatch if the row's command lacks the field.
+                continue
+            if p["seed"] is not None and seed is not None and p["seed"] != seed:
+                continue
+            d = abs(row_dice - rd)
+            if hd is not None:
+                d = min(d, abs(row_dice - hd))
+            if d <= best_d:
+                best_d, best = d, r
+    return best
 
 
 def run_record(run_dir, generate_gcode=True):
@@ -227,14 +295,33 @@ def run_record(run_dir, generate_gcode=True):
         except OSError:
             pass
 
+    # If this run dir was logged in results.tsv, surface the real row (status,
+    # commit, command, description) so the detail view does not mislabel a
+    # promoted run as "arbitrary". Falls back to the generic arbitrary record
+    # only when no results.tsv row matches (the common case for ad-hoc runs).
+    row = find_results_row(rec)
+    if row is not None:
+        status = row.get("status", "OK") or "OK"
+        commit = row.get("commit", "") or ""
+        command = row.get("command", "") or ""
+        description = row.get("description", "") or rec["name"]
+        try:
+            row_dice = float(row["dice"])
+        except (ValueError, KeyError):
+            row_dice = rec["dice"]
+    else:
+        status, commit, command, description, row_dice = (
+            "arbitrary", "", repro_cmd, rec["name"], rec["dice"],
+        )
+
     return {
         "idx": None,
-        "commit": "",
-        "dice": rec["dice"],
+        "commit": commit,
+        "dice": row_dice,
         "memory_gb": 0.0,
-        "status": "arbitrary",
-        "description": rec["name"],
-        "command": repro_cmd,
+        "status": status,
+        "description": description,
+        "command": command,
         "shape": rec["shape"],
         "iters": rec["iters"],
         "seed": rec["seed"],
@@ -277,14 +364,27 @@ def build_run_index():
 
 
 def match_row(row_dice, shape, iters, seed, index):
-    """Find the run dir whose dice best matches the results.tsv row."""
+    """Find the run dir whose dice best matches the results.tsv row.
+
+    results.tsv's dice column is the HARD dice (the deployable metric). A run dir's
+    metrics.json ``dice`` field is the SOFT dice for normal runs but 0.0 for
+    best_on_hard runs (the best-checkpoint re-carve path doesn't populate soft_dice,
+    so the summary falls back to 0.0). So match against whichever of the run's
+    ``hard_dice`` / ``dice`` is closest to the row's (hard) dice.
+    """
     if shape is None or iters is None:
         return None
     cands = index.get((shape, iters, seed)) or index.get((shape, iters, None)) or []
     if not cands:
         return None
-    best = min(cands, key=lambda r: abs(r["dice"] - row_dice))
-    if abs(best["dice"] - row_dice) > DICE_TOL:
+    def dist(r):
+        d = abs(r["dice"] - row_dice)
+        hd = r.get("hard_dice")
+        if hd is not None:
+            d = min(d, abs(hd - row_dice))
+        return d
+    best = min(cands, key=dist)
+    if dist(best) > DICE_TOL:
         return None
     return best
 
@@ -553,6 +653,7 @@ def build_data_payload(generate_gcode=True, verbose=True):
     # Build experiment records, matching each results row to a run dir.
     experiments = []
     n_matched = 0
+    matched_dirs = set()
     for i, r in enumerate(rows):
         cmd = r.get("command", "") or ""
         desc = r.get("description", "") or ""
@@ -592,7 +693,46 @@ def build_data_payload(generate_gcode=True, verbose=True):
         }
         if run:
             n_matched += 1
+            matched_dirs.add(run["run_dir"])
         experiments.append(rec)
+
+    # Append every viewable run dir that results.tsv did NOT match, as a
+    # lightweight "arbitrary" experiment. The autoresearch launch scripts
+    # (launch_wave*.sh) run train_csg directly and never append to results.tsv,
+    # so without this the dashboard's default data.json grid is frozen at the
+    # last results.tsv era (e.g. 32 wave-4 rows) while hundreds of newer runs
+    # sit on disk invisible until a batch is manually selected. These records
+    # carry run_dir + dice + metrics (so the grid's hard-dice axis + tooltips
+    # work) but NO embedded trajectory/stl/gcode; the page fetches the full
+    # record via /__api/run on click (index.html ~L974), exactly as it does for
+    # batch-dropdown runs. Newest first (list_runs sorts by mtime desc).
+    n_arbitrary = 0
+    for r in list_runs():
+        if r["run_dir"] in matched_dirs:
+            continue
+        experiments.append({
+            "idx": len(experiments),
+            "commit": "",
+            "dice": r["dice"],
+            "memory_gb": 0.0,
+            "status": "arbitrary",
+            "description": r["name"],
+            "command": "",
+            "shape": r["shape"],
+            "iters": r["iters"],
+            "seed": r["seed"],
+            "run_dir": r["run_dir"],
+            "name": r["name"],
+            "metrics": r["metrics"],
+            "stl": {},
+            "gcode": None,
+            "trajectory": None,
+            "tool_geom": None,
+            "mtime": r["mtime"],
+        })
+        n_arbitrary += 1
+    if verbose:
+        print(f"[arbitrary] appended {n_arbitrary} unmatched run dirs as lightweight experiments")
 
     if verbose:
         print(f"[match] {n_matched}/{len(rows)} rows matched to a run dir")
@@ -655,8 +795,15 @@ class IncrementalResultsBuilder:
                 try:
                     payload = build_data_payload(generate_gcode=self.generate_gcode, verbose=self.verbose)
                     os.makedirs(os.path.dirname(OUT), exist_ok=True)
-                    with open(OUT, "w") as f:
+                    # Atomic write: serialize to a temp file in the same dir, then
+                    # os.replace onto data.json. A concurrent browser read of an
+                    # in-place json.dump can catch a half-written file (parse fail
+                    # -> the page's catch branch empties the dashboard and crashes
+                    # updateStats on d3.max([])); rename is atomic on POSIX.
+                    tmp = OUT + ".tmp"
+                    with open(tmp, "w") as f:
                         json.dump(payload, f)
+                    os.replace(tmp, OUT)
                     if self.verbose:
                         print(f"[write] {OUT} ({os.path.getsize(OUT) / 1e6:.2f} MB)")
                     self.payload = payload

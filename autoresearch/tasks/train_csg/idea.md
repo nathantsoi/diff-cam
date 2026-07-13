@@ -1,123 +1,61 @@
-# jul6-step-detail — working log
+# idea.md — jul13-phys-plausible: physically plausible paths (don't snap the end mill, don't snap the part)
 
-Branch: `ar-agd/jul6-step-detail` (from `ar-agd/jul6-spline-sweep` @ be65551 —
-inherits the one-shot spline-swept-volume method, its tests, and
-`future_work.md`). Worktree: `.claude/worktrees/step-detail`.
+Branch `ar-agd/jul13-phys-plausible`, worktree `.claude/worktrees/phys-plausible`.
+Starting point: `ar-agd/jul6-step-detail` head (58b6c10 — sweep method, STEP-grid
+targets, raster_arc/raster_terrain inits, reachability ceilings) **merged with**
+`origin/autoresearch` (88b8289 — Nathan's trajectory-quality measures
+w_time/w_air_time/w_break + kc/f_ref/sigma_risk/f_max force model, jul8 RLHF
+feedback loop, jul10 w_tool_gouge warmup, difficulty-normalized dice).
 **Every run needs `LD_LIBRARY_PATH=/usr/lib/wsl/lib`** (WSL2 CUDA).
+**GPU is shared with a second Claude instance this session — check load before
+launching, alternate runs.**
 
-## Goal (user-directed)
+## The problem this campaign attacks
 
-**Maximize hard-carve dice on real STEP-file targets** (`--target-shape grid
---target-sdf-path <npz>` from `utils/step_to_sdf.py`), adapting the spline
-sweep method to detailed parts as needed, guided by `future_work.md` (kept
-from the previous campaign as the exploration basis). All method rules still
-apply: shape-agnostic optimizer/init/losses (geometric representation only —
-SDF grids, bboxes, reachability masks derived from geometry), 15-min budget,
-eval untouched.
+The step-detail campaign showed the sweep planner reaches 0.98 dice on rrph and
+0.82 on titan — geometrically. But nothing in the objective knows machining
+physics: an optimized segment may take a full-depth full-width slot cut, plunge
+straight down into material, or side-load the rrph pin / titan lettering with a
+heavy cut. On a real Haas these paths snap the end mill, or snap the part's
+delicate features ("end bits"). Two physics gaps:
 
-## Targets (regenerated NPZs, padding 0 = stock is the exact part bbox)
+1. **Tool-side**: nothing bounds per-segment material removal (chip load /
+   cutting force). Nathan's w_break model exists for the DELTA method (it reads
+   the per-step stock history `stock[t]`/`stock[t+1]`), but the sweep method
+   never materializes per-step stock — carve = min over ALL segments of the
+   swept SDF, order-free. The breakage surrogate must be re-derived for the
+   sweep architecture (sequential chip attribution).
+2. **Part-side (new, no model exists)**: slender target features (rrph pin,
+   titan letter strokes) have finite bending strength. A path that engages
+   heavily next to an already-freed thin feature snaps it. Physics: cantilever
+   root stress σ = M·c/I; breakage force scales ~t²·(strength)/h for a wall of
+   thickness t, height h. The plan must (a) know where fragile features are
+   (computable from the target SDF alone — shape-agnostic), and (b) keep
+   engagement light near them and/or order cuts so features stay supported by
+   surrounding stock as long as possible.
 
-| npz | part | phys mm | voxel | grid | 3-axis ceiling |
-|---|---|---|---|---|---|
-| titan_hi | Titan-M8 nameplate (1 solid) | 138×49×19 | 0.5 | 277×99×38 (1.0M) | **0.965** |
-| rrph_hi | RoundedRect+Pin&Hole, **solid 0 only** | 25×51×13 | 0.3 | 85×169×42 (0.6M) | **0.970** |
-| extrusion_hi | Extrusion (lies flat, z=20) | 20×100×20 | 0.5 | 40×200×40 (0.3M) | **0.648** |
-| bowl_hi | bowl + 3 feet, **y↔z swapped** (model y-up) | 260×260×76 | 1.5 | 173×173×51 (1.5M) | **0.342** |
+## Plan (draft — research synthesis in progress)
 
-Why regenerated: pre-existing `RoundedRectangleHighRes.npz` included all 11
-solids — 1–10 are giant construction geometry that exploded the stock to
-2.2 m. Solid 0 is the real 1×2×0.5 in part. Padding 0 removes the symmetric
-under-part stock slab; part sits flush at stock bottom like real fixturing.
-Conversion commands (main-repo venv has OCP bindings; worktree venv doesn't):
-`uv run python utils/step_to_sdf.py <step> -o utils/NPZs/<name>.npz
---voxel-size-mm <v> --padding 0 [--solid-indices 0]` + y↔z transpose for bowl.
-
-**Ceilings** computed with a shape-agnostic exact reachability mask (part
-height field max-filtered by the tool disc; a waste voxel is removable iff
-some tool position covers it without the cylinder clipping part above):
-- titan/rrph ~0.97: clean targets, most waste reachable.
-- extrusion 0.648 (saturates ~0.69 even with r→0 tool): profile cavities open
-  SIDEWAYS (part lies flat) — orientation shadow, not tool width.
-- bowl 0.342: curved underside is one big overhang shadow (real shops flip
-  the part). Stress test only; interpret dice vs its ceiling.
-The same mask is a candidate METHOD lever: gate w_broad attraction/residual
-loss off unreachable waste so gradient isn't wasted on impossible voxels
-(future_work "exact vertical-accessibility mask", DeepMill discussion).
-
-## Key structural constraint: path-length budget
-
-Executable path ≤ T × feed·dt = T × 1.905 mm (dt 0.45, feed 10 ipm).
-T=256 → 488 mm. One boustrophedon layer over titan's 138×49 top at ~4.7 mm
-stepover ≈ 1.7 m. Detailed parts are path-length starved at T=256 → first
-adaptation axis is scaling T (and K ∝ T) with part size; sweep cost is
-O(T·N³)/iter so T=1024 on ~1M voxels ≈ 100 ms/iter ≈ 9k iters in budget.
-dt is the cheap alternative knob (longer step cap) but coarsens spline
-sampling — chord sagitta risk on tight curves; test empirically.
-
-## Plan
-
-1. Infra (done): run_pipeline grid+target-sdf-path forwarding; NPZs; ceilings.
-2. Baselines: sweep UNCHANGED (T256 K40 lr1e-3 w_broad0.1) on titan + rrph;
-   delta reference on titan. Expect path starvation.
-3. Scale T/K (512/1024/2048, K∝T/6), dt probe; derive auto-scaling rule.
-4. future_work levers by payoff: reachability-gated attraction, multi-spline
-   safe-z retracts (pin+hole plunge), multi-start diverse inits, slope-aware
-   |N_z| weighting (bowl), curriculum loss, path-side residual attraction.
-5. extrusion + bowl with ceiling-aware expectations; ≥3 seeds on headline
-   config; plot + findings.
+- Port a per-segment engagement/force surrogate to the sweep method:
+  sequential chip attribution (a voxel is cut by the EARLIEST segment whose
+  swept tool covers it, not the argmin-deepest), giving seg_engage[t] without a
+  (T+1)×N³ history; then reuse Nathan's F = kc·chip_vol/(dt·D) → lognormal
+  P_break aggregation as a differentiable penalty.
+- Fragility field from the target SDF: local thickness (inscribed-sphere via
+  SDF magnitude on the medial band) + height-above-root → allowable side force
+  per voxel; penalize per-segment force weighted by adjacency to fragile
+  target voxels.
+- Init/pathing constraints (constructive, not just penalties): bound stepdown
+  per z-layer (a_p ≤ f(D)), forbid vertical plunges (ramp/helix entry), keep
+  raster_terrain's gouge-free property.
+- Report hard (non-differentiable) violation diagnostics alongside dice so
+  physical plausibility is a tracked metric, not a vibe.
 
 ## Log
 
-- (setup) Worktree + branch; results.tsv truncated (untracked); prior
-  findings.md removed (preserved on spline-sweep branch); runs/jul6-step-detail/.
-- run_pipeline: added `grid` target choice, `--target-sdf-path` forwarding,
-  `--stock-size-in` now optional (grid targets take the box from the NPZ).
-- STEP solids audited: titan 1 solid 138×49×19; rrph solid0 25×51×13 (+10
-  junk up to 1.8 m); extrusion 20×100×20 y-long lying flat; bowl 4 solids
-  (bowl + 3 feet) y-up → swapped to z-up.
-- NPZs generated (seconds each); bowl wall is thin (SDF min −1.75 mm at
-  1.5 mm voxels — 2-voxel shell, precision-sensitive).
-- Reachability ceilings (table above); extrusion tool-radius sweep shows
-  saturation at ~0.69 → orientation shadow, smaller tools don't help.
-- **(jul7) Eval OOM root-caused and fixed**: `surface_distances` built a dense
-  `cdist` matrix (50k × 40k surface points ≈ 16 GB on the hi-res grids) —
-  every grid-target eval hung in swap then died (the mysterious prior-session
-  hangs). Replaced with exact cKDTree queries (identical values, tested);
-  full suite green. rrph then trains at ~25 it/s @ T=256.
-- **Feed-feasibility quantified** (the diagnosed starvation, now exact): init
-  raster length vs executable budget (T−1)·feed·dt at T=256 — titan 7.4×,
-  bowl 15× over budget; worse, uniform-in-index sampling puts single steps at
-  26–192× the cap (row transitions/pass wraps), which the evaluator's speed
-  clip truncates. → `raster_arc` init (tool-sized serpentine z-layers,
-  arc-length-uniform samples, auto-coarsens pitches to fit the budget),
-  T sized by len/cap: rrph 832, extrusion 1952, titan 2560 @ dt 0.9.
-- `amin_refresh` (cached winning segment, refresh every N iters) for large-T
-  throughput; `--reach-gate` masks residual/attraction off unreachable waste
-  (my reachability code independently reproduces all four idea.md ceilings).
-  Extrusion note: uncarved stock already scores 0.644 vs 0.648 ceiling — that
-  target is a gouge-avoidance test, effectively.
-- Baselines (unchanged CSG-winning config, T256 raster): **rrph 0.9681**
-  (ceiling 0.9699 — at ceiling, target basically solved), **titan 0.718**
-  (hard plateau from ~iter 3.6k, loss frozen, grad ~1e-3 — starvation
-  signature as predicted).
-- **rrph raster_arc T832 K138 amin4: 0.9753** — beats baseline +0.007 and the
-  voxel-quantized ceiling estimate. Target solved; keep.
-- titan raster_arc T2560 dt0.9: **CUDA OOM in 15 s** — the delta sim
-  allocates a (T+1)×N³ f32 stock HISTORY (10.7 GB) that sweep training never
-  reads. VRAM caps T≈1536 on the 1.04M-voxel grid. 2-slot stock field for
-  method=sweep is the identified (unimplemented) fix.
-- extrusion crashes ×2 (logged): CUDA illegal address at T1952 (large-T
-  argmin suspect); reach-gate creates a Taichi field after materialization.
-  Both unresolved — extrusion is anyway a gouge-avoidance test (uncarved
-  stock scores 0.644 vs 0.648 ceiling).
-- **(finish-up, user-directed)** Batch3 (memory-sized titan retries) never
-  ran — session died first. Ran its key experiment as the single final run:
-  titan raster_terrain T1536 K256 dt1.5 amin4, iters sized to the 15-min
-  budget (620 @ ~1.5 s/iter; the 3500-iter version would run ~80 min).
-  Terrain init alone opens at dice 0.716 ≈ the T256 baseline's FINAL plateau.
-  **Result: 0.8189** (best @ iter 440; final-iter 0.806, evals oscillating
-  ±0.01 → converged, not budget-cut). +0.089 over baseline, 85% of the 0.965
-  ceiling; air_cut_fraction 0.24 points at retracts/2-slot-VRAM as the next
-  levers. Honesty note: 27 min wall (battery throttle → ~2.6 s/iter vs the
-  1.5 it was sized for) — over the 15-min target; kept as the campaign's
-  decisive run. findings.md + results_plot.png conclude the campaign.
+- [setup] Created branch/worktree from 58b6c10, merged origin/autoresearch
+  (conflicts: train_csg.py optimizer guard × feedback warm-start; run_pipeline
+  runs_subdir forwarding; web dashboard ctrl-points × stock/target overlays —
+  all unioned). findings.md removed, results.tsv truncated per protocol.
+- [research] Two literature scans launched (force-bounded toolpath generation;
+  workpiece-side fragility / thin-feature machining). Synthesis pending.

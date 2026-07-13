@@ -248,6 +248,16 @@ class CSGSimulatorDelta:
 
         self.tool_radius = ti.field(dtype=ti.f32, shape=())
         self.tool_height = ti.field(dtype=ti.f32, shape=())
+        # Height of the CUTTING TIP band (mm) used ONLY by the air-time metric
+        # / loss (compute_traj_metrics_volumes + compute_traj_diagnostics_hard):
+        # the air/engage/swept volumes are integrated over this bottom band of
+        # the tool, not the full tool_height shank. This stops the tall shank
+        # sitting in already-carved empty space from being counted as "air" on
+        # an engaged finishing pass (which otherwise read ~80% air). The carve
+        # itself still uses the full cylinder (tool_sdf). 0 -> fall back to the
+        # full tool_height (legacy behaviour) inside the tip SDFs. See
+        # docs/memory airfrac-shank-volume-bias.
+        self.tool_cut_height = ti.field(dtype=ti.f32, shape=())
 
         # ---- Tool holder (collision body, not learnable) ----
         # The holder is the wide spindle/collet shaft that sits coaxially ABOVE
@@ -309,6 +319,19 @@ class CSGSimulatorDelta:
         self.w_residual = ti.field(dtype=ti.f32, shape=())
         self.w_gouge[None] = 2.0
         self.w_residual[None] = 1.0
+
+        # De-biased (hard-carve-aware) loss shift. The soft ``apply_cut``
+        # (smooth_max union) over-erodes by ~log(2)/kv per cut vs the hard
+        # ``ti.max`` carve, so the soft stock_d is biased NEGATIVE (too carved)
+        # and the soft loss is satisfied before the HARD carve actually reaches
+        # the target -- the soft/hard gap that fills narrow negative features
+        # (holes). Adding ``loss_shift`` to stock_d before the loss sigmoid
+        # shifts the loss's view back toward the (less-eroded) hard stock, so
+        # the optimizer targets the deployable hard carve. Default 0 = off (no
+        # behavior change). A principled value is ~log(2)*k_ref/k_final (the
+        # single-cut over-erosion in voxel units at the final sharpness).
+        self.loss_shift = ti.field(dtype=ti.f32, shape=())
+        self.loss_shift[None] = 0.0
 
         # Air-cut penalty: a per-step term that fires when the swept tool occupies
         # EMPTY stock (tool inside, no remaining material). This is what "cutting
@@ -377,6 +400,55 @@ class CSGSimulatorDelta:
         # so it transfers to the hard carve. Gated by w_tool_gouge (0 -> disabled).
         self.w_tool_gouge = ti.field(dtype=ti.f32, shape=())
         self.w_tool_gouge[None] = 0.0
+        # Tool-gouge MARGIN (voxels): inflate the no-penetration radius from
+        # r_tool to r_tool + margin so the tool center must stay `margin` voxels
+        # FURTHER off the surface than mere tangency. Overlapping tangent tool
+        # capsules bite into a CONVEX part at pass seams (the sphere's gouge
+        # mechanism -- loss_tool_gouge=0 at midpoints yet the boolean union
+        # still over-erodes); a positive margin lifts the tool so the union of
+        # capsules stays tangent-only and does not gouge at the seams, at the
+        # cost of a little uncut residual. Shape-agnostic (target_sdf only).
+        self.tool_gouge_margin = ti.field(dtype=ti.f32, shape=())
+        self.tool_gouge_margin[None] = 0.0
+
+        # ---- Trajectory-quality measures (time + breakage) ----
+        # Three deployable measures reported alongside dice and (when their
+        # weight is > 0) incorporated into the soft loss as differentiable
+        # surrogates. The hard, non-differentiable final-metric forms are
+        # computed by compute_traj_diagnostics_hard on the hard carve.
+        #
+        # 1. Total toolpath time (seconds): sum of per-segment motion time at
+        #    the feed/rapid regime speed. Shorter is better for equal dice.
+        # 2. Air-cutting time (seconds): time spent cutting air, weighted by
+        #    the per-segment air fraction (swept tool in empty stock). High
+        #    retracts clear of the surface contribute ~0 (tool outside the
+        #    stock grid); surface-hugging air in empty corners counts. Waste.
+        # 3. Tool-breakage probability: heavy engagement is efficient but too
+        #    much snaps the tool. Soft surrogate = the docs/algorithms.md §4.1
+        #    closed-form stress-strength interference (simplified: constant
+        #    strength, single log-variance), aggregated as 1-exp(-sum P_t).
+        #    Hard form = the docs/design.md threshold rule (broken iff
+        #    F_cut_max > f_max).
+        self.w_time = ti.field(dtype=ti.f32, shape=())
+        self.w_time[None] = 0.0
+        self.w_air_time = ti.field(dtype=ti.f32, shape=())
+        self.w_air_time[None] = 0.0
+        self.w_break = ti.field(dtype=ti.f32, shape=())
+        self.w_break[None] = 0.0
+        # Breakage-model constants (see docs/algorithms.md). kc = specific
+        # cutting force (Al ~700 N/mm^2); f_ref = nominal force at which
+        # P_break=0.5 (effective S_bar/alpha_mean -- calibrate); sigma_risk =
+        # combined log-std sqrt(sigma_alpha^2 + pi^2/(6 m^2)); f_max = hard
+        # threshold force for the design.md broken flag. D = 2*tool_radius and
+        # dt are existing fields, read inside the kernels.
+        self.kc = ti.field(dtype=ti.f32, shape=())
+        self.kc[None] = 700.0
+        self.f_ref = ti.field(dtype=ti.f32, shape=())
+        self.f_ref[None] = 50.0
+        self.sigma_risk = ti.field(dtype=ti.f32, shape=())
+        self.sigma_risk[None] = 0.5
+        self.f_max = ti.field(dtype=ti.f32, shape=())
+        self.f_max[None] = 100.0
 
         # Holder collision is a PENETRATION BARRIER, not a proximity field: it is
         # exactly zero (zero gradient) while the holder has clearance, and grows
@@ -442,6 +514,38 @@ class CSGSimulatorDelta:
         # independent of the weight so it is non-zero even when disabled --
         # measures how far the tool center penetrates the target+r_tool).
         self.diag_tool_gouge = ti.field(dtype=ti.f32, shape=())
+        # Trajectory-quality diagnostics (non-differentiable read-outs of the
+        # three new measures, computed on the hard carve by
+        # compute_traj_diagnostics_hard). diag_time/diag_air_time are seconds;
+        # diag_break_prob_* are in [0,1]; diag_fcut_max is Newtons; diag_broken
+        # is 0/1 (the docs/design.md hard threshold rule); diag_engage_* are
+        # raw engaged-chip volumes (unit-cube^3) for calibration.
+        self.diag_time = ti.field(dtype=ti.f32, shape=())
+        self.diag_air_time = ti.field(dtype=ti.f32, shape=())
+        self.diag_break_prob_any = ti.field(dtype=ti.f32, shape=())
+        self.diag_break_prob_max = ti.field(dtype=ti.f32, shape=())
+        self.diag_fcut_max = ti.field(dtype=ti.f32, shape=())
+        self.diag_broken = ti.field(dtype=ti.f32, shape=())
+        self.diag_engage_max = ti.field(dtype=ti.f32, shape=())
+        self.diag_engage_mean = ti.field(dtype=ti.f32, shape=())
+
+        # Per-segment differentiable intermediates for the three new measures.
+        # Written by compute_seg_time / compute_seg_volumes (inside the Tape)
+        # and read by compute_traj_metrics, which adds the soft loss terms.
+        # needs_grad so gradient flows field->field across these kernels (same
+        # pattern as stock[t] -> compute_loss). The Tape clears their grad each
+        # iteration. Reused as plain (non-grad) scratch by the hard diagnostic
+        # path, which runs outside a Tape.
+        self.seg_time = ti.field(dtype=ti.f32, shape=max_steps, needs_grad=True)
+        self.seg_air = ti.field(dtype=ti.f32, shape=max_steps, needs_grad=True)
+        self.seg_swept = ti.field(dtype=ti.f32, shape=max_steps, needs_grad=True)
+        self.seg_engage = ti.field(dtype=ti.f32, shape=max_steps, needs_grad=True)
+        # Scalar needs_grad accumulator for the trajectory-level breakage
+        # probability: P_break_traj = 1 - exp(-sum_t P_break(t)) is a nonlinear
+        # function of the WHOLE-trajectory sum, so it cannot be atomic-added
+        # per-segment. The per-segment kernel accumulates P_break(t) here, then
+        # a separate scalar kernel adds w_break * (1 - exp(-acc_psum)) to loss.
+        self.acc_psum = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
 
         # ---- Stock ----
         self.stock = ti.field(
@@ -660,6 +764,50 @@ class CSGSimulatorDelta:
         d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * h
 
         # --- Combine (same smooth-CSG combination as before) ---
+        d_xy_pos = smooth_max(d_xy, 0.0, kv)
+        d_z_pos = smooth_max(d_z, 0.0, kv)
+        outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
+        inside = -smooth_max(-smooth_max(d_xy, d_z, kv), 0.0, kv)
+        return outside + inside
+
+    @ti.func
+    def _tool_cut_h_vox(self) -> ti.f32:
+        """Cutting-tip band height in voxels: tool_cut_height if set (>0), else
+        the full tool_height (legacy). Shared by the smooth/sharp tip SDFs."""
+        ch = self.tool_cut_height[None]
+        return ti.select(ch > 0.0, ch / self.v, self.tool_height[None] / self.v)
+
+    @ti.func
+    def tool_sdf_tip(self, p, t):
+        """Smoothed swept-cylinder SDF over the CUTTING TIP band only (voxels).
+
+        Identical to ``tool_sdf`` except the cylinder height is the tip band
+        (``tool_cut_height``) instead of the full ``tool_height`` shank, and the
+        z-center is anchored to the tool BASE (z_base + 0.5*cut_h) so the band
+        is the bottom of the tool -- the part that actually removes material.
+        Used by the air-time metric/loss so the swept/air/engage volumes reflect
+        whether the cutting tip is in material, not how much shank sits in
+        already-carved empty space. Differentiable (same form as tool_sdf).
+        """
+        r = self.tool_radius[None] / self.v          # voxels
+        cut_h = self._tool_cut_h_vox()               # voxels (tip band)
+        kv = self.k[None] / self.k_ref               # smoothness in voxel space
+
+        pv = self._vox(p)
+        a = self._vox(self.tool_pos[t])
+        b = self._vox(self.tool_pos[t + 1])
+
+        pa_xy = ti.Vector([pv.x - a.x, pv.y - a.y])
+        ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
+        ba_len2 = ba_xy.dot(ba_xy) + 1e-12
+        h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
+        closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
+        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
+
+        z_base = a.z + (b.z - a.z) * h_param
+        z_center = z_base + 0.5 * cut_h
+        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * cut_h
+
         d_xy_pos = smooth_max(d_xy, 0.0, kv)
         d_z_pos = smooth_max(d_z, 0.0, kv)
         outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
@@ -1116,7 +1264,7 @@ class CSGSimulatorDelta:
             stock_d = self.stock[T, i, j, k]
             target_d = self.target_sdf(p)
 
-            sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
+            sa = ti.max(-50.0, ti.min(50.0, (stock_d + self.loss_shift[None]) * scale))
             ta = ti.max(-50.0, ti.min(50.0, target_d * scale))
             stock_occ = 1.0 / (1.0 + ti.exp(sa))
             target_occ = 1.0 / (1.0 + ti.exp(ta))
@@ -1199,6 +1347,14 @@ class CSGSimulatorDelta:
 
         Differentiable in ``tool_pos``/``tool_delta`` (via ``tool_sdf``) and in
         ``stock`` (via ``stock_occ``); safe under ``ti.ad.Tape``.
+
+        Caveat (same grid-only blind spot as ``compute_traj_diagnostics_hard``
+        before its fix): this loop sums only over the [0,1]^3 voxel grid, so a
+        tool swept entirely OFF the stock contributes 0 air here too — it will
+        not penalize far-from-stock wandering even with w_air>0. ``w_air`` /
+        ``w_prox`` are confirmed dead levers (trade off dice), so this is left
+        as-is; a shape-blind stock-proximity anchor is the open lever for the
+        off-stock collapse (see autoresearch.md).
         """
         for t, i, j, k in ti.ndrange((t_start, T), self.Nx, self.Ny, self.Nz):
             scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
@@ -1359,6 +1515,9 @@ class CSGSimulatorDelta:
             w = self.w_tool_gouge[None]
             n = ti.max(1, T - 1 - t_start)
             r_vox = self.tool_radius[None] / self.v
+            # Margin inflates the no-penetration radius so the tool center must
+            # stay `margin` voxels beyond mere tangency (see tool_gouge_margin).
+            r_eff = r_vox + self.tool_gouge_margin[None]
             # Component-wise midpoint (avoids the same Taichi autodiff
             # load-forwarding issue as compute_traj_prox_penalty).
             mx = 0.5 * (self.tool_pos[t].x + self.tool_pos[t + 1].x)
@@ -1366,8 +1525,317 @@ class CSGSimulatorDelta:
             mz = 0.5 * (self.tool_pos[t].z + self.tool_pos[t + 1].z)
             mid = ti.Vector([mx, my, mz])
             d = self.target_sdf_scalar(mid)
-            pen = ti.max(0.0, r_vox - d)
+            pen = ti.max(0.0, r_eff - d)
             ti.atomic_add(self.loss[None], w * pen * pen / n)
+
+    # ========================================================================
+    # Trajectory-quality measures: toolpath time, air-cut time, breakage prob.
+    # Soft (differentiable) surrogates added to the loss by compute_traj_metrics;
+    # hard (non-differentiable) final metrics computed by
+    # compute_traj_diagnostics_hard on the hard carve. See docs/algorithms.md.
+    # ========================================================================
+
+    @ti.kernel
+    def compute_seg_time(self, t_start: ti.i32, T: ti.i32):
+        """Per-segment motion time (seconds), differentiable.
+
+        Mirrors ``advance_position``'s feed/rapid regime selection: the move is
+        cutting (feed_speed) when the cutter would come within safe_distance of
+        the remaining stock at the commanded destination, else traverse
+        (rapid_speed). The segment time is the executed length over the regime
+        speed:
+
+            seg_time = min(|delta|.L_mm, cap_mm) / speed
+
+        where cap_mm = speed*dt (the speed clip). Below the cap the time scales
+        linearly with the commanded length (gradient 1/speed w.r.t. delta); at
+        the cap it saturates to dt (zero gradient, the same subgradient pattern
+        as advance_position). is_feed is a hard gate (zero gradient), so grad
+        flows only through the magnitude -- exactly the existing speed-clip
+        behavior. Reads tool_delta/tool_pos/stock[t]; safe under ti.ad.Tape.
+        """
+        for t in range(t_start, T):
+            a = self.tool_pos[t]
+            delta = self.tool_delta[t]
+            dmm = ti.Vector([delta.x * self.Lx, delta.y * self.Ly, delta.z * self.Lz])
+            mag_mm = ti.sqrt(dmm.dot(dmm) + 1e-12)
+            probe = a + delta
+            stock_d = self.stock_sdf_at(probe, t)
+            cube_d = box_sdf(
+                self._vox(probe),
+                self._vox(ti.Vector([0.5, 0.5, 0.5])),
+                self._vox(ti.Vector([0.5, 0.5, 0.5])),
+            )
+            clearance = ti.max(stock_d, cube_d)
+            clearance_mm = clearance * self.v - self.tool_radius[None]
+            is_feed = ti.cast(clearance_mm <= self.safe_distance[None], ti.f32)
+            rapid_step = self.rapid_speed[None] * self.dt[None]
+            feed_step = self.feed_speed[None] * self.dt[None]
+            cap_mm = rapid_step + (feed_step - rapid_step) * is_feed
+            speed = self.rapid_speed[None] + (
+                self.feed_speed[None] - self.rapid_speed[None]
+            ) * is_feed
+            # min(mag, cap)/speed -- length-limited motion time.
+            seg_t = ti.min(mag_mm, cap_mm) / (speed + 1e-12)
+            self.seg_time[t] = seg_t
+
+    @ti.kernel
+    def zero_seg_volumes(self, t_start: ti.i32, T: ti.i32):
+        """Zero the per-segment volume accumulators before a pass.
+
+        Single-loop clear (autodiff requires exactly one top-level loop) so
+        compute_seg_volumes' atomic_add never accumulates stale values across
+        iterations. acc_psum is cleared separately by zero_acc_psum.
+        """
+        for t in range(t_start, T):
+            self.seg_swept[t] = 0.0
+            self.seg_air[t] = 0.0
+            self.seg_engage[t] = 0.0
+
+    @ti.kernel
+    def zero_acc_psum(self):
+        """Clear the breakage-probability accumulator (scalar, no loop)."""
+        self.acc_psum[None] = 0.0
+
+    @ti.kernel
+    def compute_seg_volumes(self, t_start: ti.i32, T: ti.i32):
+        """Per-segment swept/air/engaged volumes (unit-cube^3), differentiable.
+
+        Single top-level for-loop (autodiff requires exactly one). For every
+        cut t in [t_start, T) and every voxel:
+          tool_occ    = sigmoid(-tool_sdf(p, t))      ~1 inside the swept tool
+          stock_pre   = sigmoid(stock[t, p])          ~1 inside material pre-cut
+          stock_post  = sigmoid(stock[t+1, p])        ~1 inside material post-cut
+          seg_swept  += tool_occ                       (swept tool volume)
+          seg_air    += tool_occ * (1 - stock_pre)     (swept in EMPTY stock)
+          seg_engage += tool_occ * stock_pre           (chip engaged with material)
+
+        Both air and engage use the PRE-cut stock: engage is the material the
+        tooth actually meets, and air is swept volume in ALREADY-EMPTY space
+        (re-traversal / flying through a void) -- NOT the material this pass
+        carves away. The post-cut form (1 - stock_post) counted every just-cut
+        voxel as air, so a descent through solid stock read as 100% air and the
+        w_air_time gradient could not distinguish productive carving from real
+        air-cut motion. Pre-cut matches the sharp diagnostic in
+        compute_traj_diagnostics_hard. Differentiable in tool_pos/tool_delta
+        (via tool_sdf) and stock (via stock_occ, which carries grad to earlier
+        deltas through the evolving stock); safe under ti.ad.Tape.
+
+        The swept/air/engage volumes are integrated over the CUTTING TIP band
+        (tool_sdf_tip), not the full tool_height shank. This makes the air
+        fraction reflect whether the cutting tip is in material: an engaged
+        finishing pass whose shank sits in already-carved empty space no longer
+        reads ~80% air. seg_engage is therefore the tip chip load (the force
+        model is now driven by tip chip volume, which is the physically correct
+        source of cutting force -- the shank does not cut).
+        """
+        for t, i, j, k in ti.ndrange((t_start, T), self.Nx, self.Ny, self.Nz):
+            inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
+            p = ti.Vector(
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+            )
+            tool_d = self.tool_sdf_tip(p, t)
+            ta = ti.max(-50.0, ti.min(50.0, -tool_d))
+            tool_occ = 1.0 / (1.0 + ti.exp(ta))             # ~1 inside swept tool
+            sa_pre = ti.max(-50.0, ti.min(50.0, self.stock[t, i, j, k]))
+            stock_occ_pre = 1.0 / (1.0 + ti.exp(sa_pre))    # ~1 inside material
+            ti.atomic_add(self.seg_swept[t], inv_n * tool_occ)
+            ti.atomic_add(self.seg_air[t], inv_n * tool_occ * (1.0 - stock_occ_pre))
+            ti.atomic_add(self.seg_engage[t], inv_n * tool_occ * stock_occ_pre)
+
+    @ti.kernel
+    def compute_traj_metrics(self, t_start: ti.i32, T: ti.i32):
+        """Per-segment soft loss terms + breakage-probability accumulator.
+
+        Single top-level for-loop (autodiff requires exactly one). Per segment:
+          air_time_t = seg_time * is_air_t   (seconds; BINARY per segment)
+          mu_F[t]    = kc * (seg_engage[t] * v_mm^3) / (dt * D)     (Newtons)
+          P_break[t] = sigmoid((ln(mu_F) - ln(f_ref)) / sigma_risk) (§4.1)
+
+        Air is BINARY: a segment is "air" iff the tool is NOT engaged with
+        material AT ALL this segment (it does not matter how much of the tool
+        is engaged -- any engagement => cutting, air contribution 0). This
+        matches the hard metric in compute_traj_diagnostics_hard. For
+        autodiff, is_air_t is a narrow-temperature sigmoid step on seg_engage
+        (the tip chip load): is_air -> 1 as engage -> 0, is_air -> 0 once
+        engage exceeds ~1 voxel of chip load. Grad flows eng -> seg_engage
+        (needs_grad) -> tool_delta/stock.
+        Atomic-adds the per-segment time and air-time loss contributions as
+        means over segments (each term is divided by n = T - t_start, a
+        linear combination -> differentiable per segment) and accumulates
+        P_break(t) into acc_psum. The trajectory-level breakage loss
+        w_break * (1 - exp(-acc_psum)) is added by the separate scalar kernel
+        compute_break_loss, because it is a nonlinear function of the
+        WHOLE-trajectory sum. Grad flows through seg_* (needs_grad) ->
+        tool_delta/stock.
+        """
+        for t in range(t_start, T):
+            n = ti.max(1, T - t_start)
+            inv_n = 1.0 / n
+            kc = self.kc[None]
+            f_ref = self.f_ref[None]
+            sigma_risk = ti.max(self.sigma_risk[None], 1e-6)
+            dt = self.dt[None]
+            D = 2.0 * self.tool_radius[None]            # tool diameter (mm)
+            v_mm3 = self.v ** 3                         # voxel volume (mm^3)
+            w_t = self.w_time[None]
+            w_at = self.w_air_time[None]
+            st = self.seg_time[t]
+            eng = self.seg_engage[t]
+            # BINARY air, smoothed for autodiff: is_air -> 1 as eng -> 0
+            # (tool not engaged at all => air), is_air -> 0 once eng exceeds
+            # ~1 voxel of tip chip load (any engagement => cutting). It does
+            # not matter HOW MUCH of the tool is engaged. inv_vox is the
+            # one-voxel chip-load scale (seg_engage is a normalized volume in
+            # [0,1]); temp is narrow so this is a differentiable step. Off-grid
+            # segments have eng=0 => is_air=1 automatically (no special case).
+            inv_vox = 1.0 / (self.Nx * self.Ny * self.Nz)
+            temp = ti.max(1e-5, 0.25 * inv_vox)
+            # Clamp the pre-activation to [-50, 50] (as the SDF sigmoids above do):
+            # temp is tiny, so unclamped (eng-inv_vox)/temp overflows exp in the
+            # backward pass -> NaN grad. Clamped regions saturate (grad 0, intended).
+            arg = ti.max(-50.0, ti.min(50.0, (eng - inv_vox) / temp))
+            is_air = 1.0 / (1.0 + ti.exp(arg))
+            # Per-segment time + air-time loss (means over segments, differentiable).
+            ti.atomic_add(self.loss[None], w_t * st * inv_n)
+            ti.atomic_add(self.loss[None], w_at * st * is_air * inv_n)
+            # Per-step breakage probability; accumulated for the traj-level term.
+            eng = self.seg_engage[t]
+            mu_F = kc * (eng * v_mm3) / (dt * D + 1e-12)
+            ln_mu = ti.log(ti.max(mu_F, 1e-12))
+            ln_ref = ti.log(ti.max(f_ref, 1e-12))
+            p_t = 1.0 / (1.0 + ti.exp(-(ln_mu - ln_ref) / sigma_risk))
+            ti.atomic_add(self.acc_psum[None], p_t)
+
+    @ti.kernel
+    def compute_break_loss(self):
+        """Scalar differentiable breakage loss: w_break * (1 - exp(-acc_psum)).
+
+        No for-loop (a single scalar op), so it is autodiff-compatible. Reads
+        acc_psum (needs_grad, accumulated by compute_traj_metrics) and adds the
+        docs/algorithms.md §4.2 trajectory-level probability to self.loss. Grad
+        flows through acc_psum -> seg_engage -> tool_delta/stock.
+        """
+        w_b = self.w_break[None]
+        p_traj = 1.0 - ti.exp(-self.acc_psum[None])
+        ti.atomic_add(self.loss[None], w_b * p_traj)
+
+    @ti.kernel
+    def compute_traj_diagnostics_hard(self, T: ti.i32):
+        """Hard (non-differentiable) final-metric form of the three measures.
+
+        Recomputes the per-segment volumes from the SHARP carve (tool_sdf_sharp,
+        boolean stock occupancy) and writes the diag_* fields using the same
+        formulas as compute_traj_metrics, plus the docs/design.md hard
+        threshold rule: broken = 1 iff F_cut_max > f_max. Call outside a Tape
+        after forward_hard. Reuses the seg_* fields as plain scratch (no grad
+        outside a Tape).
+        """
+        for t in range(T):
+            self.seg_swept[t] = 0.0
+            self.seg_air[t] = 0.0
+            self.seg_engage[t] = 0.0
+            self.seg_time[t] = 0.0
+        inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
+        # Per-segment swept/air/engage from the sharp carve, over the CUTTING
+        # TIP band (tool_sdf_sharp_tip) so the reported air_time_frac reflects
+        # cutting-tip contact with material, not shank volume in carved space.
+        for t, i, j, k in ti.ndrange(T, self.Nx, self.Ny, self.Nz):
+            p = ti.Vector(
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+            )
+            tool_d = self.tool_sdf_sharp_tip(p, t)
+            tool_occ = 0.0
+            if tool_d < 0.0:
+                tool_occ = 1.0
+            pre = 0.0
+            if self.stock[t, i, j, k] < 0.0:
+                pre = 1.0
+            post = 0.0
+            if self.stock[t + 1, i, j, k] < 0.0:
+                post = 1.0
+            ti.atomic_add(self.seg_swept[t], inv_n * tool_occ)
+            # Air = tool swept volume that is in ALREADY-EMPTY stock (pre-cut),
+            # i.e. the tool re-traversing carved space rather than engaging solid
+            # material. Using post-cut stock here was a bug: the tool empties every
+            # voxel it touches, so post-cut those voxels read as empty and EVERY
+            # on-grid segment reported 100% air. pre-cut gives the true engaged vs
+            # air split (air = swept - engage).
+            ti.atomic_add(self.seg_air[t], inv_n * tool_occ * (1.0 - pre))
+            ti.atomic_add(self.seg_engage[t], inv_n * tool_occ * pre)
+        # Per-segment time (sharp regime gate, non-diff).
+        for t in range(T):
+            a = self.tool_pos[t]
+            delta = self.tool_delta[t]
+            dmm = ti.Vector([delta.x * self.Lx, delta.y * self.Ly, delta.z * self.Lz])
+            mag_mm = ti.sqrt(dmm.dot(dmm) + 1e-12)
+            probe = a + delta
+            stock_d = self.stock_sdf_at(probe, t)
+            cube_d = box_sdf(
+                self._vox(probe),
+                self._vox(ti.Vector([0.5, 0.5, 0.5])),
+                self._vox(ti.Vector([0.5, 0.5, 0.5])),
+            )
+            clearance = ti.max(stock_d, cube_d)
+            clearance_mm = clearance * self.v - self.tool_radius[None]
+            is_feed = ti.cast(clearance_mm <= self.safe_distance[None], ti.f32)
+            rapid_step = self.rapid_speed[None] * self.dt[None]
+            feed_step = self.feed_speed[None] * self.dt[None]
+            cap_mm = rapid_step + (feed_step - rapid_step) * is_feed
+            speed = self.rapid_speed[None] + (
+                self.feed_speed[None] - self.rapid_speed[None]
+            ) * is_feed
+            self.seg_time[t] = ti.min(mag_mm, cap_mm) / (speed + 1e-12)
+        # Combine into diag fields.
+        total_time = 0.0
+        air_time = 0.0
+        psum = 0.0
+        pmax = 0.0
+        emax = 0.0
+        esum = 0.0
+        fmax = 0.0
+        kc = self.kc[None]
+        f_ref = self.f_ref[None]
+        sigma_risk = ti.max(self.sigma_risk[None], 1e-6)
+        dt = self.dt[None]
+        D = 2.0 * self.tool_radius[None]
+        v_mm3 = self.v ** 3
+        for t in range(T):
+            st = self.seg_time[t]
+            # BINARY air: a segment is "air" iff the tool is NOT engaged with
+            # material AT ALL this segment -- it does not matter how much of
+            # the tool is engaged, any engagement => cutting (air contribution
+            # 0). seg_engage is the tip chip load (normalized volume in [0,1]);
+            # with the sharp 0/1 occupancy above it is an exact multiple of
+            # inv_n, so 0.5*inv_n cleanly separates "engaged at least one
+            # voxel" from "engages nothing". Off-grid segments (swept hits no
+            # voxel) have seg_engage=0 => air automatically -- no special case
+            # needed (the old sw<=eps branch is subsumed).
+            eng = self.seg_engage[t]
+            is_air = ti.select(eng <= 0.5 * inv_n, 1.0, 0.0)
+            total_time += st
+            air_time += st * is_air
+            mu_F = kc * (eng * v_mm3) / (dt * D + 1e-12)
+            fmax = ti.max(fmax, mu_F)
+            emax = ti.max(emax, eng)
+            esum += eng
+            ln_mu = ti.log(ti.max(mu_F, 1e-12))
+            ln_ref = ti.log(ti.max(f_ref, 1e-12))
+            p_t = 1.0 / (1.0 + ti.exp(-(ln_mu - ln_ref) / sigma_risk))
+            psum += p_t
+            pmax = ti.max(pmax, p_t)
+        self.diag_time[None] = total_time
+        self.diag_air_time[None] = air_time
+        self.diag_break_prob_any[None] = 1.0 - ti.exp(-psum)
+        self.diag_break_prob_max[None] = pmax
+        self.diag_fcut_max[None] = fmax
+        self.diag_engage_max[None] = emax
+        # segment-mean engagement:
+        self.diag_engage_mean[None] = esum / ti.max(1, T)
+        # docs/design.md hard threshold rule.
+        self.diag_broken[None] = 0.0
+        if fmax > self.f_max[None]:
+            self.diag_broken[None] = 1.0
 
     @ti.kernel
     def compute_diagnostics(self, T: ti.i32):
@@ -1427,11 +1895,18 @@ class CSGSimulatorDelta:
             stock_occ = 1.0 / (1.0 + ti.exp(sa))
             penetration = ti.max(0.0, (margin - holder_d) * scale)
             h += inv_n * w_h * stock_occ * penetration * penetration
-            # Air-cut: tool swept volume in empty stock.
+            # Air-cut: tool swept volume in ALREADY-EMPTY stock. Use pre-cut
+            # stock[t]: "empty stock" means empty before this segment cut, i.e.
+            # the tool re-traversing carved space. (Post-cut stock[t+1] was a bug:
+            # the tool empties what it touches, so post-cut read as empty and
+            # over-reported air / distorted the sigmoid-blurred fraction.)
+            stock_d_pre = self.stock[t, i, j, k]
+            sa_pre = ti.max(-50.0, ti.min(50.0, stock_d_pre * scale))
+            stock_occ_pre = 1.0 / (1.0 + ti.exp(sa_pre))
             tool_d = self.tool_sdf(p, t)
             ta = ti.max(-50.0, ti.min(50.0, -tool_d * scale))
             tool_occ = 1.0 / (1.0 + ti.exp(ta))
-            air = tool_occ * (1.0 - stock_occ)
+            air = tool_occ * (1.0 - stock_occ_pre)
             a += inv_n * w_a * air * air
             au += inv_n * air
             ts += inv_n * tool_occ
@@ -1464,7 +1939,7 @@ class CSGSimulatorDelta:
             d = self.target_sdf_scalar(mid)
             exc = ti.max(0.0, d - r_vox)
             tpx += w_tp * exc * exc / ntp
-            pen = ti.max(0.0, r_vox - d)
+            pen = ti.max(0.0, r_vox + self.tool_gouge_margin[None] - d)
             tg += w_tg * pen * pen / ntp
         # Path-length (minimal-motion) over all active segments.
         nl = ti.max(1, T)
@@ -1571,6 +2046,25 @@ class CSGSimulatorDelta:
         self.compute_traj_prox_penalty(0, num_active_steps - 1)
         self.compute_length_penalty(0, num_active_steps - 1)
         self.compute_tool_gouge_penalty(0, num_active_steps - 1)
+        # Trajectory-quality measures (time / air-cut time / breakage). These
+        # run inside the Tape so their soft loss terms receive gradient. When
+        # all three soft weights are zero the kernels are skipped: they would
+        # add 0 to the loss but still build a large autodiff graph (atomic_adds
+        # to needs_grad seg_*/acc_psum fields over all voxels x T), which both
+        # slows training and corrupts tool_delta.grad. The hard, non-diff
+        # final-metric forms (diag_time/diag_air_time/diag_break_prob_*) are
+        # computed by compute_traj_diagnostics_hard in eval_metrics, outside
+        # the Tape, so the reported metrics are unaffected by this guard.
+        w_any = (self.w_time[None] > 0.0
+                 or self.w_air_time[None] > 0.0
+                 or self.w_break[None] > 0.0)
+        if w_any:
+            self.zero_seg_volumes(0, num_active_steps - 1)
+            self.zero_acc_psum()
+            self.compute_seg_time(0, num_active_steps - 1)
+            self.compute_seg_volumes(0, num_active_steps - 1)
+            self.compute_traj_metrics(0, num_active_steps - 1)
+            self.compute_break_loss()
 
     def forward_hard(self, num_active_steps, clip_speeds=True):
         """Hard boolean forward pass for evaluation and rendering.
@@ -1618,6 +2112,13 @@ class CSGSimulatorDelta:
         self.compute_traj_prox_penalty(t0, num_active_steps - 1)
         self.compute_length_penalty(t0, num_active_steps - 1)
         self.compute_tool_gouge_penalty(t0, num_active_steps - 1)
+        # Trajectory-quality measures restricted to the carved tail [t0, T).
+        self.zero_seg_volumes(t0, num_active_steps - 1)
+        self.zero_acc_psum()
+        self.compute_seg_time(t0, num_active_steps - 1)
+        self.compute_seg_volumes(t0, num_active_steps - 1)
+        self.compute_traj_metrics(t0, num_active_steps - 1)
+        self.compute_break_loss()
 
     # ------------------------------------------------------------------
     # State save / restore (for restart-from-state training)
@@ -1960,6 +2461,39 @@ class CSGSimulatorDelta:
         d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * h
 
         # --- Combine (hard max for crisp edges) ---
+        d_xy_pos = ti.max(d_xy, 0.0)
+        d_z_pos = ti.max(d_z, 0.0)
+        outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
+        inside = -ti.max(-ti.max(d_xy, d_z), 0.0)
+        return outside + inside
+
+    @ti.func
+    def tool_sdf_sharp_tip(self, p, t):
+        """Exact (non-smoothed) capped-cylinder SDF over the CUTTING TIP band.
+
+        Hard-max twin of ``tool_sdf_tip`` (height = tool_cut_height, z anchored
+        to the tool base). Used by ``compute_traj_diagnostics_hard`` so the
+        reported air_time_frac reflects cutting-tip contact, not shank exposure.
+        Not differentiable -- never call under ti.ad.Tape.
+        """
+        r = self.tool_radius[None] / self.v          # voxels
+        cut_h = self._tool_cut_h_vox()               # voxels (tip band)
+
+        pv = self._vox(p)
+        a = self._vox(self.tool_pos[t])
+        b = self._vox(self.tool_pos[t + 1])
+
+        pa_xy = ti.Vector([pv.x - a.x, pv.y - a.y])
+        ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
+        ba_len2 = ba_xy.dot(ba_xy) + 1e-12
+        h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
+        closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
+        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
+
+        z_base = a.z + (b.z - a.z) * h_param
+        z_center = z_base + 0.5 * cut_h
+        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * cut_h
+
         d_xy_pos = ti.max(d_xy, 0.0)
         d_z_pos = ti.max(d_z, 0.0)
         outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)

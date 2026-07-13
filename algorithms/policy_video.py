@@ -247,7 +247,13 @@ def _continuous_action(agent, obs_t):
 def _continuous_metrics(env, resolution):
     from eval.eval_csg import _metrics
 
-    return _metrics(_continuous_stock_sdf(env), _continuous_target_sdf(env), 1.0 / resolution)
+    sim = env.unwrapped.simulator
+    # stock[0] is the pristine uncut stock (forward writes stock[t+1], never
+    # stock[0]); pass it so _metrics reports the do-nothing dice baseline and
+    # the difficulty-normalized dice-improvement ratio.
+    uncut = sim.stock.to_numpy()[0]
+    return _metrics(_continuous_stock_sdf(env), _continuous_target_sdf(env),
+                    1.0 / resolution, uncut)
 
 
 def _continuous_stock_sdf(env):

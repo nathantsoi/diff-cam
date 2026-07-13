@@ -31,6 +31,7 @@ eval_freq=10 + best-checkpoint saving capture the transient dice peak:
 import math
 import os
 import random
+import sys
 import time
 from dataclasses import dataclass
 
@@ -117,8 +118,19 @@ class Args:
     """run-name prefix; same env/simulator as csg_ppo (exp_name distinguishes the method)"""
     save_model: bool = False
     """whether to save the learned trajectory into the `runs/{run_name}` folder"""
+    use_feedback: bool = False
+    """if True, warm-start the trajectory from the highest-rated prior run (by
+    human star rating) that matches this target_shape + max_steps, then continue
+    optimizing — a lightweight RLHF-style policy improvement. The feedback store
+    (autoresearch/tasks/train_csg/run_feedback.json, written by the web
+    dashboard's star/note UI) is ALWAYS read and logged + recorded in
+    metrics.json; this flag only gates whether the warm-start deltas are applied.
+    Shape-agnostic in the method: matching is in this selection layer (reading
+    prior args.json metadata), not in the optimizer/init/loss code."""
     autoresearch: bool = False
     """if True, prefix the run name with 'AR-' for tracking experiments"""
+    runs_subdir: str = ""
+    """optional subdirectory under runs/ to write the run into (e.g. 'jul8-multidepth'); empty = top-level runs/. Lets the web dashboard group runs into a batch without moving them after the fact."""
 
     # eval / video cadence -- measured in Adam iterations (same flags as csg_ppo)
     eval: bool = False
@@ -155,13 +167,17 @@ class Args:
     """half-range of the uniform random init for per-step displacements (0.02 and 0.1 both hurt)"""
     init_mode: str = "random"
     """trajectory init: 'random', 'raster', 'raster_fine', 'raster_fine_wide',
-    'spiral', 'shell', or 'zlayer' (z-level descent that pre-clears the target
-    exterior layer by layer, using the tall tool's vertical extent). 'raster_fine'
-    is a clipping-aware fine boustrophedon (per-step <= feed cap) that survives
-    the speed clip; 'raster_fine_wide' spans the full target envelope (0.05-0.95)
-    instead of the inner 0.20-0.80 core. 'shell'/'zlayer' derive the target
-    surface from the baked SDF grid (shape-agnostic -- no task metadata). The
-    coarse structured inits (raster/spiral/shell/zlayer) fail via speed-limit
+    'spiral', 'shell', 'zlayer', or 'multidepth'. 'raster_fine' is a
+    clipping-aware fine boustrophedon (per-step <= feed cap) that survives the
+    speed clip; 'raster_fine_wide' spans the full target envelope (0.05-0.95)
+    instead of the inner 0.20-0.80 core. 'shell'/'zlayer'/'multidepth' derive
+    the target surface from the baked SDF grid (shape-agnostic -- no task
+    metadata). 'multidepth' is a continuous multi-depth helical roughing: it
+    descends through the target's full z-extent while a triangle-wave radius
+    sweeps the waste annulus from the cube wall inward to the target surface
+    + r_tool (bulk removal without gouging), arc-length-resampled + auto-revs
+    so the whole path fits the speed-clip budget and survives it. The coarse
+    structured inits (raster/spiral/shell/zlayer) fail via speed-limit
     clipping."""
     zlayer_revs: float = 12.0
     """zlayer init: angular revolutions over the full z descent. Higher revs =
@@ -174,6 +190,24 @@ class Args:
     """zlayer init: normalized gap between the target surface + r_tool and the
     tool-center orbit. Tighter (0.005-0.015) leaves less residual surface waste
     without gouging (tool inner edge still clears the part)."""
+
+    multidepth_levels: float = 5.0
+    """multidepth init: number of RADIAL sweep cycles across the waste annulus
+    (r_outer -> r_safe -> r_outer) over the full z descent. More cycles = denser
+    radial coverage of the annulus (more multi-depth passes through the bulk
+    waste). The helix descends continuously through the target's full z-extent
+    (read shape-agnostically from the baked SDF grid) -- this is the
+    multi-depth aspect, not discrete z-levels."""
+    multidepth_revs: float = 3.0
+    """multidepth init: angular revolutions of the helix over the full z
+    descent. More revs = denser angular coverage but longer arc; revs is
+    auto-shrunk so the total path fits the speed-clip budget (the tool can
+    only traverse (T-1)*feed_cap arc-units), so the full z-extent stays
+    reachable with every step <= the feed cap."""
+    multidepth_margin: float = 0.02
+    """multidepth init: normalized gap between target surface + r_tool and the
+    innermost spiral radius (keeps the tool tangent-or-outside the part -> no
+    gouge). Same role as zlayer_margin."""
     grad_clip: float = 0.5
     """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
     transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5
@@ -242,6 +276,11 @@ class Args:
     smooth_max (high k no longer NaNs)."""
     k_final: float = 10.0
     """final smoothness k when --k-anneal is on (ramped linearly from k_init)."""
+
+    loss_shift: float = 0.0
+    """de-biased (hard-carve-aware) loss: add this to stock_d before the loss
+    sigmoid to compensate soft-union over-erosion (~log(2)*k_ref/k_final at the
+    final sharpness) so the loss targets the deployable HARD carve. 0 = off."""
 
     # Loss balancing (objective vs. safety barriers; see CSGSimulatorDelta)
     w_residual: float = 1.0
@@ -328,6 +367,82 @@ class Args:
     stock-based w_gouge (satisfied trivially by soft-union over-erosion while
     the HARD carve still gouges), this constrains the trajectory GEOMETRY
     directly so it transfers to hard dice. 0 disables."""
+    tool_gouge_margin_mm: float = 0.0
+    """margin (mm) added to the tool radius in the TOOL-POSITION gouge barrier.
+    The barrier fires when target_sdf(tool_center) < r_tool + margin, i.e. the
+    tool center must stay `margin` mm FURTHER off the surface than mere
+    tangency. Convex parts (sphere) gouge at pass seams where overlapping
+    TANGENT capsules bite into the part -- loss_tool_gouge=0 at midpoints yet
+    the boolean union still over-erodes; a positive margin lifts the tool so the
+    union of capsules stays tangent-only, trading a little uncut residual for
+    no gouge. Shape-agnostic (target_sdf only). 0 = tangent-only (default)."""
+    w_tool_gouge_warmup_frac: float = 0.0
+    """fraction of iters before w_tool_gouge begins ramping (0 = on from start).
+    The tool-position gouge barrier is spuriously active at correct TANGENT
+    passes on convex parts (sphere), so a constant w_tool_gouge can pin the tool
+    off the surface during the low-k exploration phase and stall carving before
+    it establishes. With a warmup, carving is established first (residual falls,
+    dice peaks), THEN w_tool_gouge ramps linearly from 0 to --w-tool-gouge over
+    the remaining iters so the barrier suppresses gouge without pre-empting the
+    carve. Pairs naturally with --k-anneal (barrier ramps in as k sharpens)."""
+
+    # ---- Trajectory-quality measures (time / air-cut time / breakage) ----
+    # Three deployable measures reported alongside dice and (when their weight
+    # is > 0) added to the soft loss as differentiable surrogates. Hard,
+    # non-differentiable final-metric forms are always reported in metrics.json
+    # regardless of these weights. See docs/algorithms.md + docs/design.md.
+    w_time: float = 1e-3
+    """weight on the TOTAL TOOLPATH TIME soft term (sum of per-segment motion
+    time at the feed/rapid regime speed, seconds). Shorter is better for equal
+    dice. 0 disables. NOTE: time (~10s) and breakage (~[0,1]) live on very
+    different scales, so the three w_* here are equal-by-default starting
+    points -- tune per-run."""
+    w_air_time: float = 1e-3
+    """weight on the AIR-CUTTING TIME soft term (seconds spent cutting air,
+    weighted by the per-segment air fraction). High retracts clear of the
+    surface are free; surface-hugging air in empty corners is charged. 0
+    disables."""
+    w_break: float = 1e-3
+    """weight on the TOOL-BREAKAGE PROBABILITY soft term (docs/algorithms.md
+    §4.1/§4.2 stress-strength interference, simplified to a single threshold
+    f_ref and log-variance sigma_risk). 0 disables. A too-risky toolpath should
+    be rejected even if shorter; raising this (and best_w_break) enforces that."""
+    kc: float = 700.0
+    """specific cutting force (N/mm^2) for the breakage force model
+    (Al ~600-800). mu_F = kc * V_chip_mm3 / (dt * D)."""
+    f_ref: float = 50.0
+    """nominal cutting force (N) at which per-step P_break = 0.5 (effective
+    S_bar / alpha_mean). Calibrate from known-good/bad cuts; raw fcut_max is
+    reported in metrics.json to aid this."""
+    sigma_risk: float = 0.5
+    """combined log-std of the stress-strength interference,
+    sqrt(sigma_alpha^2 + pi^2/(6 m^2)). Sets the transition band of the
+    breakage sigmoid."""
+    f_max: float = 100.0
+    """hard threshold force (N) for the docs/design.md broken flag: broken=1
+    iff F_cut_max > f_max. Calibrate; raw fcut_max is reported."""
+    best_w_airtime: float = 0.05
+    """composite best-checkpoint weight on normalized air-cutting time. The
+    best trajectory is selected by score = dice - best_w_airtime*air_time_norm
+    - best_w_time*total_time_norm - best_w_break*break_prob_any, where the time
+    metrics are normalized by T*dt (max possible time) into [0,1]. Small
+    weights keep dice dominant; raising best_w_break enforces the reject-too-
+    risky behavior."""
+    best_w_time: float = 0.05
+    """composite best-checkpoint weight on normalized total toolpath time."""
+    best_w_break: float = 0.05
+    """composite best-checkpoint weight on breakage probability (already
+    [0,1]). Raising this rejects high-engagement checkpoints even at higher
+    dice."""
+    best_on_hard: bool = False
+    """select the best/deployable checkpoint by HARD dice (the deployable sharp
+    carve metric) instead of the default SOFT dice. The soft selector is less
+    noisy but can deploy a checkpoint whose soft dice is high yet hard dice is
+    much lower (the soft/hard gap) -- throwing away a higher-hard-dice final
+    iter. Hard selection aligns deployment with the metric we advance on, at the
+    cost of selecting on a nondeterministic carve (mitigated by the air/break
+    penalties and by hard dice being stable at convergence). The reported
+    `hard_dice` then reflects the hard-dice-best checkpoint."""
 
     init_stock_from: str = ""
     """STAGED TRAINING: path to a .npz saved by the truncation utility containing
@@ -391,6 +506,12 @@ class Args:
     """cutter radius in mm (default 1/4" end mill)"""
     tool_height_mm: float = 25.0
     """cutter flute length in mm"""
+    tool_cut_height_mm: float = 0.0
+    """height (mm) of the CUTTING TIP band over which the air-time metric/loss
+    integrates swept/air/engage volumes (see airfrac-shank-volume-bias). 0 =
+    use tool_radius_mm (one-radius tip band); the full tool_height shank is no
+    longer counted as air when it sits in already-carved empty space. The carve
+    itself is unaffected (still the full cylinder)."""
     dt: float = 0.45
     """seconds per simulator step; speed = |delta (.) envelope_mm| / dt. THE decisive
     lever: at low dt (0.12/0.01) the swept-cylinder tool is speed-limited -- its
@@ -460,11 +581,27 @@ def record_video(sim, gui, T, out_path, fps):
         return None
 
 
+def _safe_round(v, ndigits=6):
+    """Round a metric to ndigits, coercing non-finite (nan/inf) to None so the
+    summary JSON stays strictly parseable (autoresearch harnesses reject NaN)."""
+    if v is None:
+        return None
+    f = float(v)
+    return None if not np.isfinite(f) else round(f, ndigits)
+
+
 def eval_metrics(sim, T, dx):
-    """Dice/ASD/HD95 (shared `_metrics` path) + gouge/residual of the carved stock."""
+    """Dice/ASD/HD95 (shared `_metrics` path) + gouge/residual of the carved stock.
+
+    Also reports dice_baseline (do-nothing: uncut stock vs target) and
+    dice_improvement = (dice - baseline)/(1 - baseline), a difficulty-normalized
+    accuracy score (0 = idle, 1 = perfect). stock[0] is the pristine uncut stock
+    (forward writes stock[t+1], never stock[0]), so it is the right baseline for
+    both soft and hard carves."""
     stock = sim.stock.to_numpy()[T - 1]
     target = sim.target.to_numpy()
-    m = _metrics(stock, target, dx)  # {"dice", "asd", "hd95"} -- same as csg_ppo
+    uncut = sim.stock.to_numpy()[0]
+    m = _metrics(stock, target, dx, uncut)  # +dice_baseline/dice_improvement
     pred_mask = sdf_to_mask(stock)
     target_mask = sdf_to_mask(target)
     m["gouge"] = float(_gouge(pred_mask, target_mask) * (dx ** 3))
@@ -496,16 +633,55 @@ def eval_metrics(sim, T, dx):
     m["air_cut_raw"] = air_vol
     m["tool_swept_raw"] = swept
     m["air_cut_fraction"] = air_vol / max(swept, 1e-8)
+    # Trajectory-quality measures (hard, final-metric form on the hard carve):
+    # total toolpath time, air-cutting time, breakage probability + force, and
+    # the docs/design.md broken flag. Computed by compute_traj_diagnostics_hard.
+    sim.compute_traj_diagnostics_hard(T - 1)
+    m["air_time"] = float(sim.diag_air_time[None])
+    m["total_time"] = float(sim.diag_time[None])
+    m["break_prob_any"] = float(sim.diag_break_prob_any[None])
+    m["break_prob_max"] = float(sim.diag_break_prob_max[None])
+    m["fcut_max"] = float(sim.diag_fcut_max[None])
+    m["broken"] = float(sim.diag_broken[None])
+    m["engage_max"] = float(sim.diag_engage_max[None])
+    m["engage_mean"] = float(sim.diag_engage_mean[None])
     return m
 
 
-def export_stls(sim, T, dx, run_name, step, track):
+def composite_score(m, args, T, dt):
+    """Best-checkpoint composite: dice minus normalized trajectory penalties.
+
+    score = dice - best_w_airtime*air_time_norm - best_w_time*total_time_norm
+            - best_w_break*break_prob_any
+
+    air_time and total_time are normalized by T*dt (the max possible toolpath
+    time = every segment at the dt cap) into ~[0,1] so the weights are
+    comparable; break_prob_any is already [0,1]. With small weights dice still
+    dominates; the new metrics break ties toward shorter/safer paths, and a
+    large best_w_break enforces the reject-too-risky behavior. m may be None
+    (returns -inf).
+    """
+    if m is None:
+        return -1e9
+    t_cap = max(T * dt, 1e-8)
+    air_norm = float(m.get("air_time", 0.0)) / t_cap
+    time_norm = float(m.get("total_time", 0.0)) / t_cap
+    brk = float(m.get("break_prob_any", 0.0))
+    return (
+        float(m["dice"])
+        - args.best_w_airtime * air_norm
+        - args.best_w_time * time_norm
+        - args.best_w_break * brk
+    )
+
+
+def export_stls(sim, T, dx, run_dir, step, track):
     """Export initial stock / carved stock / target meshes (shared `_sdf_to_stl`)."""
     initial_stock = sim.stock.to_numpy()[0].copy()      # before the first cut
     carved_stock = sim.stock.to_numpy()[T - 1].copy()
     target = sim.target.to_numpy().copy()
 
-    mesh_dir = os.path.join("runs", run_name, "meshes")
+    mesh_dir = os.path.join(run_dir, "meshes")
     os.makedirs(mesh_dir, exist_ok=True)
     written = []
     for name, sdf in (("stock_initial", initial_stock),
@@ -524,6 +700,115 @@ def export_stls(sim, T, dx, run_name, step, track):
             wandb.save(path, base_path=os.path.dirname(path), policy="now")
     return written
 
+
+# ---------------------------------------------------------------------------
+# Human-feedback warm-start (RLHF-style policy improvement).
+#
+# The web dashboard lets a user rate each run 1-7 stars + a free-text note;
+# those ratings persist to autoresearch/tasks/train_csg/run_feedback.json (keyed
+# by run basename). Every training run reads that store here so the human's
+# qualitative judgments are (a) logged to stderr and (b) recorded in the new
+# run's metrics.json under "feedback". With --use-feedback, the run additionally
+# warm-starts its trajectory from the highest-rated prior run that matches this
+# target_shape + max_steps (matching is in THIS selection layer — reading prior
+# args.json metadata — so the optimizer/init/loss code stays shape-agnostic).
+# ---------------------------------------------------------------------------
+def _feedback_store_path():
+    return os.path.join("autoresearch", "tasks", "train_csg", "run_feedback.json")
+
+
+def _load_feedback_store():
+    """Read the feedback store; returns {} if missing/corrupt (never raises)."""
+    try:
+        with open(_feedback_store_path()) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _find_run_dir_by_name(name):
+    """Locate runs/<batch>/<name> by basename (newest on ties), or None."""
+    import glob
+    hits = [d for d in glob.glob(f"runs/**/{name}", recursive=True) if os.path.isdir(d)]
+    if not hits:
+        return None
+    hits.sort(key=lambda d: os.path.getmtime(d), reverse=True)
+    return hits[0]
+
+
+def _read_run_args(run_dir):
+    """Read a prior run's args.json, or None if unreadable."""
+    p = os.path.join(run_dir, "args.json")
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def load_human_feedback(target_shape, max_steps):
+    """Read the feedback store and find a warm-start trajectory.
+
+    Returns (warmstart_deltas_or_None, summary). `summary` always carries the
+    top-rated prior runs (for logging + metrics.json). `warmstart_deltas` is the
+    (T-1, 3) float32 delta array from the highest-starred prior run whose
+    target_shape + max_steps match, or None when no match / no saved trajectory.
+    Deltas that don't exactly fit T-1 are truncated or last-padded (never
+    rescaled — per-step displacements don't interpolate cleanly).
+    """
+    store = _load_feedback_store()
+    # Rank rated entries by stars desc, then recency desc.
+    ranked = sorted(
+        [(k, v) for k, v in store.items() if v.get("stars")],
+        key=lambda kv: (-int(kv[1]["stars"]), -float(kv[1].get("ts", 0.0))),
+    )
+    summary = {
+        "top_rated": [
+            {"run": k, "stars": int(v["stars"]), "feedback": str(v.get("feedback", ""))}
+            for k, v in ranked[:8]
+        ],
+        "warmstart": None,
+    }
+    for k, v in ranked:
+        # Warm-start only from above-average runs (5-7 stars on the 1-7 scale).
+        if int(v["stars"]) < 5:
+            break
+        run_dir = _find_run_dir_by_name(k)
+        if not run_dir:
+            continue
+        pa = _read_run_args(run_dir) or {}
+        if pa.get("target_shape") != target_shape:
+            continue
+        try:
+            if int(pa.get("max_steps", -1)) != int(max_steps):
+                continue
+        except (TypeError, ValueError):
+            continue
+        dp = os.path.join(run_dir, "trajectory_deltas.npy")
+        if not os.path.exists(dp):
+            continue
+        try:
+            arr = np.load(dp)
+        except Exception:
+            continue
+        if arr.ndim != 2 or arr.shape[1] != 3:
+            continue
+        arr = arr.astype(np.float32)
+        need = int(max_steps) - 1
+        if arr.shape[0] >= need:
+            init = arr[:need].copy()
+        else:
+            pad = np.tile(arr[-1:], (need - arr.shape[0], 1))
+            init = np.vstack([arr, pad]).astype(np.float32)
+        summary["warmstart"] = {
+            "run": k, "stars": int(v["stars"]),
+            "feedback": str(v.get("feedback", "")),
+            "shape": target_shape, "max_steps": int(max_steps),
+        }
+        return init, summary
+    return None, summary
+
+
 def main():
     args = tyro.cli(Args)
 
@@ -532,13 +817,42 @@ def main():
     prefix = "AR-" if args.autoresearch else ""
     ts = int(time.time() * 1000)
     run_name = f"{prefix}{args.env_id}__{args.exp_name}__{args.seed}__{ts}"
-    while os.path.exists(os.path.join("runs", run_name)):
-        ts += 1
-        run_name = f"{prefix}{args.env_id}__{args.exp_name}__{args.seed}__{ts}"
-    run_dir = os.path.join("runs", run_name)
+    run_dir = os.path.join("runs", args.runs_subdir, run_name) if args.runs_subdir else os.path.join("runs", run_name)
+    # Atomically claim a unique run dir. The old check-then-create loop
+    # (`while os.path.exists`) raced when two launches landed in the same
+    # millisecond: both saw no dir, both proceeded, and os.makedirs(exist_ok=True)
+    # silently let the loser overwrite the winner's artifacts. makedirs with
+    # exist_ok=False is atomic on POSIX -- exactly one process wins; the other
+    # gets FileExistsError and retries with an incremented timestamp.
+    while True:
+        try:
+            os.makedirs(run_dir, exist_ok=False)
+            break
+        except FileExistsError:
+            ts += 1
+            run_name = f"{prefix}{args.env_id}__{args.exp_name}__{args.seed}__{ts}"
+            run_dir = os.path.join("runs", args.runs_subdir, run_name) if args.runs_subdir else os.path.join("runs", run_name)
     video_dir = os.path.join(run_dir, "videos")
     os.makedirs(video_dir, exist_ok=True)
     print(f"[run] writing outputs to {run_dir}")
+
+    # Human feedback: always read the rating store, log top-rated prior runs,
+    # and (with --use-feedback) warm-start from the best matching trajectory.
+    fb_warmstart, fb_summary = load_human_feedback(args.target_shape, args.max_steps)
+    if fb_summary["top_rated"]:
+        print("[feedback] top-rated prior runs (human stars):", file=sys.stderr, flush=True)
+        for t in fb_summary["top_rated"][:5]:
+            print(f"  {t['stars']}★ {t['run']}: {t['feedback'] or '(no note)'}",
+                  file=sys.stderr, flush=True)
+    if fb_summary["warmstart"]:
+        ws = fb_summary["warmstart"]
+        if args.use_feedback:
+            print(f"[feedback] --use-feedback: warm-starting from {ws['stars']}★ "
+                  f"run {ws['run']} (shape={ws['shape']}, max_steps={ws['max_steps']})",
+                  file=sys.stderr, flush=True)
+        else:
+            print(f"[feedback] {ws['stars']}★ warm-start available ({ws['run']}); "
+                  f"pass --use-feedback to apply", file=sys.stderr, flush=True)
 
     # Save reproduction command and arguments
     try:
@@ -629,12 +943,17 @@ def main():
                           sub_radius_mm=args.target_sub_radius_mm)
     sim.tool_radius[None] = args.tool_radius_mm
     sim.tool_height[None] = args.tool_height_mm
+    # Cutting-tip band for the air-time metric/loss (0 -> one tool radius).
+    sim.tool_cut_height[None] = (
+        args.tool_cut_height_mm if args.tool_cut_height_mm > 0.0 else args.tool_radius_mm
+    )
     # Tool holder: 2.5 inch diameter cylinder above the cutter (mm; default).
     from cam.units import inch_to_mm
     sim.holder_radius[None] = inch_to_mm(2.5 / 2.0)
     # Loss balancing: objective (residual) vs. safety barriers (gouge, holder).
     sim.w_residual[None] = args.w_residual
     sim.w_gouge[None] = args.w_gouge
+    sim.loss_shift[None] = args.loss_shift
     sim.holder_penalty_weight[None] = args.holder_penalty_weight
     sim.holder_margin[None] = args.holder_margin
     # Trajectory regularizers (air-cut + jerk); 0 = disabled.
@@ -645,6 +964,18 @@ def main():
     sim.w_traj_prox[None] = args.w_traj_prox
     sim.w_len[None] = args.w_len
     sim.w_tool_gouge[None] = args.w_tool_gouge
+    # Margin is in mm; the barrier works in voxels (target_sdf + r_vox are both
+    # voxel units), so convert mm -> voxels via the voxel size v (mm/voxel).
+    sim.tool_gouge_margin[None] = args.tool_gouge_margin_mm / sim.v
+    # Trajectory-quality measures (time / air-cut time / breakage) + breakage
+    # model constants.
+    sim.w_time[None] = args.w_time
+    sim.w_air_time[None] = args.w_air_time
+    sim.w_break[None] = args.w_break
+    sim.kc[None] = args.kc
+    sim.f_ref[None] = args.f_ref
+    sim.sigma_risk[None] = args.sigma_risk
+    sim.f_max[None] = args.f_max
     sim.bake_target_grid()
     sim.set_target_volume()
 
@@ -965,8 +1296,279 @@ def main():
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "multidepth":
+        # Shape-agnostic MULTI-DEPTH surface-following helical roughing. Builds
+        # a continuous 3D toolpath from the baked target SDF grid ONLY (no shape
+        # names / params). A single helix simultaneously (a) descends through
+        # the target's full z-extent (multi-depth), (b) rotates to cover the
+        # annulus angularly, and (c) sweeps the radius back and forth across the
+        # waste annulus -- from the cube wall (r_outer = 0.5 + r_tool, tangent so
+        # corner waste is removed) inward to the target surface offset by the
+        # tool radius (r_safe(z) = target cross-section radius at z + r_tool +
+        # margin, read shape-agnostically from target_cross_section_radii). The
+        # tool center stays >= r_tool outside the target surface at every point,
+        # so it removes the bulk EXTERIOR waste (the residual a surface-hugging
+        # shell leaves behind) WITHOUT gouging -- a regular, generalizable CNC
+        # helical-z-level roughing pattern. No retracts (continuous descent) ->
+        # low air time.
+        #
+        # The simulator's per-step speed clip is a HARD wall: in T-1 steps the
+        # tool can traverse at most (T-1)*feed_cap arc-units, so any commanded
+        # path longer than that has its tail never reached (the discrete
+        # per-level-spiral version of this init hit exactly that -- 42 units of
+        # arc for a 9.5-unit budget, so only the top of the part was carved).
+        # We therefore (1) build a CONTINUOUS helix (interleave z/angle/radius
+        # so coverage is simultaneous, not sequential per level) and (2) resample
+        # the path at constant arc length to EXACTLY n points spanning the whole
+        # path, so every step is <= feed_cap and the entire z-extent is reached.
+        n = T - 1
+        stock_mm_x = args.stock_size_in[0] * 25.4
+        r_tool = args.tool_radius_mm / stock_mm_x
+        margin = args.multidepth_margin
+        # Feed speed cap in normalized units per step (the clip-survival budget).
+        # feed_ipm [in/min] * dt [s] / 60 [s/min] / stock_size_in[0] [in/unit].
+        feed_cap = args.feed_ipm * args.dt / 60.0 / args.stock_size_in[0]
+        # Target z-extent from the baked grid (shape-agnostic): lowest/highest
+        # solid voxel, padded by one voxel and clamped inside the stock.
+        _sdf_grid = sim.target.to_numpy()
+        Nz_grid = float(_sdf_grid.shape[2])
+        _solid = np.where(_sdf_grid <= 0.0)[2]
+        if len(_solid):
+            z_top = float(_solid.max()) / Nz_grid + 1.0 / Nz_grid
+            z_bot = float(_solid.min()) / Nz_grid
+        else:
+            z_top, z_bot = 0.95, 0.05
+        z_top = min(z_top + 2.0 * r_tool, 0.98)
+        z_bot = max(z_bot, 0.02)
+        r_cross = target_cross_section_radii(sim)
+        r_outer = 0.5 + r_tool  # tool tangent to cube wall removes corner waste
+
+        def r_safe_at(z):
+            return _r_cross_at(r_cross, z) + r_tool + margin
+
+        # Continuous helix over u in [0,1]: z descends, angle rotates (revs
+        # turns), and radius sweeps the annulus via a triangle wave (radial_cycles
+        # in->out passes) clamped to [r_safe(z), r_outer].
+        radial_cycles = max(1.0, float(args.multidepth_levels))
+        u = np.linspace(0.0, 1.0, 4000)
+        z = z_top + (z_bot - z_top) * u
+        r_safe_u = np.clip(np.array([r_safe_at(zz) for zz in z]), 0.0, r_outer)
+        budget = max(1.0, (n - 1)) * feed_cap  # max arc the tool can traverse
+
+        def build_helix(revs):
+            theta = 2.0 * np.pi * revs * u
+            ph = (u * radial_cycles) % 1.0
+            tri = np.abs(1.0 - 2.0 * ph)            # 0 at walls -> 1 mid
+            r = r_outer + (r_safe_u - r_outer) * tri
+            pts = np.stack([0.5 + r * np.cos(theta),
+                            0.5 + r * np.sin(theta), z], axis=1
+                           ).astype(np.float32)
+            seg = np.diff(pts, axis=0)
+            seglen = np.sqrt((seg ** 2).sum(axis=1))
+            cum = np.concatenate([[0.0], np.cumsum(seglen)])
+            return pts, cum, float(cum[-1])
+
+        # Adaptively shrink revs so the helix total arc fits the speed-clip
+        # budget (arc ~ linear in revs, dominant term r*2*pi*revs). This keeps
+        # the FULL z descent reachable in n steps (no tail dropped) while every
+        # step stays <= feed_cap. One refinement suffices.
+        revs = max(0.5, args.multidepth_revs)
+        _, _, total = build_helix(revs)
+        if total > 0.95 * budget:
+            revs = max(0.5, revs * (0.95 * budget) / total)
+            revs = max(0.5, revs * (0.95 * budget) / build_helix(revs)[2])
+        pts, cum, total = build_helix(revs)
+        # Resample the (now budget-fitting) full path at constant arc length to
+        # EXACTLY n points: every step <= feed_cap, full z-extent reached.
+        s_targets = np.linspace(0.0, total, n)
+        idx = np.clip(np.searchsorted(cum, s_targets) - 1, 0, len(pts) - 2)
+        frac = ((s_targets - cum[idx]) /
+                np.maximum(cum[idx + 1] - cum[idx], 1e-9))
+        positions = (pts[idx] + (pts[idx + 1] - pts[idx]) * frac[:, None]
+                     ).astype(np.float32)
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "multidepth_cavity":
+        # Shape-agnostic MULTI-DEPTH helical roughing WITH an interior-cavity
+        # pass. Identical to `multidepth` for targets with NO interior cavity
+        # (solid sphere/box/cyl/pyramid/bowl): the cavity detection finds none,
+        # so the path is the plain exterior helix -- zero regression on the 5
+        # working shapes. For targets with an interior concave cavity (e.g. a
+        # through-hole), the outer-envelope r_safe(z)=r_cross(z)+r_tool+margin
+        # keeps the tool OUTSIDE the cavity, so plain multidepth can never clear
+        # the cavity's waste (this is the hole root cause; see idea.md Wave 5).
+        # This mode detects the cavity shape-agnostically -- target SDF>0 voxels
+        # INSIDE the outer envelope r_cross -- and appends a retract -> rapid ->
+        # plunge -> small-radius spiral through the cavity centroid so the
+        # interior waste is reached. Reads only the baked target SDF grid; no
+        # shape names / shape params.
+        n = T - 1
+        stock_mm_x = args.stock_size_in[0] * 25.4
+        r_tool = args.tool_radius_mm / stock_mm_x
+        margin = args.multidepth_margin
+        feed_cap = args.feed_ipm * args.dt / 60.0 / args.stock_size_in[0]
+        grid = sim.target.to_numpy()
+        Nx, Ny, Nz = grid.shape
+        _solid = np.where(grid <= 0.0)[2]
+        z_top = (float(_solid.max()) / Nz + 1.0 / Nz) if len(_solid) else 0.95
+        z_bot = (float(_solid.min()) / Nz) if len(_solid) else 0.05
+        z_top = min(z_top + 2.0 * r_tool, 0.98)
+        z_bot = max(z_bot, 0.02)
+        r_cross = target_cross_section_radii(sim)
+        r_outer = 0.5 + r_tool
+
+        def r_safe_at(z):
+            return _r_cross_at(r_cross, z) + r_tool + margin
+
+        budget = max(1.0, (n - 1)) * feed_cap
+        radial_cycles = max(1.0, float(args.multidepth_levels))
+
+        def helix(revs, z_arr, r_low, r_high, cx, cy):
+            # radius sweeps [r_low, r_high] via a triangle wave; (cx,cy) center.
+            m = max(8, len(z_arr))
+            u = np.linspace(0.0, 1.0, m)
+            theta = 2.0 * np.pi * revs * u
+            tri = np.abs(1.0 - 2.0 * ((u * radial_cycles) % 1.0))
+            r = r_low + (r_high - r_low) * tri
+            pts = np.stack([cx + r * np.cos(theta), cy + r * np.sin(theta),
+                            z_arr], axis=1).astype(np.float32)
+            seg = np.diff(pts, axis=0)
+            cum = np.concatenate([[0.0], np.cumsum(np.sqrt((seg ** 2).sum(1)))])
+            return pts, cum, float(cum[-1])
+
+        def resample(pts, cum, npts):
+            s = np.linspace(0.0, cum[-1], npts)
+            idx = np.clip(np.searchsorted(cum, s) - 1, 0, len(pts) - 2)
+            frac = (s - cum[idx]) / np.maximum(cum[idx + 1] - cum[idx], 1e-9)
+            return (pts[idx] + (pts[idx + 1] - pts[idx]) * frac[:, None]
+                    ).astype(np.float32)
+
+        # --- exterior helix (same construction as multidepth) ---
+        u1 = np.linspace(0.0, 1.0, 4000)
+        z1 = z_top + (z_bot - z_top) * u1
+        rs1 = np.clip(np.array([r_safe_at(zz) for zz in z1]), 0.0, r_outer)
+        c1 = np.full_like(z1, 0.5)
+        revs = max(0.5, args.multidepth_revs)
+        _, _, te = helix(revs, z1, rs1, r_outer, c1, c1)
+        if te > 0.95 * budget:
+            revs = max(0.5, revs * (0.95 * budget) / te)
+            revs = max(0.5, revs * (0.95 * budget) / helix(revs, z1, rs1, r_outer, c1, c1)[2])
+        pts_e, cum_e, te = helix(revs, z1, rs1, r_outer, c1, c1)
+
+        # --- interior cavity detection (shape-agnostic, from the SDF grid) ---
+        xs = (np.arange(Nx) + 0.5) / Nx - 0.5
+        ys = (np.arange(Ny) + 0.5) / Ny - 0.5
+        Rxy = np.sqrt(xs[:, None] ** 2 + ys[None, :] ** 2)         # (Nx,Ny) from center
+        rc_z = np.clip(r_cross, 0.0, None)                          # (Nz,) outer envelope
+        empty_in = (grid > 0.0) & (Rxy[:, :, None] < rc_z[None, None, :])
+        cav_R = np.where(empty_in, Rxy[:, :, None], -1.0).max(axis=(0, 1))
+        r_cav_z = np.clip(cav_R, 0.0, None)                          # cavity outer radius/z
+        has_cav = r_cav_z > r_tool + 1e-3                            # tool fits in cavity
+
+        if has_cav.any():
+            cx_v = (np.arange(Nx) + 0.5) / Nx
+            cy_v = (np.arange(Ny) + 0.5) / Ny
+            sx = np.where(empty_in, cx_v[:, None, None], 0.0).sum(axis=(0, 1))
+            sy = np.where(empty_in, cy_v[None, :, None], 0.0).sum(axis=(0, 1))
+            cn = empty_in.sum(axis=(0, 1))
+            cxz = np.where(cn > 0, sx / np.maximum(cn, 1), 0.5)
+            cyz = np.where(cn > 0, sy / np.maximum(cn, 1), 0.5)
+            zk = (np.arange(Nz) + 0.5) / Nz
+            kc = np.where(has_cav)[0]
+            z_ct = min(z_top, kc.max() / Nz + 1.0 / Nz)
+            z_cb = max(z_bot, kc.min() / Nz)
+            u2 = np.linspace(0.0, 1.0, 2000)
+            z2 = z_ct + (z_cb - z_ct) * u2
+            cx2 = np.interp(z2, zk, cxz)
+            cy2 = np.interp(z2, zk, cyz)
+            # interior spiral radius stays INSIDE the cavity (<= r_cav - r_tool),
+            # so the tool clears cavity waste without gouging the solid ring.
+            r_in2 = np.clip(np.interp(z2, zk, r_cav_z) - r_tool - margin, 0.0, None)
+            z_ret = 1.0 + 2.0 * r_tool                              # just above stock top
+            # INTERIOR-FIRST ordering. tool_start [0.5,0.5,1.0] is already
+            # centered above the cavity mouth, so the path opens with an axial
+            # PLUNGE down the channel center, then the interior spiral, then a
+            # retract, then the exterior skin. The prior exterior-first ordering
+            # stranded the tool: the exterior orbits at r_safe=r_cross+r_tool+
+            # margin which, for a near-filling sphere (r_cross up to 0.45, tool
+            # 0.125), lies OUTSIDE the stock box (half-width 0.5) -> rapid air-
+            # cut, so 40+ steps vanished and the interior spiral -- the whole
+            # point of this mode -- never executed (commanded into the channel
+            # at steps 93-127 but the tool was still lagging at r~1.0). Interior-
+            # first guarantees the channel is carved before budget expires.
+            #
+            # tool_start is prepended to allpts so the plunge is resampled into
+            # ~feed_cap-sized steps (a single 0.25-mag plunge delta would be
+            # speed-clipped to 0.075 and the z-lag would accumulate, never
+            # reaching the cavity). positions[0]==tool_start -> delta[0]=0.
+            # HELICAL plunge from tool_start z=1.0 down to the cavity mouth
+            # z2[0], circling at radius r_in2[0] (tool edge r_in2[0]+r_tool <<
+            # hole radius, so it clears the cavity mouth on the way down). This
+            # MUST be helical, not a straight axial plunge: tool_sdf's capsule
+            # projection uses h_param = pa.ba/(ba.ba+1e-12); an axial segment has
+            # ba_xy=[0,0] so the gradient ~pa/1e-12 overflows the autodiff to NaN
+            # (simulator code, not modifiable). Circling keeps every segment's XY
+            # displacement non-zero so ba.ba stays finite. positions[0] differs
+            # from tool_start (small XY offset) so delta[0] is non-zero too.
+            # Built before the budget-fit loop so the loop accounts for the real
+            # (longer, circling) plunge arc, not a straight-line underestimate.
+            r_plunge = float(r_in2[0]) if float(r_in2[0]) > 1e-4 else 0.5 * r_tool
+            n_pz = max(12, int(np.ceil(abs(float(z2[0]) - 1.0) / feed_cap)) * 4)
+            uz = np.linspace(0.0, 1.0, n_pz)
+            zp = (1.0 + (float(z2[0]) - 1.0) * uz).astype(np.float32)
+            plunge, _, plunge_arc = helix(1.5, zp,
+                                          np.full_like(zp, r_plunge),
+                                          np.full_like(zp, r_plunge),
+                                          float(cx2[0]), float(cy2[0]))
+            revs_i = max(2.0, revs * 0.6)
+            scale = 1.0
+            for _ in range(4):
+                pi, _, ti_s = helix(revs_i * scale, z2, np.zeros_like(z2), r_in2, cx2, cy2)
+                pe, _, te_s = helix(revs * scale, z1, rs1, r_outer, c1, c1)
+                p_end = pi[-1]
+                ext0 = pe[0]
+                ret = np.stack([p_end,
+                                [p_end[0], p_end[1], z_ret],
+                                [ext0[0], ext0[1], z_ret],
+                                ext0], axis=0).astype(np.float32)
+                rseg = np.diff(ret, axis=0)
+                tr = float(np.sqrt((rseg ** 2).sum(1)).sum())
+                total = plunge_arc + ti_s + tr + te_s
+                if total <= 0.95 * budget:
+                    break
+                scale *= (0.95 * budget) / total
+            pts_i, _, _ = helix(revs_i * scale, z2, np.zeros_like(z2), r_in2, cx2, cy2)
+            pts_e, _, _ = helix(revs * scale, z1, rs1, r_outer, c1, c1)
+            p_end = pts_i[-1]
+            ext0 = pts_e[0]
+            ret = np.stack([p_end,
+                            [p_end[0], p_end[1], z_ret],
+                            [ext0[0], ext0[1], z_ret],
+                            ext0], axis=0).astype(np.float32)
+            allpts = np.concatenate([plunge, pts_i, ret[1:], pts_e], axis=0)
+            seg = np.diff(allpts, axis=0)
+            cum = np.concatenate([[0.0], np.cumsum(np.sqrt((seg ** 2).sum(1)))])
+            positions = resample(allpts, cum, n)
+        else:
+            # No interior cavity -> identical to plain multidepth.
+            positions = resample(pts_e, cum_e, n)
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
     else:
         init = np.random.uniform(-args.init_scale, args.init_scale, size=(T - 1, 3)).astype(np.float32)
+    # Human-feedback warm-start: with --use-feedback, replace the heuristic init
+    # with the highest-rated prior run's learned deltas (matched on shape +
+    # max_steps). The optimizer then refines a human-approved trajectory instead
+    # of starting from the heuristic — the concrete "feedback improves policy"
+    # loop. init is (T-1, 3) per-step displacements; the warm-start array is
+    # already sized to T-1 by load_human_feedback. Delta-method only: the sweep
+    # method builds its own control-point params/optimizer on the sweep path.
+    if args.use_feedback and fb_warmstart is not None:
+        init = fb_warmstart.astype(np.float32)
+        print(f"[feedback] warm-start deltas applied: shape={init.shape} "
+              f"from {fb_summary['warmstart']['run']}", file=sys.stderr, flush=True)
     if args.method != "sweep":
         params = torch.tensor(init, requires_grad=True)
         opt = torch.optim.Adam([params], lr=args.learning_rate)
@@ -983,6 +1585,7 @@ def main():
     # atomic-adds, so re-running forward on restored params would give a different
     # dice than the one we measured.
     best_dice = -1.0
+    best_score = -1e9
     best_positions = None
     best_deltas = None
     best_ctrl = None
@@ -1043,6 +1646,19 @@ def main():
                 else:
                     span = max(1, args.iters - warm_start)
                     sim.w_traj_prox[None] = args.w_traj_prox * ((it - warm_start) / span)
+            # w_tool_gouge warmup: keep w_tool_gouge at 0 until warmup_frac of
+            # iters, then ramp linearly to args.w_tool_gouge over the remaining
+            # iters. The tool-position barrier is spuriously active at tangent
+            # passes on convex parts, so a constant w_tool_gouge can pin the tool
+            # off-surface during low-k exploration and stall carving; ramping it
+            # in after carving establishes avoids that stall.
+            if args.w_tool_gouge > 0.0 and args.w_tool_gouge_warmup_frac > 0.0:
+                warm_start = int(args.iters * args.w_tool_gouge_warmup_frac)
+                if it < warm_start:
+                    sim.w_tool_gouge[None] = 0.0
+                else:
+                    span = max(1, args.iters - warm_start)
+                    sim.w_tool_gouge[None] = args.w_tool_gouge * ((it - warm_start) / span)
 
             t0 = 0
             if args.method == "sweep":
@@ -1144,16 +1760,48 @@ def main():
                     sim.tool_start[None] = ti.Vector(list(CANONICAL_TOOL_START))
                     sim.tool_delta.from_torch(params.detach())
                     sim.loss[None] = 0.0
+                # SOFT carve eval: the proven 0.85/0.92/0.89/0.92 operating-point
+                # metric. forward() uses smooth_max (differentiable), so soft
+                # dice climbs smoothly with soft optimization. This is the
+                # primary "dice" used for best_score / best-checkpoint selection
+                # (matches the jul1 baseline that the task spec ceilings refer
+                # to).
+                sim.forward(T)
+                soft_stock = sim.stock.to_numpy()[T - 1]
+                soft_target = sim.target.to_numpy()
+                soft_uncut = sim.stock.to_numpy()[0]
+                soft_m = _metrics(soft_stock, soft_target, dx, soft_uncut)
+                # HARD carve eval: deployable measures. forward_hard() uses
+                # boolean ti.max (non-differentiable) with tool_sdf_sharp.
+                # Hard dice is quantized to 1-voxel steps (flat for many iters
+                # with small tool moves) and reports the actual carved result.
+                # compute_traj_diagnostics_hard (air_time/total_time/
+                # break_prob_any) also runs on this hard carve.
                 sim.forward_hard(T)
                 m = eval_metrics(sim, T, dx)
+                m["soft_dice"] = float(soft_m["dice"])
+                m["soft_asd"] = float(soft_m["asd"])
+                m["soft_hd95"] = float(soft_m["hd95"])
+                m["soft_dice_baseline"] = float(soft_m.get("dice_baseline", float("nan")))
+                m["soft_dice_improvement"] = float(soft_m.get("dice_improvement", float("nan")))
                 last_m = m
-                if m["dice"] > best_dice:
+                # best_score uses SOFT dice (proven operating-point metric) with
+                # the hard-carve traj-quality penalties (best_w_* default 0.05,
+                # so penalties barely affect checkpoint selection; with
+                # --best-w-* 0 the composite is pure soft dice). With
+                # --best-on-hard, select on HARD dice (m["dice"]) instead so the
+                # deployed checkpoint is the hard-dice-best, aligning with the
+                # deployable metric we advance on.
+                sel_m = m if args.best_on_hard else {**m, "dice": m["soft_dice"]}
+                score = composite_score(sel_m, args, T, args.dt)
+                if score > best_score:
                     # sim.tool_delta / sim.tool_pos here reflect the PRE-step
                     # params (set before the forward at the top of the loop),
                     # which are exactly what produced this dice. Snapshot them
                     # directly so the saved best trajectory is consistent with
-                    # the measured best dice (no re-eval needed later).
-                    best_dice = float(m["dice"])
+                    # the measured metrics (no re-eval needed later).
+                    best_score = score
+                    best_dice = float(sel_m["dice"])
                     best_m = dict(m)
                     best_positions = sim.tool_pos.to_torch()[:T].numpy().copy()
                     best_deltas = sim.tool_delta.to_torch()[:T].numpy().copy()
@@ -1161,9 +1809,13 @@ def main():
                         best_ctrl = torch.cat([P0_const, params.detach()],
                                               dim=0).numpy().copy()
                     best_it = it
-                writer.add_scalar("eval/dice", m["dice"], it)
-                writer.add_scalar("eval/asd", m["asd"], it)
-                writer.add_scalar("eval/hd95", m["hd95"], it)
+                writer.add_scalar("eval/dice", m["soft_dice"], it)
+                writer.add_scalar("eval/hard_dice", m["dice"], it)
+                writer.add_scalar("eval/asd", m["soft_asd"], it)
+                writer.add_scalar("eval/hd95", m["soft_hd95"], it)
+                writer.add_scalar("eval/dice_baseline", m.get("dice_baseline", float("nan")), it)
+                writer.add_scalar("eval/dice_improvement", m.get("dice_improvement", float("nan")), it)
+                writer.add_scalar("eval/soft_dice_improvement", m["soft_dice_improvement"], it)
                 writer.add_scalar("metrics/gouge", m["gouge"], it)
                 writer.add_scalar("metrics/residual", m["residual"], it)
                 writer.add_scalar("metrics/holder_overlap", m["holder_overlap"], it)
@@ -1172,13 +1824,25 @@ def main():
                 writer.add_scalar("loss/holder", m["loss_holder"], it)
                 writer.add_scalar("loss/air", m["loss_air"], it)
                 writer.add_scalar("loss/jerk", m["loss_jerk"], it)
+                # Trajectory-quality measures (reported alongside dice).
+                writer.add_scalar("metrics/air_time", m["air_time"], it)
+                writer.add_scalar("metrics/total_time", m["total_time"], it)
+                writer.add_scalar("metrics/break_prob_any", m["break_prob_any"], it)
+                writer.add_scalar("metrics/break_prob_max", m["break_prob_max"], it)
+                writer.add_scalar("metrics/fcut_max", m["fcut_max"], it)
+                writer.add_scalar("metrics/broken", m["broken"], it)
+                writer.add_scalar("charts/best_score", best_score, it)
                 last_eval_iter = it
                 if args.progress_bar:
-                    pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['dice']:.3f}",
+                    pbar.set_postfix(loss=f"{loss:.4f}", dice=f"{m['soft_dice']:.3f}",
+                                     hd=f"{m['dice']:.3f}",
                                      resid=f"{m['loss_residual']:.3f}",
                                      gouge=f"{m['loss_gouge']:.3f}",
                                      hold=f"{m['loss_holder']:.2e}",
                                      air=f"{m['loss_air']:.3f}",
+                                     t=f"{m['total_time']:.2f}",
+                                     at=f"{m['air_time']:.2f}",
+                                     brk=f"{m['break_prob_any']:.2f}",
                                      jerk=f"{m['loss_jerk']:.2e}")
             elif args.progress_bar:
                 pbar.set_postfix(loss=f"{loss:.4f}", grad=f"{grad_norm:.2e}")
@@ -1187,8 +1851,12 @@ def main():
                 lr_val = opt.param_groups[0]["lr"]
                 time_str = time.strftime("[%Y-%m-%d %H:%M:%S] ")
                 if last_m is not None:
+                    # soft_dice is the proven operating-point metric (jul1
+                    # baseline); hard_dice is the deployable sharp carve.
+                    _sd = last_m.get("soft_dice", last_m["dice"])
+                    _hd = last_m["dice"]
                     line = (f"{time_str}[iter {it:4d}/{args.iters}] loss: {loss:.4f} | grad: {grad_norm:.2e} | lr: {lr_val:.2e} | "
-                            f"dice: {last_m['dice']:.4f} | asd: {last_m['asd']:.2f} | hd95: {last_m['hd95']:.2f} | "
+                            f"dice: {_sd:.4f} | hdice: {_hd:.4f} | asd: {last_m.get('soft_asd', last_m['asd']):.2f} | hd95: {last_m.get('soft_hd95', last_m['hd95']):.2f} | "
                             f"resid: {last_m['loss_residual']:.4f} | gouge: {last_m['loss_gouge']:.4f} | hold: {last_m['loss_holder']:.2e}")
                 else:
                     line = f"{time_str}[iter {it:4d}/{args.iters}] loss: {loss:.4f} | grad: {grad_norm:.2e} | lr: {lr_val:.2e}"
@@ -1269,8 +1937,20 @@ def main():
         # measurable independently of the best-dice checkpoint.
         final_iter_m = dict(last_m) if last_m is not None else None
         if best_positions is not None and best_dice > 0.0:
-            final_iter_dice = float(last_m["dice"]) if last_m is not None else 0.0
-            if best_dice > final_iter_dice:
+            # composite_score reads m["dice"]; by default substitute soft_dice so
+            # the best-vs-final comparison uses the proven SOFT-dice metric. With
+            # --best-on-hard, compare on HARD dice (last_m["dice"]) instead so a
+            # higher-hard-dice final iter isn't rejected in favor of a soft-best
+            # checkpoint that deploys worse.
+            final_sel_m = last_m if args.best_on_hard else {
+                **last_m, "dice": last_m.get("soft_dice", last_m["dice"])}
+            final_iter_score = composite_score(final_sel_m, args, T, args.dt)
+            # Use the best checkpoint when its COMPOSITE score (dice + the three
+            # trajectory-quality penalties) beats the final iter's composite --
+            # generalizes the old dice-only comparison. The reported metrics are
+            # the already-measured best_m (no re-eval: the hard carve is
+            # nondeterministic under GPU atomic-adds).
+            if best_score > final_iter_score:
                 positions = best_positions
                 deltas = best_deltas
                 if best_ctrl is not None:
@@ -1283,8 +1963,11 @@ def main():
                 sim.loss[None] = 0.0
                 sim.forward_hard(T)
                 used_best = True
-                print(f"[best] using best-dice checkpoint: dice={best_dice:.6f} @ iter {best_it} "
-                      f"(final-iter dice was {final_iter_dice:.6f})", flush=True)
+                print(f"[best] using best-composite checkpoint: dice={best_dice:.6f} "
+                      f"score={best_score:.6f} @ iter {best_it} "
+                      f"(final-iter soft-dice={float(final_iter_m.get('soft_dice', final_iter_m['dice'])):.6f} "
+                      f"hard-dice={float(final_iter_m['dice']):.6f} "
+                      f"score={final_iter_score:.6f})", flush=True)
 
         final_overlap = float(sim.holder_overlap_total(T - 1))
         if final_overlap > 0.0:
@@ -1297,17 +1980,31 @@ def main():
         import json
         total_seconds = time.time() - start_time
         peak_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
-        final_dice = float(last_m["dice"]) if last_m is not None else 0.0
-        final_asd = float(last_m["asd"]) if last_m is not None else 0.0
-        final_hd95 = float(last_m["hd95"]) if last_m is not None else 0.0
+        final_dice = float(last_m.get("soft_dice", last_m["dice"])) if last_m is not None else 0.0
+        final_hard_dice = float(last_m["dice"]) if last_m is not None else 0.0
+        final_asd = float(last_m.get("soft_asd", last_m["asd"])) if last_m is not None else 0.0
+        final_hd95 = float(last_m.get("soft_hd95", last_m["hd95"])) if last_m is not None else 0.0
         final_gouge = float(last_m["gouge"]) if last_m is not None else 0.0
         final_resid = float(last_m["residual"]) if last_m is not None else 0.0
         final_hold = float(last_m["holder_overlap"]) if last_m is not None else final_overlap
 
         summary_data = {
+            # hard_dice is the FINAL/DEPLOYABLE metric (sharp boolean carve) and
+            # is printed first so log-grepping agents read it as the headline.
+            # "dice" below it is the soft (differentiable, sigmoid-blurred) dice
+            # — an inflated proxy that can mask runs which don't boolean-cut.
+            "hard_dice": round(final_hard_dice, 6),
             "dice": round(final_dice, 6),
             "asd": round(final_asd, 6),
             "hd95": round(final_hd95, 6),
+            # Do-nothing baseline (uncut stock vs target) and difficulty-normalized
+            # dice improvement = (dice - baseline)/(1 - baseline): 0 = idle, 1 =
+            # perfect. Both reported for the soft (operating-point) and hard
+            # (deployable) dice; nan when the part fills the stock (no headroom).
+            "dice_baseline": _safe_round(last_m.get("dice_baseline")) if last_m else 0.0,
+            "dice_improvement": _safe_round(last_m.get("dice_improvement")) if last_m else 0.0,
+            "soft_dice_baseline": _safe_round(last_m.get("soft_dice_baseline")) if last_m else 0.0,
+            "soft_dice_improvement": _safe_round(last_m.get("soft_dice_improvement")) if last_m else 0.0,
             "loss": round(float(sim.loss[None]), 6),
             "residual": round(final_resid, 6),
             "gouge": round(final_gouge, 6),
@@ -1329,11 +2026,49 @@ def main():
             "air_cut_fraction": round(float(last_m.get("air_cut_fraction", 0.0)), 6) if last_m else 0.0,
             "air_cut_raw": round(float(last_m.get("air_cut_raw", 0.0)), 6) if last_m else 0.0,
             "tool_swept_raw": round(float(last_m.get("tool_swept_raw", 0.0)), 6) if last_m else 0.0,
+            # Trajectory-quality measures (hard, final-metric form on the hard
+            # carve) for the selected (best-composite) checkpoint. Reported
+            # alongside dice so the autoresearch harness can gate/compose on
+            # them. air_time/total_time are seconds; break_prob_* are [0,1];
+            # fcut_max is Newtons; broken is the docs/design.md hard flag;
+            # engage_* are raw chip volumes (unit-cube^3) for calibration.
+            "air_time": round(float(last_m.get("air_time", 0.0)), 6) if last_m else 0.0,
+            "total_time": round(float(last_m.get("total_time", 0.0)), 6) if last_m else 0.0,
+            # Sharp air-time fraction = air_time / total_time in [0,1]. This is
+            # the deployable air-cut metric (fraction of toolpath TIME in air on
+            # the hard carve). Distinct from air_cut_fraction, a SOFT blurred
+            # volume ratio that does NOT track this and can read ~0.09 while
+            # air_time==total_time (i.e. the whole path is air). Use this one.
+            "air_time_frac": (round(float(last_m["air_time"]) / max(float(last_m["total_time"]), 1e-8), 6)
+                              if last_m and last_m.get("total_time", 0.0) > 0 else 0.0),
+            "break_prob_any": round(float(last_m.get("break_prob_any", 0.0)), 6) if last_m else 0.0,
+            "break_prob_max": round(float(last_m.get("break_prob_max", 0.0)), 6) if last_m else 0.0,
+            "fcut_max": round(float(last_m.get("fcut_max", 0.0)), 6) if last_m else 0.0,
+            "broken": round(float(last_m.get("broken", 0.0)), 6) if last_m else 0.0,
+            "engage_max": round(float(last_m.get("engage_max", 0.0)), 6) if last_m else 0.0,
+            "engage_mean": round(float(last_m.get("engage_mean", 0.0)), 6) if last_m else 0.0,
+            "best_score": round(best_score, 6),
+            # Human feedback that informed this run. Recorded on EVERY run
+            # (even without --use-feedback) so the dashboard/metrics log which
+            # prior runs a human rated and whether a warm-start was available.
+            # warmstart is None when no >=5★ prior run matched this
+            # target_shape+max_steps. Shape-agnostic: matching lives only in the
+            # feedback selection layer (load_human_feedback), never in
+            # optimizer/init/loss.
+            "feedback_used": bool(args.use_feedback and fb_warmstart is not None),
+            "feedback_top_rated": fb_summary.get("top_rated", []) if fb_summary else [],
+            "feedback_warmstart": fb_summary.get("warmstart") if fb_summary else None,
             # Final-iter (pre-best-checkpoint) trajectory metrics: exposes any
             # late-training polish (e.g. w_prox warmup) on the final trajectory,
             # independent of where the best-dice peak occurred.
-            "final_iter_dice": round(float(final_iter_m["dice"]), 6) if final_iter_m else 0.0,
+            "final_iter_dice": round(float(final_iter_m.get("soft_dice", final_iter_m["dice"])), 6) if final_iter_m else 0.0,
+            "final_iter_hard_dice": round(float(final_iter_m["dice"]), 6) if final_iter_m else 0.0,
             "final_iter_air_cut_fraction": round(float(final_iter_m.get("air_cut_fraction", 0.0)), 6) if final_iter_m else 0.0,
+            "final_iter_air_time": round(float(final_iter_m.get("air_time", 0.0)), 6) if final_iter_m else 0.0,
+            "final_iter_total_time": round(float(final_iter_m.get("total_time", 0.0)), 6) if final_iter_m else 0.0,
+            "final_iter_air_time_frac": (round(float(final_iter_m["air_time"]) / max(float(final_iter_m["total_time"]), 1e-8), 6)
+                                         if final_iter_m and final_iter_m.get("total_time", 0.0) > 0 else 0.0),
+            "final_iter_break_prob_any": round(float(final_iter_m.get("break_prob_any", 0.0)), 6) if final_iter_m else 0.0,
         }
         metrics_path = os.path.join(run_dir, "metrics.json")
         with open(metrics_path, "w") as f:
@@ -1354,7 +2089,7 @@ def main():
         print("---\n", flush=True)
 
         # Export the final geometry (initial stock, carved stock, target).
-        export_stls(sim, T, dx, run_name, it, args.track)
+        export_stls(sim, T, dx, run_dir, it, args.track)
 
         # --- Save the learned trajectory (this is GradMill's "model") ---
         if args.save_model:

@@ -124,11 +124,21 @@ as above.
 - **Scatter plot**: each point is one experiment (x = chronological order,
   y = dice), colored by target shape, dimmed for discard/crash. The dashed red
   line is the running best.
-- **Hover** any point for its description + dice + status.
-- **Click** a point to open the detail panel: metadata, full metrics, the **3D
-  viewer**, and a **Downloads** card at the bottom of the dashboard with links
-  to that run's Haas G-code, the three STL meshes (`stock_initial`,
-  `stock_carved`, `target`), and the run directory.
+- **3D objective scatter** (the "Quality vs air-cut time vs tool-breakage
+  probability" card): a rotatable 3D plot of the three trajectory-quality
+  objectives — x = dice (higher better), y = air-cut time in seconds (lower
+  better), z = tool-breakage probability (lower better; sqrt-scaled so the tiny
+  values spread out). Drag to orbit, wheel to zoom. Points are colored by shape,
+  the yellow ring marks the Pareto-best run (high dice, low air, low break), and
+  clicking a point opens the detail panel just like the 2D scatter. Only runs
+  whose metrics include `air_time` / `break_prob_any` appear (29 of the 32 in
+  the jul6-traj-quality batch).
+- **Hover** any point for its description + dice + status + air/break summary.
+- **Click** a point to open the detail panel: metadata, full metrics (including
+  `hard_dice`, `air_time`, `total_time`, `break_prob_any`/`break_prob_max`, and
+  `air_cut_fraction`), the **3D viewer**, and a **Downloads** card at the bottom
+  of the dashboard with links to that run's Haas G-code, the three STL meshes
+  (`stock_initial`, `stock_carved`, `target`), and the run directory.
 - **Generate run video** (button in the Downloads card, run selected): renders
   that run's carve as an mp4 by replaying its saved trajectory through the
   Taichi CSG simulator (`scripts/render_run_video.py`, the same raymarch+ffmpeg
@@ -154,6 +164,20 @@ as above.
 - The **per-shape bar chart** is clickable: click a bar to jump to that shape's
   best experiment.
 - Filter by shape / status using the dropdowns in the header.
+- **Batch table** (sortable; click a header to sort, click again to reverse).
+  Each row is one run. Columns are grouped **inputs → outputs**:
+  - *Identity/scenario*: run, name, shape, status, seed, iters.
+  - *Input levers* (parsed from each run's command line; argparse last-wins, and
+    a flag omitted from the command falls back to its code default so the cell
+    shows what actually ran): `stock` (X×Y×Z in), `lr`, `dt`, `gc` (grad-clip),
+    `init` (init-mode), `mstep` (max-steps), `w_len`, `w_airt` (w-air-time),
+    `w_time`, `w_break`, `b_air` (best-w-airtime), `b_time` (best-w-time),
+    `f_ref`, `f_max`. Hover a header for what the lever does and the run's
+    finding about it.
+  - *Output metrics*: dice (soft), hdice (hard), air s, total s, air frac,
+    break any/max, asd, hd95, loss, residual, gouge, holder, train s.
+  - A second header row gives a per-column filter (text substring, distinct-value
+    dropdown, or min/max range). Best-in-column values are highlighted in green.
 
 ## Notes
 
