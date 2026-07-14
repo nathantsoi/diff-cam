@@ -176,6 +176,35 @@ encode most of the practice doctrine for our 3-axis one-setup regime.
   path budget, pitches coarsened, same material over less path = heavier
   chips. Plausibility levers COMPETE under a fixed budget; the init itself
   prints the fix (feasible at T ≥ 907) → combined run needs T≈960, K≈160.
+- [e3, rrph wax w_fragile — instructive FAILURE → model fix] With b=t
+  cantilever caps, wax rims read F_allow=3.2 N vs ~57 N applied → the
+  penalty demanded ~18x lighter cuts, the optimizer lost dice (0.9503) AND
+  still broke the part (margin 0.06). Diagnosis: a rim strip attached along
+  its whole length is NOT a free-standing post — the supported- vs
+  unsupported-wire distinction (Telea μ_A / Shapeways rules). Fixed:
+  b_eff = A_interface/t (pins keep t³; strips get their attached length).
+  Wax rrph caps → 38-122 N (needs only ~1.5x lighter rim passes — a fair
+  ask); Al caps → 1-3 kN (rims genuinely safe, matching intuition). e3'
+  rerunning with honest caps.
+- [e3', rrph wax w_fragile 5 + honest caps] Dice fully recovered (0.9712 =
+  baseline) and applied force near the weakest rim halved (~57 → ~28 N,
+  margin 0.29 → 0.60) at zero dice cost — the lever WORKS, just
+  under-weighted (relu² excess is small at margin 0.6). e4 = w_fragile 20.
+  Note: baked-grid caps (16.8 N weakest) differ from raw-NPZ offline calc
+  (37.7 N) — interface areas are grid-dependent; same order, fine.
+- [e4, rrph wax w_fragile 20] margin 0.60 → 0.67 only; dice flat. **The
+  structural insight**: with feed speed fixed, F = kc_eff·(chip/mm) is pure
+  engagement GEOMETRY — a machinist would slow the feed near fragile
+  features, but our executed model has no per-segment feed override, so the
+  optimizer's only lever is shallower/narrower passes = MORE PATH LENGTH.
+  Weight dialing can't buy what the budget doesn't allow. (Also: mean-/S
+  normalization dilutes a handful of violating segments — sum-form or big
+  weights are equivalent, but the binding constraint is the budget.)
+  Follow-ups this implies: (a) per-segment feed-rate DOF (real CAM's
+  feed-override: F ∝ feed → differentiable, cheap, directly relieves both
+  force caps without path budget!) — strong candidate next lever; (b)
+  multi-spline retracts (future_work #1) to afford dedicated light
+  finishing passes near features.
 - [research] Two literature scans launched (force-bounded toolpath generation;
   workpiece-side fragility / thin-feature machining). Part-side scan landed in
   full (synthesis above); the tool-side scan died on an API session limit —

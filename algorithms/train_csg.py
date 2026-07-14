@@ -2101,6 +2101,26 @@ def main():
             _viol = _engaged & (_F > _cap)
             _margin = float(np.min(_cap[_engaged] / np.maximum(_F[_engaged], 1e-6))
                             ) if _engaged.any() else float(F_ALLOW_SAFE)
+            # Offline feed-rate scheduling (the industrial fix for residual
+            # force violations): F is LINEAR in feed at fixed geometry, so
+            # slowing exactly the violating segments to 90% of their cap
+            # removes breakage by construction, costing only cycle time --
+            # never dice (the carve geometry is feed-independent). Floor 0.2
+            # (5x slowdown); a segment still over its cap AT the floor is a
+            # genuine geometry problem the penalties must fix. The schedule
+            # is saved as feed_mult.npy next to the trajectory.
+            _capv = np.minimum(_cap, args.f_max)
+            _mult = np.ones_like(_F)
+            _need = _engaged & (_F > 0.9 * _capv)
+            _mult[_need] = np.clip(0.9 * _capv[_need] / np.maximum(_F[_need], 1e-9),
+                                   0.2, 1.0)
+            _F_sched = _F * _mult
+            _sched_time = float((_len / _mult).sum() / max(_len.sum(), 1e-9))
+            _viol_sched = _engaged & (_F_sched > _cap)
+            _margin_sched = float(np.min(_cap[_engaged] /
+                                         np.maximum(_F_sched[_engaged], 1e-6))
+                                  ) if _engaged.any() else float(F_ALLOW_SAFE)
+            np.save(os.path.join(run_dir, "feed_mult.npy"), _mult)
             phys_diag = {
                 # max sequential-attribution cutting force (N, spindle-
                 # normalized kc*MRR/v_c) and the hard tool-break flag at the
@@ -2109,6 +2129,14 @@ def main():
                 # this one is calibrated to physical Newtons.
                 "fcut_seq_max": round(float(_F.max()) if len(_F) else 0.0, 3),
                 "tool_broken_seq": float(bool((_F > args.f_max).any())),
+                # After offline feed scheduling (deployable program):
+                "fcut_sched_max": round(float(_F_sched.max()) if len(_F_sched)
+                                        else 0.0, 3),
+                "tool_broken_sched": float(bool((_F_sched > args.f_max).any())),
+                "fragile_margin_sched": round(min(_margin_sched, F_ALLOW_SAFE), 3),
+                "part_broken_sched": float(bool(_viol_sched.any())),
+                "sched_time_factor": round(_sched_time, 4),
+                "sched_slowed_frac": round(float(_need.sum() / max(len(_F), 1)), 6),
                 # engaged steps descending steeper than ramp_deg (end mills
                 # cannot drill): count and fraction of engaged steps.
                 "plunge_count": int(_plunge.sum()),
@@ -2125,6 +2153,13 @@ def main():
                   f"fragile margin {phys_diag['fragile_margin_min']:.2f} "
                   f"({phys_diag['n_fragile_features']} feature(s)); "
                   f"part_broken={int(phys_diag['part_broken'])}", flush=True)
+            print(f"[phys] after feed scheduling: F max "
+                  f"{phys_diag['fcut_sched_max']:.1f} N, fragile margin "
+                  f"{phys_diag['fragile_margin_sched']:.2f}, part_broken="
+                  f"{int(phys_diag['part_broken_sched'])}, cycle time x"
+                  f"{phys_diag['sched_time_factor']:.3f} "
+                  f"({100 * phys_diag['sched_slowed_frac']:.1f}% of steps slowed)",
+                  flush=True)
 
         # Save summary metrics for automated agents and LLM harnesses.
         import json
