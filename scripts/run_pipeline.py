@@ -184,6 +184,8 @@ def main():
     ap.add_argument("--sigma-y", type=float, default=276.0,
                     help="part material bending strength (MPa) for fragility "
                          "(276 Al 6061; ~10 machining wax)")
+    ap.add_argument("--spindle-rpm", type=float, default=5000.0,
+                    help="spindle speed for the cutting-force scale kc*MRR/v_c")
     ap.add_argument("--frag-thin-mm", type=float, default=0.0,
                     help="fragility thinness threshold radius mm (0 = tool radius)")
     ap.add_argument("--frag-contact-mm", type=float, default=1.0,
@@ -460,6 +462,7 @@ def main():
             "--w_ramp", str(args.w_ramp),
             "--ramp_deg", str(args.ramp_deg),
             "--sigma_y", str(args.sigma_y),
+            "--spindle_rpm", str(args.spindle_rpm),
             "--frag_thin_mm", str(args.frag_thin_mm),
             "--frag_contact_mm", str(args.frag_contact_mm),
             "--w_gouge", str(args.w_gouge),

@@ -274,6 +274,10 @@ class Args:
     sigma_y: float = 276.0
     """part material bending strength (MPa) for the fragility field. 276 = Al
     6061 yield; ~10 = machining wax; ~70 = acrylic."""
+    spindle_rpm: float = 5000.0
+    """spindle speed for the force scale: cutting force ~ kc*MRR/v_c with
+    v_c = pi*D*rpm/60 (energy is delivered via spindle rotation, not feed
+    travel — without this the chip-area force overestimates ~400x)"""
     frag_thin_mm: float = 0.0
     """fragility thinness threshold radius (mm); features with local
     half-thickness below this are fragile candidates. 0 = auto (tool radius)."""
@@ -1078,7 +1082,17 @@ def main():
         # the soft penalties are off.
         sweep.w_force[None] = args.w_force
         sweep.w_fragile[None] = args.w_fragile
-        sweep.kc[None] = args.kc
+        # Effective feed-force coefficient (N per mm^2 of engagement cross-
+        # section): F = kc*MRR/v_c = [kc*feed/v_c] * (chip_vol/len). The
+        # specific cutting energy kc (N/mm^2 = J/mm^3) is spent at the CUTTING
+        # speed v_c (spindle surface speed), so the force felt along the feed
+        # is scaled down by feed/v_c. Sanity: full slot (a_p 6 x a_e 6.35 mm)
+        # at kc 700, feed 4.23 mm/s, 5000 rpm -> ~68 N (realistic; the raw
+        # chip-area form reads 27 kN).
+        _feed_mm_s_setup = float(ipm_to_mm_per_s(args.feed_ipm))
+        _v_cut = np.pi * 2.0 * float(sim.tool_radius[None]) * args.spindle_rpm / 60.0
+        _kc_eff = args.kc * _feed_mm_s_setup / max(_v_cut, 1e-6)
+        sweep.kc[None] = _kc_eff
         sweep.f_cap[None] = args.f_max
         from utils.fragility import compute_fragility, F_ALLOW_SAFE
         frag = compute_fragility(
@@ -2065,10 +2079,12 @@ def main():
             _pos = positions.astype(np.float64)
             _smm = np.diff(_pos, axis=0) * np.array([sim.Lx, sim.Ly, sim.Lz])
             _len = np.linalg.norm(_smm, axis=1)
-            _F = args.kc * _chip / np.maximum(_len, 0.1)
+            _F = _kc_eff * _chip / np.maximum(_len, 0.1)
             _engaged = _chip > 0.5 * sim.v ** 3
             _dz, _dxy = _smm[:, 2], np.linalg.norm(_smm[:, :2], axis=1)
-            _plunge = _engaged & (-_dz > _ramp_tan * _dxy + 1e-6)
+            # 5% slope + 0.02 mm headroom: ramp legs sit exactly AT ramp_deg,
+            # and spline fit / f32 roundoff must not flag the boundary.
+            _plunge = _engaged & (-_dz > 1.05 * _ramp_tan * _dxy + 0.02)
             _dims = np.array([sim.Nx, sim.Ny, sim.Nz])
             _mid = np.clip((0.5 * (_pos[1:] + _pos[:-1]) * _dims).astype(int),
                            0, _dims - 1)
@@ -2077,11 +2093,13 @@ def main():
             _margin = float(np.min(_cap[_engaged] / np.maximum(_F[_engaged], 1e-6))
                             ) if _engaged.any() else float(F_ALLOW_SAFE)
             phys_diag = {
-                # max engaged chip-area force (N) and the hard tool-break flag
-                # at the f_max threshold (chip-area form; Nathan's fcut_max is
-                # the vol/(dt*D) form -- both reported).
-                "fcut_area_max": round(float(_F.max()) if len(_F) else 0.0, 3),
-                "tool_broken_area": float(bool((_F > args.f_max).any())),
+                # max sequential-attribution cutting force (N, spindle-
+                # normalized kc*MRR/v_c) and the hard tool-break flag at the
+                # f_max threshold. Nathan's fcut_max (vol/(dt*D) form, delta
+                # attribution) is reported separately -- both are surrogates,
+                # this one is calibrated to physical Newtons.
+                "fcut_seq_max": round(float(_F.max()) if len(_F) else 0.0, 3),
+                "tool_broken_seq": float(bool((_F > args.f_max).any())),
                 # engaged steps descending steeper than ramp_deg (end mills
                 # cannot drill): count and fraction of engaged steps.
                 "plunge_count": int(_plunge.sum()),
@@ -2092,7 +2110,7 @@ def main():
                 "part_broken": float(bool(_viol.any())),
                 "n_fragile_features": len(frag["features"]),
             }
-            print(f"[phys] F_area max {phys_diag['fcut_area_max']:.1f} N "
+            print(f"[phys] F_seq max {phys_diag['fcut_seq_max']:.1f} N "
                   f"(cap {args.f_max:.0f}); plunges {phys_diag['plunge_count']} "
                   f"({100 * phys_diag['plunge_frac']:.1f}% of engaged); "
                   f"fragile margin {phys_diag['fragile_margin_min']:.2f} "

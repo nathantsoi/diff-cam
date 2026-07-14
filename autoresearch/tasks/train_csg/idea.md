@@ -167,6 +167,19 @@ encode most of the practice doctrine for our 3-axis one-setup regime.
   diagnostics (fcut_area_max, plunge_count/frac, fragile_margin_min,
   part_broken) on the reported trajectory; run_pipeline forwarding. 5 new
   tests + 11 existing all pass on CPU.
+- [finding: the ramp floor] Plunge-free entry has an IRREDUCIBLE path-length
+  cost: descending the part's z-span at ramp angle θ takes z_span/tan(θ) of
+  horizontal travel regardless of layer count (sphere: 23 mm span at 3° =
+  437 mm — 90% of the T256 budget of 486 mm; at 10° = 130 mm). This is real
+  machining economics (why CAM sells helical entry and why plunging tempts),
+  and it means physically plausible paths NEED either bigger T, faster dt, or
+  a steeper ramp on soft materials. First smoke run hung on exactly this: the
+  init auto-coarsening only shrinks serpentine pitches, which cannot buy back
+  the ramp floor → guarded (bd commit), floor reported with actionable knobs.
+- [bugfix] Fragility phantom features: matched-radius EDT opening left
+  sub-voxel sliver shells on smooth thick surfaces (sphere read 144 phantom
+  features, weakest 92 N). +1 voxel dilation tolerance kills them (real thin
+  features clear it); thick-ball regression test added.
 - [impl note] First-cover chip attribution is DISCONTINUOUS at attribution
   flips (a boundary voxel hands occ~0.5 between segments when a cover
   appears/disappears) — inherent to sequential semantics with overlapping
