@@ -590,7 +590,11 @@ def raster_arc_waypoints(sim, tool_start, stepover_frac=0.8, stepdown_mm=None,
             row_mm = float(np.hypot((b_xy[0] - a_xy[0]) * L_mm[0],
                                     (b_xy[1] - a_xy[1]) * L_mm[1]))
             drop_mm = (z_prev - z) * L_mm[2]
-            n_leg = max(1, int(np.ceil(drop_mm / (ramp_tan * max(row_mm, 1e-6)))))
+            # Clamp: a degenerate (near-point) first row would demand millions
+            # of legs; beyond ~500 the "ramp" is effectively a bounded-pitch
+            # helix on a tiny footprint anyway.
+            n_leg = min(500, max(1, int(np.ceil(
+                drop_mm / (ramp_tan * max(row_mm, 1e-6))))))
             ends = (a_xy, b_xy)
             z_cur = z_prev
             for leg in range(n_leg):
@@ -641,18 +645,34 @@ def init_reference_path(sim, tool_start, n_samples, mode="raster", seed=0,
         wps, total = raster_arc_waypoints(sim, tool_start, stepover_frac,
                                           stepdown_mm, terrain=terrain,
                                           ramp_deg=ramp_deg)
+        # Coarsening reduces SERPENTINE length only. Ramped entries have an
+        # IRREDUCIBLE floor: descending the bbox z-span at ramp_deg costs
+        # z_span/tan(ramp_deg) of travel no matter how coarse the pitches
+        # (the physical price of plunge-free 3-axis entry). Guard the loop:
+        # stop when the budget is met OR coarsening stops helping — an
+        # unguarded loop multiplies the pitches to float overflow.
         while max_len_mm is not None and total > max_len_mm:
             f = max(1.05, np.sqrt(total / max_len_mm))
             stepover_frac *= f
             stepdown_mm *= f
-            wps, total = raster_arc_waypoints(sim, tool_start, stepover_frac,
-                                              stepdown_mm, terrain=terrain,
-                                              ramp_deg=ramp_deg)
+            wps, new_total = raster_arc_waypoints(sim, tool_start, stepover_frac,
+                                                  stepdown_mm, terrain=terrain,
+                                                  ramp_deg=ramp_deg)
+            if new_total > 0.995 * total:
+                total = new_total
+                print(f"[sweep] init coarsening hit its floor at {total:.0f} mm "
+                      f"> budget {max_len_mm:.0f} mm ({total - max_len_mm:.0f} mm "
+                      f"over{'; ramp entries at %.0f deg are irreducible -- '
+                            'raise --max-steps, --ramp-deg, or --dt' % ramp_deg
+                            if ramp_deg > 0 else ''})", flush=True)
+                break
+            total = new_total
         if stepover_frac > 0.8:
-            print(f"[sweep] raster_arc coarsened to fit the executable budget: "
+            fit = max_len_mm is None or total <= max_len_mm
+            print(f"[sweep] raster_arc coarsened{'' if fit else ' (budget NOT met)'}: "
                   f"stepover {stepover_frac:.2f} x tool diameter, stepdown "
-                  f"{stepdown_mm:.2f} mm (len {total:.0f} <= {max_len_mm:.0f} mm)",
-                  flush=True)
+                  f"{stepdown_mm:.2f} mm (len {total:.0f} "
+                  f"{'<=' if fit else '>'} {max_len_mm:.0f} mm)", flush=True)
         L_mm = np.array([sim.Lx, sim.Ly, sim.Lz], dtype=np.float64)
         pts = _resample_arc_length(wps, L_mm, n)
     elif mode == "helix":
