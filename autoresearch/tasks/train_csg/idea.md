@@ -205,6 +205,23 @@ encode most of the practice doctrine for our 3-axis one-setup regime.
   force caps without path budget!) — strong candidate next lever; (b)
   multi-spline retracts (future_work #1) to afford dedicated light
   finishing passes near features.
+- [e5, rrph COMBINED at the physics-demanded budget T960/K160] ramp3 +
+  w_ramp15 + w_force5 + wax w_fragile60: **dice 0.9720 = baseline — the
+  full plausibility stack is free** on rrph. Plunges 5.2% (baseline 21.9%),
+  F_seq 91 N < 100 cap (T headroom resolved e2's force squeeze), init fits
+  budget with ramps (ratio 0.95). Residual: wax fragile margin 0.58.
+- [feed scheduling, b16bd04] The industrial close-out for the residual:
+  F ∝ feed at fixed geometry → deterministically slow ONLY the violating
+  segments to 90% of their cap (floor 0.2 = 5x). Breakage removed by
+  construction, cycle time is the only cost, dice untouched (geometry is
+  feed-independent). Saved as feed_mult.npy; sched metrics reported.
+  e6 (e5 config + scheduler) validating.
+- [e6 HEADLINE — full package validated, single seed] e5 training config +
+  offline feed scheduling: **hard dice 0.9740** (baseline 0.9716, campaign
+  SOTA 0.9753), plunges 3.8% (baseline 21.9%), scheduled F max 59 N,
+  **fragile margin 1.11 → part_broken=0 in WAX**, cycle time ×1.009 (2.4%
+  of steps slowed). Physically plausible machining of rrph costs ~nothing
+  in dice. Seed replication in progress (s2, s3) before claiming.
 - [research] Two literature scans launched (force-bounded toolpath generation;
   workpiece-side fragility / thin-feature machining). Part-side scan landed in
   full (synthesis above); the tool-side scan died on an API session limit —
