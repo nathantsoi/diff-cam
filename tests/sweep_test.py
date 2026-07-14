@@ -320,3 +320,18 @@ def test_ramp_entry_has_no_engaged_plunges():
     tan3 = np.tan(np.radians(3.0))
     assert (-dz[desc] <= tan3 * dxy[desc] + 1e-6).all(), (
         -dz[desc] - tan3 * dxy[desc]).max()
+
+
+def test_fragility_no_phantom_features_on_thick_ball():
+    """A smooth thick solid has NO fragile features: the opening's grid
+    quantization must not read back sliver shells (the sphere-with-144-
+    features bug)."""
+    from utils.fragility import compute_fragility
+    N = 50
+    xx, yy, zz = np.mgrid[:N, :N, :N]
+    ball = (xx - 25.0) ** 2 + (yy - 25.0) ** 2 + (zz - 25.0) ** 2 <= 20.0 ** 2
+    sdf = np.where(ball, -1.0, 1.0).astype(np.float32)
+    frag = compute_fragility(sdf, voxel_mm=0.5, sigma_y_mpa=276.0,
+                             tool_radius_mm=3.175)
+    assert frag["features"] == [], frag["features"]
+    assert not frag["thin_mask"].any()

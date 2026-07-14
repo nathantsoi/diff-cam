@@ -119,6 +119,11 @@ def compute_fragility(target_sdf_vox, voxel_mm, sigma_y_mpa=276.0,
 
     # Opening by a ball of radius r_thin via two EDTs: erosion keeps voxels
     # deeper than r_thin; dilation of the erosion reconstructs the "rump".
+    # The dilation radius carries a +1 voxel tolerance: with exactly matched
+    # radii, grid quantization leaves sub-voxel sliver shells on smooth thick
+    # surfaces (a sphere read back ~144 phantom "features") — a genuinely
+    # thin feature clears the tolerance because its whole cross-section, not
+    # a fractional-voxel rind, lies outside the eroded core.
     edt_in = ndimage.distance_transform_edt(part)          # voxels, 0 outside
     rump_core = edt_in > r_thin_vox
     if not rump_core.any():
@@ -127,7 +132,7 @@ def compute_fragility(target_sdf_vox, voxel_mm, sigma_y_mpa=276.0,
         # than flagging everything (no root, no lever arm).
         return out
     d_from_core = ndimage.distance_transform_edt(~rump_core)
-    rump = d_from_core <= r_thin_vox                        # opening result
+    rump = d_from_core <= r_thin_vox + 1.0                  # opening + tolerance
     thin = part & ~rump
     out["thin_mask"] = thin
     if not thin.any():
@@ -138,11 +143,15 @@ def compute_fragility(target_sdf_vox, voxel_mm, sigma_y_mpa=276.0,
     interface = thin & ndimage.binary_dilation(rump & part, structure=st6)
 
     feats = []
+    slices = ndimage.find_objects(labels)
     for fid in range(1, n_feat + 1):
-        comp = labels == fid
+        # Crop to the component's bbox (+1 halo) so the BFS scales with the
+        # feature, not the grid.
+        sl = tuple(slice(max(s.start - 1, 0), s.stop + 1) for s in slices[fid - 1])
+        comp = labels[sl] == fid
         n_vox = int(comp.sum())
-        h_vox_arr, h_max = _geodesic_height(comp, interface)
-        t_mm = 2.0 * float(edt_in[comp].max()) * voxel_mm   # inscribed diameter
+        _, h_max = _geodesic_height(comp, interface[sl])
+        t_mm = 2.0 * float(edt_in[sl][comp].max()) * voxel_mm  # inscribed diam
         h_mm = max(float(h_max) * voxel_mm, voxel_mm)
         f_n = sigma_y_mpa * t_mm ** 3 / (6.0 * h_mm)
         feats.append({"id": fid, "f_allow_n": float(f_n), "t_mm": t_mm,
