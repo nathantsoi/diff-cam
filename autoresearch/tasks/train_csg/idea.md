@@ -157,6 +157,25 @@ encode most of the practice doctrine for our 3-axis one-setup regime.
   (conflicts: train_csg.py optimizer guard × feedback warm-start; run_pipeline
   runs_subdir forwarding; web dashboard ctrl-points × stock/target overlays —
   all unioned). findings.md removed, results.tsv truncated per protocol.
+- [e1 BASELINE AUDIT, rrph Al] hdice 0.9716 (~SOTA 0.9753 at the 15-min
+  budget). Violations of the un-penalized SOTA-config path: **21.9% of
+  engaged steps are plunges** (88 steps steeper than 3+eps deg — the
+  dominant implausibility, driven by the init's corner plunges + optimizer
+  descents); F_seq_max 65.1 N (tool survives in Al, cap 100); fragile
+  margin 1.56 on the rounded top-rim features (holds in Al; in wax σ_y=10
+  the caps shrink 27.6x → margin 0.056 → part features snap). rrph's pin is
+  ~12 mm diameter — NOT slender; true fragility tests need wax rrph or
+  titan lettering. Also found+fixed en route: composite best-checkpoint
+  selected on soft dice, which is identically 0 for sweep → forced
+  best-on-hard for sweep runs (0b09ee0).
+- [e2, rrph +ramp lever] --sweep-init-ramp --ramp-deg 3 --w-ramp 5: plunges
+  88 → 21 (21.9% → 5.9% of engaged) at ZERO dice cost (0.9721 vs 0.9716).
+  Residual 21: spline corner-rounding at ramp turnarounds + optimizer local
+  descents; try w_ramp 10-20 in the combined run. **Conservation lesson**:
+  F_seq_max rose 65 → 139 N — the 3° ramp floor consumed ~10% of the fixed
+  path budget, pitches coarsened, same material over less path = heavier
+  chips. Plausibility levers COMPETE under a fixed budget; the init itself
+  prints the fix (feasible at T ≥ 907) → combined run needs T≈960, K≈160.
 - [research] Two literature scans launched (force-bounded toolpath generation;
   workpiece-side fragility / thin-feature machining). Part-side scan landed in
   full (synthesis above); the tool-side scan died on an API session limit —

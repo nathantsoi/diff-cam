@@ -21,13 +21,19 @@ Method (Telea & Jalba, ISMM 2011 voxel-printability recipe, adapted):
    interface voxels) — the cantilever length.
 4. thickness t_feat = 2 * max interior EDT over the component — the true
    (inscribed-ball) thickness of the feature's core.
-5. allowable side force per feature (cantilever root bending, square section
-   b = t, conservative for walls, ~1.7x optimistic for round pins):
+5. allowable side force per feature (cantilever root bending). The section
+   WIDTH matters: a pin is attached over ~t x t, but a thin rim/edge strip is
+   attached along its whole length and is far stronger than a free-standing
+   post of the same thickness (the supported- vs unsupported-wire distinction
+   in Telea/Shapeways printability rules — treating rims as cantilevers made
+   machining their neighborhood look impossible). We take the bending width
+   from the attachment footprint, b_eff = A_interface / t (>= t):
 
-       F_allow = sigma_y * t^3 / (6 * h)      [N, with sigma_y in MPa = N/mm^2]
+       F_allow = sigma_y * t^2 * b_eff / (6 * h)   [N, sigma_y in MPa]
 
-   Components attached at both ends (bridges) or unreached voxels keep the
-   conservative single-cantilever value.
+   For a pin b_eff ~ (pi/4) t recovers the t^3 law; for a strip attached
+   along L, b_eff ~ L. Components attached at both ends (bridges) or
+   unreached voxels keep the conservative single-cantilever value.
 6. contact splat: every voxel (waste or part) within contact_mm of a fragile
    feature's surface gets that feature's (F_allow, feature id); everywhere
    else is "safe" (F_ALLOW_SAFE). Cutting a voxel in a feature's contact band
@@ -150,12 +156,17 @@ def compute_fragility(target_sdf_vox, voxel_mm, sigma_y_mpa=276.0,
         sl = tuple(slice(max(s.start - 1, 0), s.stop + 1) for s in slices[fid - 1])
         comp = labels[sl] == fid
         n_vox = int(comp.sum())
+        iface = interface[sl] & comp
         _, h_max = _geodesic_height(comp, interface[sl])
         t_mm = 2.0 * float(edt_in[sl][comp].max()) * voxel_mm  # inscribed diam
         h_mm = max(float(h_max) * voxel_mm, voxel_mm)
-        f_n = sigma_y_mpa * t_mm ** 3 / (6.0 * h_mm)
+        # Attachment footprint -> effective bending width (>= t): interface
+        # voxel count is a surface-area proxy in voxel^2.
+        a_iface_mm2 = float(iface.sum()) * voxel_mm ** 2
+        b_eff_mm = max(a_iface_mm2 / max(t_mm, voxel_mm), t_mm)
+        f_n = sigma_y_mpa * t_mm ** 2 * b_eff_mm / (6.0 * h_mm)
         feats.append({"id": fid, "f_allow_n": float(f_n), "t_mm": t_mm,
-                      "h_mm": h_mm, "n_voxels": n_vox})
+                      "h_mm": h_mm, "b_eff_mm": b_eff_mm, "n_voxels": n_vox})
     out["features"] = feats
 
     # Contact splat: nearest fragile voxel within (contact_mm) of any voxel
