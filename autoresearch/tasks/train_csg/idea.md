@@ -9,6 +9,10 @@ feedback loop, jul10 w_tool_gouge warmup, difficulty-normalized dice).
 **Every run needs `LD_LIBRARY_PATH=/usr/lib/wsl/lib`** (WSL2 CUDA).
 **GPU is shared with a second Claude instance this session — check load before
 launching, alternate runs.**
+**Throughput on this box: rrph T832 runs ~2.5 it/s (NOT the step-detail
+campaign's implied ~13 it/s — likely battery-throttled then too) → size
+--iters ≈ 2200 for the 15-min budget. rrph converges by ~2000 anyway
+(hdice 0.9751 at iter 3500 in the killed 12k run).**
 
 ## The problem this campaign attacks
 

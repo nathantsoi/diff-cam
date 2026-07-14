@@ -1069,6 +1069,15 @@ def main():
     # matmul away from the Taichi path gradient.
     sweep = None
     if args.method == "sweep":
+        # Best-checkpoint selection MUST compare on hard dice for the sweep
+        # method: its soft (sequential k=10) dice is identically ~0, so the
+        # composite score would otherwise reduce to "smallest trajectory
+        # penalties" and select an early useless path (observed: iter-50
+        # hard-dice 0.28 chosen over final 0.97).
+        if not args.best_on_hard:
+            args.best_on_hard = True
+            print("[sweep] best-checkpoint selection forced to hard dice "
+                  "(--best-on-hard): sweep soft dice is a dead signal", flush=True)
         from simulator.sweep import (SweepCarve, bspline_basis,
                                      init_reference_path, fit_control_points)
         from cam.units import ipm_to_mm_per_s
