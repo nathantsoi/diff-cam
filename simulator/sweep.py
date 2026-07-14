@@ -67,6 +67,43 @@ class SweepCarve:
         self.diag_residual_vox = ti.field(dtype=ti.i32, shape=())
         self.diag_gouge_vox = ti.field(dtype=ti.i32, shape=())
 
+        # ---- Physical-plausibility terms (cutting force / fragility) ----
+        # The swept carve is order-free, but cutting physics is sequential:
+        # segment s removes the voxels it covers that no EARLIER segment
+        # already covered. cut_seg holds that first-covering attribution
+        # (-1 = never cut), written by find_argmin alongside amin and cached
+        # on the same refresh cadence. From it, seg_chip accumulates the
+        # per-segment removed volume (mm^3, soft occupancy — the envelope
+        # trick at fixed attribution, exactly like the cached argmin), and
+        # the force surrogate is the mechanistic chip-area model
+        #     F[s] = kc * seg_chip[s] / len_mm[s]     [N]
+        # (chip area (mm^2) x specific cutting force kc (N/mm^2); reduces to
+        # the textbook F = kc*a_p*a_e for a slot cut). Two penalties, both
+        # mean-over-segments of relu(F/cap - 1)^2:
+        #   w_force   : cap = f_cap (tool strength — don't snap the end mill)
+        #   w_fragile : cap = per-segment min allowable force of the fragile
+        #               part features the segment cuts beside (seg_finv, from
+        #               utils/fragility.py — don't snap the part's end bits).
+        self.cut_seg = ti.field(dtype=ti.i32, shape=(self.Nx, self.Ny, self.Nz))
+        n_seg = n_points - 1
+        self.seg_chip = ti.field(dtype=ti.f32, shape=n_seg, needs_grad=True)
+        self.seg_finv = ti.field(dtype=ti.f32, shape=n_seg)  # 1/N cap, non-grad
+        self.w_force = ti.field(dtype=ti.f32, shape=())
+        self.w_force[None] = 0.0
+        self.w_fragile = ti.field(dtype=ti.f32, shape=())
+        self.w_fragile[None] = 0.0
+        self.f_cap = ti.field(dtype=ti.f32, shape=())
+        self.f_cap[None] = 100.0
+        self.kc = ti.field(dtype=ti.f32, shape=())
+        self.kc[None] = 700.0
+        # Voxel edge in mm (isotropic; sim.v) for chip mm^3 and path-length mm.
+        self.v_mm = float(sim.v)
+        # Host-side mirror of seg_chip after each backward (for the ramp gate
+        # and logging); refreshed by loss_and_grad when physics is active.
+        self.seg_chip_np = np.zeros(n_seg, dtype=np.float32)
+        # Per-voxel inverse allowable force (host numpy), set by set_fragility.
+        self._finv_np = None
+
     # ------------------------------------------------------------------
     # Geometry (identical to CSGSimulatorDelta.tool_sdf_sharp, but taking
     # explicit endpoints so it can index any segment of the sampled path).
@@ -116,16 +153,86 @@ class SweepCarve:
     # ------------------------------------------------------------------
     @ti.kernel
     def find_argmin(self, S: ti.i32):
+        """Per voxel: winning (deepest-cover) segment for the carve gradient,
+        and FIRST-covering segment for sequential physics attribution.
+
+        amin drives geometry (the exact min subgradient); cut_seg says which
+        pass physically removes the voxel — the earliest segment whose swept
+        tool covers it (-1 if never covered, or outside the initial stock).
+        Both are cached and refreshed together on the amin-refresh cadence.
+        """
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             pv = ti.Vector([i + 0.5, j + 0.5, k + 0.5])
             best_d = 1e9
             best_s = 0
+            first_s = -1
             for s in range(S):
                 d = self._seg_sdf(pv, self._vox_of_path(s), self._vox_of_path(s + 1))
                 if d < best_d:
                     best_d = d
                     best_s = s
+                if first_s == -1 and d < 0.0:
+                    first_s = s
             self.amin[i, j, k] = best_s
+            if self._stock0(pv) >= 0.0:
+                first_s = -1  # outside the stock: nothing to remove
+            self.cut_seg[i, j, k] = first_s
+
+    # ------------------------------------------------------------------
+    # Physics: per-segment chip volume + force penalties (autodiff-safe).
+    # Pattern mirrors CSGSimulatorDelta's trajectory-quality kernels: a zero
+    # kernel, an accumulate kernel, and a consume kernel, all inside the Tape,
+    # each with exactly one top-level loop.
+    # ------------------------------------------------------------------
+    @ti.kernel
+    def zero_seg_chip(self, S: ti.i32):
+        for s in range(S):
+            self.seg_chip[s] = 0.0
+
+    @ti.kernel
+    def accum_seg_chip(self):
+        """seg_chip[s] += soft removed volume (mm^3) of s's attributed voxels.
+
+        Each voxel re-evaluates ONLY its cached first-covering segment
+        (straight-line code -> exact envelope subgradient into the path, the
+        same maxpool trick as compute_loss). Soft occupancy (half-voxel
+        sigmoid — sharper than the loss's 1-voxel band so the chip VOLUME
+        tracks the hard removed volume, while the gradient band stays ~1.5
+        voxels wide) keeps the volume differentiable as the tube surface
+        crosses voxel centers.
+        """
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            s = self.cut_seg[i, j, k]
+            if s >= 0:
+                pv = ti.Vector([i + 0.5, j + 0.5, k + 0.5])
+                d = self._seg_sdf(pv, self._vox_of_path(s), self._vox_of_path(s + 1))
+                da = ti.max(-50.0, ti.min(50.0, d / 0.5))
+                occ = 1.0 / (1.0 + ti.exp(da))  # ~1 inside the swept tool
+                ti.atomic_add(self.seg_chip[s], occ * self.v_mm ** 3)
+
+    @ti.kernel
+    def add_force_penalties(self, S: ti.i32):
+        """Mean-over-segments relu(F/cap - 1)^2 for the tool and fragile caps.
+
+        F[s] = kc * seg_chip[s] / len_mm[s]. len_mm is read from the live path
+        (differentiable), so the penalty can relieve force by removing less
+        material per pass OR by spreading the same removal over longer travel.
+        """
+        for s in range(S):
+            a = self._vox_of_path(s)
+            b = self._vox_of_path(s + 1)
+            d = b - a
+            len_mm = ti.sqrt(d.dot(d) + 1e-8) * self.v_mm
+            f = self.kc[None] * self.seg_chip[s] / ti.max(len_mm, 0.1)
+            inv_n = 1.0 / S
+            wf = self.w_force[None]
+            if wf > 0.0:
+                ex = ti.max(f / self.f_cap[None] - 1.0, 0.0)
+                ti.atomic_add(self.loss[None], wf * ex * ex * inv_n)
+            wfr = self.w_fragile[None]
+            if wfr > 0.0:
+                exf = ti.max(f * self.seg_finv[s] - 1.0, 0.0)
+                ti.atomic_add(self.loss[None], wfr * exf * exf * inv_n)
 
     # ------------------------------------------------------------------
     # Pass 2: loss on the winning segment only (autodiff-safe).
@@ -206,7 +313,29 @@ class SweepCarve:
     # ------------------------------------------------------------------
     # Host-side driver: one forward+backward, returns (loss, grad_X).
     # ------------------------------------------------------------------
-    def loss_and_grad(self, X, refresh_argmin=True):
+    def set_fragility(self, f_allow_vox):
+        """Load the per-voxel allowable-force field (N) from utils.fragility.
+
+        Only the inverse is kept (host-side): seg_finv[s] = max over s's
+        attributed voxels of 1/f_allow, refreshed with the argmin cache.
+        """
+        self._finv_np = (1.0 / np.maximum(
+            np.asarray(f_allow_vox, dtype=np.float64), 1e-3)).astype(np.float32)
+
+    def _refresh_seg_finv(self, S):
+        """seg_finv[s] = tightest (inverse) fragile cap among s's voxels.
+
+        Host-side numpy scatter-max over the cached first-cover attribution.
+        Constant between refreshes; only F[s] carries gradient in the penalty.
+        """
+        cut = self.cut_seg.to_numpy()
+        finv = np.zeros(S, dtype=np.float32)
+        m = cut >= 0
+        if m.any():
+            np.maximum.at(finv, cut[m], self._finv_np[m])
+        self.seg_finv.from_numpy(finv)
+
+    def loss_and_grad(self, X, refresh_argmin=True, want_chip=False):
         """X: (n_points, 3) float32 normalized path samples.
 
         Returns (loss_value, grad wrt X as (n_points, 3) float32 array).
@@ -218,14 +347,37 @@ class SweepCarve:
         surrogate; with clipped ~0.1-voxel/iter path motion the winner index
         is stable over a handful of iterations, and a periodic refresh keeps
         the bound tight.
+
+        When the force/fragility weights are non-zero, the physics kernels run
+        inside the Tape (zero -> accumulate -> consume, the delta method's
+        trajectory-quality pattern) and ``seg_chip_np`` is refreshed. With
+        ``want_chip=True`` (and physics off), seg_chip is still computed at
+        refresh iterations OUTSIDE the Tape — a cheap non-diff engagement
+        readout for the torch-side ramp gate.
         """
         S = self.n_points - 1
         self.path.from_numpy(X.astype(np.float32))
+        physics = (self.w_force[None] > 0.0
+                   or (self.w_fragile[None] > 0.0 and self._finv_np is not None))
         if refresh_argmin:
             self.find_argmin(S)
+            if self.w_fragile[None] > 0.0 and self._finv_np is not None:
+                self._refresh_seg_finv(S)
         self.loss[None] = 0.0
         with ti.ad.Tape(loss=self.loss):
             self.compute_loss()
+            if physics:
+                self.zero_seg_chip(S)
+                self.accum_seg_chip()
+                self.add_force_penalties(S)
+        if physics:
+            self.seg_chip_np = self.seg_chip.to_numpy()
+        elif want_chip and refresh_argmin:
+            # Non-diff engagement readout (outside the Tape; seg_chip is plain
+            # scratch here, same reuse pattern as the delta hard diagnostics).
+            self.zero_seg_chip(S)
+            self.accum_seg_chip()
+            self.seg_chip_np = self.seg_chip.to_numpy()
         return float(self.loss[None]), self.path.grad.to_numpy()
 
 
@@ -330,7 +482,7 @@ def legal_base_height(sim, margin_vox=0.5):
 
 
 def raster_arc_waypoints(sim, tool_start, stepover_frac=0.8, stepdown_mm=None,
-                         terrain=False):
+                         terrain=False, ramp_deg=0.0):
     """Geometry-derived serpentine z-layer raster waypoints over the target bbox.
 
     Shape-agnostic (reads only the baked SDF bbox, stock dims, and tool
@@ -347,6 +499,13 @@ def raster_arc_waypoints(sim, tool_start, stepover_frac=0.8, stepdown_mm=None,
     part it must not mow through (raised letters, the pin), making the init
     gouge-free by construction instead of asking the gouge barrier to lift
     thousands of samples out of the part.
+
+    With ``ramp_deg > 0`` each layer is entered by RAMPING: instead of
+    plunging the stepdown vertically at the serpentine corner (an end mill
+    cannot feed axially like a drill — CAM practice is 2-5 degree ramp or
+    helical entry), the descent zigzags along the layer's first scan row at
+    ``ramp_deg`` degrees until the layer depth is reached, then the serpentine
+    proceeds. Adds ~stepdown/tan(ramp) mm of path per layer.
 
     Returns (waypoints (M, 3) normalized float64, total physical length mm).
     """
@@ -398,19 +557,59 @@ def raster_arc_waypoints(sim, tool_start, stepover_frac=0.8, stepdown_mm=None,
     pass_xy = [p for r in pass_rows for p in r]
 
     wps = [tuple(tool_start)]
-    # Lead-in above the stock (cuts nothing), then plunge at the first corner.
+    # Lead-in above the stock (cuts nothing), then enter the first corner.
     wps.append((pass_xy[0][0], pass_xy[0][1], tool_start[2]))
+    ramp_tan = np.tan(np.radians(ramp_deg)) if ramp_deg > 0.0 else 0.0
+
+    def _ramp_leg(p0, p1, z0, z1):
+        """Waypoints from p0@z0 to p1@z1 along the row (excluding the start).
+
+        Terrain mode samples the leg densely so the descending chord follows
+        the legal-height profile (a single long chord would gouge raised
+        features mid-row); off-feature drop-backs remain — the same property
+        the terrain scan rows already have (w_ramp polishes them in training).
+        """
+        npts = n_scan if terrain else 2
+        pts = []
+        for q in range(1, npts):
+            f = q / (npts - 1)
+            x = p0[0] + (p1[0] - p0[0]) * f
+            y = p0[1] + (p1[1] - p0[1]) * f
+            zl = z0 + (z1 - z0) * f
+            pts.append((x, y, z_at(x, y, zl) if terrain else zl))
+        return pts
+
+    z_prev = 1.0  # ramp from the STOCK top: all material entry is ramped
     for k, z in enumerate(z_layers):
         layer = pass_xy if k % 2 == 0 else pass_xy[::-1]
+        if ramp_tan > 0.0 and z_prev > z:
+            # Ramped entry: zigzag along the layer's first scan row, dropping
+            # at <= ramp_deg per leg, then return to the corner at depth so
+            # the serpentine starts where it expects to.
+            a_xy, b_xy = layer[0], layer[n_scan - 1]
+            row_mm = float(np.hypot((b_xy[0] - a_xy[0]) * L_mm[0],
+                                    (b_xy[1] - a_xy[1]) * L_mm[1]))
+            drop_mm = (z_prev - z) * L_mm[2]
+            n_leg = max(1, int(np.ceil(drop_mm / (ramp_tan * max(row_mm, 1e-6)))))
+            ends = (a_xy, b_xy)
+            z_cur = z_prev
+            for leg in range(n_leg):
+                z_next = max(z, z_prev - (leg + 1) * drop_mm / n_leg / L_mm[2])
+                wps.extend(_ramp_leg(ends[leg % 2], ends[(leg + 1) % 2],
+                                     z_cur, z_next))
+                z_cur = z_next
+            if n_leg % 2 == 1:  # odd legs end at b: run back to the corner
+                wps.extend(_ramp_leg(b_xy, a_xy, z, z))
         for x, y in layer:
             wps.append((x, y, z_at(x, y, z) if terrain else z))
+        z_prev = z
     wps = np.asarray(wps, dtype=np.float64)
     seg = np.diff(wps, axis=0) * L_mm
     return wps, float(np.linalg.norm(seg, axis=1).sum())
 
 
 def init_reference_path(sim, tool_start, n_samples, mode="raster", seed=0,
-                        max_len_mm=None):
+                        max_len_mm=None, ramp_deg=0.0):
     """Shape-agnostic reference polyline (n_samples, 3) for the init fit.
 
     Modes:
@@ -440,13 +639,15 @@ def init_reference_path(sim, tool_start, n_samples, mode="raster", seed=0,
         terrain = mode == "raster_terrain"
         stepover_frac, stepdown_mm = 0.8, float(sim.tool_radius[None])
         wps, total = raster_arc_waypoints(sim, tool_start, stepover_frac,
-                                          stepdown_mm, terrain=terrain)
+                                          stepdown_mm, terrain=terrain,
+                                          ramp_deg=ramp_deg)
         while max_len_mm is not None and total > max_len_mm:
             f = max(1.05, np.sqrt(total / max_len_mm))
             stepover_frac *= f
             stepdown_mm *= f
             wps, total = raster_arc_waypoints(sim, tool_start, stepover_frac,
-                                              stepdown_mm, terrain=terrain)
+                                              stepdown_mm, terrain=terrain,
+                                              ramp_deg=ramp_deg)
         if stepover_frac > 0.8:
             print(f"[sweep] raster_arc coarsened to fit the executable budget: "
                   f"stepover {stepover_frac:.2f} x tool diameter, stepdown "

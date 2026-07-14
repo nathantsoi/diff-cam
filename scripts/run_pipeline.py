@@ -170,6 +170,27 @@ def main():
                     help="sweep: non-saturating residual attraction weight (0 = off)")
     ap.add_argument("--sigma-broad", type=float, default=4.0,
                     help="sweep: distance scale (voxels) of the attraction term")
+    ap.add_argument("--w-force", type=float, default=0.0,
+                    help="sweep: tool cutting-force penalty weight (chip-area force "
+                         "F=kc*chip/len vs --f-max cap; 0 = off)")
+    ap.add_argument("--w-fragile", type=float, default=0.0,
+                    help="sweep: part-fragility penalty weight (force cap near slender "
+                         "target features from utils/fragility.py; 0 = off)")
+    ap.add_argument("--w-ramp", type=float, default=0.0,
+                    help="sweep: plunge penalty weight (engaged descent steeper than "
+                         "--ramp-deg; 0 = off)")
+    ap.add_argument("--ramp-deg", type=float, default=3.0,
+                    help="max engaged descent angle (degrees) for --w-ramp / --sweep-init-ramp")
+    ap.add_argument("--sigma-y", type=float, default=276.0,
+                    help="part material bending strength (MPa) for fragility "
+                         "(276 Al 6061; ~10 machining wax)")
+    ap.add_argument("--frag-thin-mm", type=float, default=0.0,
+                    help="fragility thinness threshold radius mm (0 = tool radius)")
+    ap.add_argument("--frag-contact-mm", type=float, default=1.0,
+                    help="force-transmission distance (mm) beyond fragile feature surfaces")
+    ap.add_argument("--sweep-init-ramp", action="store_true",
+                    help="sweep: ramp into each raster z-layer at --ramp-deg instead of "
+                         "plunging the stepdown vertically at the corner")
     ap.add_argument("--w-gouge", type=float, default=4.0,
                     help="loss weight on cutting INTO the part (barrier)")
     ap.add_argument("--w-residual", type=float, default=1.0,
@@ -434,6 +455,13 @@ def main():
             "--w_feed", str(args.w_feed),
             "--w_broad", str(args.w_broad),
             "--sigma_broad", str(args.sigma_broad),
+            "--w_force", str(args.w_force),
+            "--w_fragile", str(args.w_fragile),
+            "--w_ramp", str(args.w_ramp),
+            "--ramp_deg", str(args.ramp_deg),
+            "--sigma_y", str(args.sigma_y),
+            "--frag_thin_mm", str(args.frag_thin_mm),
+            "--frag_contact_mm", str(args.frag_contact_mm),
             "--w_gouge", str(args.w_gouge),
             "--w_residual", str(args.w_residual),
             "--grad_clip", str(args.grad_clip),
@@ -491,6 +519,8 @@ def main():
             cmd += ["--target_sdf_path", args.target_sdf_path]
         if args.reach_gate:
             cmd.append("--reach_gate")
+        if args.sweep_init_ramp:
+            cmd.append("--sweep_init_ramp")
         if not args.no_save_model:
             cmd.append("--save_model")
         if args.use_feedback:

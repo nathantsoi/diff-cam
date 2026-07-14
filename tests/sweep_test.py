@@ -168,3 +168,155 @@ def test_raster_arc_covers_bbox_footprint():
         assert body[:, d].min() <= lo[d] + 1e-6
         assert body[:, d].max() >= hi[d] - 1e-6
     assert body[:, 2].min() <= lo[2] + 1e-6
+
+
+# ---------------------------------------------------------------------------
+# Physical-plausibility terms (jul13-phys-plausible): sequential chip
+# attribution, force penalties, fragility field, ramped layer entry.
+# ---------------------------------------------------------------------------
+
+def _seg_sdf_np(P, a, b, r_vox, h_vox):
+    """Numpy mirror of SweepCarve._seg_sdf (voxel space) for brute-force checks."""
+    pa = P[:, :2] - a[:2]
+    ba = b[:2] - a[:2]
+    denom = float(ba @ ba) + 1e-12
+    t = np.clip((pa @ ba) / denom, 0.0, 1.0)
+    closest = a[:2] + np.outer(t, ba)
+    d_xy = np.sqrt(((P[:, :2] - closest) ** 2).sum(1) + 1e-8) - r_vox
+    z_base = a[2] + (b[2] - a[2]) * t
+    z_center = z_base + 0.5 * h_vox
+    d_z = np.sqrt((P[:, 2] - z_center) ** 2 + 1e-8) - 0.5 * h_vox
+    outside = np.sqrt(np.maximum(d_xy, 0) ** 2 + np.maximum(d_z, 0) ** 2 + 1e-8)
+    inside = -np.maximum(-np.maximum(d_xy, d_z), 0.0)
+    return outside + inside
+
+
+def test_cut_seg_is_first_covering_segment():
+    T = 24
+    sim, X = _make_sim_and_path(T)
+    sweep = SweepCarve(sim, n_points=T)
+    sweep.path.from_numpy(X)
+    sweep.find_argmin(T - 1)
+    cut = sweep.cut_seg.to_numpy()
+    N = np.array([sweep.Nx, sweep.Ny, sweep.Nz])
+    ii, jj, kk = np.meshgrid(*[np.arange(n) for n in N], indexing="ij")
+    P = np.stack([ii, jj, kk], axis=-1).reshape(-1, 3) + 0.5
+    r_vox = sim.tool_radius[None] / sim.v
+    h_vox = sim.tool_height[None] / sim.v
+    Xv = X * N  # voxel-space path
+    first = np.full(P.shape[0], -1, dtype=np.int32)
+    for s in range(T - 1):
+        d = _seg_sdf_np(P, Xv[s], Xv[s + 1], r_vox, h_vox)
+        hit = (d < 0.0) & (first == -1)
+        first[hit] = s
+    half = 0.5 * N
+    stock0 = np.max(np.abs(P - half) - half, axis=1)
+    first[stock0 >= 0.0] = -1
+    assert (first.reshape(cut.shape) == cut).all()
+
+
+def test_seg_chip_tracks_sequential_removal():
+    """Per-segment soft chip vs brute-force sequential hard removal (the
+    voxels each segment covers FIRST). The soft volume is biased low (surface
+    sigmoid, one-sided attribution band) — a calibratable scale factor — but
+    it must (a) sit in a sane band of the hard truth, (b) rank segments
+    consistently (heavy vs idle), (c) be ~zero on segments that remove
+    nothing."""
+    T = 24
+    sim, X = _make_sim_and_path(T)
+    sweep = SweepCarve(sim, n_points=T)
+    sweep.w_force[None] = 1.0  # activate physics kernels
+    sweep.loss_and_grad(X)
+    chip = sweep.seg_chip_np.astype(np.float64)
+    assert (chip >= 0).all()
+    # Brute-force sequential hard chips from the cut_seg attribution already
+    # verified exact above.
+    cut = sweep.cut_seg.to_numpy()
+    hard = np.bincount(cut[cut >= 0].ravel(), minlength=T - 1) * sim.v ** 3
+    total_ratio = chip.sum() / max(hard.sum(), 1e-9)
+    assert 0.4 < total_ratio <= 1.1, total_ratio
+    idle = hard == 0
+    if idle.any():
+        assert chip[idle].max() < 0.1 * max(chip.max(), 1e-9)
+    if (~idle).sum() >= 3:
+        c = np.corrcoef(chip[~idle], hard[~idle])[0, 1]
+        assert c > 0.9, c
+
+
+def test_force_penalty_gradient_matches_fd():
+    T = 24
+    sim, X = _make_sim_and_path(T)
+    sweep = SweepCarve(sim, n_points=T)
+    sweep.w_force[None] = 5.0
+    sweep.f_cap[None] = 2.0   # tiny cap so the penalty is active
+    _, gX = sweep.loss_and_grad(X)
+
+    def loss_at(Xp):
+        # FIXED attribution (no find_argmin): the FD probes the surrogate the
+        # optimizer actually descends between refreshes. Refreshing inside the
+        # FD would cross first-cover attribution flips, which are genuine O(1)
+        # handoffs of boundary voxels between segments (bounded jumps absorbed
+        # by the amin-refresh cadence, not part of the smooth surrogate).
+        S = T - 1
+        sweep.path.from_numpy(Xp)
+        sweep.loss[None] = 0.0
+        sweep.compute_loss()
+        sweep.zero_seg_chip(S)
+        sweep.accum_seg_chip()
+        sweep.add_force_penalties(S)
+        return float(sweep.loss[None])
+
+    eps = 2e-3
+    rng = np.random.default_rng(3)
+    ok = 0
+    for _ in range(6):
+        t = int(rng.integers(1, T))
+        c = int(rng.integers(0, 3))
+        Xp, Xm = X.copy(), X.copy()
+        Xp[t, c] += eps
+        Xm[t, c] -= eps
+        fd = (loss_at(Xp) - loss_at(Xm)) / (2 * eps)
+        g = float(gX[t, c])
+        rel = abs(fd - g) / max(1e-8, abs(fd) + abs(g))
+        if rel < 0.05 or (abs(fd) < 2e-4 and abs(g) < 2e-4):
+            ok += 1
+    assert ok >= 5
+
+
+def test_fragility_detects_pin():
+    from utils.fragility import compute_fragility, F_ALLOW_SAFE
+    Nx, Ny, Nz = 40, 40, 44
+    occ = np.zeros((Nx, Ny, Nz), bool)
+    occ[:, :, :20] = True                      # plate: 10 mm thick at 0.5 mm/vox
+    xx, yy = np.mgrid[:Nx, :Ny]
+    pin = (xx - 20) ** 2 + (yy - 20) ** 2 <= 2.0 ** 2
+    occ[pin, 20:36] = True                     # pin: r=1 mm, h=8 mm
+    sdf = np.where(occ, -1.0, 1.0).astype(np.float32)
+    frag = compute_fragility(sdf, voxel_mm=0.5, sigma_y_mpa=10.0,
+                             tool_radius_mm=3.175, contact_mm=1.0)
+    feats = frag["features"]
+    assert len(feats) == 1, feats
+    f = feats[0]
+    # t ~ 2 mm, h ~ 8 mm -> F = 10 * 2^3 / (6 * 8) = 1.67 N (edt quantization slack)
+    assert 0.8 < f["f_allow_n"] < 3.5, f
+    # waste voxel right beside the pin top carries the cap; far corner is safe
+    assert frag["f_allow_vox"][23, 20, 30] < 5.0
+    assert frag["f_allow_vox"][2, 2, 40] == F_ALLOW_SAFE
+    # tool-center field is capped anywhere the cutter overlaps the pin band
+    assert frag["f_allow_tool"][26, 20, 30] < 5.0
+
+
+def test_ramp_entry_has_no_engaged_plunges():
+    """With ramp_deg on, every descending step below the stock top moves
+    laterally at >= the ramp slope (plain mode: exact by construction)."""
+    from simulator.sweep import raster_arc_waypoints
+    sim, _ = _make_sim_and_path(24)
+    wps, _ = raster_arc_waypoints(sim, (0.5, 0.5, 1.0), ramp_deg=3.0)
+    L = np.array([sim.Lx, sim.Ly, sim.Lz])
+    seg = np.diff(np.asarray(wps), axis=0) * L
+    below = np.minimum(wps[:-1, 2], wps[1:, 2]) < 1.0  # touches material zone
+    dz, dxy = seg[:, 2], np.linalg.norm(seg[:, :2], axis=1)
+    desc = below & (dz < -1e-9)
+    tan3 = np.tan(np.radians(3.0))
+    assert (-dz[desc] <= tan3 * dxy[desc] + 1e-6).all(), (
+        -dz[desc] - tan3 * dxy[desc]).max()

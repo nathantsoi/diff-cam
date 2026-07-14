@@ -251,6 +251,40 @@ class Args:
     sigma_broad: float = 4.0
     """sweep: distance scale (voxels) normalizing the attraction term"""
 
+    # --- Physical plausibility (sweep method; see idea.md jul13-phys-plausible) ---
+    w_force: float = 0.0
+    """sweep: weight of the tool cutting-force penalty relu(F/f_max - 1)^2,
+    F[s] = kc * chip_mm3[s] / len_mm[s] (mechanistic chip-area force) with
+    sequential first-cover chip attribution. Bounds material removal per pass
+    so the optimized path cannot demand cuts that snap the end mill. 0 = off."""
+    w_fragile: float = 0.0
+    """sweep: weight of the part-fragility penalty relu(F*finv - 1)^2: segments
+    cutting within contact range of a slender target feature (thin pin, raised
+    letter) get a tighter force cap = that feature's cantilever breakage force
+    (utils/fragility.py, sigma_y * t^3/(6h)). 'Light passes near thin walls'.
+    0 = off."""
+    w_ramp: float = 0.0
+    """sweep: weight of the plunge penalty relu(-dz - tan(ramp_deg)*|dxy|)^2 on
+    ENGAGED steps (chip > 0): an end mill cannot feed axially like a drill, so
+    engaged descent steeper than ramp_deg is penalized (CAM ramp-entry rule).
+    0 = off."""
+    ramp_deg: float = 3.0
+    """max engaged descent angle (degrees) for w_ramp and --sweep-init-ramp;
+    CAM practice is 2-5 degrees for ramp entry"""
+    sigma_y: float = 276.0
+    """part material bending strength (MPa) for the fragility field. 276 = Al
+    6061 yield; ~10 = machining wax; ~70 = acrylic."""
+    frag_thin_mm: float = 0.0
+    """fragility thinness threshold radius (mm); features with local
+    half-thickness below this are fragile candidates. 0 = auto (tool radius)."""
+    frag_contact_mm: float = 1.0
+    """force-transmission distance (mm) beyond a fragile feature's surface:
+    cutting within this band pushes on the feature"""
+    sweep_init_ramp: bool = False
+    """sweep: enter each raster_arc/raster_terrain z-layer by ramping along the
+    first scan row at ramp_deg instead of plunging the stepdown vertically at
+    the corner (constructive plunge-free init)"""
+
     # CamEnvDiff / CSG specific (mirrors csg_ppo)
     resolution: int = 32
     """voxel grid resolution per axis"""
@@ -1037,6 +1071,31 @@ def main():
         sweep = SweepCarve(sim, n_points=T)
         sweep.w_broad[None] = args.w_broad
         sweep.sigma_broad[None] = args.sigma_broad
+        # Physical-plausibility terms (idea.md jul13-phys-plausible). The
+        # fragility field is computed from the target SDF ALONE (thin-feature
+        # detection + cantilever strength — shape-agnostic geometry) and is
+        # always built: the hard diagnostics report fragile margins even when
+        # the soft penalties are off.
+        sweep.w_force[None] = args.w_force
+        sweep.w_fragile[None] = args.w_fragile
+        sweep.kc[None] = args.kc
+        sweep.f_cap[None] = args.f_max
+        from utils.fragility import compute_fragility, F_ALLOW_SAFE
+        frag = compute_fragility(
+            sim.target.to_numpy(), sim.v, sigma_y_mpa=args.sigma_y,
+            r_thin_mm=(args.frag_thin_mm if args.frag_thin_mm > 0 else None),
+            contact_mm=args.frag_contact_mm,
+            tool_radius_mm=float(sim.tool_radius[None]))
+        sweep.set_fragility(frag["f_allow_vox"])
+        if frag["features"]:
+            worst = min(frag["features"], key=lambda f: f["f_allow_n"])
+            print(f"[fragility] {len(frag['features'])} fragile feature(s) "
+                  f"(sigma_y {args.sigma_y:.0f} MPa); weakest: t={worst['t_mm']:.2f} mm "
+                  f"h={worst['h_mm']:.2f} mm F_allow={worst['f_allow_n']:.1f} N",
+                  flush=True)
+        else:
+            print("[fragility] no fragile features detected in the target",
+                  flush=True)
         if args.reach_gate:
             from utils.reachability import compute_reachable_mask
             _tgt = sim.target.to_numpy()
@@ -1050,8 +1109,10 @@ def main():
                   flush=True)
         B_np = bspline_basis(args.n_ctrl, T)
         _cap_budget_mm = (T - 1) * float(ipm_to_mm_per_s(args.feed_ipm)) * args.dt
-        X_ref = init_reference_path(sim, tool_start, T, mode=args.sweep_init,
-                                    seed=args.seed, max_len_mm=_cap_budget_mm)
+        X_ref = init_reference_path(
+            sim, tool_start, T, mode=args.sweep_init, seed=args.seed,
+            max_len_mm=_cap_budget_mm,
+            ramp_deg=(args.ramp_deg if args.sweep_init_ramp else 0.0))
         P_init = fit_control_points(B_np, X_ref)
         P_init[0] = tool_start
         B_t = torch.from_numpy(B_np)                       # (T, K)
@@ -1068,6 +1129,7 @@ def main():
         # cap, so an init whose length exceeds (T-1)*cap can only be executed
         # truncated — coverage (and dice) die silently. Surface it up front.
         _cap_mm = feed_mm_s * args.dt
+        _ramp_tan = float(np.tan(np.radians(args.ramp_deg)))
         _step_mm = np.linalg.norm(np.diff(X_ref.astype(np.float64), axis=0)
                                   * np.array([sim.Lx, sim.Ly, sim.Lz]), axis=1)
         _len = float(_step_mm.sum())
@@ -1676,11 +1738,23 @@ def main():
                 feed_pen = torch.relu(speed / feed_mm_s - 1.0).pow(2).mean()
                 zfloor_pen = torch.relu(z_floor_t - X[:, 2]).pow(2).mean()
                 reg_loss = args.w_feed * feed_pen + 100.0 * zfloor_pen
+                if args.w_ramp > 0.0:
+                    # Plunge penalty: engaged steps (chip attribution from the
+                    # last argmin refresh, detached gate) may not descend
+                    # steeper than ramp_deg. Excess is in mm, normalized by
+                    # the per-step feed cap so the scale is dimensionless.
+                    engaged_t = torch.from_numpy(
+                        (sweep.seg_chip_np > 1e-9).astype(np.float32))
+                    dz_mm = step_mm[:, 2]
+                    dxy_mm = step_mm[:, :2].norm(dim=1)
+                    ramp_ex = torch.relu(-dz_mm - _ramp_tan * dxy_mm) / _cap_mm
+                    reg_loss = reg_loss + args.w_ramp * (engaged_t * ramp_ex).pow(2).mean()
                 reg_loss.backward()
                 X_det = X.detach()
                 _refresh = args.amin_refresh <= 1 or it % args.amin_refresh == 0
                 ti_loss, grad_X = sweep.loss_and_grad(X_det.numpy(),
-                                                      refresh_argmin=_refresh)
+                                                      refresh_argmin=_refresh,
+                                                      want_chip=args.w_ramp > 0.0)
                 grad = params.grad + (B_t.T @ torch.from_numpy(grad_X))[1:]
                 loss = ti_loss + float(reg_loss)
                 grad_norm = float(grad.norm().item())
@@ -1976,6 +2050,55 @@ def main():
         else:
             print("[holder] final trajectory keeps the holder clear of the stock.")
 
+        # --- Physical-plausibility hard diagnostics (sweep; idea.md
+        # jul13-phys-plausible). Computed on the REPORTED trajectory (the sim
+        # holds the best-checkpoint carve if it was selected above). Chip
+        # attribution is the delta sim's sequential hard engagement
+        # (compute_traj_diagnostics_hard scratch), force is the mechanistic
+        # chip-area model F = kc * chip_mm3 / len_mm — same definitions as the
+        # soft penalties, so penalty-off runs report honest violation levels.
+        phys_diag = {}
+        if args.method == "sweep":
+            sim.compute_traj_diagnostics_hard(T - 1)
+            _grid_mm3 = sim.Lx * sim.Ly * sim.Lz
+            _chip = sim.seg_engage.to_numpy()[:T - 1].astype(np.float64) * _grid_mm3
+            _pos = positions.astype(np.float64)
+            _smm = np.diff(_pos, axis=0) * np.array([sim.Lx, sim.Ly, sim.Lz])
+            _len = np.linalg.norm(_smm, axis=1)
+            _F = args.kc * _chip / np.maximum(_len, 0.1)
+            _engaged = _chip > 0.5 * sim.v ** 3
+            _dz, _dxy = _smm[:, 2], np.linalg.norm(_smm[:, :2], axis=1)
+            _plunge = _engaged & (-_dz > _ramp_tan * _dxy + 1e-6)
+            _dims = np.array([sim.Nx, sim.Ny, sim.Nz])
+            _mid = np.clip((0.5 * (_pos[1:] + _pos[:-1]) * _dims).astype(int),
+                           0, _dims - 1)
+            _cap = frag["f_allow_tool"][_mid[:, 0], _mid[:, 1], _mid[:, 2]]
+            _viol = _engaged & (_F > _cap)
+            _margin = float(np.min(_cap[_engaged] / np.maximum(_F[_engaged], 1e-6))
+                            ) if _engaged.any() else float(F_ALLOW_SAFE)
+            phys_diag = {
+                # max engaged chip-area force (N) and the hard tool-break flag
+                # at the f_max threshold (chip-area form; Nathan's fcut_max is
+                # the vol/(dt*D) form -- both reported).
+                "fcut_area_max": round(float(_F.max()) if len(_F) else 0.0, 3),
+                "tool_broken_area": float(bool((_F > args.f_max).any())),
+                # engaged steps descending steeper than ramp_deg (end mills
+                # cannot drill): count and fraction of engaged steps.
+                "plunge_count": int(_plunge.sum()),
+                "plunge_frac": round(float(_plunge.sum() / max(_engaged.sum(), 1)), 6),
+                # part-side: worst allowable/applied force ratio near fragile
+                # features (<1 means a feature would snap) and the break flag.
+                "fragile_margin_min": round(min(_margin, F_ALLOW_SAFE), 3),
+                "part_broken": float(bool(_viol.any())),
+                "n_fragile_features": len(frag["features"]),
+            }
+            print(f"[phys] F_area max {phys_diag['fcut_area_max']:.1f} N "
+                  f"(cap {args.f_max:.0f}); plunges {phys_diag['plunge_count']} "
+                  f"({100 * phys_diag['plunge_frac']:.1f}% of engaged); "
+                  f"fragile margin {phys_diag['fragile_margin_min']:.2f} "
+                  f"({phys_diag['n_fragile_features']} feature(s)); "
+                  f"part_broken={int(phys_diag['part_broken'])}", flush=True)
+
         # Save summary metrics for automated agents and LLM harnesses.
         import json
         total_seconds = time.time() - start_time
@@ -2048,6 +2171,9 @@ def main():
             "engage_max": round(float(last_m.get("engage_max", 0.0)), 6) if last_m else 0.0,
             "engage_mean": round(float(last_m.get("engage_mean", 0.0)), 6) if last_m else 0.0,
             "best_score": round(best_score, 6),
+            # Physical-plausibility diagnostics (sweep method; empty-safe for
+            # delta runs). See the [phys] log line / idea.md jul13-phys-plausible.
+            **phys_diag,
             # Human feedback that informed this run. Recorded on EVERY run
             # (even without --use-feedback) so the dashboard/metrics log which
             # prior runs a human rated and whether a warm-start was available.
