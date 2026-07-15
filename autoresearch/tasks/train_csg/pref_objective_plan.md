@@ -115,12 +115,54 @@ At the top of each loop iteration (per the step added to `autoresearch.md`):
 
 ## 6. Current preference understanding
 
-*(Empty until the first pairs are answered. Update here each loop. Format:)*
-- `w_air_time` — preferred: ? (n=?). Notes: …
-- `init_mode` — preferred: ? (n=?). Notes: …
+First answers landed 2026-07-15 (~09:11), 10/20 answered, n=1 per dimension
+(so per-dimension signal is WEAK — treat directions as hypotheses, themes as
+the real signal).
 
-Recurring themes → next reformulation to try:
-- *(none yet)*
+- `w_air_time` — preferred: tie (n=1). Notes: "both follow the contour and dont
+  cut any air, however the surface finish is poor as the endmill doesnt follow
+  the surface precisely."
+- `w_gouge` — preferred: tie (n=1). Notes: "both pretty good, look almost the same."
+- `w_residual` — preferred: A=1.0 (n=1). Notes: "better shape following."
+- `w_break` — preferred: tie (n=1). Notes: "both ok but not great — dont make it
+  all the way around the outside of the part and have air cutting."
+- `w_time` — preferred: tie (n=1). Notes: "very similar, both great!"
+- `k-anneal` — preferred: B=sharper (n=1). Notes: "much better part contour
+  following."
+- `init_mode` — preferred: tie (n=1). Notes: "main difference is when tool is
+  air cutting, which does not matter beyond both spending about the same time
+  cutting air, all of which is bad."
+- `multidepth_revs` — preferred: A=3.0 (n=1). Notes: "less air cutting, better
+  shape following."
+- `loss_shift` — preferred: B=0.5 (n=1). Notes: "follows the contour of the
+  part. top surface following could be better."
+
+Recurring themes (the real signal — repeated across unrelated dimensions):
+1. **Contour / surface following is the dominant valued quality.** Cited as the
+   reason for the preferred side in 4 of the 5 non-tie dimensions (k-anneal,
+   loss_shift, w_residual, multidepth_revs) — "better shape/contour following."
+2. **Air cutting is the dominant negative.** Flagged in 4 notes (init_mode,
+   multidepth_revs, w_break, +1 unstructured) — "air cutting... all of which is
+   bad."
+3. **Surface finish / precise surface following is a stated deficit.** Flagged
+   twice (w_air_time "surface finish poor, endmill doesnt follow surface
+   precisely"; loss_shift "top surface following could be better").
+
+→ next reformulations to try (swept as hard_dice experiments; preference
+steering picks what to try, the metric confirms):
+- **Sharper surface proxy**: k-anneal B preferred for "better contour following"
+  → test k_final above 120 (e.g. 180) on a surface-finish-sensitive shape
+  (sphere / bowl) with the SOTA base. Does a sharper final k lift hard_dice, or
+  only cosmetic dice?
+- **Promote loss_shift=0.5** into the SOTA base (loss_shift B preferred,
+  "follows the contour... top surface could be better") → test loss_shift 0.0 vs
+  0.5 on sphere/box across seeds; watch for over-fitting the path tail.
+- **Top-surface following**: the loss_shift note flags the TOP surface
+  specifically — a candidate for a z-weighted contour term later if the metric
+  confirms loss_shift helps.
+- Air-cutting theme reinforces keeping w_air_time nonzero (1e-3 in SOTA) and
+  the multidepth_contour init; multidepth_revs A=3.0 preferred over higher →
+  keep revs=3.0 (do NOT push finer stepover).
 
 ## 7. Gate (Idea 9)
 

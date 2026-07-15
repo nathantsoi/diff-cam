@@ -405,3 +405,28 @@ dual-adaptive SOTA AND the bowl cavity win.** (Note: args.json records init_mode
    computed (max radius per theta = outer boundary); z_area already computed. Gate
    a hole-aware init (sphere-exterior contour + central column spiral) on annul.
    Higher code risk — attempt now that the bowl win is banked.
+
+## jul15 hole+cavity NEGATIVE (09:35) — cavity init does NOT transfer to the hole
+
+Tested whether the cavity init that won for the bowl also helps the hole (the
+only remaining broken shape, ~0.273 contour baseline). Ran
+`--init-mode multidepth_cavity` on sphere_hole r11.43, seeds 1,2 (k-anneal
+20->120, revs 3.0, w_air_time 1e-3, w_gouge 4.0):
+- hole s1 cavity: best hard_dice 0.2634 (final_iter COLLAPSED to 0.194 — unstable)
+- hole s2 cavity: best hard_dice 0.2630
+Both BELOW the 0.273 contour baseline. So cavity init HURTS the hole.
+
+Why (code read): `multidepth_cavity` DOES clear the central column (helical
+plunge + interior spiral at r<=r_cav-r_tool-margin) AND an exterior helix. But
+its exterior uses r_cross (cross-section MAX = corner), so r_safe=r_cross+
+r_tool+margin exceeds the stock box (half-width 0.5) for the near-filling
+sphere -> air-cut waste (the mode's own comments flag this). The contour init's
+angularly-varying r_bound is more efficient. Net: cavity spends the fixed step
+budget on a messy exterior + column clear, and the optimizer does worse from
+that start than from the contour init's clean exterior (the optimizer can learn
+to clear the column itself, but struggles to fix a messy exterior).
+
+Remaining bet for the hole: a HYBRID init = contour's angularly-varying
+exterior (r_bound, efficient) + cavity's interior column-clearing pass, gated
+on annul>0.40 (the annularity scalar, hole=0.769). Higher code risk — build as
+a new `multidepth_hole` mode. NOT done yet; the hole stays at ~0.273 contour.
