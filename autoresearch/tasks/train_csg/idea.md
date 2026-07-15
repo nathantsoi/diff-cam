@@ -32,8 +32,8 @@ Best `hard_dice` by shape (3-seed, committed at `02fb503`/`845999e`):
 | sphere       | 11.43  | **0.8311**     | contour + k20, finish OFF               |
 | box          | 9.0    | **0.7596**     | contour + k10 (adaptive), finish OFF    |
 | pyramid      | 9.0    | **0.7976**     | contour + k20, finish OFF               |
-| sphere_bowl  | 11.43  | 0.6185         | (k-anneal only; contour NOT yet tried)  |
-| sphere_hole  | 11.43  | 0.2630         | (structurally broken; contour NOT tried)|
+| sphere_bowl  | 11.43  | **0.6471**      | cavity init + k20 (NEW HIGH; contour 0.619 neutral) |
+| sphere_hole  | 11.43  | 0.2630         | (structurally broken; contour 0.273, it10k 0.282)  |
 
 Key prior findings (from results.tsv):
 - `best_on_hard` selection: shape-agnostic +0.035 mean (5/6 shapes).
@@ -275,3 +275,42 @@ story becomes: convex+hole = contour, bowl = cavity.
 3. **Preference queue (PRIMARY):** 12 pending, 0 answered (human away — intended).
    Added 2 bowl pairs (w_gouge s2, w_air_time s3) for CSG-shape coverage (was a
    gap — all prior pairs were convex shapes). Keep stocking on freed GPUs.
+
+## jul15 BOWL CAVITY WIN CONFIRMED (07:03) — bowl SOTA → cavity init
+
+| bowl config | s1 | s2 | s3 | 3-seed mean | vs contour 0.6188 |
+|---|---|---|---|---|---|
+| **cavity + k20** | 0.6548 | 0.6266 | 0.6599 | **0.6471** | **+0.0283 WIN** |
+| cavity + k10 | 0.6481 | 0.5263 (collapse) | — | 0.587 (unstable) | — |
+| contour + k20 (prior) | 0.6185 | 0.6192 | 0.6186 | 0.6188 | baseline |
+
+**Cavity init beats contour for the bowl by +0.028 (0.619 → 0.647)**, confirmed
+on current code (and +0.014 over jul11's 0.6328). cavity k10 is seed-unstable
+(s2 collapsed 0.65→0.53 under k-sharpening), so **k20 is the bowl-cavity
+config** (higher AND stable). Bowl SOTA updated to **0.6471 (cavity + k20)**.
+
+**Per-shape init story is now clear and OPPOSITE for the two CSG shapes:**
+- convex shapes (cyl/sphere/box/pyr) + sphere_hole → **contour** init wins.
+- sphere_bowl → **cavity** init wins (contour neutral, +0.028 to cavity).
+
+This is a genuine per-shape branching point (now permitted). The SOTA command's
+`--init-mode multidepth_contour` is correct for 5/6 shapes; the bowl wants
+`--init-mode multidepth_cavity`. Next: make init_mode **adaptive** — gate on the
+bowl's geometric signature (it is a single concavity: sphere∩{inside a smaller
+sphere/cyl}, so high "interior-void fraction" or negative-curvature signature)
+so one shape-agnostic command picks cavity for the bowl and contour elsewhere.
+That gate is the analog of k_init_adaptive / contour_finish_adaptive.
+
+### jul15 next (07:03)
+1. **Design + implement init_mode_adaptive** (gate cavity-vs-contour on the
+   bowl's geometry). Re-run bowl 3-seed to confirm the adaptive command picks
+   cavity and holds 0.647; re-run a convex shape to confirm it still picks
+   contour (regression check). This makes the bowl win part of the SOTA command
+   shape-agnostically.
+2. Keep pref queue stocked (launch init_mode + w_residual + w_break pairs on
+   freed GPUs; init_mode pair on sphere directly tests cavity-vs-contour
+   preference on a convex shape — connects the pref loop to this finding).
+3. After init_mode_adaptive: the hole (~0.27) remains the only broken shape.
+   The deferred hole-aware init (sphere-exterior contour + central column
+   spiral) is the remaining research bet — higher code risk, attempt once the
+   bowl win is banked into the adaptive command.
