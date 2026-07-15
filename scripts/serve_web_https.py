@@ -263,6 +263,15 @@ def _run_key_from_rel(run_rel: str) -> str:
 # Sentinel for "field not provided" (distinct from None, which means "clear").
 _UNSET = object()
 
+# Serializes read-modify-write on the feedback store. The server is a
+# ThreadingTCPServer, so concurrent POSTs (e.g. rating several runs in quick
+# succession, or a star click landing during a note save) run in separate
+# threads. Without a lock, two set_feedback calls each load the file, each add
+# one entry, and each save -- the second save silently clobbers the first, so
+# one of the ratings is LOST ("not all persisted"). Holding this lock across
+# the whole load->modify->save makes each update atomic.
+_FEEDBACK_LOCK = threading.Lock()
+
 
 def set_feedback(root: Path, run: str, stars=_UNSET, feedback=_UNSET) -> dict:
     """Set/clear one run's feedback entry. Returns the stored entry.
@@ -271,29 +280,33 @@ def set_feedback(root: Path, run: str, stars=_UNSET, feedback=_UNSET) -> dict:
     string (or "" to clear). Either may be omitted (_UNSET) to leave that field
     unchanged. An entry left with no stars and empty text is removed so the
     store stays clean.
+
+    The full load->modify->save is held under _FEEDBACK_LOCK so concurrent
+    ratings don't clobber each other (lost-update fix).
     """
-    data = load_feedback(root)
-    key = _run_key_from_rel(run)
-    entry = data.get(key, {})
-    if stars is not _UNSET:
-        if stars is None:
-            entry["stars"] = None
+    with _FEEDBACK_LOCK:
+        data = load_feedback(root)
+        key = _run_key_from_rel(run)
+        entry = data.get(key, {})
+        if stars is not _UNSET:
+            if stars is None:
+                entry["stars"] = None
+            else:
+                try:
+                    s = int(stars)
+                except (TypeError, ValueError):
+                    s = None
+                # Accept only the documented 1-7 ratings; anything else -> null.
+                entry["stars"] = s if (s is not None and 1 <= s <= 7) else None
+        if feedback is not _UNSET:
+            entry["feedback"] = str(feedback).strip()
+        entry["ts"] = time.time()
+        if not entry.get("stars") and not entry.get("feedback"):
+            data.pop(key, None)
         else:
-            try:
-                s = int(stars)
-            except (TypeError, ValueError):
-                s = None
-            # Accept only the documented 1-7 ratings; anything else -> null.
-            entry["stars"] = s if (s is not None and 1 <= s <= 7) else None
-    if feedback is not _UNSET:
-        entry["feedback"] = str(feedback).strip()
-    entry["ts"] = time.time()
-    if not entry.get("stars") and not entry.get("feedback"):
-        data.pop(key, None)
-    else:
-        data[key] = entry
-    save_feedback(root, data)
-    return data.get(key, {})
+            data[key] = entry
+        save_feedback(root, data)
+        return data.get(key, {})
 
 
 # ---------------------------------------------------------------------------
@@ -307,10 +320,14 @@ def set_feedback(root: Path, run: str, stars=_UNSET, feedback=_UNSET) -> dict:
 #
 # Schema: a list of pair objects
 #   {"id": "p_0001", "run_a": "<basename>", "run_b": "<basename>",
-#    "prompt": "...", "ts": <epoch>, "answer": "a"|"b"|"tie"|null,
-#    "answer_ts": <epoch>|null, "note": ""}
-# run_a/run_b are stored as basenames (the unique key, same convention as the
-# star-rating store) so a pair survives regardless of batch folder moves.
+#    "prompt": "...", "dimension": "w_air_time", "magnitude_a": "1e-3",
+#    "magnitude_b": "1e-2", "scenario": "sphere s1",
+#    "ts": <epoch>, "answer": "a"|"b"|"tie"|null, "answer_ts": <epoch>|null,
+#    "note": ""}
+# dimension/magnitude_a/magnitude_b/scenario are optional (added for the
+# preference-based-objective-learning loop); old pairs omit them. run_a/run_b
+# are stored as basenames (the unique key, same convention as the star-rating
+# store) so a pair survives regardless of batch folder moves.
 # ---------------------------------------------------------------------------
 def pairwise_path(root: Path) -> Path:
     """Path to pairwise.json under the train_csg task dir."""
@@ -347,37 +364,64 @@ def _new_pair_id(pairs: list) -> str:
     return f"p_{n:04d}"
 
 
-def add_pair(root: Path, run_a: str, run_b: str, prompt: str = "") -> dict:
-    """Append a new unanswered pair; returns the stored pair object."""
-    data = load_pairs(root)
-    pair = {
-        "id": _new_pair_id(data),
-        "run_a": _run_key_from_rel(run_a),
-        "run_b": _run_key_from_rel(run_b),
-        "prompt": (prompt or "").strip(),
-        "ts": time.time(),
-        "answer": None,
-        "answer_ts": None,
-        "note": "",
-    }
-    data.append(pair)
-    save_pairs(root, data)
-    return pair
+# Serializes read-modify-write on the pairwise store (same lost-update risk as
+# _FEEDBACK_LOCK: the threading server can POST two pair answers concurrently
+# and the second save would clobber the first).
+_PAIRS_LOCK = threading.Lock()
+
+
+def add_pair(
+    root: Path,
+    run_a: str,
+    run_b: str,
+    prompt: str = "",
+    dimension: str = "",
+    magnitude_a: str = "",
+    magnitude_b: str = "",
+    scenario: str = "",
+) -> dict:
+    """Append a new unanswered pair; returns the stored pair object.
+
+    `dimension` is the single objective knob the pair varies (e.g. `w_air_time`);
+    `magnitude_a` / `magnitude_b` are the two values of that knob; `scenario`
+    is a short label for the fixed config (shape/seed/iters). All optional and
+    backward compatible — old callers and old pairs omit them.
+    """
+    with _PAIRS_LOCK:
+        data = load_pairs(root)
+        pair = {
+            "id": _new_pair_id(data),
+            "run_a": _run_key_from_rel(run_a),
+            "run_b": _run_key_from_rel(run_b),
+            "prompt": (prompt or "").strip(),
+            "dimension": (dimension or "").strip(),
+            "magnitude_a": str(magnitude_a or "").strip(),
+            "magnitude_b": str(magnitude_b or "").strip(),
+            "scenario": (scenario or "").strip(),
+            "ts": time.time(),
+            "answer": None,
+            "answer_ts": None,
+            "note": "",
+        }
+        data.append(pair)
+        save_pairs(root, data)
+        return pair
 
 
 def record_pair_answer(root: Path, pair_id: str, answer: str, note: str = "") -> dict | None:
     """Record a human answer for one pair. Returns the updated pair or None."""
     if answer not in ("a", "b", "tie"):
         return None
-    data = load_pairs(root)
-    for p in data:
-        if p.get("id") == pair_id:
-            p["answer"] = answer
-            p["answer_ts"] = time.time()
-            p["note"] = str(note).strip() if note is not None else ""
-            save_pairs(root, data)
-            return p
-    return None
+    with _PAIRS_LOCK:
+        data = load_pairs(root)
+        for p in data:
+            if p.get("id") == pair_id:
+                p["answer"] = answer
+                p["answer_ts"] = time.time()
+                p["note"] = str(note).strip() if note is not None else ""
+                save_pairs(root, data)
+                return p
+        return None
 
 
 def generate_run_video(root: Path, run_rel: str, force: bool = False) -> dict:
@@ -550,6 +594,20 @@ def main() -> None:
                 elif status == "answered":
                     pairs = [p for p in pairs if p.get("answer")]
                 return self._json({"pairs": pairs})
+            # Preference digest: answered pairs aggregated by dimension (the
+            # single objective knob a pair varies). Same view the agent gets via
+            # scripts/pref_digest.py; the compare.html digest panel fetches this.
+            if parsed.path == "/__api/pref-digest" or parsed.path.endswith("/__api/pref-digest"):
+                scripts_dir = str(Path(__file__).resolve().parent)
+                if scripts_dir not in sys.path:
+                    sys.path.insert(0, scripts_dir)
+                from pref_lib import digest, pending, summary_counts
+                pairs = load_pairs(root)
+                return self._json({
+                    "by_dimension": digest(pairs),
+                    "pending": pending(pairs),
+                    "counts": summary_counts(pairs),
+                })
             return super().do_GET()
 
         def do_POST(self):
@@ -578,7 +636,10 @@ def main() -> None:
                 )
                 return self._json({"ok": True, "entry": entry})
             # Pairwise comparison actions. Body branches on intent:
-            #  - add a pair:        {"run_a": "...", "run_b": "...", "prompt": "..."}
+            #  - add a pair:        {"run_a": "...", "run_b": "...", "prompt": "...",
+            #                        "dimension": "...", "magnitude_a": "...",
+            #                        "magnitude_b": "...", "scenario": "..."}
+            #                       (dimension/magnitude_*/scenario optional)
             #  - record an answer:  {"id": "p_0001", "answer": "a"|"b"|"tie", "note": "..."}
             if parsed.path == "/__api/pairs" or parsed.path.endswith("/__api/pairs"):
                 try:
@@ -595,7 +656,13 @@ def main() -> None:
                         return self._json({"ok": False, "error": "invalid answer or unknown pair id"}, 400)
                     return self._json({"ok": True, "pair": pair})
                 if body.get("run_a") and body.get("run_b"):
-                    pair = add_pair(root, str(body["run_a"]), str(body["run_b"]), body.get("prompt", ""))
+                    pair = add_pair(
+                        root, str(body["run_a"]), str(body["run_b"]), body.get("prompt", ""),
+                        dimension=body.get("dimension", ""),
+                        magnitude_a=body.get("magnitude_a", ""),
+                        magnitude_b=body.get("magnitude_b", ""),
+                        scenario=body.get("scenario", ""),
+                    )
                     return self._json({"ok": True, "pair": pair})
                 return self._json({"ok": False, "error": "provide {run_a,run_b} to add a pair or {id,answer} to record an answer"}, 400)
             return self._json({"ok": False, "error": "unknown POST endpoint"}, 404)

@@ -32,11 +32,18 @@
 
   /* pair prompt bar */
   #pair-bar { background:var(--panel); border:1px solid #000; border-radius:10px; padding:10px 14px;
-    display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
+    display:flex; flex-direction:column; gap:6px; }
+  #pair-bar .top { display:flex; flex-wrap:wrap; gap:12px; align-items:center; }
   #pair-bar .prompt { font-size:14px; }
   #pair-bar .prompt b { color:var(--accent); }
   #pair-bar .pid { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
   #pair-bar .spacer { flex:1; }
+  #pair-bar .dim { font-size:13px; color:var(--ink); }
+  #pair-bar .dim .lbl { color:var(--muted); }
+  #pair-bar .dim .va { color:var(--a); font-weight:600; }
+  #pair-bar .dim .vb { color:var(--b); font-weight:600; }
+  #pair-bar .dim .vs { color:var(--muted); margin:0 6px; }
+  #pair-bar .dim .sc { color:var(--muted); margin-left:10px; }
 
   /* two side-by-side viewers */
   .row { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
@@ -73,8 +80,20 @@
   .pick.A { background:var(--a); color:#0b0e12; border-color:var(--a); }
   .pick.B { background:var(--b); color:#0b0e12; border-color:var(--b); }
   .pick.tie { background:var(--panel2); color:var(--ink); }
-  #ans-note { width:240px; font-size:12px; padding:5px 8px; background:var(--bg); color:var(--ink);
-    border:1px solid var(--grid); border-radius:5px; }
+  #ans-note { width:280px; font-size:13px; padding:6px 8px; background:var(--bg); color:var(--ink);
+    border:1px solid var(--grid); border-radius:5px; resize:vertical; font-family:inherit; }
+  #ans-note:focus { border-color:var(--accent); outline:none; }
+
+  /* preference digest panel */
+  #digest-panel { background:var(--panel); border:1px solid #000; border-radius:10px; padding:4px 14px; }
+  #digest-panel summary { cursor:pointer; color:var(--muted); font-size:13px; padding:8px 0; }
+  #digest-body { font-size:13px; padding:0 0 12px; display:flex; flex-direction:column; gap:10px; }
+  #digest-body .ddim { border-left:3px solid var(--grid); padding-left:10px; }
+  #digest-body .ddim .dhead { color:var(--ink); }
+  #digest-body .ddim .dhead b { color:var(--accent); }
+  #digest-body .ddim .dhead .pw { color:var(--muted); margin-left:8px; font-size:12px; }
+  #digest-body .ddim .note { color:var(--muted); font-size:12px; margin:3px 0 0; }
+  #digest-body .empty { color:var(--muted); }
 
   /* ad-hoc compare */
   details.adhoc { background:var(--panel); border:1px solid #000; border-radius:10px; padding:4px 14px; }
@@ -100,10 +119,13 @@
 
 <main>
   <div id="pair-bar">
-    <span class="pid" id="pair-id">—</span>
-    <span class="prompt" id="pair-prompt">No pair loaded.</span>
-    <span class="spacer"></span>
-    <span class="pid" id="pair-answered"></span>
+    <div class="top">
+      <span class="pid" id="pair-id">—</span>
+      <span class="prompt" id="pair-prompt">No pair loaded.</span>
+      <span class="spacer"></span>
+      <span class="pid" id="pair-answered"></span>
+    </div>
+    <div class="dim" id="pair-dim" hidden></div>
   </div>
 
   <div class="row">
@@ -137,11 +159,16 @@
   <div id="answer-bar">
     <span class="hint" id="ans-hint">Pick the better trajectory.</span>
     <span class="spacer"></span>
-    <input id="ans-note" type="text" placeholder="optional note (why)">
+    <textarea id="ans-note" rows="2" placeholder="Why? (the agent reads this)"></textarea>
     <button class="pick A" id="pick-a">◀ A is better</button>
     <button class="pick tie" id="pick-tie">Tie / both bad</button>
     <button class="pick B" id="pick-b">B is better ▶</button>
   </div>
+
+  <details id="digest-panel">
+    <summary>Preference digest (what the agent has learned so far)</summary>
+    <div id="digest-body">loading…</div>
+  </details>
 
   <details class="adhoc">
     <summary>Ad-hoc compare (pick any two runs — not recorded)</summary>
@@ -330,13 +357,45 @@ function updateStats(){
     `<b>${pend}</b> pending · <b>${ans}</b> answered`;
 }
 
+async function refreshDigest(){
+  const body = document.getElementById("digest-body");
+  try {
+    const r = await fetch(`${BASE}__api/pref-digest`);
+    const j = await r.json();
+    const dims = (j && j.by_dimension) ? j.by_dimension : {};
+    const counts = (j && j.counts) ? j.counts : {};
+    const keys = Object.keys(dims).sort();
+    if (!keys.length){
+      body.innerHTML = `<span class="empty">No answered pairs yet — ` +
+        `${(counts.total||0)} total, ${(counts.pending||0)} pending. The agent enqueues pairs; ` +
+        `answer A/B/tie and the learned direction appears here.</span>`;
+      return;
+    }
+    const pwLabel = v => v==="a"?"prefers A":v==="b"?"prefers B":v==="tie"?"prefers tie":"no clear winner";
+    body.innerHTML = keys.map(d=>{
+      const rec = dims[d];
+      const notes = (rec.notes||[]).slice(0,5).map(n=>{
+        const s = n.length>200 ? n.slice(0,197)+"…" : n;
+        return `<div class="note">— ${escapeHtml(s)}</div>`;
+      }).join("");
+      return `<div class="ddim"><div class="dhead">` +
+             `<b>${escapeHtml(d)}</b> <span class="pw">n=${rec.n} · ${pwLabel(rec.preferred)} ` +
+             `(A=${rec.a_wins} B=${rec.b_wins} tie=${rec.ties})</span></div>${notes}</div>`;
+    }).join("");
+  } catch (e){
+    body.innerHTML = `<span class="empty">digest unavailable (${escapeHtml(String(e))})</span>`;
+  }
+}
+
 async function showPair(pair){
   activePair = pair || null;
   const idEl = document.getElementById("pair-id");
   const pEl  = document.getElementById("pair-prompt");
   const aEl  = document.getElementById("pair-answered");
+  const dEl  = document.getElementById("pair-dim");
   if (!pair){
     idEl.textContent = "—"; pEl.textContent = "No pair loaded."; aEl.textContent = "";
+    dEl.hidden = true;
     setAnswerEnabled(false);
     return;
   }
@@ -344,6 +403,16 @@ async function showPair(pair){
   idEl.textContent = pair.id + (pair.answer ? " · (answered: "+pair.answer+")" : "");
   pEl.innerHTML = pair.prompt ? "Prompt: <b>"+escapeHtml(pair.prompt)+"</b>" : "Pick the better trajectory.";
   aEl.textContent = pair.answer ? "answered "+pair.answer : "pending";
+  // Structured framing: which objective knob varies, at which magnitudes.
+  if (pair.dimension){
+    const ma = pair.magnitude_a || "?", mb = pair.magnitude_b || "?";
+    let html = `<span class="lbl">Dimension:</span> <b>${escapeHtml(pair.dimension)}</b> ` +
+               `<span class="va">A=${escapeHtml(ma)}</span><span class="vs">vs</span><span class="vb">B=${escapeHtml(mb)}</span>`;
+    if (pair.scenario) html += `<span class="sc">· ${escapeHtml(pair.scenario)}</span>`;
+    dEl.innerHTML = html; dEl.hidden = false;
+  } else {
+    dEl.hidden = true;
+  }
   setAnswerEnabled(!pair.answer);
   document.getElementById("ans-note").value = pair.note || "";
   // Init the two WebGPU devices sequentially (concurrent adapter requests can
@@ -377,6 +446,7 @@ async function answer(ans){
   document.getElementById("pair-id").textContent = activePair.id + " · (answered: "+ans+")";
   document.getElementById("pair-answered").textContent = "answered "+ans;
   setAnswerEnabled(false);
+  refreshDigest();   // reflect the just-recorded answer in the learned-so-far panel
   toast("Saved: "+ans.toUpperCase()+". Loading next pending…");
   setTimeout(nextPending, 600);
 }
@@ -476,6 +546,7 @@ async function adhocLoad(){
   document.getElementById("pair-id").textContent = "— ad-hoc —";
   document.getElementById("pair-prompt").textContent = "Ad-hoc compare (not recorded).";
   document.getElementById("pair-answered").textContent = "";
+  document.getElementById("pair-dim").hidden = true;
   setAnswerEnabled(false);
   await Promise.all([sideA.loadRun(a), sideB.loadRun(b)]);
   setStep(1.0);
@@ -503,7 +574,7 @@ function wire(){
 (async function init(){
   wire();
   masterLoop();
-  try { await refreshPairs(); await loadRunList(); } catch(e){ console.warn(e); }
+  try { await refreshPairs(); await loadRunList(); refreshDigest(); } catch(e){ console.warn(e); }
   // show first pending pair if any, else leave ad-hoc ready.
   const pend = PAIRS.filter(p=>!p.answer);
   if (pend.length) showPair(pend[0]);

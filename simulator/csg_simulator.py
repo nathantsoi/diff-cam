@@ -357,6 +357,17 @@ class CSGSimulatorDelta:
         self.w_time[None] = 0.0
         self.w_air_time = ti.field(dtype=ti.f32, shape=())
         self.w_air_time[None] = 0.0
+        # Late-weighted air penalty (Idea 2): a SECOND air-time loss term whose
+        # per-segment weight ramps from 0 (early entry/reposition air is cheap)
+        # to 1 (late air is expensive), attacking end-of-trajectory air cutting.
+        # w_air_late is the overall weight (0 = off, same scale as w_air_time);
+        # w_air_ramp_frac is the fraction of the trajectory held at ramp=0 before
+        # the linear ramp to 1 begins (0 = ramp over the whole trajectory). The
+        # ramp depends only on the step index t (shape-agnostic).
+        self.w_air_late = ti.field(dtype=ti.f32, shape=())
+        self.w_air_late[None] = 0.0
+        self.w_air_ramp_frac = ti.field(dtype=ti.f32, shape=())
+        self.w_air_ramp_frac[None] = 0.0
         self.w_break = ti.field(dtype=ti.f32, shape=())
         self.w_break[None] = 0.0
         # Breakage-model constants (see docs/algorithms.md). kc = specific
@@ -1587,6 +1598,18 @@ class CSGSimulatorDelta:
             # Per-segment time + air-time loss (means over segments, differentiable).
             ti.atomic_add(self.loss[None], w_t * st * inv_n)
             ti.atomic_add(self.loss[None], w_at * st * is_air * inv_n)
+            # Late-weighted air penalty (Idea 2): ramp(t) in [0,1], low early /
+            # high late. ramp(t)=0 during the warmup fraction (early entry air is
+            # free), then rises linearly to 1 at the final segment. Depends only
+            # on t (shape-agnostic); a scalar multiplier on the differentiable
+            # is_air term, so autodiff is unaffected. w_air_late=0 => term off.
+            w_al = self.w_air_late[None]
+            if w_al > 0.0:
+                span = ti.max(1, (T - 1) - t_start)
+                warm = ti.cast(self.w_air_ramp_frac[None] * ti.cast(span, ti.f32), ti.i32)
+                ramp = ti.cast(ti.max(0, t - t_start - warm), ti.f32) / ti.cast(ti.max(1, span - warm), ti.f32)
+                ramp = ti.max(0.0, ti.min(1.0, ramp))
+                ti.atomic_add(self.loss[None], w_al * st * is_air * ramp * inv_n)
             # Per-step breakage probability; accumulated for the traj-level term.
             eng = self.seg_engage[t]
             mu_F = kc * (eng * v_mm3) / (dt * D + 1e-12)
@@ -1961,6 +1984,7 @@ class CSGSimulatorDelta:
         # the Tape, so the reported metrics are unaffected by this guard.
         w_any = (self.w_time[None] > 0.0
                  or self.w_air_time[None] > 0.0
+                 or self.w_air_late[None] > 0.0
                  or self.w_break[None] > 0.0)
         if w_any:
             self.zero_seg_volumes(0, num_active_steps - 1)

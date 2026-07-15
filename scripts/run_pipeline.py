@@ -192,6 +192,10 @@ def main():
                     help="weight on the total toolpath time soft term (seconds; 0 disables)")
     ap.add_argument("--w-air-time", type=float, default=1e-3,
                     help="weight on the air-cutting time soft term (seconds; 0 disables)")
+    ap.add_argument("--w-air-late", type=float, default=0.0,
+                    help="weight on the LATE-WEIGHTED air-cutting soft term (Idea 2; 0 disables)")
+    ap.add_argument("--w-air-ramp-frac", type=float, default=0.0,
+                    help="fraction of trajectory held at ramp=0 before the late-air ramp to 1 (0=whole traj)")
     ap.add_argument("--w-break", type=float, default=1e-3,
                     help="weight on the tool-breakage probability soft term (0 disables)")
     ap.add_argument("--kc", type=float, default=700.0,
@@ -410,6 +414,8 @@ def main():
             "--tool_gouge_margin_mm", str(args.tool_gouge_margin_mm),
             "--w_time", str(args.w_time),
             "--w_air_time", str(args.w_air_time),
+            "--w_air_late", str(args.w_air_late),
+            "--w_air_ramp_frac", str(args.w_air_ramp_frac),
             "--w_break", str(args.w_break),
             "--kc", str(args.kc),
             "--f_ref", str(args.f_ref),

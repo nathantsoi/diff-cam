@@ -28,6 +28,7 @@ eval_freq=10 + best-checkpoint saving capture the transient dice peak:
         --record_video_freq 100 --video_fps 30
 """
 
+import json
 import math
 import os
 import random
@@ -100,6 +101,52 @@ def _r_cross_at(r_cross, z):
     """Sample the cross-section radius profile at normalized height z."""
     k = int(np.clip(z * len(r_cross), 0, len(r_cross) - 1))
     return float(r_cross[k])
+
+
+def _contour_geometry_scalars(grid):
+    """Shape-agnostic geometric descriptors of a baked target SDF grid.
+
+    Returns ``(ang_cv, z_cv, r_bound, z_area)`` where:
+      ang_cv  = mean over z-slices of (std/mean of the per-theta boundary radius)
+                -- LOW for circular cross-sections (cylinder 0.012, sphere 0.033),
+                HIGH for flat-faced polygons (box 0.109, pyramid 0.150).
+      z_cv    = std/mean of the per-z-slice inside-voxel area -- LOW for prismatic
+                parts with constant cross-section (cylinder 0.000, box 0.000),
+                HIGH for tapered/curved tops (sphere 0.425, pyramid 0.883).
+      r_bound = (Nz, N_th) per-(z,theta) boundary radius (0 where no target voxel).
+      z_area  = (Nz,) inside-voxel count per z-slice.
+
+    Pure function of the SDF grid (no shape names / params); the two scalars drive
+    contour_finish_adaptive (finish helps on LOW ang_cv + LOW z_cv = cylinder) and
+    k_init_adaptive (k10 helps on HIGH ang_cv + LOW z_cv = box) -- opposite angular
+    corners of the same prismatic (z_cv < 0.06) gate. Measured at res 64; threshold
+    0.06 sits in a clean gap on both scalars.
+    """
+    Nx, Ny, Nz = grid.shape
+    N_th = 96
+    xs = (np.arange(Nx) + 0.5) / Nx - 0.5
+    ys = (np.arange(Ny) + 0.5) / Ny - 0.5
+    Rxy = np.sqrt(xs[:, None] ** 2 + ys[None, :] ** 2)       # (Nx,Ny)
+    Axy = np.arctan2(ys[None, :], xs[:, None])                # (Nx,Ny)
+    th_bins = (np.floor((Axy + np.pi) / (2.0 * np.pi) * N_th
+                        ).astype(np.int32)) % N_th             # (Nx,Ny)
+    r_bound = np.zeros((Nz, N_th), dtype=np.float32)
+    z_area = np.zeros(Nz, dtype=np.float32)      # inside-voxel count per z-slice
+    for iz in range(Nz):
+        m = grid[:, :, iz] <= 0.0
+        if m.any():
+            np.maximum.at(r_bound[iz], th_bins[m], Rxy[m])
+            z_area[iz] = float(m.sum())
+    ang_cvs = []
+    for iz in range(Nz):
+        b = r_bound[iz]
+        b = b[b > 0.0]
+        if len(b) > 3:
+            ang_cvs.append(float(b.std() / max(b.mean(), 1e-9)))
+    ang_cv = float(np.mean(ang_cvs)) if ang_cvs else 1.0
+    a = z_area[z_area > 0.0]
+    z_cv = float(a.std() / max(a.mean(), 1e-9)) if len(a) > 1 else 0.0
+    return ang_cv, z_cv, r_bound, z_area
 
 
 @dataclass
@@ -208,6 +255,58 @@ class Args:
     """multidepth init: normalized gap between target surface + r_tool and the
     innermost spiral radius (keeps the tool tangent-or-outside the part -> no
     gouge). Same role as zlayer_margin."""
+    contour_finish_frac: float = 0.0
+    """multidepth_contour init: fraction of the step budget spent on a final
+    perimeter FINISH pass. 0.0 = pure roughing helix (legacy). >0.0 splits the
+    budget: (1-frac) steps rough-out (triangle-wave annulus sweep, tool kept at
+    r_boundary+tool+margin), then `frac` steps trace a precise ascending contour
+    spiral at r_boundary+tool (minimal margin, tangent to the surface) over the
+    full z-extent. The finish pass ESTABLISHES the final surface explicitly --
+    the optimizer need not push the tool into the surface to remove residual
+    (reducing gouge) and the trajectory ENDS on a clean contour loop (killing
+    tail-wander air). Shape-agnostic: reads only the baked per-(z,theta) boundary
+    radius grid already computed for the roughing pass. Targets the curved-shape
+    failure (sphere/cyl gouge + air_late) while preserving the box win."""
+    contour_finish_adaptive: bool = False
+    """multidepth_contour init: if set, OVERRIDE contour_finish_frac with a value
+    chosen from the target GEOMETRY (not the shape name). A finish loop helps only
+    where the cross-section is CIRCULAR (low angular CV of the boundary radius ->
+    roughing reduces to a constant-r helix that under-cuts the wall) AND PRISMATIC
+    (low z CV of the cross-section area -> an ascending spiral traces the whole
+    wall without gouging a curved top). Measured scalars (res 64):
+      cylinder ang_cv=0.012 z_cv=0.000 (finish helps -> NEW HIGH 0.8898)
+      sphere   ang_cv=0.033 z_cv=0.425 (finish gouges the curved top)
+      box      ang_cv=0.109 z_cv=0.000 (finish steals roughing budget box needs)
+      pyramid  ang_cv=0.150 z_cv=0.874 (finish marginal regression)
+    Threshold 0.06 on BOTH scalars selects cylinder alone (gap: cyl 0.012 vs box
+    0.109 on angular; cyl 0.000 vs sphere 0.425 on z). When the geometry qualifies,
+    finish_frac = contour_finish_frac; else 0. Shape-agnostic (two scalars from the
+    baked SDF + a threshold in a measured gap; no shape names)."""
+    k_init_adaptive: bool = False
+    """k-anneal: if set, OVERRIDE k_init with a value chosen from the target
+    GEOMETRY (not the shape name). This is the MIRROR of contour_finish_adaptive:
+    both read the same two scalars (angular CV of the boundary radius, z CV of the
+    cross-section area) and select on the SAME prismatic gate (z_cv < 0.06), but on
+    OPPOSITE angular corners:
+      finish helps (cylinder): LOW ang_cv  + LOW z_cv  (circular prismatic)
+      k10 helps (box):         HIGH ang_cv + LOW z_cv  (flat-faced prismatic)
+    A sharp early proxy (k_init=20) wins CURVED cross-sections (low ang_cv: cyl,
+    sphere) and the tapered pyramid, but on a FLAT-FACED prismatic part (high ang_cv
+    + low z_cv = box) the sharp k20 proxy over-cuts early then WANDERS IN AIR for
+    the last ~1/3 of the trajectory (the confirmed box+k20 tail-wander, air_late
+    ~50-79%). A softer k_init (k_init_flat) avoids that flat-face edge-gradient
+    wander. Measured scalars (res 64) and the threshold-0.06 gate:
+      cylinder ang_cv=0.012 z_cv=0.000 -> curved (k_init, k20)
+      sphere   ang_cv=0.033 z_cv=0.425 -> curved (k_init, k20; high z_cv excludes)
+      box      ang_cv=0.109 z_cv=0.000 -> FLAT-PRISMATIC (k_init_flat, k10)
+      pyramid  ang_cv=0.150 z_cv=0.883 -> curved (k_init, k20; high z_cv excludes)
+    The gate (ang_cv > 0.06 AND z_cv < 0.06) selects box ALONE for k_init_flat;
+    every other shape keeps k_init. Shape-agnostic (two scalars from the baked SDF
+    + a threshold in the same measured gap; no shape names)."""
+    k_init_flat: float = 10.0
+    """k_init_adaptive: k_init used for FLAT-FACED PRISMATIC targets (high ang_cv +
+    low z_cv, e.g. box). Default 10.0 (the confirmed box contour+k10 gold standard,
+    0.7559 hard_dice / 0% air_late)."""
     grad_clip: float = 0.5
     """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
     transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5
@@ -226,15 +325,25 @@ class Args:
     additions -- trains without per-shape code or metadata."""
     k_init: float = 10.0
     """initial smoothness parameter for the smooth-min/max SDF ops"""
-    k_anneal: bool = False
+    k_anneal: bool = True
     """linearly ramp the smoothness k from k_init to k_final over training.
-    Continuation method: low k early = smooth landscape, broad gradients (good
-    exploration of the carve basin); high k late = sharp union, soft loss
-    tracks HARD coverage (polish of real carving). May beat any fixed k by
-    combining exploration with hard-tracking. Only meaningful with the stable
-    smooth_max (high k no longer NaNs)."""
-    k_final: float = 10.0
-    """final smoothness k when --k-anneal is on (ramped linearly from k_init)."""
+    DEFAULT = True (advanced 2026-07-11). Continuation method that attacks the
+    soft/hard DRIFT at its source: low k early = smooth landscape, broad
+    gradients (exploration of the carve basin); high k late = sharp union, soft
+    loss tracks HARD coverage (polish of the real deployable carve). 6-shape x
+    3-seed sweep confirmed a large SHAPE-AGNOSTIC win at k_final=120: +0.140
+    sphere, +0.065 cyl, +0.171 box, +0.449 pyramid, +0.079 bowl, +0.065 hole
+    (mean +0.16; pyramid rescued 0.34->0.79). Sphere dose-response peaks at
+    k_final=120 (160 degrades via high-k instability). Stacks on best_on_hard.
+    Use --no-k-anneal to disable."""
+    k_final: float = 120.0
+    """final smoothness k when --k-anneal is on (ramped linearly from k_init).
+    DEFAULT = 120 (sphere dose-response peak; shape-agnostic sweet spot)."""
+    k_ramp_frac: float = 1.0
+    """fraction of iters over which k ramps from k_init to k_final (then holds).
+    1.0 = linear over all iters (default). <1.0 reaches k_final early so the
+    optimizer spends more iters refining the HARD-tracking (high-k) carve -- the
+    phase where peaks are set. E.g. 0.5 = k hits k_final at the halfway point."""
 
     loss_shift: float = 0.0
     """de-biased (hard-carve-aware) loss: add this to stock_d before the loss
@@ -361,6 +470,15 @@ class Args:
     weighted by the per-segment air fraction). High retracts clear of the
     surface are free; surface-hugging air in empty corners is charged. 0
     disables."""
+    w_air_late: float = 0.0
+    """weight on the LATE-WEIGHTED AIR-CUTTING soft term (Idea 2): a second
+    air-time loss whose per-segment weight ramps from 0 (early) to 1 (late),
+    attacking end-of-trajectory air cutting. Same scale as w_air_time; 0 = off.
+    Shape-agnostic (depends only on step index)."""
+    w_air_ramp_frac: float = 0.0
+    """fraction of the trajectory held at ramp=0 before the late-air ramp rises
+    to 1 (0 = ramp over the whole trajectory; 0.33 = first third is free, ramp
+    over the last two thirds). Only active when w_air_late > 0."""
     w_break: float = 1e-3
     """weight on the TOOL-BREAKAGE PROBABILITY soft term (docs/algorithms.md
     §4.1/§4.2 stress-strength interference, simplified to a single threshold
@@ -393,7 +511,7 @@ class Args:
     """composite best-checkpoint weight on breakage probability (already
     [0,1]). Raising this rejects high-engagement checkpoints even at higher
     dice."""
-    best_on_hard: bool = False
+    best_on_hard: bool = True
     """select the best/deployable checkpoint by HARD dice (the deployable sharp
     carve metric) instead of the default SOFT dice. The soft selector is less
     noisy but can deploy a checkpoint whose soft dice is high yet hard dice is
@@ -401,7 +519,16 @@ class Args:
     iter. Hard selection aligns deployment with the metric we advance on, at the
     cost of selecting on a nondeterministic carve (mitigated by the air/break
     penalties and by hard dice being stable at convergence). The reported
-    `hard_dice` then reflects the hard-dice-best checkpoint."""
+    `hard_dice` then reflects the hard-dice-best checkpoint.
+
+    DEFAULT = True (advanced 2026-07-11). 6-shape x 3-seed sweep confirmed
+    best_on_hard is a shape-agnostic win: +0.035 mean over soft selection
+    (sphere +0.032, cyl +0.038, box +0.037, pyramid +0.060, bowl +0.043; hole
+    neutral as a structurally broken shape). Cause: hard_dice peaks early then
+    DRIFTS DOWN as soft_dice keeps optimizing past the hard optimum (soft/hard
+    drift); soft selection saves the drifted iter, hard selection saves the
+    peak. Zero training cost, shape-agnostic. See idea.md. Use --no-best-on-hard
+    to disable (e.g. to reproduce the soft-selected baseline)."""
 
     init_stock_from: str = ""
     """STAGED TRAINING: path to a .npz saved by the truncation utility containing
@@ -779,8 +906,10 @@ def load_human_feedback(target_shape, max_steps):
 # in autoresearch/tasks/train_csg/pairwise.json. This reader mirrors the
 # star-rating path: every run reads the store, logs a win-rate summary to
 # stderr, and records it in metrics.json under "pairwise" so the autoresearch
-# agent has a human-preference signal to seed/rank future runs (selection-layer
-# only — the optimizer/init/loss code never sees this).
+# agent has a human-preference signal available. This reader itself is
+# selection-layer only (it never mutates the loss), but the loss/init/optimizer
+# are fully editable elsewhere — the agent may encode a preference as a loss
+# term if it judges that helps (see autoresearch.md "What you CAN/CANNOT do").
 # ---------------------------------------------------------------------------
 def _pairwise_store_path():
     return os.path.join("autoresearch", "tasks", "train_csg", "pairwise.json")
@@ -789,9 +918,14 @@ def _pairwise_store_path():
 def load_pairwise_preferences():
     """Read the pairwise comparison store; return a summary dict (never raises).
 
-    Counts answered pairs and per-run wins (a tie credits each side 0.5). The
-    summary is logged + recorded in metrics.json so human A/B preferences flow
-    into future runs alongside the star ratings.
+    Counts answered pairs and per-run wins (a tie credits each side 0.5), and
+    breaks answers down per *dimension* (the objective knob a pair varies) with
+    the preferred direction + recent free-text reasons. The summary is logged +
+    recorded in metrics.json so human A/B preferences flow into future runs
+    alongside the star ratings. This reader is selection-layer only (it does not
+    mutate the loss), but the loss/init/optimizer are fully editable elsewhere —
+    the agent may encode a preference as a loss term if it judges that helps
+    (see autoresearch.md "What you CAN/CANNOT do").
     """
     try:
         with open(_pairwise_store_path()) as f:
@@ -813,11 +947,49 @@ def load_pairwise_preferences():
             wins[a] = wins.get(a, 0.0) + 0.5
             wins[b] = wins.get(b, 0.0) + 0.5
     ranked = sorted(wins.items(), key=lambda kv: -kv[1])[:8]
+
+    # Per-dimension breakdown (mirrors scripts/pref_lib.digest): for each
+    # objective knob a pair varies, tally A/B/tie wins and resolve a preferred
+    # direction. Pairs with no dimension bucket under "(unstructured)".
+    by_dim = {}
+    for p in answered:
+        d = (p.get("dimension") or "").strip() or "(unstructured)"
+        rec = by_dim.setdefault(
+            d, {"n": 0, "a_wins": 0, "b_wins": 0, "ties": 0, "preferred": None})
+        rec["n"] += 1
+        ans = p.get("answer")
+        if ans == "a":
+            rec["a_wins"] += 1
+        elif ans == "b":
+            rec["b_wins"] += 1
+        else:
+            rec["ties"] += 1
+    for rec in by_dim.values():
+        a, b, t = rec["a_wins"], rec["b_wins"], rec["ties"]
+        if a > b and a > t:
+            rec["preferred"] = "a"
+        elif b > a and b > t:
+            rec["preferred"] = "b"
+        elif t > a and t > b:
+            rec["preferred"] = "tie"
+
+    # Most recent non-empty answer notes (newest-first), truncated, for the
+    # agent to read at the top of its next loop alongside pref_digest.py.
+    notes = []
+    for p in reversed(answered):  # store is append-order => reversed = newest-first
+        n = (p.get("note") or "").strip()
+        if n:
+            notes.append(n[:240])
+        if len(notes) >= 5:
+            break
+
     return {
         "total": len(pairs),
         "answered": len(answered),
         "pending": len(pairs) - len(answered),
         "top_winners": [{"run": r, "wins": w} for r, w in ranked],
+        "by_dimension": by_dim,
+        "recent_notes": notes,
     }
 
 
@@ -873,12 +1045,25 @@ def main():
               f"({pw_summary['pending']} pending). Top winners:", file=sys.stderr, flush=True)
         for t in pw_summary["top_winners"][:5]:
             print(f"  {t['wins']:.1f} wins  {t['run']}", file=sys.stderr, flush=True)
+        by_dim = pw_summary.get("by_dimension", {})
+        if by_dim:
+            print("[pairwise] per-dimension preference (steering signal only, not in loss):",
+                  file=sys.stderr, flush=True)
+            for d in sorted(by_dim):
+                rec = by_dim[d]
+                pref = rec["preferred"] or "no clear winner"
+                print(f"  [{d}] n={rec['n']} preferred={pref} "
+                      f"(A={rec['a_wins']} B={rec['b_wins']} tie={rec['ties']})",
+                      file=sys.stderr, flush=True)
+        notes = pw_summary.get("recent_notes", [])
+        if notes:
+            print("[pairwise] recent answer notes (newest-first):", file=sys.stderr, flush=True)
+            for n in notes:
+                print(f"  - {n}", file=sys.stderr, flush=True)
 
     # Save reproduction command and arguments
     try:
-        import sys
         import shlex
-        import json
 
         # Save reproduction command
         reproduce_cmd_path = os.path.join(run_dir, "reproduce_command.sh")
@@ -979,6 +1164,8 @@ def main():
     # model constants.
     sim.w_time[None] = args.w_time
     sim.w_air_time[None] = args.w_air_time
+    sim.w_air_late[None] = args.w_air_late
+    sim.w_air_ramp_frac[None] = args.w_air_ramp_frac
     sim.w_break[None] = args.w_break
     sim.kc[None] = args.kc
     sim.f_ref[None] = args.f_ref
@@ -1003,6 +1190,23 @@ def main():
     sim.enforce_z_floor[None] = 1 if args.enforce_z_floor else 0
     print(f"[z-floor] part_bottom_z={part_bottom_z:.4f} epsilon={args.z_floor_epsilon_mm}mm "
           f"-> floor={z_floor:.4f} (enforced={bool(sim.enforce_z_floor[None])})", flush=True)
+
+    # --- Adaptive k_init (shape-agnostic): choose the anneal START k from the
+    # target GEOMETRY, not the shape name. Mirror of contour_finish_adaptive on
+    # the opposite angular corner of the same prismatic (z_cv<0.06) gate: a
+    # FLAT-FACED prismatic part (high ang_cv + low z_cv = box) gets the softer
+    # k_init_flat (avoids the confirmed box+k20 tail-wander air-cutting); every
+    # other shape keeps k_init (sharp early proxy wins curved/tapered). Overrides
+    # args.k_init before the k-anneal loop reads it; also sets sim.k[None] so the
+    # first iter (before the anneal updates it) starts on the chosen k.
+    if args.k_init_adaptive:
+        ang_cv, z_cv, _, _ = _contour_geometry_scalars(sdf_grid)
+        flat_prismatic = (ang_cv > 0.06) and (z_cv < 0.06)
+        k_chosen = float(args.k_init_flat) if flat_prismatic else float(args.k_init)
+        args.k_init = k_chosen
+        sim.k[None] = k_chosen
+        print(f"[k-init] k_init_adaptive: ang_cv={ang_cv:.3f} z_cv={z_cv:.3f} "
+              f"flat_prismatic={flat_prismatic} -> k_init={k_chosen}", file=sys.stderr)
 
     # --- Staged training: start from a saved mid-cut stock + tool position ---
     # (the previous trajectory's truncated state). init_stock will then write
@@ -1534,10 +1738,12 @@ def main():
         th_bins = (np.floor((Axy + np.pi) / (2.0 * np.pi) * N_th
                             ).astype(np.int32)) % N_th             # (Nx,Ny)
         r_bound = np.zeros((Nz, N_th), dtype=np.float32)
+        z_area = np.zeros(Nz, dtype=np.float32)      # inside-voxel count per z-slice
         for iz in range(Nz):
             m = inside_mask = grid[:, :, iz] <= 0.0
             if m.any():
                 np.maximum.at(r_bound[iz], th_bins[m], Rxy[m])
+                z_area[iz] = float(m.sum())
 
         u = np.linspace(0.0, 1.0, 4000)
         z = z_top + (z_bot - z_top) * u
@@ -1585,12 +1791,61 @@ def main():
                            ).astype(np.float32)
             seg = np.diff(pts, axis=0)
             cum = np.concatenate([[0.0], np.cumsum(np.sqrt((seg ** 2).sum(1)))])
-        s_targets = np.linspace(0.0, float(cum[-1]), n)
-        idx = np.clip(np.searchsorted(cum, s_targets) - 1, 0, len(pts) - 2)
-        frac = ((s_targets - cum[idx]) /
-                np.maximum(cum[idx + 1] - cum[idx], 1e-9))
-        positions = (pts[idx] + (pts[idx + 1] - pts[idx]) * frac[:, None]
-                     ).astype(np.float32)
+        # Constant-arc resample of a polyline to exactly `n_steps` points.
+        def _resample_arc(poly, n_steps):
+            seg = np.diff(poly, axis=0)
+            c = np.concatenate([[0.0], np.cumsum(np.sqrt((seg ** 2).sum(1)))])
+            s = np.linspace(0.0, float(c[-1]), n_steps)
+            ix = np.clip(np.searchsorted(c, s) - 1, 0, len(poly) - 2)
+            fr = (s - c[ix]) / np.maximum(c[ix + 1] - c[ix], 1e-9)
+            return (poly[ix] + (poly[ix + 1] - poly[ix]) * fr[:, None]
+                    ).astype(np.float32)
+
+        finish_frac = float(np.clip(args.contour_finish_frac, 0.0, 0.8))
+        if args.contour_finish_adaptive:
+            # Choose finish_frac from the target GEOMETRY (not the shape name).
+            # A finish loop helps only where the cross-section is CIRCULAR (low
+            # angular CV of the boundary radius) AND PRISMATIC (low z CV of the
+            # cross-section area). Threshold 0.06 on both sits in a measured gap
+            # that selects the circular-prismatic case (cylinder) alone; see the
+            # contour_finish_adaptive arg docstring for the measured scalars.
+            ang_cv, z_cv, _, _ = _contour_geometry_scalars(grid)
+            qualifies = (ang_cv < 0.06) and (z_cv < 0.06)
+            finish_frac = float(np.clip(args.contour_finish_frac, 0.0, 0.8)) if qualifies else 0.0
+            print(f"[init] contour_finish_adaptive: ang_cv={ang_cv:.3f} z_cv={z_cv:.3f} "
+                  f"-> finish_frac={finish_frac:.2f} (qualifies={qualifies})", file=sys.stderr)
+        if finish_frac > 0.0:
+            # Split the step budget: roughing helix (descend, triangle-wave
+            # annulus sweep) then a perimeter FINISH pass (ascend, precise
+            # contour trace at r_boundary+tool -- no margin, tangent to the
+            # surface). The finish establishes the final surface explicitly so
+            # the optimizer need not gouge inward to remove residual, and the
+            # trajectory ENDS on a contour loop (no tail-wander air).
+            n_r = max(2, int(round(n * (1.0 - finish_frac))))
+            n_f = max(2, n - n_r)
+            positions_r = _resample_arc(pts, n_r)
+            # Finish spiral: ascend z_bot -> z_top, continuing the revolution,
+            # orbiting at the precise surface (r_boundary + tool, no margin).
+            uf = np.linspace(0.0, 1.0, 2000)
+            zf = z_bot + (z_top - z_bot) * uf
+            thetaf = 2.0 * np.pi * max(0.5, args.multidepth_revs) * uf
+            iz_f = np.clip((zf * Nz).astype(int), 0, Nz - 1)
+            it_f = (np.floor((thetaf % (2.0 * np.pi)) / (2.0 * np.pi) * N_th
+                             ).astype(np.int32)) % N_th
+            r_bnd_f = r_bound[iz_f, it_f]
+            r_fin = np.where(r_bnd_f > 0.0,
+                             np.clip(r_bnd_f + r_tool, 0.0, r_outer),
+                             r_outer)
+            pts_f = np.stack([0.5 + r_fin * np.cos(thetaf),
+                              0.5 + r_fin * np.sin(thetaf), zf],
+                             axis=1).astype(np.float32)
+            # Seed the finish path at the roughing endpoint (z_bot) so the two
+            # resamples meet continuously.
+            pts_f[0] = positions_r[-1]
+            positions_f = _resample_arc(pts_f, n_f)
+            positions = np.concatenate([positions_r, positions_f], axis=0)
+        else:
+            positions = _resample_arc(pts, n)
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
@@ -1657,9 +1912,11 @@ def main():
             # (low k = smooth exploration early; high k = hard-tracking late).
             # Independent of the lr block above (the two can combine).
             if args.k_anneal:
-                sim.k[None] = args.k_init + (args.k_final - args.k_init) * (
-                    it / max(1, args.iters)
-                )
+                # ramp k from k_init to k_final over the first k_ramp_frac of
+                # iters, then hold at k_final (more high-k hard-tracking time).
+                frac = it / max(1, args.iters)
+                t = min(1.0, frac / max(1e-6, args.k_ramp_frac))
+                sim.k[None] = args.k_init + (args.k_final - args.k_init) * t
 
             # w_prox warmup: keep w_prox at 0 until warmup_frac of iters, then
             # ramp linearly to args.w_prox over the remaining iters so carving
@@ -1970,7 +2227,8 @@ def main():
             print("[holder] final trajectory keeps the holder clear of the stock.")
 
         # Save summary metrics for automated agents and LLM harnesses.
-        import json
+        # (json is a module-level import; a local `import json` here would make
+        #  `json` local to all of main(), breaking the earlier args.json save.)
         total_seconds = time.time() - start_time
         peak_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
         final_dice = float(last_m.get("soft_dice", last_m["dice"])) if last_m is not None else 0.0
