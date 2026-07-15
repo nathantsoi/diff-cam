@@ -2117,10 +2117,12 @@ def main():
             pe = ext_poly(revs * scale)
             ret = np.stack([pi[-1], [pi[-1][0], pi[-1][1], z_ret],
                             [pe[0][0], pe[0][1], z_ret], pe[0]], axis=0).astype(np.float32)
-            # Prepend tool_start so positions[0]==tool_start -> delta[0]=0 and
-            # the plunge is resampled into feed_cap-sized helical steps.
-            allpts = np.concatenate([tool_start[None, :].astype(np.float32),
-                                     plunge, pi, ret[1:], pe], axis=0)
+            # Start the path at plunge[0] (z=1.0, small XY offset from
+            # tool_start) -- matching multidepth_cavity. Do NOT prepend
+            # tool_start: that yields init[0]=0 (a zero-length first segment)
+            # whose degenerate capsule NaNs the autodiff backward. plunge[0]
+            # gives init[0]=plunge[0]-tool_start, a nonzero horizontal delta.
+            allpts = np.concatenate([plunge, pi, ret[1:], pe], axis=0)
             positions = _resample_arc(allpts, n)
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
