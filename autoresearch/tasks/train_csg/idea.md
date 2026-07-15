@@ -430,3 +430,15 @@ Remaining bet for the hole: a HYBRID init = contour's angularly-varying
 exterior (r_bound, efficient) + cavity's interior column-clearing pass, gated
 on annul>0.40 (the annularity scalar, hole=0.769). Higher code risk — build as
 a new `multidepth_hole` mode. NOT done yet; the hole stays at ~0.273 contour.
+
+## jul15 k_final=180 SMALL-WIN (10:02) — preference signal weakly confirmed by hard_dice
+
+The clearest preference signal was k-anneal -> SHARPER (n=2 unanimous, "better
+contour following and less air cutting"). Tested k_final=180 (vs the SOTA 120)
+on sphere r11.43, seeds 1,2, full SOTA adaptive base:
+- sphere s1 k_final=180: 0.8341  (vs 0.8300 baseline)  +0.004
+- sphere s2 k_final=180: 0.8336
+Both seeds positive but marginal (within noise). The preference direction
+(sharper k -> better contour following) is WEAKLY confirmed by hard_dice, not a
+large win. Recorded as SMALL-WIN, not promoted to SOTA yet (need a clean s2
+baseline + a 3rd seed to rule out noise before defaulting k_final=180).
