@@ -314,3 +314,61 @@ That gate is the analog of k_init_adaptive / contour_finish_adaptive.
    The deferred hole-aware init (sphere-exterior contour + central column
    spiral) is the remaining research bet — higher code risk, attempt once the
    bowl win is banked into the adaptive command.
+
+## jul15 init_mode_adaptive IMPLEMENTED + GATE VERIFIED (07:22, commit 29de163)
+
+Found the bowl's geometry scalars by grepping the bowl-contour + bowl pref-pair
+logs (the cavity confirm runs had no adaptive flags so never printed them):
+
+| shape | ang_cv | z_cv | init winner (measured) |
+|---|---|---|---|
+| cylinder | 0.012 | 0.000 | contour |
+| sphere | 0.033 | 0.425 | contour |
+| box | 0.109 | 0.000 | contour |
+| pyramid | 0.153 | 0.883 | contour |
+| **bowl** | **0.033** | **0.592** | **cavity** |
+| hole | 0.012 | 0.424 | contour |
+
+The bowl is the ONLY shape that is circular (ang_cv<0.06, sphere-like 0.033)
+AND whose z_cv sits ABOVE the sphere/hole cluster (0.592 vs 0.424-0.425 — the
+open scoop inflates per-z cross-section area variance). Gate
+`ang_cv < 0.06 AND z_cv > 0.50` selects the bowl ALONE (threshold 0.50 in the
+0.425→0.592 gap). NOTE the hole (0.012/0.424) is geometrically indistinguishable
+from a sphere by these scalars — that is why contour treats the hole like a
+sphere and why the hole stays broken (no shape-agnostic gate on ang_cv/z_cv can
+rescue it; a hole-aware init is still the only path).
+
+Implemented `--init-mode-adaptive` (+ `--init-mode-cavity-zcv 0.50`) in
+train_csg.py — third member of the geometry-gated family, mirrors
+k_init_adaptive. Overrides args.init_mode to multidepth_cavity when the gate
+fires, else multidepth_contour.
+
+**One shape-agnostic command now reproduces BOTH wins:**
+```
+--k-anneal --k-init 20.0 --k-final 120.0 --k-init-adaptive \
+--init-mode-adaptive --contour-finish-frac 0.2 --contour-finish-adaptive
+```
+Defaults (multidepth_revs=3.0, w_air_time=1e-3, w_gouge=4.0) make this EXACTLY
+the bowl-cavity winning config (cavity/k20/revs3/wair1e-3/finish0; the two other
+adaptive flags are no-ops on the bowl: k stays 20, finish_frac=0) AND the convex
+dual-adaptive SOTA (contour + k_init_adaptive + contour_finish_adaptive).
+
+**Gate verified at runtime** (07:22, runs in `runs/jul15-initmode-adaptive/`):
+- bowl s1,s2: ang_cv=0.033 z_cv=0.592 → concavity=True → multidepth_cavity ✓
+- sphere s1:  ang_cv=0.033 z_cv=0.425 → concavity=False → multidepth_contour ✓ (regression check passes — sphere does NOT switch to cavity)
+
+3-seed bowl (s1,s2) + sphere s1 (regression) confirmation runs IN FLIGHT
+(GPUs 1,3,7; finish ~08:10). Expected: bowl ≈0.65/0.63 (reproduces cavity win),
+sphere ≈0.78 (no regression). Harvest pending.
+
+### jul15 next (07:22)
+1. Harvest the 3 adaptive confirmation runs (~08:10); if bowl holds 0.647 and
+   sphere holds ~0.78 → bowl win is BANKED into the shape-agnostic SOTA command.
+   Run a box/cylinder adaptive spot-check too (confirm still contour/k10/finish).
+2. Keep pref queue stocked (13 pending, 0 answered — human away, intended).
+   Launch next pref pairs on freed GPUs (rotate dimension/shape/seed).
+3. After bowl banked: the hole (~0.27) is the only broken shape. Deferred
+   hole-aware init (sphere-exterior contour + central column spiral) is the
+   remaining research bet — ang_cv/z_cv cannot distinguish hole from sphere, so
+   a NEW scalar (central-void-fraction: high interior column of stock-kept
+   voxels) is needed to gate a hole-specific init. Higher code risk.
