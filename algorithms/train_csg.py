@@ -2047,32 +2047,48 @@ def main():
             # init_mode_adaptive routes non-annular shapes there).
             positions = _resample_arc(ext_poly(revs), n)
         else:
+            # Restrict the interior sweep to the z-extent where the annulus
+            # actually exists (r_inner.max(theta) > r_tool): above/below the
+            # through-channel a slice has no inside voxels -> r_inner=0 -> an
+            # orbit held at r=0 produces near-AXIAL segments (zero XY) which
+            # overflow tool_sdf's capsule autodiff to NaN. Keep a minimum orbit
+            # radius r_floor so every segment has nonzero XY displacement.
+            annulus_z = np.where((r_inner > r_tool + 1e-3).any(axis=1))[0]
+            if len(annulus_z):
+                z_ct = float(annulus_z.max()) / Nz
+                z_cb = float(annulus_z.min()) / Nz
+            else:
+                z_ct, z_cb = z_top, z_bot
+            r_floor = 0.5 * r_tool
+
             # --- interior column-clearing polyline (orbit INSIDE the inner wall) ---
             def int_poly(revs_i):
                 u = np.linspace(0.0, 1.0, 4000)
-                z = z_top + (z_bot - z_top) * u
+                z = z_ct + (z_cb - z_ct) * u
                 theta = 2.0 * np.pi * revs_i * u
                 iz_u = np.clip((z * Nz).astype(int), 0, Nz - 1)
                 it_u = (np.floor((theta % (2.0 * np.pi)) / (2.0 * np.pi) * N_th).astype(np.int32)) % N_th
                 r_in_wall = r_inner[iz_u, it_u]
                 r_in_safe = np.clip(r_in_wall - r_tool - margin, 0.0, None)
                 tri = np.abs(1.0 - 2.0 * ((u * radial_cycles) % 1.0))
-                # sweep core(0) <-> inner wall to clear the column; hold at 0
-                # where there is no inner wall at this (z,theta).
-                r = (r_in_safe * tri) * (r_in_wall > r_tool + 1e-3)
+                has_wall = (r_in_wall > r_tool + 1e-3).astype(np.float32)
+                # sweep r_floor <-> inner wall to clear the column; hold at
+                # r_floor (nonzero XY) where no inner wall at this (z,theta).
+                r = (r_floor + np.maximum(r_in_safe - r_floor, 0.0) * tri) * has_wall \
+                    + r_floor * (1.0 - has_wall)
                 return np.stack([0.5 + r * np.cos(theta), 0.5 + r * np.sin(theta), z],
                                 axis=1).astype(np.float32)
 
-            # HELICAL plunge from tool_start (z=1.0) down to z_top, circling at
-            # a small radius: every segment has nonzero XY displacement so
-            # tool_sdf's capsule projection (h_param = pa.ba/(ba.ba+1e-12))
-            # stays finite -- an axial plunge overflows the autodiff to NaN
-            # (simulator code, not modifiable; see multidepth_cavity). The
-            # column is centered, so circle about (0.5, 0.5).
+            # HELICAL plunge from tool_start (z=1.0) down to z_ct (top of the
+            # annulus / interior-start), circling at a small radius: every
+            # segment has nonzero XY displacement so tool_sdf's capsule
+            # projection (h_param = pa.ba/(ba.ba+1e-12)) stays finite -- an
+            # axial plunge overflows the autodiff to NaN (simulator code, not
+            # modifiable; see multidepth_cavity). The column is centered.
             r_plunge = 0.5 * r_tool
-            n_pz = max(12, int(np.ceil(abs(z_top - 1.0) / max(feed_cap, 1e-6))) * 4)
+            n_pz = max(12, int(np.ceil(abs(z_ct - 1.0) / max(feed_cap, 1e-6))) * 4)
             uz = np.linspace(0.0, 1.0, n_pz)
-            zp = (1.0 + (z_top - 1.0) * uz).astype(np.float32)
+            zp = (1.0 + (z_ct - 1.0) * uz).astype(np.float32)
             theta_p = 2.0 * np.pi * 1.5 * uz
             plunge = np.stack([0.5 + r_plunge * np.cos(theta_p),
                                0.5 + r_plunge * np.sin(theta_p), zp],
@@ -2088,12 +2104,12 @@ def main():
                 pi = int_poly(revs_i * scale)
                 pe = ext_poly(revs * scale)
                 plunge_arc = float(np.sqrt((np.diff(plunge, axis=0) ** 2).sum(1)).sum())
-                ti = float(np.sqrt((np.diff(pi, axis=0) ** 2).sum(1)).sum())
-                te = float(np.sqrt((np.diff(pe, axis=0) ** 2).sum(1)).sum())
+                arc_i = float(np.sqrt((np.diff(pi, axis=0) ** 2).sum(1)).sum())
+                arc_e = float(np.sqrt((np.diff(pe, axis=0) ** 2).sum(1)).sum())
                 ret = np.stack([pi[-1], [pi[-1][0], pi[-1][1], z_ret],
                                 [pe[0][0], pe[0][1], z_ret], pe[0]], axis=0).astype(np.float32)
-                tr = float(np.sqrt((np.diff(ret, axis=0) ** 2).sum(1)).sum())
-                total = plunge_arc + ti + tr + te
+                arc_r = float(np.sqrt((np.diff(ret, axis=0) ** 2).sum(1)).sum())
+                total = plunge_arc + arc_i + arc_r + arc_e
                 if total <= 0.95 * budget:
                     break
                 scale *= (0.95 * budget) / total
