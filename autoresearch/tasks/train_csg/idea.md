@@ -75,3 +75,49 @@ possibly fixes the "broken hole."
   iters). 8× RTX 6000.
 - Pref queue at resume: 0 answered, 1 pending (p_0001, bowl random vs
   multidepth_cavity, air-cutting focus).
+
+## jul15 hole diagnostic — WHY sphere_hole stays ~0.27 (investigated 01:55)
+
+The contour+dual-adaptive hole run (3 seeds, 0.2732 mean) barely beat the
+k-anneal-only baseline (0.263). Diagnosed the failure mode from the s1 iter log
++ the jul11 w_residual hole sweep:
+
+- **NOT a broken init.** Dice climbs 0.12 (iter 0, contour init) → 0.27 (iter
+  5000) and is STILL RISING at the end (grad ~0.4, loss still decreasing
+  0.41→0.21). The init is usable; the optimizer makes progress.
+- **Plateau tracks the k-anneal sharpening.** Dice rises fast 0.12→0.26 by iter
+  ~3000, then CREEPS 0.26→0.27 from iter 3000–5000. k ramps 20→120 over 5000
+  iters, so k≈80 at iter 3000, ≈120 at 5000 — the plateau coincides exactly
+  with the proxy entering the sharp regime. Sharpening k freezes the landscape
+  before the bulk exterior is fully carved.
+- **w_residual upweighting HURTS the hole** (jul11 sweep, 3 seeds each):
+  w_res 0.5 → 0.25, 1.0 (default) → 0.27, 2.0 → 0.16, 4.0 → 0.01. Pushing
+  "remove uncarved stock" harder collapses the trajectory — loss-weighting is
+  the WRONG lever here (fragile). Do NOT chase hole via w_residual.
+- **Gouge is NOT the blocker.** Tool radius 3.175mm < hole (tsub) radius
+  9.525mm → the tool fits the through-column with 6.35mm clearance. Final
+  gouge ~0.03 (normalized) is tiny; residual ~0.195 dominates. The tool can
+  physically carve the hole; the optimizer just doesn't get there.
+- Geometric reminder: target = sphere∩{outside cyl} (the PART TO KEEP). Stock
+  is the full block; ~95% must be removed (exterior) — the same exterior the
+  plain sphere carves to 0.83. So the hole's failure is the *exterior* carve
+  stalling, not the column. The column subtraction perturbs the contour init
+  + loss landscape enough to stall the exterior removal as k sharpens.
+
+**Hypothesis (testable, shape-agnostic, low-risk):** a gentler/slower k-anneal
+lets the hole keep soft-carving past iter 3000 instead of freezing at 0.27.
+
+## Revised next hole experiment (when GPUs free; interleave with pref pairs)
+
+Per autoresearch.md "interleave so neither starves" — run these alongside, not
+instead of, pref pairs. All shape-agnostic (no per-shape branching yet):
+
+1. **H1 — slower k ramp via more iters:** hole, iters=10000, k-anneal 20→120,
+   3 seeds. Same total k range but 2× slower ramp → 2× the soft-carving window.
+2. **H2 — gentler k_final:** hole, iters=5000, k-anneal 20→60 (not 120), 3
+   seeds. Keeps the proxy softer throughout so the exterior carve doesn't
+   freeze. Risk: under-sharpen may hurt final precision — compare hdice.
+3. If H1 or H2 beats 0.273, sweep the winning k-schedule across all 6 shapes to
+   confirm it's still SOTA on the convex shapes (regression check).
+4. Only if k-schedule fails: hole-aware init (sphere-exterior contour + central
+   column spiral) — per-shape branching, higher risk, defer.
