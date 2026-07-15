@@ -149,6 +149,46 @@ def _contour_geometry_scalars(grid):
     return ang_cv, z_cv, r_bound, z_area
 
 
+def _annularity_scalar(grid):
+    """Shape-agnostic ANNULARITY of a baked target SDF grid: how much the
+    cross-sections are RINGS (a central through-void) vs SOLID disks.
+
+    annul = 1 - mean_z( z_area[z] / (pi * r_vox[z]^2) ) over z-slices that have
+    target voxels, where r_vox = r_bound_mean * Nx puts the normalized
+    per-theta outer-boundary radius (the MAX radius -- the outer wall only) into
+    voxel units so it is comparable to z_area (an inside-voxel COUNT = voxel^2
+    area). For a SOLID cross-section z_area == pi*r^2 -> ratio ~1 -> annul ~0
+    (small negative from circle pixelation). For an ANNULAR cross-section (a
+    through-hole: the central column is NOT target, so the inside-voxel area is
+    the outer disk MINUS the inner disk) z_area < pi*r_outer^2 -> ratio <1 ->
+    annul > 0. r_bound is the outer boundary only, so it CANNOT see the inner
+    wall -- which is exactly why ang_cv/z_cv read a through-hole as a plain
+    sphere (both ~0.012-0.033 / 0.424-0.425). Annularity reads the DEFICIT.
+
+    Pure function of the SDF grid (no shape names / params). Measured (res 32):
+      cylinder 0.000  sphere -0.089  box -0.056  pyramid -0.319
+      bowl 0.150  (concavity from a top scoop, partially annular upper slices)
+      hole 0.769  (through-column removes ~77% of the outer-disk area)
+    A threshold ~0.40 selects the HOLE ALONE (0.769 vs bowl 0.150); the bowl is
+    already captured by the z_cv concavity gate. Shape-agnostic (one scalar from
+    the baked SDF + a threshold in a measured gap; no shape names)."""
+    ang_cv, z_cv, r_bound, z_area = _contour_geometry_scalars(grid)
+    Nx = grid.shape[0]
+    Nz = r_bound.shape[0]
+    ratios = []
+    for iz in range(Nz):
+        if z_area[iz] > 0.0:
+            b = r_bound[iz]
+            b = b[b > 0.0]
+            if len(b) > 0:
+                r_vox = float(b.mean()) * Nx
+                implied = np.pi * r_vox * r_vox
+                if implied > 1e-9:
+                    ratios.append(float(z_area[iz]) / implied)
+    mean_ratio = float(np.mean(ratios)) if ratios else 1.0
+    return 1.0 - mean_ratio
+
+
 @dataclass
 class Args:
     exp_name: str = "train_csg"
@@ -1265,10 +1305,12 @@ def main():
     # gate. Overrides args.init_mode before the init dispatch reads it below.
     if args.init_mode_adaptive:
         ang_cv, z_cv, _, _ = _contour_geometry_scalars(sdf_grid)
+        annul = _annularity_scalar(sdf_grid)
         concavity = (ang_cv < 0.06) and (z_cv > args.init_mode_cavity_zcv)
         args.init_mode = "multidepth_cavity" if concavity else "multidepth_contour"
         print(f"[init] init_mode_adaptive: ang_cv={ang_cv:.3f} z_cv={z_cv:.3f} "
-              f"concavity={concavity} -> init_mode={args.init_mode}", file=sys.stderr)
+              f"annul={annul:.3f} concavity={concavity} -> init_mode={args.init_mode}",
+              file=sys.stderr)
 
     # --- Staged training: start from a saved mid-cut stock + tool position ---
     # (the previous trajectory's truncated state). init_stock will then write
