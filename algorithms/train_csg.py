@@ -378,6 +378,15 @@ class Args:
     """init_mode_adaptive: z_cv threshold above which a CIRCULAR (ang_cv<0.06) target
     is treated as a concavity (bowl) and given the cavity init. 0.50 sits in the
     measured gap between sphere/hole (0.424-0.425) and bowl (0.592)."""
+    init_mode_hole_annul: float = 0.40
+    """init_mode_adaptive: ANNULARITY threshold above which a target is treated as a
+    through-hole and given the multidepth_hole init (contour exterior + interior
+    column clear). Annularity = 1 - mean_z(z_area/(pi*r_vox^2)); ~0 for solid
+    cross-sections, 0.15 for the bowl, 0.769 for the through-hole. 0.40 sits in
+    the gap between bowl (0.15) and hole (0.769), selecting the hole alone. The
+    hole is otherwise indistinguishable from a sphere by ang_cv/z_cv (both
+    0.012-0.033 / 0.424-0.425), so the annularity scalar is the only shape-
+    agnostic separator. Checked BEFORE the concavity (bowl) gate."""
     grad_clip: float = 0.5
     """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
     transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5
@@ -1306,11 +1315,17 @@ def main():
     if args.init_mode_adaptive:
         ang_cv, z_cv, _, _ = _contour_geometry_scalars(sdf_grid)
         annul = _annularity_scalar(sdf_grid)
+        annular = annul > args.init_mode_hole_annul
         concavity = (ang_cv < 0.06) and (z_cv > args.init_mode_cavity_zcv)
-        args.init_mode = "multidepth_cavity" if concavity else "multidepth_contour"
+        if annular:
+            args.init_mode = "multidepth_hole"
+        elif concavity:
+            args.init_mode = "multidepth_cavity"
+        else:
+            args.init_mode = "multidepth_contour"
         print(f"[init] init_mode_adaptive: ang_cv={ang_cv:.3f} z_cv={z_cv:.3f} "
-              f"annul={annul:.3f} concavity={concavity} -> init_mode={args.init_mode}",
-              file=sys.stderr)
+              f"annul={annul:.3f} annular={annular} concavity={concavity} "
+              f"-> init_mode={args.init_mode}", file=sys.stderr)
 
     # --- Staged training: start from a saved mid-cut stock + tool position ---
     # (the previous trajectory's truncated state). init_stock will then write
@@ -1950,6 +1965,147 @@ def main():
             positions = np.concatenate([positions_r, positions_f], axis=0)
         else:
             positions = _resample_arc(pts, n)
+        init = np.empty((n, 3), dtype=np.float32)
+        init[0] = positions[0] - tool_start
+        init[1:] = np.diff(positions, axis=0)
+    elif args.init_mode == "multidepth_hole":
+        # HYBRID init for ANNULAR targets (through-hole): the contour init's
+        # angularly-varying EXTERIOR sweep (r_bound = max per-theta inside
+        # radius; efficient -- reaches the actual surface, no air-cut waste)
+        # PLUS an INTERIOR column-clearing pass orbiting INSIDE the hole's
+        # inner wall (r_inner = min per-theta inside radius) to open the
+        # through-channel. multidepth_contour alone orbits only the outer wall
+        # and never opens the column (the hole's root cause at ~0.273);
+        # multidepth_cavity opens the column but its r_cross-based exterior
+        # air-cuts for near-filling spheres (clipped to the wall), scoring
+        # WORSE on the hole (0.263). This mode takes the efficient exterior
+        # from contour + the column clear from cavity. For NON-annular targets
+        # r_inner==0 everywhere -> the interior pass is empty -> the path is
+        # identical to multidepth_contour (zero regression on the 5 solid
+        # shapes). Reads only the baked target SDF grid; no shape names.
+        n = T - 1
+        stock_mm_x = args.stock_size_in[0] * 25.4
+        r_tool = args.tool_radius_mm / stock_mm_x
+        margin = args.multidepth_margin
+        feed_cap = args.feed_ipm * args.dt / 60.0 / args.stock_size_in[0]
+        grid = sim.target.to_numpy()
+        Nx, Ny, Nz = grid.shape
+        _solid = np.where(grid <= 0.0)[2]
+        z_top = (float(_solid.max()) / Nz + 1.0 / Nz) if len(_solid) else 0.95
+        z_bot = (float(_solid.min()) / Nz) if len(_solid) else 0.05
+        z_top = min(z_top + 2.0 * r_tool, 0.98)
+        z_bot = max(z_bot, 0.02)
+        r_outer = 0.5 + r_tool
+
+        N_th = 96
+        xs = (np.arange(Nx) + 0.5) / Nx - 0.5
+        ys = (np.arange(Ny) + 0.5) / Ny - 0.5
+        Rxy = np.sqrt(xs[:, None] ** 2 + ys[None, :] ** 2)
+        Axy = np.arctan2(ys[None, :], xs[:, None])
+        th_bins = (np.floor((Axy + np.pi) / (2.0 * np.pi) * N_th).astype(np.int32)) % N_th
+        r_bound = np.zeros((Nz, N_th), dtype=np.float32)      # outer wall (max per theta)
+        r_inner = np.full((Nz, N_th), 1e9, dtype=np.float32)  # inner wall (min per theta)
+        for iz in range(Nz):
+            m = grid[:, :, iz] <= 0.0
+            if m.any():
+                np.maximum.at(r_bound[iz], th_bins[m], Rxy[m])
+                np.minimum.at(r_inner[iz], th_bins[m], Rxy[m])
+        r_inner = np.where(r_inner >= 1e9, 0.0, r_inner)
+        annular = bool((r_inner > r_tool + 1e-3).any())
+
+        def _resample_arc(poly, n_steps):
+            seg = np.diff(poly, axis=0)
+            c = np.concatenate([[0.0], np.cumsum(np.sqrt((seg ** 2).sum(1)))])
+            s = np.linspace(0.0, float(c[-1]), n_steps)
+            ix = np.clip(np.searchsorted(c, s) - 1, 0, len(poly) - 2)
+            fr = (s - c[ix]) / np.maximum(c[ix + 1] - c[ix], 1e-9)
+            return (poly[ix] + (poly[ix + 1] - poly[ix]) * fr[:, None]).astype(np.float32)
+
+        revs = max(0.5, args.multidepth_revs)
+        radial_cycles = max(1.0, float(args.multidepth_levels))
+        budget = max(1.0, (n - 1)) * feed_cap
+
+        # --- exterior contour polyline (angularly-varying r_bound, sweep <-> wall) ---
+        def ext_poly(revs_e):
+            u = np.linspace(0.0, 1.0, 4000)
+            z = z_top + (z_bot - z_top) * u
+            theta = 2.0 * np.pi * revs_e * u
+            iz_u = np.clip((z * Nz).astype(int), 0, Nz - 1)
+            it_u = (np.floor((theta % (2.0 * np.pi)) / (2.0 * np.pi) * N_th).astype(np.int32)) % N_th
+            r_bnd_u = r_bound[iz_u, it_u]
+            r_safe_u = np.where(r_bnd_u > 0.0,
+                                np.clip(r_bnd_u + r_tool + margin, 0.0, r_outer),
+                                r_outer)
+            tri = np.abs(1.0 - 2.0 * ((u * radial_cycles) % 1.0))
+            r = r_outer + (r_safe_u - r_outer) * tri
+            return np.stack([0.5 + r * np.cos(theta), 0.5 + r * np.sin(theta), z],
+                            axis=1).astype(np.float32)
+
+        if not annular:
+            # No inner wall -> identical to multidepth_contour (no finish pass;
+            # the adaptive finish gate is handled by multidepth_contour when
+            # init_mode_adaptive routes non-annular shapes there).
+            positions = _resample_arc(ext_poly(revs), n)
+        else:
+            # --- interior column-clearing polyline (orbit INSIDE the inner wall) ---
+            def int_poly(revs_i):
+                u = np.linspace(0.0, 1.0, 4000)
+                z = z_top + (z_bot - z_top) * u
+                theta = 2.0 * np.pi * revs_i * u
+                iz_u = np.clip((z * Nz).astype(int), 0, Nz - 1)
+                it_u = (np.floor((theta % (2.0 * np.pi)) / (2.0 * np.pi) * N_th).astype(np.int32)) % N_th
+                r_in_wall = r_inner[iz_u, it_u]
+                r_in_safe = np.clip(r_in_wall - r_tool - margin, 0.0, None)
+                tri = np.abs(1.0 - 2.0 * ((u * radial_cycles) % 1.0))
+                # sweep core(0) <-> inner wall to clear the column; hold at 0
+                # where there is no inner wall at this (z,theta).
+                r = (r_in_safe * tri) * (r_in_wall > r_tool + 1e-3)
+                return np.stack([0.5 + r * np.cos(theta), 0.5 + r * np.sin(theta), z],
+                                axis=1).astype(np.float32)
+
+            # HELICAL plunge from tool_start (z=1.0) down to z_top, circling at
+            # a small radius: every segment has nonzero XY displacement so
+            # tool_sdf's capsule projection (h_param = pa.ba/(ba.ba+1e-12))
+            # stays finite -- an axial plunge overflows the autodiff to NaN
+            # (simulator code, not modifiable; see multidepth_cavity). The
+            # column is centered, so circle about (0.5, 0.5).
+            r_plunge = 0.5 * r_tool
+            n_pz = max(12, int(np.ceil(abs(z_top - 1.0) / max(feed_cap, 1e-6))) * 4)
+            uz = np.linspace(0.0, 1.0, n_pz)
+            zp = (1.0 + (z_top - 1.0) * uz).astype(np.float32)
+            theta_p = 2.0 * np.pi * 1.5 * uz
+            plunge = np.stack([0.5 + r_plunge * np.cos(theta_p),
+                               0.5 + r_plunge * np.sin(theta_p), zp],
+                              axis=1).astype(np.float32)
+
+            # INTERIOR-FIRST ordering: plunge -> interior spiral (open column)
+            # -> retract -> exterior skin (clear outside-sphere waste). Budget-
+            # fit by shrinking revolutions if the concatenated path overruns.
+            revs_i = max(2.0, revs * 0.6)
+            z_ret = 1.0 + 2.0 * r_tool
+            scale = 1.0
+            for _ in range(5):
+                pi = int_poly(revs_i * scale)
+                pe = ext_poly(revs * scale)
+                plunge_arc = float(np.sqrt((np.diff(plunge, axis=0) ** 2).sum(1)).sum())
+                ti = float(np.sqrt((np.diff(pi, axis=0) ** 2).sum(1)).sum())
+                te = float(np.sqrt((np.diff(pe, axis=0) ** 2).sum(1)).sum())
+                ret = np.stack([pi[-1], [pi[-1][0], pi[-1][1], z_ret],
+                                [pe[0][0], pe[0][1], z_ret], pe[0]], axis=0).astype(np.float32)
+                tr = float(np.sqrt((np.diff(ret, axis=0) ** 2).sum(1)).sum())
+                total = plunge_arc + ti + tr + te
+                if total <= 0.95 * budget:
+                    break
+                scale *= (0.95 * budget) / total
+            pi = int_poly(revs_i * scale)
+            pe = ext_poly(revs * scale)
+            ret = np.stack([pi[-1], [pi[-1][0], pi[-1][1], z_ret],
+                            [pe[0][0], pe[0][1], z_ret], pe[0]], axis=0).astype(np.float32)
+            # Prepend tool_start so positions[0]==tool_start -> delta[0]=0 and
+            # the plunge is resampled into feed_cap-sized helical steps.
+            allpts = np.concatenate([tool_start[None, :].astype(np.float32),
+                                     plunge, pi, ret[1:], pe], axis=0)
+            positions = _resample_arc(allpts, n)
         init = np.empty((n, 3), dtype=np.float32)
         init[0] = positions[0] - tool_start
         init[1:] = np.diff(positions, axis=0)
