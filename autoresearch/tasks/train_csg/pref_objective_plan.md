@@ -75,8 +75,14 @@ the digest. Pick 2–3 magnitudes per dimension across pairs.
    The driver runs both experiments on free GPUs, lands them in `runs/<TAG>/`
    with `--save-model` (so trajectories render in the viewer), and enqueues the
    pair via `scripts/enqueue_pair.py`.
-3. **Cap the pending queue at ~8 pairs** — do not flood the human. If ≥8 are
-   pending, wait for answers before enqueuing more.
+3. **Keep generating comparisons while waiting for the user — do NOT cap or
+   block.** The human answers asynchronously and may be away for hours, so a
+   full or growing pending queue is the *intended* state, not a signal to pause.
+   Whenever GPUs are free, enqueue the next pair; never "wait for answers before
+   enqueuing more." The only things that gate enqueuing are GPU availability and
+   disk (prune answered+recorded run dirs periodically, keeping the newest ~20
+   for re-viewing; never delete a run whose pair is still pending). Interleave
+   pair-generation with the `hard_dice` experiments so neither starves.
 4. Vary shape/seed across pairs so the learned preference generalizes
    (shape-agnostic); never make the *pair's* dimension about a shape name.
 

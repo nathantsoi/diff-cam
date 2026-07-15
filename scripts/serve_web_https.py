@@ -598,6 +598,7 @@ def main() -> None:
             # single objective knob a pair varies). Same view the agent gets via
             # scripts/pref_digest.py; the compare.html digest panel fetches this.
             if parsed.path == "/__api/pref-digest" or parsed.path.endswith("/__api/pref-digest"):
+                import sys
                 scripts_dir = str(Path(__file__).resolve().parent)
                 if scripts_dir not in sys.path:
                     sys.path.insert(0, scripts_dir)
