@@ -503,3 +503,29 @@ not yet reliable. Seed 3 (launched 12:21, GPU 1) is the TIEBREAKER:
     sensitive to seed; candidate: tighten r_floor or the annulus z-clip).
 
 Stale NaN-degenerate run dirs (best_score -1e9, hard_dice 0.162) deleted.
+
+## jul15 multidepth_hole s3 + 3-seed VERDICT (12:48) — NEUTRAL/wash, NOT promoted
+
+Hole s3 hybrid deployed hard_dice = 0.2575 (final_iter 0.2530; air_cut_frac 0.38).
+3-seed picture (vs contour baseline ~0.273, cavity 0.263):
+  s1=0.2663  s2=0.2990  s3=0.2575  -> mean 0.2743, spread 0.0415
+  contour baseline ~0.273 (stable across seeds per prior runs)
+VERDICT: the hybrid MATCHES contour on mean (0.274 vs 0.273 = +0.001) but with
+~6x the seed variance (spread 0.041 vs contour's ~0.005). 1/3 seeds wins (s2
++0.026), 2/3 lose marginally (s1 -0.007, s3 -0.016). This is a WASH, not a
+reliable win -> DO NOT PROMOTE the hybrid to hole SOTA. The hole stays at the
+contour baseline (~0.273), which remains the best STABLE init for the hole.
+
+The s2=0.299 ceiling is real headroom (the interior column pass CAN help when
+the optimizer refines well), but the init is seed-unstable: s3 had the LOWEST
+air_cut (0.38) yet the LOWEST hard_dice (0.257) -> air-cut is NOT the
+differentiator; the variance is in how well the optimizer refines from the
+hybrid start. Candidate stability fixes for a LATER attempt (not now):
+  - the interior column pass budget may eat the exterior contour budget on
+    unlucky seeds -> make the interior pass ADAPTIVE in length (only as many
+    orbits as the annulus needs, not a fixed fraction of the path);
+  - tighten r_floor / the annulus z-clip so the interior orbit is more
+    concentric (less seed-dependent collision with the column wall).
+The hole is the last broken shape but at 0.273 stable; pivoting to the
+preference-driven reformulations (k_final=180, loss_shift=0.5, cut-overlap)
+which affect ALL shapes is higher-value than perfecting one shape's init.
