@@ -307,6 +307,37 @@ class Args:
     """k_init_adaptive: k_init used for FLAT-FACED PRISMATIC targets (high ang_cv +
     low z_cv, e.g. box). Default 10.0 (the confirmed box contour+k10 gold standard,
     0.7559 hard_dice / 0% air_late)."""
+    init_mode_adaptive: bool = False
+    """init_mode: if set, OVERRIDE init_mode with a value chosen from the target
+    GEOMETRY (not the shape name). The THIRD member of the geometry-gated family
+    (after contour_finish_adaptive and k_init_adaptive), reading the same two
+    scalars. It picks the init TRAJECTORY FAMILY:
+      multidepth_contour (SDF-following contour helix) is SOTA for 5/6 shapes
+        (cylinder, sphere, box, pyramid, sphere_hole) -- convex parts + the hole,
+        where tracing the target's outer boundary radius then descending wins.
+      multidepth_cavity (cavity-helix init) is SOTA for the BOWL ALONE
+        (sphere_bowl: 0.6471 vs contour 0.6188, +0.028 WIN) -- a single concavity
+        (sphere with a scoop carved out) where the contour init follows an SDF that
+        is ambiguous across the open mouth and the helix collapses; the cavity init
+        instead machines from the solid envelope inward and is robust to it.
+    The bowl is the ONLY shape that is BOTH circular (low ang_cv, sphere-like
+    0.033) AND strongly z-varying BEYOND a plain sphere (z_cv=0.592 > sphere 0.425;
+    the open scoop inflates the per-z cross-section area variance). Measured scalars
+    (res 64) and the gate (ang_cv < 0.06 AND z_cv > init_mode_cavity_zcv):
+      cylinder ang_cv=0.012 z_cv=0.000 -> contour (z_cv too low)
+      sphere   ang_cv=0.033 z_cv=0.425 -> contour (z_cv < 0.50)
+      box      ang_cv=0.109 z_cv=0.000 -> contour (ang_cv too high)
+      pyramid  ang_cv=0.150 z_cv=0.883 -> contour (ang_cv too high)
+      bowl     ang_cv=0.033 z_cv=0.592 -> CAVITY (the only shape above the z gate)
+      hole     ang_cv=0.012 z_cv=0.424 -> contour (z_cv < 0.50; contour 0.273)
+    Default threshold init_mode_cavity_zcv=0.50 sits in the gap between sphere/hole
+    (0.424-0.425) and bowl (0.592). Overrides args.init_mode to multidepth_cavity
+    when the gate fires, else multidepth_contour. Shape-agnostic (two scalars from
+    the baked SDF + a threshold in a measured gap; no shape names)."""
+    init_mode_cavity_zcv: float = 0.50
+    """init_mode_adaptive: z_cv threshold above which a CIRCULAR (ang_cv<0.06) target
+    is treated as a concavity (bowl) and given the cavity init. 0.50 sits in the
+    measured gap between sphere/hole (0.424-0.425) and bowl (0.592)."""
     grad_clip: float = 0.5
     """clip per-iteration gradient L2 norm to this (0 = disabled). Stabilizes the
     transient dice peak so best-checkpoint saving captures a higher one; 0.4-0.5
@@ -1221,6 +1252,23 @@ def main():
         sim.k[None] = k_chosen
         print(f"[k-init] k_init_adaptive: ang_cv={ang_cv:.3f} z_cv={z_cv:.3f} "
               f"flat_prismatic={flat_prismatic} -> k_init={k_chosen}", file=sys.stderr)
+
+    # --- Adaptive init_mode (shape-agnostic): choose the init TRAJECTORY FAMILY
+    # from the target GEOMETRY, not the shape name. Third member of the
+    # geometry-gated family (with contour_finish_adaptive and k_init_adaptive).
+    # A CIRCULAR target (low ang_cv) with a STRONG z-varying concavity (z_cv above
+    # the bowl threshold) gets multidepth_cavity (the confirmed bowl WIN: 0.6471 vs
+    # contour 0.6188); every other shape gets multidepth_contour (SOTA for the 5
+    # convex parts + the hole). The gate (ang_cv < 0.06 AND z_cv > cavity_zcv)
+    # selects the BOWL alone (ang_cv 0.033, z_cv 0.592); sphere/hole (0.424-0.425)
+    # and the flat/tapered parts fall below the z threshold or outside the angular
+    # gate. Overrides args.init_mode before the init dispatch reads it below.
+    if args.init_mode_adaptive:
+        ang_cv, z_cv, _, _ = _contour_geometry_scalars(sdf_grid)
+        concavity = (ang_cv < 0.06) and (z_cv > args.init_mode_cavity_zcv)
+        args.init_mode = "multidepth_cavity" if concavity else "multidepth_contour"
+        print(f"[init] init_mode_adaptive: ang_cv={ang_cv:.3f} z_cv={z_cv:.3f} "
+              f"concavity={concavity} -> init_mode={args.init_mode}", file=sys.stderr)
 
     # --- Staged training: start from a saved mid-cut stock + tool position ---
     # (the previous trajectory's truncated state). init_stock will then write
