@@ -478,3 +478,28 @@ PROGRESSES cleanly after the fix — climbing from init 0.162:
 Still BELOW the 0.273 contour baseline / 0.263 cavity at 800 iters, but still
 climbing at iter 700 -> full 5000-iter runs (now launched s1,s2 on GPUs 1,7,
 s3 pending a free GPU) will judge whether the hybrid BEATS the baselines.
+
+## jul15 multidepth_hole FULL-RUN s1/s2 (12:20) — s2 WINS over contour, s1 marginal; s3 tiebreaker running
+
+Full 5000-iter runs of the hybrid `multidepth_hole` init (sphere_hole r11.43,
+SOTA adaptive base, --eval --eval-freq 250, best_on_hard), after the two-bug fix:
+- hole s1 hybrid: deployed hard_dice = 0.2663  (final_iter 0.2620; air_cut_frac 0.42)
+- hole s2 hybrid: deployed hard_dice = 0.2990  (final_iter 0.2980; air_cut_frac 0.39)
+
+vs baselines: contour 0.273 (s1/s2 cavity 0.263). So:
+- s2 = +0.026 over contour, +0.036 over cavity -> CLEAR WIN (hybrid beats BOTH
+  baselines on s2; air_cut_frac 0.39 is lower than contour's typical ~0.42, i.e.
+  the interior column pass also cut less air).
+- s1 = -0.007 vs contour, +0.003 vs cavity -> marginal loss vs contour, beats
+  cavity. Seed-unstable (0.266 vs 0.299 spread = 0.033).
+
+s2 PROVES the hybrid CAN beat the contour baseline substantially; s1 shows it is
+not yet reliable. Seed 3 (launched 12:21, GPU 1) is the TIEBREAKER:
+  - if s3 >= 0.273 -> hybrid wins 2/3 seeds -> PROMOTE to hole SOTA (the
+    annul>0.40 gate is already wired into init_mode_adaptive, so promoting =
+    confirming the gate; zero regression on non-annular by construction).
+  - if s3 < 0.273  -> 1/3, inconclusive -> need more seeds or a stability fix
+    (the s1/s2 spread suggests the interior-pass budget or orbit radius is
+    sensitive to seed; candidate: tighten r_floor or the annulus z-clip).
+
+Stale NaN-degenerate run dirs (best_score -1e9, hard_dice 0.162) deleted.
