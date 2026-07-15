@@ -529,3 +529,45 @@ hybrid start. Candidate stability fixes for a LATER attempt (not now):
 The hole is the last broken shape but at 0.273 stable; pivoting to the
 preference-driven reformulations (k_final=180, loss_shift=0.5, cut-overlap)
 which affect ALL shapes is higher-value than perfecting one shape's init.
+
+## jul15 k_final=180 PROMOTION CHECK (13:30) — NEUTRAL/marginal, NOT promoted; pref signal is largely cosmetic
+
+Ran k_final=180 (vs SOTA 120) on the 3rd seed of the two "winning" shapes
+(sphere, bowl) + no-regression on box/cyl/pyramid s1, full SOTA adaptive base:
+  shape    seed  kf=180   kf=120 baseline   delta
+  sphere   s3    0.8318   0.830 (s1,s2)     +0.002  (noise, consistent dir)
+  box      s1    0.7754   0.7596            +0.016  (real, 1 seed)
+  cyl      s1    0.8900   0.889             +0.001  (noise)
+  pyramid  s1    0.7997   0.798 (3-seed)    +0.002  (noise)
+  bowl     s3    0.6162   0.655 (s3@120)    -0.039  (see reframe below)
+
+BOWL REFRAME (the s3 "collapse" is NOT a k_final regression): the bowl is
+inherently seed-unstable under the cavity init — kf=120 itself collapses on s2
+(0.6266). Across all 3 seeds:
+  kf=120 bowl: s1=0.6548 s2=0.6266 s3=0.6599  mean=0.6471 spread=0.033
+  kf=180 bowl: s1=0.6619 s2=0.6638 s3=0.6162  mean=0.6473 spread=0.048
+  delta mean = +0.0002 -> NEUTRAL. kf=180 just shifts WHICH seed collapses
+  (s2->s3); it does not change the bowl on average.
+
+VERDICT: k_final=180 is NEUTRAL-to-marginal on EVERY shape (no regression
+anywhere; only box +0.016 is substantive, and that is 1 seed needing s2/s3
+confirmation). NOT promoted to the SOTA base — the gains are too small and the
+box gain alone doesn't justify a blanket k-final change.
+
+META-FINDING (important): the CLEAREST preference signal — k-anneal -> SHARPER
+(unanimous n=2, "better contour following") — translates to at most a MARGINAL
+hard_dice gain. I.e. the human's preference for sharper contour following is
+largely COSMETIC: it improves the visual contour quality the human sees without
+much changing the deployable sharp-boolean-carve metric. Implication for the
+pref loop: do NOT expect every strong preference direction to move hard_dice;
+preferences track perceived trajectory quality, which overlaps but is not
+identical to the carve metric. Two ways forward:
+  (a) treat preference-aligned-but-metric-neutral changes as worthwhile on
+      their own (the human values them) and encode them as a separate objective
+      layer, NOT measured by hard_dice;
+  (b) hunt for preference dimensions that DO move hard_dice (the cut-overlap /
+      jaggedness theme is the next candidate — residual scallop directly costs
+      hard_dice).
+Next pref-driven reformulation to metric-confirm: loss_shift=0.5 (pref B,
+"follows the contour") — untested on hard_dice broadly; and the cut-overlap
+theme (multidepth_revs 4.5 on continuous-wall shapes) — pref pairs running.
