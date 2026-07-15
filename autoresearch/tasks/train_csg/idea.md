@@ -199,3 +199,79 @@ SOTA command. If it helps hole but hurts sphere, make delay adaptive (high delay
 only for compute-starved shapes — but that needs a shape signal; the hole's
 signature is low ang_cv + high z_cv + the SDF column subtraction; could gate on
 "dice still rising at iter 5000" but that's not known a priori — defer).
+
+## jul15 k_ramp_delay RESULTS (06:11) — DEAD END
+
+| run | config | hdice | vs ref | verdict |
+|---|---|---|---|---|
+| hole delay=0.4 s1 | d0.4 @5k | 0.2718 | ≈base 0.2716 | NEUTRAL |
+| hole delay=0.6 s1/s2/s3 | d0.6 @5k | 0.2723/0.2703/0.2486 → 0.2604 | −0.011 | LOSS (s3 collapse) |
+| hole delay=0.8 s1 | d0.8 @5k | 0.2689 | −0.003 | LOSS |
+| sphere delay=0.6 s1/s2 | d0.6 @5k | 0.7724/0.7906 → 0.7815 | −0.050 vs 0.831 | LOSS |
+
+**k_ramp_delay is a dead end.** No delay beats the hole baseline (delay=0.4 only
+ties at 0.272; delay=0.6/0.8 lose), and delay=0.6 *hurts* the sphere by −0.05.
+**Why it fails (the key insight):** the it10k hole win is NOT just "a longer soft
+window" — it is "a longer soft window WITH a gentle (slow) ramp rate" (k reaches
+120 at iter 10000, rate 10/1k-iter). k_ramp_delay gives the longer soft window
+but COMPRESSES the ramp into the tail (20→120 in iters 3000–5000 = 3× steeper),
+and that steep tail-ramp COLLAPSES the same way the sphere collapses — dice
+0.70→0.57 mid-ramp, best_on_hard rescues to 0.78 but still far below 0.831. So
+delay ≠ the it10k benefit. The lever is ramp *rate* over *total* iters, which
+only more iters provides — and more iters hurts the convex shapes (below).
+
+**Fundamental tension (now confirmed):** the hole and the convex shapes have
+OPPOSITE k-sharpening needs. The hole is compute-starved (dice still rising at
+iter 5000) and wants a longer/slower ramp; the sphere/box converge by 5000 and
+want to sharpen promptly — a slower ramp under-sharpens them + the late-k push
+collapses them. **No shape-agnostic k-schedule helps the hole without hurting the
+convex SOTA.** A schedule fix for the hole must therefore be ADAPTIVE (geometry-
+gated) or per-shape — not shape-agnostic.
+
+## jul15 it10k regression COMPLETE (06:15) — NOT shape-agnostic
+
+| shape | 5k SOTA | 10k | delta | verdict |
+|---|---|---|---|---|
+| sphere_hole | 0.2716 | 0.2820 (3-seed) | +0.010 | WIN (only hole) |
+| sphere | 0.8311 | 0.8124 | −0.019 | LOSS |
+| box | 0.7596 | 0.7541 | −0.006 | LOSS (marginal) |
+
+`--iters 10000` helps the hole +0.010 but hurts BOTH convex shapes (sphere
+−0.019, box −0.006; sphere's final-iter even collapsed 0.81→0.64 as k hit 120).
+Doubling compute to lift one broken shape while regressing the two convex SOTAs
+is the wrong move. **it10k is NOT a shape-agnostic free win.** (Matches the
+k_ramp_delay conclusion from the opposite direction: the convex shapes want
+fast/prompt sharpening at 5k; the hole wants slow/long.)
+
+## jul15 bowl contour NEUTRAL + cavity lead (06:15)
+
+The other CSG shape, sphere_bowl (baseline 0.6185), was never tried with contour
+until the 01:00 jul15-contour-bowl run. Result (3 seeds, contour+dual-adaptive):
+**0.6185 / 0.6192 / 0.6186 → mean 0.6188 ≈ baseline. NEUTRAL.** Contour init does
+NOT help the bowl either — the "contour improves hole/bowl" hypothesis is false
+for both CSG shapes.
+
+But an overlooked prior run, `jul11-init-cavity-gen` (multidepth_cavity + k-anneal,
+3 seeds), scored **0.6439 / 0.6255 / 0.6291 → mean 0.6328** — *above* the 0.6185
+bowl baseline. So the bowl's best init may be **cavity, not contour** — the
+OPPOSITE of the convex shapes (contour wins) and the hole (contour wins, cavity
+0.262 < contour 0.273). This is a +0.014 lead.
+
+**Running now (jul15-bowl-cavity, GPUs 1-5) to confirm on current code:**
+- cavity + k_init 20 (fair vs contour-bowl 0.6188, same adaptive pick), 3 seeds.
+- cavity + k_init 10 (re-confirm jul11's 0.6439 config), 2 seeds.
+If cavity bowl > 0.619 holds, **bowl SOTA → cavity init** and the per-shape init
+story becomes: convex+hole = contour, bowl = cavity.
+
+## jul15 next directions (06:15)
+
+1. **Harvest bowl cavity confirm** (~50 min): is bowl SOTA cavity (0.633) > contour (0.619)?
+2. **Per-shape branching for CSG shapes is now justified** (autoresearch.md permits
+   it): the hole and bowl do not yield to any shape-agnostic schedule/init tweak
+   tried (contour neutral on both; k_ramp_delay dead; it10k not shape-agnostic).
+   The deferred hole-aware init (sphere-exterior contour + central column spiral)
+   is the remaining research bet for the hole — higher code risk, defer until the
+   bowl cavity result is banked and pref queue is healthy.
+3. **Preference queue (PRIMARY):** 12 pending, 0 answered (human away — intended).
+   Added 2 bowl pairs (w_gouge s2, w_air_time s3) for CSG-shape coverage (was a
+   gap — all prior pairs were convex shapes). Keep stocking on freed GPUs.
