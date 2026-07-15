@@ -344,6 +344,20 @@ class Args:
     1.0 = linear over all iters (default). <1.0 reaches k_final early so the
     optimizer spends more iters refining the HARD-tracking (high-k) carve -- the
     phase where peaks are set. E.g. 0.5 = k hits k_final at the halfway point."""
+    k_ramp_delay: float = 0.0
+    """fraction of iters to HOLD k at k_init before the ramp begins (default 0.0
+    = no delay, ramp starts immediately -- backward compatible). >0 delays the
+    sharpening so the optimizer spends a longer SOFT-exploration window carving
+    the bulk exterior before k rises. Motivated by the sphere_hole diagnostic:
+    the hole is COMPUTE-starved at 5000 iters (dice still rising at the end) and
+    the win from --iters 10000 comes purely from the 2x longer soft window (k
+    reaches k_final at iter 10000 not 5000), NOT from sharper terminal k (kf240
+    ties/loses). k_ramp_delay lets the hole keep soft-carving past where a linear
+    ramp would have frozen it, AT FIXED iters -- so the benefit need not cost 2x
+    compute (10k iters hurts sphere -0.019 because the convex shapes are already
+    converged by 5000 and the slower ramp only under-sharpens them). Shape-agnostic:
+    the ramp still completes by k_ramp_frac. E.g. delay=0.6,frac=1.0 -> k held at
+    k_init for iters 0-6000 then ramps k_init->k_final over iters 6000-10000."""
 
     loss_shift: float = 0.0
     """de-biased (hard-carve-aware) loss: add this to stock_d before the loss
@@ -1912,10 +1926,17 @@ def main():
             # (low k = smooth exploration early; high k = hard-tracking late).
             # Independent of the lr block above (the two can combine).
             if args.k_anneal:
-                # ramp k from k_init to k_final over the first k_ramp_frac of
-                # iters, then hold at k_final (more high-k hard-tracking time).
+                # ramp k from k_init to k_final. k_ramp_delay holds k at k_init
+                # for the first `delay` fraction (longer soft-exploration window
+                # -- helps compute-starved targets like sphere_hole at fixed
+                # iters); the ramp then completes by k_ramp_frac, after which k
+                # holds at k_final (high-k hard-tracking / polish time).
                 frac = it / max(1, args.iters)
-                t = min(1.0, frac / max(1e-6, args.k_ramp_frac))
+                delay = max(0.0, min(args.k_ramp_frac - 1e-6, args.k_ramp_delay))
+                if frac <= delay:
+                    t = 0.0
+                else:
+                    t = min(1.0, (frac - delay) / max(1e-6, args.k_ramp_frac - delay))
                 sim.k[None] = args.k_init + (args.k_final - args.k_init) * t
 
             # w_prox warmup: keep w_prox at 0 until warmup_frac of iters, then

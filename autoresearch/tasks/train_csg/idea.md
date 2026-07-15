@@ -157,3 +157,45 @@ just needs `--iters 10000` to be shape-agnostically better). Then the open
 question: is there a k-schedule that gives the hole's soft-window benefit
 WITHOUT doubling iters (e.g. hold k=20 for first 60% then ramp 20→120 late)?
 That needs a k-anneal schedule-shape code change — defer unless sharp10k fails.
+
+## jul15 it10k 3-seed + 10k regression (05:16)
+
+- **it10k 3-seed mean = 0.2820** (s1 0.291, s2 0.278, s3 0.277) vs baseline 0.2716
+  = **+0.0104 WIN** (real but humbler than s1's +0.019; the win is partly
+  seed-1 luck). Confirms MORE ITERS is the hole lever, margin ≈ +0.01.
+- **sphere it10k regression = 0.8124** vs 5k SOTA 0.8311 = **−0.019 LOSS**.
+  More iters HURTS the convex sphere (already converged by 5000; the 2× slower
+  k ramp under-sharpens it, and the final-iter even collapsed 0.81→0.64 as k
+  hit 120 — high-k late instability). box it10k regression still running.
+- **CONCLUSION: `--iters 10000` is NOT a shape-agnostic free win** (helps hole
+  +0.010 but hurts sphere −0.019). Doubling compute to help one shape while
+  hurting another is the wrong move.
+
+## jul15 k_ramp_delay — the shape-agnostic fix (implemented 05:16, running)
+
+The it10k win is purely the **longer soft window** (k stays low longer). So
+instead of 2× iters, **reshape the k-anneal schedule at FIXED 5000 iters**: hold
+k at k_init for the first `delay` fraction, then ramp to k_final. This gives the
+hole its soft-carve window without slowing the convex shapes' sharpening (they
+still reach k_final by iter 5000).
+
+**Code change (train_csg.py):** added `--k-ramp-delay` (default 0.0 = current
+linear ramp, backward compatible). Schedule now:
+`k = k_init + (k_final-k_init) * t`, where `t=0` for `frac ≤ delay`, else
+`t = min(1, (frac-delay)/(k_ramp_frac-delay))`. Verified parses + trains clean.
+
+**Experiment (running, 7 GPUs):**
+1. hole `--k-ramp-delay 0.6` iters=5000, **3 seeds** — does delay give the 10k
+   benefit (0.282) at 5k iters? Target: beat 5k baseline 0.2716 toward 0.28+.
+2. hole delay=0.4 and delay=0.8 (seed 1) — sweep the delay.
+3. sphere `--k-ramp-delay 0.6` iters=5000, 2 seeds — **regression**: does
+   delaying the ramp hurt the convex SOTA 0.831? If delay=0.6 sphere ≈ 0.83
+   (neutral), the delayed schedule is shape-agnostic-safe. If it drops, the
+   delay must be per-shape / adaptive (gate on the same ang_cv/z_cv scalars).
+
+If hole delay=0.6 @5k ≥ 0.28 AND sphere delay=0.6 @5k ≈ 0.83 → **k_ramp_delay is
+the shape-agnostic hole fix at zero extra compute**, and becomes part of the
+SOTA command. If it helps hole but hurts sphere, make delay adaptive (high delay
+only for compute-starved shapes — but that needs a shape signal; the hole's
+signature is low ang_cv + high z_cv + the SDF column subtraction; could gate on
+"dice still rising at iter 5000" but that's not known a priori — defer).
