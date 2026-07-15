@@ -115,38 +115,59 @@ At the top of each loop iteration (per the step added to `autoresearch.md`):
 
 ## 6. Current preference understanding
 
-First answers landed 2026-07-15 (~09:11), 10/20 answered, n=1 per dimension
-(so per-dimension signal is WEAK — treat directions as hypotheses, themes as
-the real signal).
+Updated 2026-07-15 (~12:00), 20/29 answered. Per-dimension n is still small
+(1–3); treat directions as hypotheses, themes as the real signal.
 
-- `w_air_time` — preferred: tie (n=1). Notes: "both follow the contour and dont
-  cut any air, however the surface finish is poor as the endmill doesnt follow
-  the surface precisely."
-- `w_gouge` — preferred: tie (n=1). Notes: "both pretty good, look almost the same."
-- `w_residual` — preferred: A=1.0 (n=1). Notes: "better shape following."
-- `w_break` — preferred: tie (n=1). Notes: "both ok but not great — dont make it
-  all the way around the outside of the part and have air cutting."
+- `w_air_time` — preferred: tie (n=2). Notes: "too much air cutting, did not cut
+  top of part well"; "both follow the contour and dont cut any air, however the
+  surface finish is poor as the endmill doesnt follow the surface precisely."
+- `w_gouge` — preferred: no clear winner (A=1 B=1 tie=1, n=3). Notes: "less
+  jagged surface finish (fewer spikes) however gouging appears in both";
+  "better contour following, but surface still jagged due to the cutting not
+  overlapping the previous cut enough to remove all the material"; "both pretty
+  good, look almost the same."
+- `w_residual` — preferred: A=1.0 (n=2, unanimous). Notes: "no gouging, but the
+  cutter should follow the surface more consistently and overlap more to remove
+  the remaining jagged material"; "better shape following."
+- `w_break` — preferred: no clear winner (A=0 B=1 tie=1, n=2). Notes: "better
+  because it did not spend time moving while just cutting air, good contour
+  following"; "both ok but not great — dont make it all the way around the
+  outside of the part and have air cutting."
 - `w_time` — preferred: tie (n=1). Notes: "very similar, both great!"
-- `k-anneal` — preferred: B=sharper (n=1). Notes: "much better part contour
-  following."
-- `init_mode` — preferred: tie (n=1). Notes: "main difference is when tool is
-  air cutting, which does not matter beyond both spending about the same time
-  cutting air, all of which is bad."
-- `multidepth_revs` — preferred: A=3.0 (n=1). Notes: "less air cutting, better
+- `k-anneal` — preferred: B=sharper (n=2, UNANIMOUS). Notes: "better contour
+  following and less air cutting"; "much better part contour following."
+- `init_mode` — preferred: no clear winner (A=1 B=1 tie=1, n=3). Notes: "much
+  less time spent cutting air, which is good"; "no time spent air cutting...
+  good surface cutting on the top of the part"; "main difference is when tool
+  is air cutting... all of which is bad."
+- `multidepth_revs` — preferred: no clear winner (A=1 B=1 tie=1, n=3). Notes:
+  "a little bit better surface cutting, but not great"; "both have way too much
+  air cutting and reasonable part-contour following"; "less air cutting, better
   shape following."
 - `loss_shift` — preferred: B=0.5 (n=1). Notes: "follows the contour of the
   part. top surface following could be better."
 
 Recurring themes (the real signal — repeated across unrelated dimensions):
 1. **Contour / surface following is the dominant valued quality.** Cited as the
-   reason for the preferred side in 4 of the 5 non-tie dimensions (k-anneal,
-   loss_shift, w_residual, multidepth_revs) — "better shape/contour following."
-2. **Air cutting is the dominant negative.** Flagged in 4 notes (init_mode,
-   multidepth_revs, w_break, +1 unstructured) — "air cutting... all of which is
-   bad."
+   reason for the preferred side across k-anneal, loss_shift, w_residual,
+   multidepth_revs, w_break — "better shape/contour following."
+2. **Air cutting is the dominant negative.** Flagged in 6+ notes (init_mode ×2,
+   multidepth_revs, w_break, w_air_time, +unstructured) — "air cutting... all of
+   which is bad."
 3. **Surface finish / precise surface following is a stated deficit.** Flagged
-   twice (w_air_time "surface finish poor, endmill doesnt follow surface
-   precisely"; loss_shift "top surface following could be better").
+   repeatedly (w_air_time "surface finish poor, endmill doesnt follow surface
+   precisely"; loss_shift "top surface following could be better"; init_mode
+   "good surface cutting on the top of the part").
+4. **NEW (jaggedness from insufficient cut overlap).** Flagged in w_gouge and
+   w_residual notes — "surface still jagged due to the cutting not overlapping
+   the previous cut enough to remove all the material"; "overlap more to remove
+   the remaining jagged material"; "fewer spikes on the surface." This is a
+   STEPOVER/cut-overlap signal, distinct from contour following: the user wants
+   adjacent passes to overlap enough to clear all material (no scallop/spike
+   ridges). Tension with theme 2: finer stepover (more revs) reduces jaggedness
+   but adds air cutting — and multidepth_revs A=3.0 (coarser) was preferred for
+   "less air cutting." So the ideal is NOT blanket-finer stepover but a
+   stepover that overlaps only where there is material (no extra air).
 
 → next reformulations to try (swept as hard_dice experiments; preference
 steering picks what to try, the metric confirms):
@@ -160,6 +181,17 @@ steering picks what to try, the metric confirms):
 - **Top-surface following**: the loss_shift note flags the TOP surface
   specifically — a candidate for a z-weighted contour term later if the metric
   confirms loss_shift helps.
+- **NEW (cut-overlap / anti-jaggedness)**: the w_gouge + w_residual notes want
+  adjacent passes to overlap enough to clear all material (no scallop ridges).
+  Candidate reformulations, swept as hard_dice experiments:
+  (a) raise `--multidepth-revs` ONLY on shapes where the exterior is material-
+  bearing all around (so more revs = more overlap, not more air) — but note
+  multidepth_revs A=3.0 was preferred for "less air", so test 3.0 vs 4.5 (not
+  6.0) on box/cyl where the wall is continuous;
+  (b) a loss term that penalizes residual scallop between adjacent orbits
+  (inter-pass residual) — a structural objective change, higher code risk;
+  preference steering says TRY (a) first (cheap flag sweep), the metric
+  confirms whether overlap helps hard_dice without the air-cutting penalty.
 - Air-cutting theme reinforces keeping w_air_time nonzero (1e-3 in SOTA) and
   the multidepth_contour init; multidepth_revs A=3.0 preferred over higher →
   keep revs=3.0 (do NOT push finer stepover).

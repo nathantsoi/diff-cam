@@ -442,3 +442,39 @@ Both seeds positive but marginal (within noise). The preference direction
 (sharper k -> better contour following) is WEAKLY confirmed by hard_dice, not a
 large win. Recorded as SMALL-WIN, not promoted to SOTA yet (need a clean s2
 baseline + a 3rd seed to rule out noise before defaulting k_final=180).
+
+## jul15 multidepth_hole BUILT + TWO BUGS FIXED (11:30–12:00) — hybrid init now trains
+
+Built the HYBRID `multidepth_hole` init (the "remaining bet" above): contour's
+angularly-varying r_bound exterior + an interior column-clearing pass orbiting
+inside r_inner (min per-theta inside radius) + helical plunge, gated on
+annul>0.40 (hole=0.769 alone; all solids annul~0, bowl 0.150 -> below gate, so
+non-annular shapes fall through to contour unchanged = zero regression by
+construction). Two distinct bugs crashed/silently-broke it; both fixed + committed:
+
+1. **`ti` module shadowing** (`AttributeError: 'float' object has no attribute
+   'ad'` at `with ti.ad.Tape(...)`). The annular budget-fit loop used locals
+   `ti =`/`te =`/`tr =`, rebinding the taichi module (imported as `ti`) to a
+   float in the enclosing function scope. ONLY the annular branch ran that loop,
+   so the 5 solid shapes were unaffected -> only the hole crashed. Fix: renamed
+   to `arc_i`/`arc_e`/`arc_r` (cavity's loop already used `ti_s`/`te_s`). Also
+   hardened the interior pass against axial segments (r_floor=0.5*r_tool, z-clip
+   to the annulus-bearing z-range, min orbit radius).
+
+2. **Zero-length first segment NaN** (the SILENT zero-progress bug masked by #1).
+   Forward loss finite but backward grad NaN at iter 0 -> optimizer never moved,
+   full 5000-iter runs finished in ~3 min with best_score=-1e9, hard_dice=0.162
+   identical to the 50-iter smoke. Root cause: I prepended `tool_start`, making
+   positions[0]==tool_start so init[0]=0 — a zero-length first capsule whose
+   degenerate direction NaNs the autodiff backward. Cavity starts at plunge[0]
+   (nonzero first delta) and survives. Fix: drop the tool_start prepend, match
+   cavity (`allpts = concatenate([plunge, pi, ret[1:], pe])`). Re-tested 60-iter
+   -> finite grads, no NaN, loss bouncing.
+
+800-iter eval test (sphere_hole r11.43 s1, SOTA adaptive base, --eval --eval-freq 100)
+PROGRESSES cleanly after the fix — climbing from init 0.162:
+  iter100 0.1909  iter200 0.2295  iter300 0.2355  iter400 0.2086
+  iter500 0.2446  iter600 0.2386  iter700 0.2487  (resid 0.47->0.20, gouge ~0.03)
+Still BELOW the 0.273 contour baseline / 0.263 cavity at 800 iters, but still
+climbing at iter 700 -> full 5000-iter runs (now launched s1,s2 on GPUs 1,7,
+s3 pending a free GPU) will judge whether the hybrid BEATS the baselines.
