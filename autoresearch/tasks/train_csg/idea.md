@@ -372,3 +372,36 @@ sphere ≈0.78 (no regression). Harvest pending.
    remaining research bet — ang_cv/z_cv cannot distinguish hole from sphere, so
    a NEW scalar (central-void-fraction: high interior column of stock-kept
    voxels) is needed to gate a hole-specific init. Higher code risk.
+
+## jul15 init_mode_adaptive CONFIRMED (08:19) — bowl win BANKED into SOTA command
+
+3-seed adaptive confirmation (`runs/jul15-initmode-adaptive/`, shape-agnostic
+command `--k-anneal --k-init 20.0 --k-final 120.0 --k-init-adaptive
+--init-mode-adaptive --contour-finish-frac 0.2 --contour-finish-adaptive`):
+
+| run | gate result | hdice | vs prior |
+|---|---|---|---|
+| bowl s1 | concavity=True → cavity | 0.6508 | (cavity win s1 was 0.6548) ✓ |
+| bowl s2 | concavity=True → cavity | 0.6594 | (cavity win s2 was 0.6266) ✓ +0.033 |
+| sphere s1 | concavity=False → contour | 0.8300 | NO REGRESSION (contour SOTA) ✓ |
+
+Bowl adaptive mean 0.6551 reproduces the cavity win (0.6471); sphere holds contour
+at 0.830 (no regression). **One shape-agnostic command now carries BOTH the convex
+dual-adaptive SOTA AND the bowl cavity win.** (Note: args.json records init_mode=
+"random" because it is dumped BEFORE the runtime gate overrides it; the runtime
+`[init] init_mode_adaptive:` print is the source of truth for which init ran.)
+
+### jul15 next (08:19)
+1. Box + cylinder adaptive spot-check (confirm the flat-prismatic k10 gate and
+   the cylinder finish gate still fire through init_mode_adaptive — they should,
+   since init_mode_adaptive only overrides init_mode, not k/finish).
+2. Keep pref queue stocked (17 pending, 0 answered). Launch more pairs on freed
+   GPUs; rotate dimension/shape/seed.
+3. Remaining research bet: the hole (~0.27) is the only broken shape. ang_cv/z_cv
+   cannot distinguish it from a sphere (both 0.012-0.033 / 0.424-0.425). Need a
+   NEW scalar — ANNULARITY: `annul = 1 - mean_z( z_area[z] / (pi*r_bound_mean[z]^2) )`
+   — ~0 for solid cross-sections (sphere/cyl/box), >0 for the hole (annular: the
+   central column removes area relative to the outer boundary). r_bound is already
+   computed (max radius per theta = outer boundary); z_area already computed. Gate
+   a hole-aware init (sphere-exterior contour + central column spiral) on annul.
+   Higher code risk — attempt now that the bowl win is banked.
