@@ -38,6 +38,12 @@ SHAPE="${SHAPE:-sphere}"
 RADIUS="${RADIUS:-9.0}"
 SEED="${SEED:-1}"
 ITERS="${ITERS:-5000}"
+MAX_STEPS="${MAX_STEPS:-128}"
+# Optional extra flags applied to BOTH sides so the pair runs on a deployable
+# config (e.g. the SOTA contour+dual-adaptive method) rather than the bare
+# baseline. The dimension knob (FLAG_A/MAG_A vs FLAG_B/MAG_B) is still the only
+# thing that differs between A and B. Quote as a single string of args.
+BASE_FLAGS="${BASE_FLAGS:-}"
 TAG="${TAG:-pref_wairtime_sph}"
 PROMPT="${PROMPT:-Which trajectory air-cuts less at the end?}"
 SCENARIO="${SCENARIO:-${SHAPE} s${SEED} iters${ITERS}}"
@@ -64,7 +70,8 @@ launch_one() {
   CUDA_VISIBLE_DEVICES=$gpu uv run python -m algorithms.train_csg \
     --target_shape "$SHAPE" --target_radius_mm "$RADIUS" \
     --seed "$SEED" --runs_subdir "$SUB" --no-track --best_on_hard \
-    --max_steps "$ITERS" \
+    --iters "$ITERS" --max_steps "$MAX_STEPS" \
+    $BASE_FLAGS \
     $flag "$mag" \
     --save-model \
     > "$log" 2>&1 &
@@ -77,8 +84,8 @@ idx=0
 SIDES=( "a:$FLAG_A:$MAG_A" "b:$FLAG_B:$MAG_B" )
 for g in "${GPUS[@]}"; do
   if [ $idx -lt 2 ] && gpu_free "$g"; then
-    IFS=':' read -r sflag smag <<< "${SIDES[$idx]}"
-    launch_one "$g" "$sflag" "$smag"
+    IFS=':' read -r sside sflag smag <<< "${SIDES[$idx]}"
+    launch_one "$g" "$sside" "$sflag" "$smag"
     idx=$((idx+1))
   fi
 done
@@ -88,8 +95,8 @@ while [ $idx -lt 2 ]; do
     pid="${BUSY[$g]:-}"
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
       if [ $idx -lt 2 ] && gpu_free "$g"; then
-        IFS=':' read -r sflag smag <<< "${SIDES[$idx]}"
-        launch_one "$g" "$sflag" "$smag"
+        IFS=':' read -r sside sflag smag <<< "${SIDES[$idx]}"
+        launch_one "$g" "$sside" "$sflag" "$smag"
         idx=$((idx+1))
       fi
     fi
