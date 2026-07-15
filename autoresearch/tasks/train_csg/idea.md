@@ -121,3 +121,39 @@ instead of, pref pairs. All shape-agnostic (no per-shape branching yet):
    confirm it's still SOTA on the convex shapes (regression check).
 4. Only if k-schedule fails: hole-aware init (sphere-exterior contour + central
    column spiral) — per-shape branching, higher risk, defer.
+
+## jul15 hole k-schedule RESULTS (03:40, best_on_hard, seed 1 unless noted)
+
+Baseline = contour+dual-adaptive, kf120, 5000 iters, 3-seed mean **0.2716**.
+
+| experiment | config | hdice | vs 0.2716 | verdict |
+|---|---|---|---|---|
+| H1 it10k | kf120, **10000 iters** | **0.2910** | +0.019 | **WIN** |
+| H2 kf60 | kf**60**, 5000 iters | 0.2545 | −0.017 | LOSS |
+| cavity init | multidepth_cavity, 5000 iters | 0.2617 | −0.010 | LOSS |
+| sharp5k | kf**240**, 5000 iters | ~0.26 (finishing) | −0.01 | LOSS (plateaued) |
+| sharp10k | kf240, 10000 iters | TBD (~0.27@iter3459, climbing) | ? | pending |
+
+**Conclusions:**
+- **MORE ITERS is the one lever that helps the hole** (H1 = +0.019). Confirms
+  the diagnostic: the failure is slow optimization + k-sharpening freeze, and
+  extending the soft-carve window (k reaches 120 at iter 10000 not 5000) lets
+  the exterior keep carving. Modest but real. it10k seeds 2,3 running to get a
+  3-seed mean (confirm not seed-1 luck).
+- **Gentler k_final HURTS** (kf60 = 0.255 < 0.273). Opposite direction was
+  correct. Matches the sphere finding (kf60=0.735 ≪ kf180=0.833): sharper
+  k_final helps. Do NOT chase the hole via gentler k.
+- **Cavity init HURTS the hole** (0.262 < 0.273). Had an early iter-0 edge
+  (0.168 vs 0.121) but collapsed under k-sharpening (final-iter 0.2275). Init
+  is NOT the lever; contour SDF-follow remains best.
+- **Sharper k_final ALONE (kf240, 5k) plateaus BELOW baseline** (~0.26). The
+  sharper proxy freezes the landscape even earlier at fixed iters. So the win
+  in H1 is the *longer soft window*, not sharper terminal k. sharp10k (kf240 +
+  10k) tests combining both; pending — if it beats 0.291, sharper+longer wins.
+
+**Next (when it10k 3-seed confirms):** sweep iters=10000 across all 6 shapes
+(regression check — more iters should not hurt convex; confirms the SOTA command
+just needs `--iters 10000` to be shape-agnostically better). Then the open
+question: is there a k-schedule that gives the hole's soft-window benefit
+WITHOUT doubling iters (e.g. hold k=20 for first 60% then ramp 20→120 late)?
+That needs a k-anneal schedule-shape code change — defer unless sharp10k fails.
