@@ -13,18 +13,25 @@ dependencies = [
     "imageio-ffmpeg>=0.6.0",
     "matplotlib>=3.10.9",
     "mujoco>=3.9.0",
-    "pufferlib>=3.0.0",
     "pyyaml>=6.0.3",
     "rtree>=1.4.1",
     "scikit-image>=0.25.2",
     "scipy>=1.15.3",
-    "taichi>=1.6.0",
+    # Taichi 1.7.4's Linux wheel references GLIBC_2.32 despite its
+    # manylinux_2_27 tag. Lonestar6 can load the 1.7.2 wheel (GLIBC_2.27).
+    "taichi==1.7.2",
     "tensorboard>=2.20.0",
     "torch>=2.9.1",
+    "tqdm>=4.66.5",
     "trimesh>=4.11.1",
     "tyro>=1.0.5",
     "wandb>=0.28.0",
 ]
+
+[project.optional-dependencies]
+# PPO/eval imports PufferLib; differentiable train_csg and the VRAM sweeps do
+# not. Keeping it optional avoids compiling its CUDA extension on every setup.
+ppo = ["pufferlib>=3.0.0"]
 
 [tool.setuptools.packages.find]
 include = ["cam_env*", "simulator*", "algorithms*", "cam*", "eval*", "utils*"]

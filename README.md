@@ -22,6 +22,14 @@ Install [uv](https://docs.astral.sh/uv/) and sync the environment:
 uv sync
 ```
 
+The default environment covers GradMill, CSG simulation, CAM, and the VRAM
+sweeps. The discrete PPO/evaluation entry points additionally require
+PufferLib:
+
+```bash
+uv sync --extra ppo
+```
+
 GPU work runs on Taichi's CUDA backend. Live GUIs (the continuous gradient-descent
 viewer and the discrete env's GGUI window) need a display; on headless machines
 install TurboVNC and start a server, then run inside that session:

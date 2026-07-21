@@ -64,12 +64,19 @@ cd $SCRATCH/diff-cam
 ### Option B: Login Node Only via Pip 
 
 Use this method if you cannot get a compute node or prefer standard `pip`.
+It installs the differentiable training and VRAM environment with CUDA 12.8
+PyTorch and the Lonestar6-compatible Taichi wheel. PufferLib is omitted because
+it is only needed by the PPO lane and its CUDA extension must be built
+separately against the active PyTorch/CUDA pair.
 
 1. **Run the installer directly on the login node:**
 ```bash
 ./scripts/01_install_login.sh
 
 ```
+
+The installer is safe to rerun after a partial installation; it reuses and
+repairs the existing `.venv`.
 
 
 ---

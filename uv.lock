@@ -342,7 +342,6 @@ dependencies = [
     { name = "imageio-ffmpeg" },
     { name = "matplotlib" },
     { name = "mujoco" },
-    { name = "pufferlib" },
     { name = "pyyaml" },
     { name = "rtree" },
     { name = "scikit-image", version = "0.25.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
@@ -351,9 +350,15 @@ dependencies = [
     { name = "taichi" },
     { name = "tensorboard" },
     { name = "torch" },
+    { name = "tqdm" },
     { name = "trimesh" },
     { name = "tyro" },
     { name = "wandb" },
+]
+
+[package.optional-dependencies]
+ppo = [
+    { name = "pufferlib" },
 ]
 
 [package.dev-dependencies]
@@ -371,18 +376,20 @@ requires-dist = [
     { name = "imageio-ffmpeg", specifier = ">=0.6.0" },
     { name = "matplotlib", specifier = ">=3.10.9" },
     { name = "mujoco", specifier = ">=3.9.0" },
-    { name = "pufferlib", specifier = ">=3.0.0" },
+    { name = "pufferlib", marker = "extra == 'ppo'", specifier = ">=3.0.0" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rtree", specifier = ">=1.4.1" },
     { name = "scikit-image", specifier = ">=0.25.2" },
     { name = "scipy", specifier = ">=1.15.3" },
-    { name = "taichi", specifier = ">=1.6.0" },
+    { name = "taichi", specifier = "==1.7.2" },
     { name = "tensorboard", specifier = ">=2.20.0" },
     { name = "torch", specifier = ">=2.9.1" },
+    { name = "tqdm", specifier = ">=4.66.5" },
     { name = "trimesh", specifier = ">=4.11.1" },
     { name = "tyro", specifier = ">=1.0.5" },
     { name = "wandb", specifier = ">=0.28.0" },
 ]
+provides-extras = ["ppo"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.0.2" }]
@@ -2346,7 +2353,7 @@ wheels = [
 
 [[package]]
 name = "taichi"
-version = "1.7.4"
+version = "1.7.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "colorama" },
@@ -2355,15 +2362,18 @@ dependencies = [
     { name = "rich" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/32/ae/c9f15c432ed2424b11c7ada880bff577a51e860be20b083df51312963e2c/taichi-1.7.4-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:9e44e74d3def16bda5203722a94d63cbbc3d04b2e0bb9d5dd7527f884c9c9a9a", size = 50432897, upload-time = "2025-07-31T14:48:33.903Z" },
-    { url = "https://files.pythonhosted.org/packages/9c/bd/7c4bf1412555c69276f5d28a786f1023079bf32947c6591719d3ecc43713/taichi-1.7.4-cp310-cp310-manylinux_2_27_x86_64.whl", hash = "sha256:42ffa0ba20b19e8695894cc4796ebefaed11cc10a1ac3704bd48a9ddfd54436e", size = 56293061, upload-time = "2025-07-31T14:49:23.891Z" },
-    { url = "https://files.pythonhosted.org/packages/5c/b2/c576be78f77759c14aa839aa650d177b880467da9da3907245668e070209/taichi-1.7.4-cp310-cp310-win_amd64.whl", hash = "sha256:0cd550e5f91429b6078872d1d4d366a6257c3e50171c6eed21fa4e9801810f6e", size = 83307098, upload-time = "2025-07-31T14:48:43.171Z" },
-    { url = "https://files.pythonhosted.org/packages/23/89/3a920b880e058b4d8c5b0fe1e695481725707aab5ac35b3e91295903dda0/taichi-1.7.4-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:4cbb5a16cac228862c5da2ec71ef722e637c7a5ebf636f8f11000c2f8a9b6693", size = 50437174, upload-time = "2025-07-31T14:49:20.548Z" },
-    { url = "https://files.pythonhosted.org/packages/bc/c6/90b110c26588e9c8f1f71d1485b176e547b581075102d54aeb38d2e48ae4/taichi-1.7.4-cp311-cp311-manylinux_2_27_x86_64.whl", hash = "sha256:5c3c1624daeb1554c1a2b6ee9f9b8398bd8392d7f89fc65395f94baecf049f89", size = 56180510, upload-time = "2025-07-31T14:48:47.605Z" },
-    { url = "https://files.pythonhosted.org/packages/45/35/0495da9f8f0afa801a8e2da262fb75814bf9a4d788946c40bfc9340bf088/taichi-1.7.4-cp311-cp311-win_amd64.whl", hash = "sha256:767d977f077efcc83eb746a8dd1ccd196db782f48eac07c495922b36f8828e2c", size = 83206769, upload-time = "2025-07-31T14:48:59.236Z" },
-    { url = "https://files.pythonhosted.org/packages/ef/5b/7c7d6b8259fba064a4b3908f67f2488efbc3104d2a2fbaba00d81d30bac2/taichi-1.7.4-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:5c7d188f8a8a15f07b197aa881517ffc7459663ee25a0e36636ce347c0649353", size = 50345635, upload-time = "2025-07-31T14:49:27.27Z" },
-    { url = "https://files.pythonhosted.org/packages/74/74/c7aca2af38d38efe9ad8430864e97e87c0b0d4affa2ea6cc4aecbbcfdb0e/taichi-1.7.4-cp312-cp312-manylinux_2_27_x86_64.whl", hash = "sha256:6f1303aedae3ea25e33cef5f30259fc2f66c7f0287433c4e31bdb25fdcd4d81e", size = 56298504, upload-time = "2025-07-31T14:48:55.232Z" },
-    { url = "https://files.pythonhosted.org/packages/27/32/5882f3fafbd981fe060c7ee96355161b82c78e7624a4460eefaf2760ea64/taichi-1.7.4-cp312-cp312-win_amd64.whl", hash = "sha256:d078481d84032d9284a12a0b78672a4a2915786d9106791fad657c09352e9565", size = 83312702, upload-time = "2025-07-31T14:49:03.715Z" },
+    { url = "https://files.pythonhosted.org/packages/43/04/8fc68c188caef74ef9b20894edc2e604d61ff3fa0edfae34fc69012ebc48/taichi-1.7.2-cp310-cp310-macosx_11_0_arm64.whl", hash = "sha256:35e4767acee0d44458d2e4d245ec5d4f16fdacc57a80cbaf1c6d7cadfc335113", size = 50320674, upload-time = "2024-08-22T08:59:02.45Z" },
+    { url = "https://files.pythonhosted.org/packages/23/5a/b7b9cb306e4d8115ae81c66dbaf24423afcbe2e75003e53264bbdf847120/taichi-1.7.2-cp310-cp310-macosx_11_0_x86_64.whl", hash = "sha256:106e6648519714846fcfca3878ab3198ba5dd69fd354b77d3baed998885299ea", size = 57076432, upload-time = "2024-08-22T08:58:12.907Z" },
+    { url = "https://files.pythonhosted.org/packages/6e/3e/e42ea40809e7e8e4f06a64457497f7404096b1370c01048a77101bfcca6e/taichi-1.7.2-cp310-cp310-manylinux_2_27_x86_64.whl", hash = "sha256:b90c51af0b454cf6e90457b3b325301b36e09ddcde180b556d5555900e40f909", size = 54978087, upload-time = "2024-08-22T08:58:01.373Z" },
+    { url = "https://files.pythonhosted.org/packages/22/34/42e0f2893954e3b55aea014570eb6ef872ab82b4e962c828e70a19c09b7b/taichi-1.7.2-cp310-cp310-win_amd64.whl", hash = "sha256:81c3accde0b53940cc07fdc271b0ab3158e52e1260ee6eefbbb67ade6e8bc2c4", size = 83122090, upload-time = "2024-08-22T08:58:16.665Z" },
+    { url = "https://files.pythonhosted.org/packages/d9/c1/5098a96317465c157d6c87d651c68908dde2611ba608ba14c86e6c2ff971/taichi-1.7.2-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:706148dfdf50cec5c9c70ae00b8d1689ca3b10b50447213f8b46de5465845f67", size = 50323948, upload-time = "2024-08-22T08:58:32.777Z" },
+    { url = "https://files.pythonhosted.org/packages/17/58/a805bde6b26942123edf1979ad0f06b501b37ac29d0238a64728a69f510f/taichi-1.7.2-cp311-cp311-macosx_11_0_x86_64.whl", hash = "sha256:53b037529268a4401f72aac9821b2f9b167b352697f392b19c93c946f14ad9a5", size = 57082491, upload-time = "2024-08-22T08:58:09.497Z" },
+    { url = "https://files.pythonhosted.org/packages/b8/2c/626ad87c43eafe3320c6eddfd9c629221aa9968edaed1924f4d05666824c/taichi-1.7.2-cp311-cp311-manylinux_2_27_x86_64.whl", hash = "sha256:4d97a5d87839aabbe93083227cbd9049c1df03469f758209bdc516156d2f60d5", size = 54978095, upload-time = "2024-08-22T08:58:22.661Z" },
+    { url = "https://files.pythonhosted.org/packages/65/1e/3d0475ecb99b365ab16b3bec947c29c74219c2c695b9cce59655c32e02ab/taichi-1.7.2-cp311-cp311-win_amd64.whl", hash = "sha256:e845dbb1fcd9c0b1ae4c6e154c6712216457a3b8204dfbcb46f3830b115e3818", size = 83121451, upload-time = "2024-08-22T08:58:41.334Z" },
+    { url = "https://files.pythonhosted.org/packages/d4/0d/c2763d139bc3915c438f8b54587689b4a65dfc4ffd143fe42411f50326ba/taichi-1.7.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:5e02427f2f5109ce52e3a2c2a3a41e745a4a3e415a125386b12f2e7f9e45c9ff", size = 50323207, upload-time = "2024-08-22T08:57:35.551Z" },
+    { url = "https://files.pythonhosted.org/packages/20/61/33f3e6d62b45d88104574db98cb1da29f0c092265ed83478e5399832514b/taichi-1.7.2-cp312-cp312-macosx_11_0_x86_64.whl", hash = "sha256:dca5b3ac63cc0369034d75c7fd1fee93288bd964fa2464778f1cc40540ab928a", size = 57084422, upload-time = "2024-08-22T08:57:40.953Z" },
+    { url = "https://files.pythonhosted.org/packages/a4/c1/0a4af7f8f5231e0fe31b4fabf6da32fbf73e77ae540460371f00837b934e/taichi-1.7.2-cp312-cp312-manylinux_2_27_x86_64.whl", hash = "sha256:6faa8d505b207807dc4e42e137dd6af76b0bfdedbd2aefa5ad59a231f355f104", size = 54983936, upload-time = "2024-08-22T08:57:53.658Z" },
+    { url = "https://files.pythonhosted.org/packages/13/e4/328a380bceedf3dda18201ff5e6b18a051784328ace22549a8418cce4d08/taichi-1.7.2-cp312-cp312-win_amd64.whl", hash = "sha256:a30e7dc72db12419eca23690d649ef0aa6644d7ed54988de9dfbcb6ae7b303a5", size = 83180117, upload-time = "2024-08-22T08:58:36.932Z" },
 ]
 
 [[package]]
