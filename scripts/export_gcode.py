@@ -89,6 +89,15 @@ def main():
     ap.add_argument("--stock-origin-in", type=float, nargs=3, default=None,
                     metavar=("X", "Y", "Z"),
                     help="work origin (G54) = stock top-centre in machine inches (default: run config)")
+    ap.add_argument("--feed-mult", default=None,
+                    help="path to a (T-1,) per-segment feed-multiplier .npy (the "
+                         "offline force/fragility schedule train_csg.py saves as "
+                         "feed_mult.npy; default: auto-detect next to --trajectory)")
+    ap.add_argument("--no-feed-mult", action="store_true",
+                    help="ignore any feed_mult.npy; emit a single uniform feed. "
+                         "NOTE: a scheduled run's force/fragility margins were "
+                         "validated WITH the schedule -- exporting without it "
+                         "restores the unscheduled peak forces")
     ap.add_argument("--feed", type=float, default=600.0, help="cutting feed, mm/min")
     ap.add_argument("--plunge-feed", type=float, default=200.0, help="Z plunge feed, mm/min")
     ap.add_argument("--rpm", type=float, default=5000.0, help="spindle speed")
@@ -120,7 +129,32 @@ def main():
             return tuple(v) if isinstance(v, list) else v, "run"
         return default, "default"
 
-    stock_size_in, s_src = pick(args.stock_size_in, "stock_size_in", (1.0, 1.0, 1.0))
+    # Grid/STEP-target runs record stock_size_in as null -- their stock box
+    # lives in the target NPZ (stock_size_mm: part bbox + padding, the same
+    # box the simulator carved against). Falling through to the 1 in cube
+    # default would emit G-code at the wrong physical scale on any non-cubic
+    # part (rrph is 1 x 2 x 0.5 in), so read the NPZ before the default.
+    npz_stock_in = None
+    if run_cfg.get("stock_size_in") is None and run_cfg.get("target_sdf_path"):
+        npz_path = run_cfg["target_sdf_path"]
+        if not os.path.isabs(npz_path):
+            npz_path = os.path.join(repo, npz_path)
+        try:
+            with np.load(npz_path) as z:
+                npz_stock_in = tuple(float(c) / 25.4 for c in z["stock_size_mm"])
+            print(f"[config] stock box from target NPZ {npz_path}: "
+                  f"{tuple(round(v, 4) for v in npz_stock_in)} in")
+        except (OSError, KeyError, ValueError) as e:
+            raise SystemExit(
+                f"grid-target run but its stock box could not be read from "
+                f"{npz_path}: {e}\nRefusing to fall back to the 1 in cube -- "
+                f"the G-code would be at the wrong physical scale. Pass "
+                f"--stock-size-in explicitly if you know the true box.")
+
+    stock_size_in, s_src = pick(args.stock_size_in, "stock_size_in",
+                                npz_stock_in or (1.0, 1.0, 1.0))
+    if npz_stock_in is not None and s_src == "default":
+        s_src = "npz"
     stock_origin_in, o_src = pick(args.stock_origin_in, "stock_origin_in", None)
 
     # Work volume: --workspace-mm (cube) wins, else --workspace-in, else run config, else Mini Mill.
@@ -153,10 +187,40 @@ def main():
         coolant=not args.no_coolant,
     )
 
+    # Per-segment feed schedule (offline force/fragility scheduling). Same
+    # auto-detect convention as args.json: train_csg.py saves feed_mult.npy
+    # next to trajectory.npy. The scheduled feeds are the deployable program --
+    # the run's validated force/fragility margins assume them.
+    feed_mults = None
+    if not args.no_feed_mult:
+        fm_path = args.feed_mult
+        if fm_path is None:
+            cand = os.path.join(os.path.dirname(os.path.abspath(args.trajectory)),
+                                "feed_mult.npy")
+            fm_path = cand if os.path.exists(cand) else None
+        if fm_path is not None:
+            feed_mults = np.load(fm_path).astype(np.float64).ravel()
+            if len(feed_mults) != len(positions) - 1:
+                raise SystemExit(
+                    f"{fm_path} has {len(feed_mults)} entries but the trajectory "
+                    f"has {len(positions) - 1} segments -- the schedule belongs "
+                    f"to a different trajectory; refusing to emit mismatched "
+                    f"feeds for a physical part")
+            n_slow = int((feed_mults < 1.0).sum())
+            # Cycle-time factor over the scheduled segments (time = length/feed;
+            # equal-weight per segment is a fair summary without lengths here).
+            print(f"[feed] schedule from {fm_path}: {n_slow}/{len(feed_mults)} "
+                  f"segments slowed, min mult {feed_mults.min():.3f} "
+                  f"(F{args.feed * feed_mults.min():.0f} mm/min at F{args.feed:.0f})")
+        elif args.feed_mult is None:
+            print("[feed] no feed_mult.npy next to the trajectory; uniform feed "
+                  "(fine for runs trained without the physics package)")
+
     ext = ".nc" if args.post == "haas" else ".ngc"
     out = args.out or os.path.join(repo, f"trajectory_{args.post}{ext}")
-    save_gcode(positions, out, cfg, post=args.post)
-    print(f"Wrote {args.post} G-code for {positions.shape[0]} points -> {out}")
+    save_gcode(positions, out, cfg, post=args.post, feed_mults=feed_mults)
+    sched = f" ({int((feed_mults < 1.0).sum())} feed-scheduled segments)" if feed_mults is not None else ""
+    print(f"Wrote {args.post} G-code for {positions.shape[0]} points -> {out}{sched}")
 
 
 if __name__ == "__main__":

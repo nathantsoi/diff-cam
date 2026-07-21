@@ -67,7 +67,7 @@ class PostProcessor:
 
     name = "base"
 
-    def program(self, positions, config: MachineConfig) -> str:
+    def program(self, positions, config: MachineConfig, feed_mults=None) -> str:
         raise NotImplementedError
 
     @staticmethod
@@ -78,6 +78,50 @@ class PostProcessor:
         if len(positions) == 0:
             raise ValueError("positions is empty")
         return positions
+
+    @staticmethod
+    def _validate_feed_mults(positions, feed_mults):
+        """Validate per-segment feed multipliers against the trajectory.
+
+        ``feed_mults[s]`` scales the programmed feed of the move from
+        ``positions[s]`` to ``positions[s+1]`` (the offline feed schedule
+        written by ``train_csg.py`` as ``feed_mult.npy``: slowing exactly the
+        force-violating segments removes tool/part breakage at fixed path
+        geometry). Returns a ``(T-1,)`` float array, or ``None`` when no
+        schedule was given.
+        """
+        if feed_mults is None:
+            return None
+        feed_mults = np.asarray(feed_mults, dtype=np.float64).ravel()
+        if len(feed_mults) != len(positions) - 1:
+            raise ValueError(
+                f"feed_mults must have one entry per segment "
+                f"({len(positions) - 1}); got {len(feed_mults)}"
+            )
+        if not np.all(np.isfinite(feed_mults)) or np.any(feed_mults <= 0.0):
+            raise ValueError("feed_mults must be finite and > 0")
+        return feed_mults
+
+    @staticmethod
+    def _cut_lines(pts_out, feed_out, feed_mults, precision, g1_word="G1"):
+        """Cutting moves through ``pts_out[1:]`` with modal feed words.
+
+        Feed is modal, so an ``F`` word is emitted only when the segment's
+        scheduled feed differs from the one already in effect (compared on the
+        formatted value, so float noise below the output precision does not
+        bloat the program). With no schedule this reduces exactly to the
+        historical output: one ``F`` word, then bare linear moves.
+        """
+        lines = []
+        active = None  # formatted F value currently in effect
+        for s, pt in enumerate(pts_out[1:]):
+            mult = 1.0 if feed_mults is None else feed_mults[s]
+            word = _fmt(feed_out * mult, precision)
+            if word != active:
+                lines.append(f"F{word}")
+                active = word
+            lines.append(f"{g1_word} {_axis_words(pt, precision)}")
+        return lines
 
 
 class RS274Post(PostProcessor):
@@ -91,8 +135,10 @@ class RS274Post(PostProcessor):
 
     name = "rs274"
 
-    def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
+    def program(self, positions, config: MachineConfig = MachineConfig(),
+                feed_mults=None) -> str:
         positions = self._validate(positions)
+        feed_mults = self._validate_feed_mults(positions, feed_mults)
         # Normalized stock coords [0,1] -> work-coordinate-system mm (top-centre
         # G54), then mm -> output units.
         pts_out = _len_out(config.to_wcs(positions), config)
@@ -109,10 +155,8 @@ class RS274Post(PostProcessor):
         # Rapid to the first waypoint.
         lines.append(f"G0 {_axis_words(pts_out[0], p)}")
 
-        if len(pts_out) > 1:
-            lines.append(f"F{_fmt(feed_out, p)}")
-            for pt in pts_out[1:]:
-                lines.append(f"G1 {_axis_words(pt, p)}")
+        # Cutting moves; F words are modal and per the (optional) feed schedule.
+        lines.extend(self._cut_lines(pts_out, feed_out, feed_mults, p))
 
         lines.append("M2")
         return "\n".join(lines) + "\n"
@@ -147,8 +191,10 @@ class HaasPost(PostProcessor):
 
     name = "haas"
 
-    def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
+    def program(self, positions, config: MachineConfig = MachineConfig(),
+                feed_mults=None) -> str:
         positions = self._validate(positions)
+        feed_mults = self._validate_feed_mults(positions, feed_mults)
         # Normalized stock coords [0,1] -> work-coordinate-system mm (top-centre
         # G54), then mm -> output units.
         pts_out = _len_out(config.to_wcs(positions), config)
@@ -191,11 +237,10 @@ class HaasPost(PostProcessor):
         lines.append(f"G00 X{_fmt(x0, p)} Y{_fmt(y0, p)}")
         lines.append(f"G01 Z{_fmt(z0, p)} F{_fmt(plunge_out, p)}")
 
-        # Cutting moves through the rest of the trajectory.
-        if len(pts_out) > 1:
-            lines.append(f"F{_fmt(feed_out, p)}")
-            for pt in pts_out[1:]:
-                lines.append(f"G01 {_axis_words(pt, p)}")
+        # Cutting moves through the rest of the trajectory; F words are modal
+        # and follow the (optional) per-segment feed schedule.
+        lines.extend(self._cut_lines(pts_out, feed_out, feed_mults, p,
+                                     g1_word="G01"))
 
         # Retract / shutdown.
         lines.append(f"G00 Z{safe}")
