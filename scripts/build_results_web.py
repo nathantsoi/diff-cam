@@ -130,7 +130,19 @@ def load_run(run_dir):
             metrics = json.load(f)
     except (OSError, ValueError):
         return None
-    if "dice" not in metrics:
+    # Headline dice, across three metric conventions that coexist in runs/:
+    #   delta-era + early-sweep runs  -> "dice" already holds the hard-carve value
+    #   post-traj-quality sweep runs  -> "dice" is SOFT dice, which is identically
+    #                                    ~0 for the sweep method (one hard union,
+    #                                    so the soft surrogate never engages) and
+    #                                    "hard_dice" carries the real number.
+    # Preferring hard_dice when present gives one deployable-dice column over the
+    # whole history; without it every phys-plausible run reads as 0.0 and fails
+    # to match its results.tsv row.
+    dice = metrics.get("hard_dice")
+    if dice is None:
+        dice = metrics.get("dice")
+    if dice is None:
         return None
     return {
         "run_dir": os.path.relpath(run_dir, REPO),
@@ -138,7 +150,7 @@ def load_run(run_dir):
         "shape": args.get("target_shape"),
         "iters": int(args["iters"]) if args.get("iters") is not None else None,
         "seed": int(args["seed"]) if args.get("seed") is not None else None,
-        "dice": float(metrics["dice"]),
+        "dice": float(dice),
         "hard_dice": float(metrics["hard_dice"]) if metrics.get("hard_dice") is not None else None,
         "metrics": clean_for_json(metrics),
         "args": args,
