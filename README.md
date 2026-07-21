@@ -270,7 +270,7 @@ After training finishes (including on early stopping), the **final** model's
 geometry is also exported as STL meshes — the initial uncarved stock, the carved
 stock, and the target part — to `runs/<run>/meshes/` (and uploaded to wandb when
 `--track`). Meshes are the zero-level surface of each SDF (marching cubes) in the
-unit-cube frame. Furthermore, all training scripts output a structured summary table to console and save machine-readable evaluation results to `runs/<run>/metrics.json` and `runs/latest_metrics.json` (containing `dice`, `asd`, `hd95`, `reward`, `training_seconds`, `peak_vram_mb`, `num_steps`), making automated monitoring and LLM research harnesses (such as autoresearch agents) seamless.
+unit-cube frame. Furthermore, all training scripts output a structured summary table to console and save machine-readable evaluation results to `runs/<run>/metrics.json` and `runs/latest_metrics.json` (containing `dice`, `asd`, `hd95`, `reward`, `training_seconds`, `peak_vram_mb`, `num_steps`), making automated monitoring and LLM research harnesses (such as autoresearch agents) seamless. For `train_csg`, `peak_vram_mb` is the sampled whole-device CUDA peak (including Taichi allocations); `peak_vram_delta_mb` subtracts the pre-simulator baseline and is the appropriate measurement for allocation-scaling plots on a dedicated GPU. Per-iteration values are also logged under `resources/vram_*` in TensorBoard/W&B.
 
 ```bash
 # Continuous PPO, no video (default):
