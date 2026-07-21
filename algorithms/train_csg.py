@@ -45,6 +45,7 @@ from simulator.csg_metrics import _gouge, _residual, sdf_to_mask
 from simulator.csg_simulator import CSGSimulatorDelta
 from eval.eval_csg import _metrics
 from algorithms.policy_video import _encode_mp4, _sdf_to_stl, raymarch_buffer_to_rgb
+from utils.vram import VramTracker
 
 # Fixed render camera (matches the look of the live GUI / paper figures).
 CAM_POS = (2.0, 2.0, 1.6)
@@ -941,6 +942,17 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
+    # Driver-level sampling sees Taichi's CUDA allocations; PyTorch's allocator
+    # counters do not.  Capture the baseline before constructing the simulator
+    # so we can report both whole-device usage and this run's incremental growth.
+    vram = VramTracker()
+    cuda_device_name = torch.cuda.get_device_name() if vram.available else ""
+    if vram.available:
+        print(f"[vram] baseline {vram.baseline_used_mb:.1f} MiB / "
+              f"{vram.total_mb:.1f} MiB on {cuda_device_name}", flush=True)
+    else:
+        print("[vram] CUDA memory sampling unavailable; VRAM metrics will be 0", flush=True)
+
     # --- Live GUI (interactive only) ---
     gui = None
     if not args.headless:
@@ -1016,6 +1028,10 @@ def main():
     sim.f_max[None] = args.f_max
     sim.bake_target_grid()
     sim.set_target_volume()
+    sim_vram = vram.sample()
+    if sim_vram is not None:
+        print(f"[vram] simulator initialized: {sim_vram.used_mb:.1f} MiB used "
+              f"(+{sim_vram.delta_mb:.1f} MiB from baseline)", flush=True)
 
     # --- Z-floor: clamp the executed tool BASE z so the holder (which rides
     # above the base by tool_height) cannot plunge into the remaining stock.
@@ -1973,6 +1989,16 @@ def main():
             elif gui is not None:
                 render_trajectory_live(sim, gui, T, label=f"iter {it}")
 
+            # Sample after the complete iteration (training + optional eval and
+            # rendering), when Taichi fields and their lazy gradients have been
+            # materialized.  TensorBoard is synced into W&B when --track is on.
+            vram_now = vram.sample()
+            if vram_now is not None:
+                writer.add_scalar("resources/vram_device_used_mb", vram_now.used_mb, it)
+                writer.add_scalar("resources/vram_run_delta_mb", vram_now.delta_mb, it)
+                writer.add_scalar("resources/vram_device_peak_mb", vram_now.peak_used_mb, it)
+                writer.add_scalar("resources/vram_run_peak_delta_mb", vram_now.peak_delta_mb, it)
+
         # --- Final capture: ensure the last model is recorded (mirrors csg_ppo) ---
         if args.record_video_freq > 0 and it != last_video_iter:
             out_path = os.path.join(video_dir, f"policy_step_{it:09d}.mp4")
@@ -2164,7 +2190,8 @@ def main():
         # Save summary metrics for automated agents and LLM harnesses.
         import json
         total_seconds = time.time() - start_time
-        peak_vram_mb = torch.cuda.max_memory_allocated() / (1024 * 1024) if torch.cuda.is_available() else 0.0
+        vram.sample()
+        vram_summary = vram.summary()
         final_dice = float(last_m.get("soft_dice", last_m["dice"])) if last_m is not None else 0.0
         final_hard_dice = float(last_m["dice"]) if last_m is not None else 0.0
         final_asd = float(last_m.get("soft_asd", last_m["asd"])) if last_m is not None else 0.0
@@ -2195,7 +2222,16 @@ def main():
             "gouge": round(final_gouge, 6),
             "holder_overlap": round(final_hold, 6),
             "training_seconds": round(total_seconds, 2),
-            "peak_vram_mb": round(peak_vram_mb, 2),
+            # Driver-level sampled peak includes Taichi (unlike
+            # torch.cuda.max_memory_allocated).  The delta removes the device's
+            # pre-simulator baseline and is the value to compare with the
+            # analytical O(T*N^3) allocation model on a dedicated node.
+            "peak_vram_mb": round(vram_summary["peak_vram_mb"], 2),
+            "peak_vram_delta_mb": round(vram_summary["peak_vram_delta_mb"], 2),
+            "vram_baseline_mb": round(vram_summary["vram_baseline_mb"], 2),
+            "vram_total_mb": round(vram_summary["vram_total_mb"], 2),
+            "cuda_device": cuda_device_name,
+            "vram_measurement": "sampled_cuda_mem_get_info_whole_device",
             "num_steps": args.iters,
             # Loss-component diagnostics (from the best checkpoint's eval). These
             # do NOT affect the dice score -- they expose how much of the swept
