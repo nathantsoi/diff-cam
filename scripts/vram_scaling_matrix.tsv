@@ -1,0 +1,32 @@
+probe_id	sweep_axis	method	N	T	iters	numerically_usable	note
+0	a100_confirmation	sweep	64	128	3	yes	A100 confirmation of the Taichi-inclusive byte model
+1	T_at_N128	sweep	128	64	2	yes	fixed N=128; vary T
+2	T_at_N128	delta	128	64	2	yes	fixed N=128; vary T
+3	T_at_N128	sweep	128	128	2	yes	fixed N=128; vary T
+4	T_at_N128	delta	128	128	2	yes	fixed N=128; vary T
+5	T_at_N128	sweep	128	256	2	yes	fixed N=128; vary T
+6	T_at_N128	delta	128	256	2	allocation_only	T>~192 can produce SDF-overflow NaNs; measure allocation only
+7	T_at_N128	sweep	128	1024	2	yes	fixed N=128; vary T
+8	T_at_N128	delta	128	1024	2	allocation_only	T>~192 can produce SDF-overflow NaNs; measure allocation only
+9	T_at_N128	sweep	128	2048	2	yes	fixed N=128; vary T
+10	T_at_N128	delta	128	2048	2	allocation_only	T>~192 can produce SDF-overflow NaNs; measure allocation only
+11	T_at_N128	sweep	128	2560	2	yes	near the expected dense-history wall on a 40 GiB A100
+12	T_at_N128	delta	128	2560	2	allocation_only	near 40 GiB wall; delta is numerically unusable at this T
+13	T_at_N128	sweep	128	5120	2	yes	near the expected dense-history wall on an 80 GiB A100
+14	T_at_N128	delta	128	5120	2	allocation_only	near 80 GiB wall; delta is numerically unusable at this T
+15	N_at_T128	sweep	48	128	2	yes	fixed T=128; vary N
+16	N_at_T128	delta	48	128	2	yes	fixed T=128; vary N
+17	N_at_T128	sweep	96	128	2	yes	fixed T=128; vary N
+18	N_at_T128	delta	96	128	2	yes	fixed T=128; vary N
+19	N_at_T128	sweep	128	128	2	yes	fixed T=128; vary N
+20	N_at_T128	delta	128	128	2	yes	fixed T=128; vary N
+21	N_at_T128	sweep	192	128	2	yes	fixed T=128; vary N
+22	N_at_T128	delta	192	128	2	yes	fixed T=128; vary N
+23	N_at_T128	sweep	256	128	2	yes	fixed T=128; vary N
+24	N_at_T128	delta	256	128	2	yes	fixed T=128; vary N
+25	N_at_T128	sweep	320	128	2	yes	fixed T=128; vary N
+26	N_at_T128	delta	320	128	2	yes	fixed T=128; vary N
+27	N_at_T128	sweep	352	128	2	yes	near the expected dense-history wall on a 40 GiB A100
+28	N_at_T128	delta	352	128	2	yes	near the expected dense-history wall on a 40 GiB A100
+29	N_at_T128	sweep	448	128	2	yes	beyond the expected dense-history wall on an 80 GiB A100
+30	N_at_T128	delta	448	128	2	yes	beyond the expected dense-history wall on an 80 GiB A100
