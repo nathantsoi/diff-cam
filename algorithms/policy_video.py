@@ -184,12 +184,26 @@ def raymarch_buffer_to_rgb(buffer_field):
     return np.transpose(img, (1, 0, 2))[::-1]
 
 
+def _ffmpeg_exe():
+    """ffmpeg executable: the system one if on PATH, else the static binary
+    bundled by the imageio-ffmpeg wheel (no system install required)."""
+    import shutil
+    exe = shutil.which("ffmpeg")
+    if exe:
+        return exe
+    try:
+        import imageio_ffmpeg
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        return "ffmpeg"  # let subprocess raise the informative FileNotFoundError
+
+
 def _encode_mp4(frames, out_path, fps):
     """Pipe raw RGB frames to ffmpeg -> h264 mp4 (standard orientation)."""
     arr = np.ascontiguousarray(np.stack(frames), dtype=np.uint8)  # (T, H, W, 3)
     h, w = arr.shape[1], arr.shape[2]
     cmd = [
-        "ffmpeg", "-y", "-loglevel", "error",
+        _ffmpeg_exe(), "-y", "-loglevel", "error",
         "-f", "rawvideo", "-pix_fmt", "rgb24",
         "-s", f"{w}x{h}", "-r", str(fps), "-i", "-",
         "-an", "-vcodec", "libx264", "-pix_fmt", "yuv420p", out_path,
@@ -200,9 +214,9 @@ def _encode_mp4(frames, out_path, fps):
             raise RuntimeError(proc.stderr.decode("utf-8", "replace").strip())
     except FileNotFoundError:
         print(
-            "[video] mp4 encoding needs ffmpeg on your PATH "
-            "(e.g. `conda install ffmpeg`, `brew install ffmpeg`, "
-            "or `apt install ffmpeg`)."
+            "[video] mp4 encoding needs ffmpeg: install it on your PATH "
+            "(`apt install ffmpeg`) or `uv add imageio-ffmpeg` for the "
+            "bundled static binary."
         )
         raise
 

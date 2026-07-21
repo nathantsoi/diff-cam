@@ -242,7 +242,16 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let e1 = triTable[cubeIndex * 16u + i + 1u];
     let e2 = triTable[cubeIndex * 16u + i + 2u];
     let tIdx = atomicAdd(&counter, 3u);
-    let n = normalize(cross(vertList[e1] - vertList[e0], vertList[e2] - vertList[e0]));
+    // Never write past the vertex/index buffers: an over-budget mesh must
+    // degrade (missing triangles), not flood the queue with out-of-bounds
+    // draws -- Chrome eventually kills the device (black canvas) otherwise.
+    if (tIdx + 3u > arrayLength(&indices)) { break; }
+    // Face normal; the render shader lights two-sided (abs(dot)), so winding
+    // orientation doesn't matter -- only degenerate (NaN) normals must be
+    // guarded, since a NaN vertex poisons the whole triangle.
+    var n = cross(vertList[e1] - vertList[e0], vertList[e2] - vertList[e0]);
+    let nl = length(n);
+    if (nl > 1e-12) { n = n / nl; } else { n = vec3<f32>(0.0, 0.0, 1.0); }
     vertices[tIdx] = Vertex(vertList[e0].x * params.uiScale, vertList[e0].y * params.uiScale, vertList[e0].z * params.uiScale, n.x, n.y, n.z, 0.5, 0.5, 0.5, 1.0);
     vertices[tIdx+1u] = Vertex(vertList[e1].x * params.uiScale, vertList[e1].y * params.uiScale, vertList[e1].z * params.uiScale, n.x, n.y, n.z, 0.5, 0.5, 0.5, 1.0);
     vertices[tIdx+2u] = Vertex(vertList[e2].x * params.uiScale, vertList[e2].y * params.uiScale, vertList[e2].z * params.uiScale, n.x, n.y, n.z, 0.5, 0.5, 0.5, 1.0);
@@ -274,7 +283,10 @@ struct Out {
 fn solid_main(input: SolidIn) -> Out {
   var out: Out;
   let light = normalize(vec3<f32>(0.4, 0.7, 0.9));
-  let shade = max(dot(normalize(input.normal), light), 0.18);
+  // Two-sided shading: marching-cubes winding (and thus face-normal sign) is
+  // not guaranteed consistent, so |dot| lights front- and back-facing normals
+  // identically -- no dark patches from flipped triangles.
+  let shade = max(abs(dot(normalize(input.normal), light)), 0.18);
   out.position = uniforms.viewProj * vec4<f32>(input.position, 1.0);
   out.color = vec4<f32>(input.color.rgb * shade, input.color.a);
   return out;
@@ -344,6 +356,14 @@ fn holder_frag(input: HOut) -> @location(0) vec4<f32> {
 
 export async function createVoxelViewer(canvas, options = {}) {
   const onStatus = options.onStatus || (() => {});
+  // Surface GPU device loss to the host page (instead of a silently black
+  // canvas) so it can drop to the SVG fallback viewer.
+  const reportLost = (device) => {
+    device.lost.then((info) => {
+      onStatus({ available: false, lost: true,
+                 reason: `device lost (${info.reason || "unknown"}): ${info.message || ""}` });
+    }).catch(() => {});
+  };
   if (!globalThis.navigator?.gpu) {
     onStatus({ available: false, reason: "WebGPU is unavailable in this browser." });
     return { available: false };
@@ -353,13 +373,20 @@ export async function createVoxelViewer(canvas, options = {}) {
     adapter = await navigator.gpu.requestAdapter();
     if (!adapter) { onStatus({ available: false, reason: "No WebGPU adapter." }); return { available: false }; }
     device = await adapter.requestDevice();
+    reportLost(device);
   } catch (e) {
     onStatus({ available: false, reason: "Device init failed: " + e.message });
     return { available: false };
   }
 
-  // Stock in normalized [0,1]^3. toolRadius normalized (3.175mm / 25.4mm).
-  const stockSize = [1, 1, 1];
+  // Stock box in "aspect space": each axis spans L_axis/L_max, so a cubic
+  // stock is [1,1,1] and a non-cubic (grid/STEP) stock is a box. Run
+  // trajectories stay per-axis normalized [0,1]; `wpt` maps them into aspect
+  // space at use. All radii/heights (tool, holder) are normalized by L_max,
+  // so physical shapes stay undistorted and the tool stays circular.
+  let ASPECT = [1, 1, 1];
+  const wpt = p => [p[0]*ASPECT[0], p[1]*ASPECT[1], p[2]*ASPECT[2]];
+  let stockSize = [1, 1, 1];
   const stockLocation = [0, 0, 0];
   const uiScale = 1.0;
   // Tool + holder geometry, in stock-normalized units, matching the Taichi
@@ -382,8 +409,8 @@ export async function createVoxelViewer(canvas, options = {}) {
   const numVoxels = gridSize[0]*gridSize[1]*gridSize[2];
   const maxTriangles = Math.floor(numVoxels * 0.2);
   const maxVertices = maxTriangles * 3;
-  const voxelSize = [stockSize[0]/userGridSize[0], stockSize[1]/userGridSize[1], stockSize[2]/userGridSize[2]];
-  const gridOffset = [stockLocation[0]-padding*voxelSize[0], stockLocation[1]-padding*voxelSize[1], stockLocation[2]-padding*voxelSize[2]];
+  let voxelSize = [stockSize[0]/userGridSize[0], stockSize[1]/userGridSize[1], stockSize[2]/userGridSize[2]];
+  let gridOffset = [stockLocation[0]-padding*voxelSize[0], stockLocation[1]-padding*voxelSize[1], stockLocation[2]-padding*voxelSize[2]];
 
   const U = GPUBufferUsage;
   const gridBuffer = device.createBuffer({ size: numVoxels*4, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC });
@@ -396,6 +423,13 @@ export async function createVoxelViewer(canvas, options = {}) {
   const counterBuffer = device.createBuffer({ size: 4, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC });
   const volumeCounterBuffer = device.createBuffer({ size: 4, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC });
   device.queue.writeBuffer(volumeCounterBuffer, 0, new Uint32Array([0]));
+  // Indirect draw args [indexCount, 1, 0, 0, 0]. indexCount is clamped and
+  // written on the GPU in the same submission that rebuilds the mesh, so the
+  // draw always matches the buffer contents -- the async JS counter readback
+  // (1-2 frames behind) can never draw a stale count over a new mesh, which
+  // showed up as z-fighting/shading garbage while carving.
+  const indirectBuffer = device.createBuffer({ size: 20, usage: U.INDIRECT | U.STORAGE | U.COPY_DST });
+  device.queue.writeBuffer(indirectBuffer, 0, new Uint32Array([0, 1, 0, 0, 0]));
   const paramsBuffer = device.createBuffer({ size: 128, usage: U.UNIFORM | U.COPY_DST });
   const cutBuffer = device.createBuffer({ size: 1000*32, usage: U.STORAGE | U.COPY_DST });
 
@@ -443,6 +477,24 @@ export async function createVoxelViewer(canvas, options = {}) {
   const mcBG = device.createBindGroup({ layout:mcBGL.pipe.getBindGroupLayout(0), entries:[
     {binding:0,resource:{buffer:gridBuffer}},{binding:1,resource:{buffer:edgeTableBuffer}},{binding:2,resource:{buffer:triTableBuffer}},
     {binding:3,resource:{buffer:vertexBuffer}},{binding:4,resource:{buffer:indexBuffer}},{binding:5,resource:{buffer:counterBuffer}},{binding:6,resource:{buffer:paramsBuffer}},
+  ] });
+
+  // Writes min(counter, budget) into the indirect draw args right after the MC
+  // pass (same submission; see indirectBuffer above).
+  const CLAMP_CODE = `
+@group(0) @binding(0) var<storage, read> counter: array<u32>;
+@group(0) @binding(1) var<storage, read_write> indirect: array<u32>;
+@compute @workgroup_size(1)
+fn main() {
+  indirect[0] = min(counter[0], ${maxVertices}u);
+}
+`;
+  const clampBGL = mkCompute(CLAMP_CODE, [
+    { binding:0, visibility:GPUShaderStage.COMPUTE, buffer:{type:"read-only-storage"} },
+    { binding:1, visibility:GPUShaderStage.COMPUTE, buffer:{type:"storage"} },
+  ]);
+  const clampBG = device.createBindGroup({ layout:clampBGL.pipe.getBindGroupLayout(0), entries:[
+    {binding:0,resource:{buffer:counterBuffer}},{binding:1,resource:{buffer:indirectBuffer}},
   ] });
 
   const dispatch = (pass) => pass.dispatchWorkgroups(Math.ceil(gridSize[0]/8), Math.ceil(gridSize[1]/8), Math.ceil(gridSize[2]/4));
@@ -552,11 +604,17 @@ export async function createVoxelViewer(canvas, options = {}) {
     const dpr = Math.min(2, window.devicePixelRatio || 1);
     width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
     height = Math.max(1, Math.floor(canvas.clientHeight * dpr));
-    if (canvas.width !== width || canvas.height !== height) {
+    // Only touch the drawing buffer + depth texture when the size actually
+    // changed. This runs every frame: unconditionally destroying/recreating
+    // the depth texture churned thousands of GPU allocations per minute
+    // (eventual device loss = black canvas) and could destroy a texture the
+    // in-flight previous frame was still depth-testing against (flickery
+    // shading while carving).
+    if (canvas.width !== width || canvas.height !== height || !depthTex) {
       canvas.width = width; canvas.height = height;
+      if (depthTex) depthTex.destroy();
+      depthTex = device.createTexture({ size:[width,height], format:"depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
     }
-    if (depthTex) depthTex.destroy();
-    depthTex = device.createTexture({ size:[width,height], format:"depth24plus", usage: GPUTextureUsage.RENDER_ATTACHMENT });
   };
 
   // ---- line overlay (tool path + stock wireframe) ----
@@ -579,7 +637,8 @@ export async function createVoxelViewer(canvas, options = {}) {
     const size = Math.max(4, data.byteLength);
     if (!lineBuffer || lineBuffer.size < size) {
       lineBuffer?.destroy();
-      lineBuffer = device.createBuffer({ size, usage: U.VERTEX | U.COPY_DST });
+      // 2x slack so per-frame overlay count changes don't churn reallocations.
+      lineBuffer = device.createBuffer({ size: size * 2, usage: U.VERTEX | U.COPY_DST });
     }
     device.queue.writeBuffer(lineBuffer, 0, data);
     lineCount = n;
@@ -612,6 +671,7 @@ export async function createVoxelViewer(canvas, options = {}) {
   let vertexCount = 0;
   const countRead = device.createBuffer({ size: 8, usage: U.MAP_READ | U.COPY_DST });
   let extracting = false, dirty = false;
+  let meshCapWarned = false;
 
   const applyCuts = (cuts) => {
     if (!cuts || !cuts.length) return;
@@ -633,12 +693,20 @@ export async function createVoxelViewer(canvas, options = {}) {
     device.queue.writeBuffer(counterBuffer, 0, new Uint32Array([0]));
     const enc = device.createCommandEncoder(); const pass = enc.beginComputePass();
     pass.setPipeline(mcBGL.pipe); pass.setBindGroup(0, mcBG); dispatch(pass); pass.end();
+    const cpass = enc.beginComputePass();
+    cpass.setPipeline(clampBGL.pipe); cpass.setBindGroup(0, clampBG); cpass.dispatchWorkgroups(1); cpass.end();
     enc.copyBufferToBuffer(counterBuffer, 0, countRead, 0, 4);
     device.queue.submit([enc.finish()]);
     try {
       await countRead.mapAsync(GPUMapMode.READ);
       const counts = new Uint32Array(countRead.getMappedRange());
-      vertexCount = counts[0];
+      // The MC counter can overshoot the buffer budget (threads bump it before
+      // the bounds check); clamp so drawIndexed never reads past the buffers.
+      vertexCount = Math.min(counts[0], maxVertices);
+      if (counts[0] > maxVertices && !meshCapWarned) {
+        meshCapWarned = true;
+        console.warn(`[voxel] mesh exceeded budget (${counts[0]} > ${maxVertices} verts); drawing truncated mesh`);
+      }
       countRead.unmap();
     } catch (e) { /* ignore */ }
     extracting = false;
@@ -651,8 +719,9 @@ export async function createVoxelViewer(canvas, options = {}) {
   const cutsFor = (upto) => {
     const cuts = [];
     for (let i=0; i<upto && i+1<trajectoryPts.length; i++){
-      cuts.push({ startX:trajectoryPts[i][0], startY:trajectoryPts[i][1], startZ:trajectoryPts[i][2], radius:toolRadius,
-                  endX:trajectoryPts[i+1][0], endY:trajectoryPts[i+1][1], endZ:trajectoryPts[i+1][2] });
+      const a = wpt(trajectoryPts[i]), b = wpt(trajectoryPts[i+1]);
+      cuts.push({ startX:a[0], startY:a[1], startZ:a[2], radius:toolRadius,
+                  endX:b[0], endY:b[1], endZ:b[2] });
     }
     return cuts;
   };
@@ -670,16 +739,35 @@ export async function createVoxelViewer(canvas, options = {}) {
   const cutsForRange = (from, to) => {
     const cuts = [];
     for (let i=from; i<to && i+1<trajectoryPts.length; i++){
-      cuts.push({ startX:trajectoryPts[i][0], startY:trajectoryPts[i][1], startZ:trajectoryPts[i][2], radius:toolRadius,
-                  endX:trajectoryPts[i+1][0], endY:trajectoryPts[i+1][1], endZ:trajectoryPts[i+1][2] });
+      const a = wpt(trajectoryPts[i]), b = wpt(trajectoryPts[i+1]);
+      cuts.push({ startX:a[0], startY:a[1], startZ:a[2], radius:toolRadius,
+                  endX:b[0], endY:b[1], endZ:b[2] });
     }
     return cuts;
+  };
+
+  // Target part mesh (translucent green), pre-transformed to aspect space by
+  // the host page (STL mm coords / longest stock axis). `data` is interleaved
+  // pos3+normal3+color4 per vertex — the same 40-byte layout as the tool
+  // cylinder, drawn with the same transparent pipeline. Pass null to clear.
+  let targetBuffer = null, targetVertexCount = 0;
+  const setTargetMesh = (data) => {
+    targetBuffer?.destroy();
+    targetBuffer = null; targetVertexCount = 0;
+    if (data && data.length >= 30) {
+      targetBuffer = device.createBuffer({ size: data.byteLength, usage: U.VERTEX | U.COPY_DST });
+      device.queue.writeBuffer(targetBuffer, 0, data);
+      targetVertexCount = data.length / 10;
+    }
   };
 
   const setTrajectory = (pts, stageBoundary) => {
     trajectoryPts = pts ? pts.map(p => [p[0], p[1], p[2]]) : null;
     stageBoundaryIdx = (typeof stageBoundary === "number") ? stageBoundary : null;
     initGrid(); carvedStep = 0; vertexCount = 0;
+    // Zero the indirect count too, or a run with no cuts would keep drawing
+    // the previous run's mesh.
+    device.queue.writeBuffer(indirectBuffer, 0, new Uint32Array([0]));
     if (pts && pts.length) { applyCuts(cutsFor(pts.length-1)); carvedStep = pts.length-1; extractMesh(); }
   };
 
@@ -693,6 +781,18 @@ export async function createVoxelViewer(canvas, options = {}) {
     if (typeof g.toolHeight === "number") TOOL_HEIGHT = g.toolHeight;
     if (typeof g.holderRadius === "number") holderRadius = g.holderRadius;
     if (typeof g.holderHeight === "number") HOLDER_HEIGHT = g.holderHeight;
+    // Stock-box aspect (L/maxL per axis, from the run's stock or its target
+    // NPZ): resize the SDF grid's world box so non-cubic (grid/STEP) stock
+    // renders and carves undistorted. The grid resolution stays fixed; only
+    // the per-axis voxel size changes.
+    if (Array.isArray(g.aspect) && g.aspect.length === 3
+        && g.aspect.some((v, i) => Math.abs(v - ASPECT[i]) > 1e-9)) {
+      ASPECT = g.aspect.map(v => Math.max(1e-3, Number(v) || 1));
+      stockSize = [...ASPECT];
+      voxelSize = [stockSize[0]/userGridSize[0], stockSize[1]/userGridSize[1], stockSize[2]/userGridSize[2]];
+      gridOffset = [stockLocation[0]-padding*voxelSize[0], stockLocation[1]-padding*voxelSize[1], stockLocation[2]-padding*voxelSize[2]];
+      updateParams(0);
+    }
     toolLogged = false;
     // The cut radius may have changed, so re-carve the already-played prefix from
     // a fresh stock up to the current step.
@@ -705,7 +805,9 @@ export async function createVoxelViewer(canvas, options = {}) {
   };
 
   // Render one frame with the given orbit camera. opts:
-  //   showCube : bool        — draw the stock wireframe (default true)
+  //   showCube : bool        — draw the carved stock mesh + wireframe (default true)
+  //   showTarget : bool      — draw the target part mesh set via setTargetMesh (default true)
+  //   showExec : bool        — draw the executed toolpath lines (default true)
   //   showAxes : bool        — draw the XYZ triad at the stock origin (default false)
   //   cmdPts   : [[x,y,z]…]  — commanded (pre-clip) path to draw dimly (default null);
   //              violet when ctrlPts is also given (sweep runs: it IS the planned spline)
@@ -722,7 +824,7 @@ export async function createVoxelViewer(canvas, options = {}) {
     let hasTool = false, hasHolder = false;
     if (trajectoryPts) {
       const rstep = Math.max(0, Math.min(reachedStep, trajectoryPts.length-1));
-      const tip = trajectoryPts[rstep];
+      const tip = wpt(trajectoryPts[rstep]);
       // Match the Taichi CSGSimulatorDelta tool model (simulator/csg_simulator.py):
       //   tool:   flat-end Z cylinder, bottom at tip, height TOOL_HEIGHT.
       //   holder: Z cylinder stacked on the tool's top (bottom = tip + tool_height),
@@ -742,12 +844,23 @@ export async function createVoxelViewer(canvas, options = {}) {
       depthStencilAttachment: { view: depthTex.createView(), depthClearValue:1.0, depthLoadOp:"clear", depthStoreOp:"store" },
     });
     pass.setBindGroup(0, bindGroup);
-    // Carved stock mesh.
-    if (vertexCount > 0) {
+    const showCube = opts.showCube !== false;
+    // Carved stock mesh (indirect: count comes from the GPU-side clamp, always
+    // consistent with the buffers; a zero count is a no-op draw). Gated on
+    // showCube together with the wireframe: "Show stock" hides the whole
+    // carved block, not just its border, e.g. to inspect the target/paths.
+    if (showCube) {
       pass.setPipeline(solidPipeline);
       pass.setVertexBuffer(0, vertexBuffer);
       pass.setIndexBuffer(indexBuffer, "uint32");
-      pass.drawIndexed(vertexCount);
+      pass.drawIndexedIndirect(indirectBuffer, 0);
+    }
+    // Target part (translucent green): what the carve is aiming for. Most
+    // useful with the stock hidden, but harmless inside it.
+    if (opts.showTarget !== false && targetBuffer && targetVertexCount) {
+      pass.setPipeline(transPipeline);
+      pass.setVertexBuffer(0, targetBuffer);
+      pass.draw(targetVertexCount);
     }
     // Cutting-tool cylinder (50% transparent, drawn after the opaque stock).
     if (hasTool) {
@@ -764,13 +877,13 @@ export async function createVoxelViewer(canvas, options = {}) {
       pass.draw(holderVertexCount);
     }
     // Line overlay: stock wireframe + axes + commanded path + tool path + tool-tip marker.
-    const showCube = opts.showCube !== false;
     const showAxes = !!opts.showAxes;
+    const showExec = opts.showExec !== false;
     const cmdPts = opts.cmdPts || null;
     const ctrlPts = opts.ctrlPts || null;
     const segs = [];
     if (showCube) {
-      STOCK_WIRE.forEach(([a,b]) => segs.push({ a, b, color:[0.22,0.26,0.30,0.5] }));
+      STOCK_WIRE.forEach(([a,b]) => segs.push({ a: wpt(a), b: wpt(b), color:[0.22,0.26,0.30,0.5] }));
     }
     if (showAxes) {
       const L = 0.5;
@@ -779,19 +892,20 @@ export async function createVoxelViewer(canvas, options = {}) {
       });
     }
     if (cmdPts && cmdPts.length > 1) {
-      const cc = ctrlPts ? [0.72,0.52,0.92,0.6] : [0.6,0.65,0.7,0.35];
+      // Alternate segments only -> dashed, so the plan can't be mistaken for
+      // the solid executed toolpath it often hugs (matches the SVG viewer).
+      const cc = ctrlPts ? [0.72,0.52,0.92,0.7] : [0.6,0.65,0.7,0.45];
       for (let i=1;i<cmdPts.length;i++){
-        segs.push({ a:cmdPts[i-1], b:cmdPts[i], color:cc });
+        if (i % 2 === 0) continue;
+        segs.push({ a:wpt(cmdPts[i-1]), b:wpt(cmdPts[i]), color:cc });
       }
     }
     if (ctrlPts && ctrlPts.length) {
-      // Control polygon chords (the spline lives inside this hull)…
-      for (let i=1;i<ctrlPts.length;i++){
-        segs.push({ a:ctrlPts[i-1], b:ctrlPts[i], color:[0.85,0.60,1.0,0.30] });
-      }
-      // …and a small 3-axis cross marking each control point.
+      // A small 3-axis cross at each control point. (No polygon chords: they
+      // trace nearly the same curve as the spline and read as a duplicate.)
       const Lc = 0.012;
-      ctrlPts.forEach(p => {
+      ctrlPts.forEach(pn => {
+        const p = wpt(pn);
         [[1,0,0],[0,1,0],[0,0,1]].forEach(([dx,dy,dz])=>{
           segs.push({ a:[p[0]-dx*Lc,p[1]-dy*Lc,p[2]-dz*Lc],
                       b:[p[0]+dx*Lc,p[1]+dy*Lc,p[2]+dz*Lc], color:[0.90,0.62,1.0,0.95] });
@@ -800,29 +914,33 @@ export async function createVoxelViewer(canvas, options = {}) {
     }
     if (trajectoryPts) {
       const rstep = Math.max(0, Math.min(reachedStep, trajectoryPts.length-1));
+      // Executed toolpath lines (toggleable; the carve, tool and tip marker
+      // stay visible when hidden).
+      if (showExec) {
       // Not-yet-reached suffix: dim, so playback progress is visible.
       for (let i=1;i<trajectoryPts.length;i++){
         if (i <= rstep) continue;
-        segs.push({ a:trajectoryPts[i-1], b:trajectoryPts[i], color:[0.22,0.45,0.66,0.25] });
+        segs.push({ a:wpt(trajectoryPts[i-1]), b:wpt(trajectoryPts[i]), color:[0.22,0.45,0.66,0.25] });
       }
       // Reached prefix: bright; stage 2 (staged runs) in amber to distinguish
       // the second trajectory from the first.
       for (let i=1;i<=rstep;i++){
         const c = (stageBoundaryIdx != null && i > stageBoundaryIdx)
           ? [0.98,0.75,0.14,0.95] : [0.36,0.75,1.0,0.95];
-        segs.push({ a:trajectoryPts[i-1], b:trajectoryPts[i], color:c });
+        segs.push({ a:wpt(trajectoryPts[i-1]), b:wpt(trajectoryPts[i]), color:c });
+      }
       }
       // Stage boundary marker (staged runs): amber 3-axis cross where stage 1
       // ends and stage 2 begins.
       if (stageBoundaryIdx != null && stageBoundaryIdx < trajectoryPts.length) {
-        const bp = trajectoryPts[stageBoundaryIdx], L = 0.06;
+        const bp = wpt(trajectoryPts[stageBoundaryIdx]), L = 0.06;
         [[1,0,0],[0,1,0],[0,0,1]].forEach(([dx,dy,dz])=>{
           segs.push({ a:bp, b:[bp[0]+dx*L,bp[1]+dy*L,bp[2]+dz*L], color:[0.98,0.75,0.14,1] });
           segs.push({ a:bp, b:[bp[0]-dx*L,bp[1]-dy*L,bp[2]-dz*L], color:[0.98,0.75,0.14,1] });
         });
       }
       // tool-tip marker: small 3-axis cross at the current tip.
-      const tip = trajectoryPts[rstep], L = 0.05;
+      const tip = wpt(trajectoryPts[rstep]), L = 0.05;
       [[1,0,0,1.0,0.82,0.47],[0,1,0,0.34,0.83,0.39],[0,0,1,0.35,0.63,1.0]].forEach(([dx,dy,dz,r,g,b])=>{
         segs.push({ a:tip, b:[tip[0]+dx*L,tip[1]+dy*L,tip[2]+dz*L], color:[r,g,b,1] });
         segs.push({ a:tip, b:[tip[0]-dx*L,tip[1]-dy*L,tip[2]-dz*L], color:[r,g,b,1] });
@@ -846,12 +964,13 @@ export async function createVoxelViewer(canvas, options = {}) {
     available: true,
     setTrajectory,
     setToolGeometry,
+    setTargetMesh,
     carveToStep,
     render,
     resize,
     get vertexCount() { return vertexCount; },
     destroy() {
-      [gridBuffer, edgeTableBuffer, triTableBuffer, vertexBuffer, indexBuffer, counterBuffer, volumeCounterBuffer, paramsBuffer, cutBuffer, countRead, uniformBuffer, lineBuffer, toolBuffer, holderBuffer].forEach(b => b?.destroy?.());
+      [gridBuffer, edgeTableBuffer, triTableBuffer, vertexBuffer, indexBuffer, counterBuffer, volumeCounterBuffer, indirectBuffer, paramsBuffer, cutBuffer, countRead, uniformBuffer, lineBuffer, toolBuffer, holderBuffer, targetBuffer].forEach(b => b?.destroy?.());
       depthTex?.destroy();
     },
   };

@@ -44,15 +44,34 @@ OUT = os.path.join(WEB, "data.json")
 DICE_TOL = 0.05  # results.tsv dice must be within this of a run's metrics dice
 
 
+def grid_label(npz_path):
+    """Per-part shape label for a grid/STEP target, e.g. 'grid:titan'.
+
+    All grid runs share target_shape == 'grid'; labeling by the NPZ stem keeps
+    different STEP parts from colliding in the run-matching index and the
+    per-shape chart."""
+    return "grid:" + os.path.splitext(os.path.basename(npz_path))[0]
+
+
 def parse_cmd(cmd):
-    """Pull shape / iters / seed out of a results.tsv command string."""
+    """Pull shape / iters / seed out of a results.tsv command string.
+
+    Accepts both flag styles: run_pipeline.py commands use hyphens
+    (--target-shape) while direct algorithms.train_csg commands -- the only
+    way to launch grid/STEP targets -- use underscores (--target_shape).
+    """
     if not isinstance(cmd, str):
         cmd = ""
-    shape = re.search(r"--target-shape\s+(\S+)", cmd)
+    shape = re.search(r"--target[-_]shape\s+(\S+)", cmd)
     iters = re.search(r"--iters\s+(\d+)", cmd)
     seed = re.search(r"--seed\s+(\d+)", cmd)
+    shape_v = shape.group(1) if shape else None
+    if shape_v == "grid":
+        m = re.search(r"--target[-_]sdf[-_]path\s+(\S+)", cmd)
+        if m:
+            shape_v = grid_label(m.group(1))
     return {
-        "shape": shape.group(1) if shape else None,
+        "shape": shape_v,
         "iters": int(iters.group(1)) if iters else None,
         "seed": int(seed.group(1)) if seed else None,
     }
@@ -63,31 +82,65 @@ def parse_cmd(cmd):
 IN_TO_MM = 25.4
 
 
-def tool_geom_from_args(args):
-    """Tool + holder geometry in stock-normalized [0,1]^3 units, matching the
-    Taichi CSGSimulatorDelta (simulator/csg_simulator.py) that renders each run's
-    run.mp4 via record_video.
+_NPZ_STOCK_CACHE = {}
 
-    The sim measures SDFs in voxel space (radius_mm / voxel_mm) over a grid of
-    Nx = stock_mm / voxel_mm cells, so a normalized radius = radius_mm / stock_mm
-    (the voxel size cancels). Defaults are the sim's own defaults: tool_radius_mm
-    3.175, tool_height_mm 25.0, 2.5"-diameter holder, 10"-Z work volume, 1" stock.
+
+def stock_mm_from_args(args):
+    """Stock box (Lx, Ly, Lz) in mm for a run, grid/STEP-aware.
+
+    Grid targets don't pass --stock-size-in; their stock box lives in the
+    target NPZ (the part bbox + padding -- the same source the simulator uses,
+    see simulator/csg_simulator.py). Analytic shapes use --stock-size-in
+    (default 1" cube). Falls back to the 1" cube if the NPZ is unreadable.
     """
-    sin = args.get("stock_size_in") if args else None
+    a = args or {}
+    if a.get("target_shape") == "grid" and a.get("target_sdf_path"):
+        p = a["target_sdf_path"]
+        full = p if os.path.isabs(p) else os.path.join(REPO, p)
+        if full not in _NPZ_STOCK_CACHE:
+            try:
+                with np.load(full) as z:
+                    _NPZ_STOCK_CACHE[full] = [float(c) for c in z["stock_size_mm"]]
+            except (OSError, KeyError, ValueError) as e:
+                print(f"  [stock] can't read target NPZ {p}: {e}", file=sys.stderr)
+                _NPZ_STOCK_CACHE[full] = None
+        mm = _NPZ_STOCK_CACHE[full]
+        if mm is not None:
+            return list(mm)
+    sin = a.get("stock_size_in")
     sin = list(sin) if sin else [1.0, 1.0, 1.0]
-    lx = (sin[0] if len(sin) > 0 and sin[0] else 1.0) * IN_TO_MM
-    lz = (sin[2] if len(sin) > 2 and sin[2] else (sin[0] if sin else 1.0)) * IN_TO_MM
-    win = None
-    if args:
-        win = args.get("workspace_in") or args.get("work_volume_in")
+    sin = (sin + [1.0, 1.0, 1.0])[:3]
+    return [(c if c else 1.0) * IN_TO_MM for c in sin]
+
+
+def tool_geom_from_args(args):
+    """Tool + holder geometry normalized by the LONGEST stock axis, plus the
+    stock-box aspect, matching the Taichi CSGSimulatorDelta
+    (simulator/csg_simulator.py) that renders each run's run.mp4.
+
+    The viewers draw in "aspect space": each axis spans L_axis/L_max, so
+    physical shapes stay undistorted on non-cubic stock (grid/STEP targets)
+    and a single normalized radius (radius_mm / L_max) is valid on every
+    axis -- the tool stays circular. Run coordinates are still per-axis
+    normalized [0,1]; the viewers scale them by ``aspect`` before drawing.
+    For the default 1" cubic stock this reduces exactly to the old
+    stock-normalized values. Defaults are the sim's own defaults:
+    tool_radius_mm 3.175, tool_height_mm 25.0, 2.5"-diameter holder,
+    10"-Z work volume.
+    """
+    a = args or {}
+    lx, ly, lz = stock_mm_from_args(a)
+    max_l = max(lx, ly, lz)
+    win = a.get("workspace_in") or a.get("work_volume_in")
     win = list(win) if win else [16.0, 12.0, 10.0]
     wz = (win[2] if len(win) > 2 and win[2] else 10.0) * IN_TO_MM
-    a = args or {}
     return {
-        "toolRadius": float(a.get("tool_radius_mm", 3.175)) / lx,
-        "toolHeight": float(a.get("tool_height_mm", 25.0)) / lz,
-        "holderRadius": (IN_TO_MM * 2.5 / 2.0) / lx,   # 2.5"-diameter spindle
-        "holderHeight": wz / lz,                       # machine Z travel
+        "toolRadius": float(a.get("tool_radius_mm", 3.175)) / max_l,
+        "toolHeight": float(a.get("tool_height_mm", 25.0)) / max_l,
+        "holderRadius": (IN_TO_MM * 2.5 / 2.0) / max_l,   # 2.5"-diameter spindle
+        "holderHeight": wz / max_l,                       # machine Z travel
+        "aspect": [lx / max_l, ly / max_l, lz / max_l],
+        "stockMm": [lx, ly, lz],
     }
 
 
@@ -108,10 +161,13 @@ def load_run(run_dir):
         return None
     if "dice" not in metrics:
         return None
+    shape = args.get("target_shape")
+    if shape == "grid" and args.get("target_sdf_path"):
+        shape = grid_label(args["target_sdf_path"])
     return {
         "run_dir": os.path.relpath(run_dir, REPO),
         "name": name,
-        "shape": args.get("target_shape"),
+        "shape": shape,
         "iters": int(args["iters"]) if args.get("iters") is not None else None,
         "seed": int(args["seed"]) if args.get("seed") is not None else None,
         "dice": float(metrics["dice"]),
@@ -353,10 +409,15 @@ def make_machine_config(args):
     def pick(key, default):
         v = args.get(key)
         return tuple(v) if isinstance(v, list) else (v if v is not None else default)
+    # Grid/STEP runs don't pass --stock-size-in; scale G-code by the NPZ's
+    # stock box instead of silently defaulting to a 1" cube.
+    stock_in = pick("stock_size_in", None)
+    if stock_in is None:
+        stock_in = tuple(c / IN_TO_MM for c in stock_mm_from_args(args))
     return MachineConfig(
         workspace_mm=100.0,
         workspace_in=pick("workspace_in", (16.0, 12.0, 10.0)),
-        stock_size_in=pick("stock_size_in", (1.0, 1.0, 1.0)),
+        stock_size_in=stock_in,
         stock_origin_in=args.get("stock_origin_in"),
         feed=600.0,
         plunge_feed=200.0,

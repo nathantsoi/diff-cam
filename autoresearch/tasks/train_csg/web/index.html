@@ -72,6 +72,11 @@
   .tool-btn { width:34px; height:34px; display:flex; align-items:center; justify-content:center;
     font-size:16px; color:hsl(220,10%,80%); cursor:pointer; padding:0; }
   .tool-btn:hover { color:#fff; border-color:var(--accent); }
+  .vp-legend { position:absolute; top:38px; left:10px; z-index:5; pointer-events:none;
+    display:flex; flex-direction:column; gap:3px; padding:6px 9px; font-size:11px;
+    color:var(--muted); border-radius:6px; }
+  .vp-legend span { display:inline-flex; align-items:center; gap:6px; }
+  .vp-legend i { display:inline-block; width:14px; height:3px; border-radius:2px; }
   .vp-settings { position:relative; }
   .settings-menu { position:absolute; top:40px; right:0; padding:8px 10px; display:none;
     flex-direction:column; gap:6px; font-size:12px; z-index:6; min-width:170px; }
@@ -203,12 +208,13 @@
       <div class="viewport-wrap">
         <canvas id="voxel-canvas"></canvas>
         <svg id="traj"></svg>
+        <div class="vp-legend glass" id="vp-legend" style="display:none;"></div>
         <div class="vp-toolbar">
           <button class="tool-btn glass" id="vp-home" title="Home: re-center the view">&#8962;</button>
           <div class="vp-settings">
             <button class="tool-btn glass" id="vp-settings-btn" title="View settings">&#9881;</button>
             <div class="settings-menu glass" id="vp-settings-menu">
-              <label class="settings-row"><span>Show stock cube</span>
+              <label class="settings-row"><span>Show stock (carved block)</span>
                 <input type="checkbox" id="opt-cube" checked></label>
               <label class="settings-row"><span>Show axes</span>
                 <input type="checkbox" id="opt-axes" checked></label>
@@ -216,6 +222,10 @@
                 <input type="checkbox" id="opt-cmd"></label>
               <label class="settings-row" id="opt-ctrl-row" style="display:none;"><span>Spline control points</span>
                 <input type="checkbox" id="opt-ctrl" checked></label>
+              <label class="settings-row"><span>Executed toolpath</span>
+                <input type="checkbox" id="opt-exec" checked></label>
+              <label class="settings-row" id="opt-target-row" style="display:none;"><span>Show target part</span>
+                <input type="checkbox" id="opt-target" checked></label>
             </div>
           </div>
           <div class="nav-cube glass" id="nav-cube" title="Click a face for a standard view">
@@ -1059,7 +1069,8 @@ const CUBE_EDGES = [
 let cam = {target:[0.5,0.5,0.5], distance:2.6, yaw:0.72, pitch:0.62};
 let curD = null;            // currently selected experiment
 let pbStep = 0, pbPlaying = false, pbSpeed = 1, pbLastT = 0, pbRAF = 0;
-let opt = {cube:true, axes:true, cmd:false, ctrl:true};
+let opt = {cube:true, axes:true, cmd:false, ctrl:true, exec:true, target:true};
+let lastAutoCmdRun = null;   // run whose sweep plan was already auto-enabled once
 let vpInited = false;
 
 // WebGPU voxel viewer state. When `ready` is true the carved-stock mesh is rendered
@@ -1076,11 +1087,70 @@ let voxelBadge = null;
 // (so non-default stock/tool sizes match their video too); we fall back to the
 // sim's own defaults (tool_radius_mm 3.175, tool_height_mm 25.0, 2.5"-diameter
 // holder, 10"-Z work volume, 1" stock) when the field is absent.
-const DEFAULT_TOOL_GEOM = { toolRadius: 0.125, toolHeight: 0.984, holderRadius: 1.25, holderHeight: 10.0 };
+const DEFAULT_TOOL_GEOM = { toolRadius: 0.125, toolHeight: 0.984, holderRadius: 1.25, holderHeight: 10.0, aspect: [1,1,1] };
 let curToolGeom = { ...DEFAULT_TOOL_GEOM };
 function toolGeomForRun(d){
   if (d && d.tool_geom) return { ...DEFAULT_TOOL_GEOM, ...d.tool_geom };
   return { ...DEFAULT_TOOL_GEOM };
+}
+// Normalized run coords -> "aspect space" (each axis L/maxL): the display
+// space where non-cubic (grid/STEP) stock renders undistorted. Cubic stock
+// has aspect [1,1,1], so this is a no-op for the classic scenarios.
+function toWorld(p){
+  const A = curToolGeom.aspect || [1,1,1];
+  return [p[0]*A[0], p[1]*A[1], p[2]*A[2]];
+}
+
+// ---- target part mesh (GPU viewer): fetch + parse the run's target STL ----
+// STLs are exported by the trainer in MILLIMETRES; dividing by the longest
+// stock axis puts them in the same aspect space the viewer draws in.
+let targetMeshFor = null;   // run key the currently loaded target mesh belongs to
+function parseBinarySTL(buf, maxL){
+  const dv = new DataView(buf);
+  if (buf.byteLength < 84) return null;
+  const n = dv.getUint32(80, true);
+  if (n === 0 || 84 + n * 50 !== buf.byteLength) return null;  // ASCII or corrupt
+  const C = [0.30, 0.85, 0.48, 0.35];                          // translucent green
+  const out = new Float32Array(n * 30);                        // 3 verts x 10 floats
+  let o = 0, p = 84;
+  for (let t = 0; t < n; t++){
+    // Face normal from the vertices (file normals can be zero/garbage).
+    const v = [];
+    for (let k = 0; k < 3; k++){
+      const q = p + 12 + k*12;
+      v.push([dv.getFloat32(q, true), dv.getFloat32(q+4, true), dv.getFloat32(q+8, true)]);
+    }
+    const ux = v[1][0]-v[0][0], uy = v[1][1]-v[0][1], uz = v[1][2]-v[0][2];
+    const wx = v[2][0]-v[0][0], wy = v[2][1]-v[0][1], wz = v[2][2]-v[0][2];
+    let nx = uy*wz - uz*wy, ny = uz*wx - ux*wz, nz = ux*wy - uy*wx;
+    const nl = Math.hypot(nx, ny, nz);
+    if (nl > 1e-12) { nx /= nl; ny /= nl; nz /= nl; } else { nx = 0; ny = 0; nz = 1; }
+    for (let k = 0; k < 3; k++){
+      out[o++] = v[k][0] / maxL; out[o++] = v[k][1] / maxL; out[o++] = v[k][2] / maxL;
+      out[o++] = nx; out[o++] = ny; out[o++] = nz;
+      out[o++] = C[0]; out[o++] = C[1]; out[o++] = C[2]; out[o++] = C[3];
+    }
+    p += 50;
+  }
+  return out;
+}
+async function loadTargetMesh(d){
+  if (!voxel.ready) return;
+  const key = d.run_dir || d.name || d.idx;
+  const stl = d.stl && d.stl.target;
+  const mm = curToolGeom.stockMm;
+  if (!stl || !mm) { voxel.viewer.setTargetMesh(null); targetMeshFor = null; return; }
+  if (targetMeshFor === key) return;
+  try {
+    const buf = await (await fetch(BASE + stl)).arrayBuffer();
+    const data = parseBinarySTL(buf, Math.max(...mm));
+    voxel.viewer.setTargetMesh(data);
+    targetMeshFor = data ? key : null;
+    renderViewport();
+  } catch (e) {
+    console.warn("[target] failed to load", stl, e);
+    voxel.viewer.setTargetMesh(null); targetMeshFor = null;
+  }
 }
 
 function setVoxelBadge(text, ok){
@@ -1109,7 +1179,8 @@ function startVoxelLoop(){
     const cmd = opt.cmd && curD.trajectory.cmd ? curD.trajectory.cmd : null;
     const ctrl = opt.ctrl && curD.trajectory.ctrl ? curD.trajectory.ctrl : null;
     try {
-      voxel.viewer.render(cam, cstep, { showCube: opt.cube, showAxes: opt.axes, cmdPts: cmd, ctrlPts: ctrl });
+      voxel.viewer.render(cam, cstep, { showCube: opt.cube, showAxes: opt.axes,
+        cmdPts: cmd, ctrlPts: ctrl, showExec: opt.exec, showTarget: opt.target });
     } catch (e) {
       // A validation error in one frame (e.g. a bad bind group) must not kill the
       // render loop — log once and keep the canvas alive.
@@ -1137,7 +1208,18 @@ async function initVoxelViewer(){
       gridResolution: 96,
       toolRadius: curToolGeom.toolRadius, toolHeight: curToolGeom.toolHeight,
       holderRadius: curToolGeom.holderRadius, holderHeight: curToolGeom.holderHeight,
-      onStatus: (s)=>{ if (!s.available) console.warn("[voxel]", s.reason); },
+      onStatus: (s)=>{
+        if (s.available) return;
+        console.warn("[voxel]", s.reason);
+        // GPU device died after init (driver reset, error storm, tab
+        // backgrounding): don't leave a black canvas — drop to the SVG viewer.
+        if (s.lost && voxel.ready) {
+          voxel.ready = false; voxel.viewer = null;
+          stopVoxelLoop();
+          setVoxelBadge("WebGPU lost — SVG fallback", false);
+          if (curD) loadTrajectory(curD); else renderViewport();
+        }
+      },
     });
     if (viewer && viewer.available) {
       voxel.viewer = viewer;
@@ -1228,13 +1310,15 @@ function initViewport(){
   initVoxelViewer();
 
   // Toolbar: home + settings.
-  document.getElementById("vp-home").onclick = ()=>{ if (curD && curD.trajectory) Object.assign(cam, homeCamera(curD.trajectory.traj)); renderViewport(); };
+  document.getElementById("vp-home").onclick = ()=>{ if (curD && curD.trajectory) Object.assign(cam, homeCamera(curD.trajectory.traj.map(toWorld))); renderViewport(); };
   const menu = document.getElementById("vp-settings-menu");
   document.getElementById("vp-settings-btn").onclick = ()=>menu.classList.toggle("open");
   document.getElementById("opt-cube").onchange = e=>{opt.cube=e.target.checked; renderViewport();};
   document.getElementById("opt-axes").onchange  = e=>{opt.axes =e.target.checked; renderViewport();};
   document.getElementById("opt-cmd").onchange   = e=>{opt.cmd  =e.target.checked; renderViewport();};
   document.getElementById("opt-ctrl").onchange  = e=>{opt.ctrl =e.target.checked; renderViewport();};
+  document.getElementById("opt-exec").onchange  = e=>{opt.exec =e.target.checked; renderViewport();};
+  document.getElementById("opt-target").onchange = e=>{opt.target=e.target.checked; renderViewport();};
 
   // Nav-cube: mirror orientation; click faces to snap.
   document.querySelectorAll("#nav-cube .cube-face").forEach(face=>{
@@ -1266,10 +1350,42 @@ function loadTrajectory(d){
   // IS the planned spline, so relabel the toggle, expose the control-point
   // toggle, and turn the plan on by default so the planning is visible.
   const isSweep = !!(d.trajectory && d.trajectory.ctrl);
+  const runKey = d.run_dir || d.name || d.idx;
   document.getElementById("opt-cmd-label").textContent =
     isSweep ? "Planned spline path" : "Commanded (pre-clip) path";
   document.getElementById("opt-ctrl-row").style.display = isSweep ? "" : "none";
-  if (isSweep && !opt.cmd) { opt.cmd = true; document.getElementById("opt-cmd").checked = true; }
+  // Auto-enable the plan only once per run: loadTrajectory re-runs for the
+  // same run (viewer-ready callback, GPU fallback), and re-forcing the toggle
+  // would override the user's choice to hide it.
+  if (isSweep && !opt.cmd && runKey !== lastAutoCmdRun) {
+    opt.cmd = true; document.getElementById("opt-cmd").checked = true;
+  }
+  if (isSweep) lastAutoCmdRun = runKey;
+
+  // Target part mesh (GPU viewer only): fetch/parse the run's target STL.
+  const hasTargetStl = !!(d.stl && d.stl.target);
+  document.getElementById("opt-target-row").style.display =
+    (voxel.ready && hasTargetStl) ? "" : "none";
+  if (voxel.ready) loadTargetMesh(d);
+
+  // Legend so the overlapping curves are identifiable at a glance.
+  const lg = document.getElementById("vp-legend");
+  if (d.trajectory) {
+    const staged = d.trajectory.staged && d.trajectory.stage_boundary != null;
+    let rows = `<span><i style="background:#4fb3ff"></i>executed toolpath</span>`;
+    if (staged) rows += `<span><i style="background:#fbbf24"></i>stage 2</span>`;
+    if (isSweep) {
+      rows += `<span><i style="background:#b184e8"></i>planned spline (dashed)</span>` +
+              `<span><i style="background:#c89bff;width:7px;height:7px;border-radius:50%;"></i>control points</span>`;
+    } else if (d.trajectory.cmd) {
+      rows += `<span><i style="background:#9aa7b3"></i>commanded (dashed)</span>`;
+    }
+    if (voxel.ready && hasTargetStl) rows += `<span><i style="background:#4dd97a"></i>target part</span>`;
+    lg.innerHTML = rows;
+    lg.style.display = "flex";
+  } else {
+    lg.style.display = "none";
+  }
 
   // Use the WebGPU carved-stock viewer when available; otherwise the SVG fallback.
   const useVoxel = voxel.ready && d.trajectory;
@@ -1286,7 +1402,7 @@ function loadTrajectory(d){
 
   // Show the fully-carved path initially; playback restarts from step 0 on play.
   setStep(T-1);
-  if (d.trajectory) Object.assign(cam, homeCamera(d.trajectory.traj));
+  if (d.trajectory) Object.assign(cam, homeCamera(d.trajectory.traj.map(toWorld)));
   renderViewport();
 }
 
@@ -1357,8 +1473,12 @@ function renderViewport(){
   const cmd = opt.cmd ? curD.trajectory.cmd : null;
   const cstep = Math.max(0, Math.min(pts.length-1, Math.round(pbStep)));
 
-  // Pre-project everything (with depth) for sorting.
-  const P = p => project(p, cam, W, H);
+  // Pre-project everything (with depth) for sorting. Run coords are per-axis
+  // normalized; P maps them through the stock aspect first so non-cubic
+  // (grid/STEP) stock isn't stretched into a cube. PW projects points that
+  // are already in aspect space (e.g. tool-cylinder rings).
+  const PW = p => project(p, cam, W, H);
+  const P = p => PW(toWorld(p));
   const projPts = pts.map(P);
   const projCmd = cmd ? cmd.map(P) : null;
 
@@ -1403,15 +1523,10 @@ function renderViewport(){
     }
   }
 
-  // B-spline control polygon + control points (sweep runs).
+  // B-spline control points (sweep runs). No polygon chords: they trace
+  // nearly the same curve as the spline and read as a duplicate path.
   if (ctrlPts && ctrlPts.length){
     const projCtrl = ctrlPts.map(P);
-    for (let i=1;i<projCtrl.length;i++){
-      const a=projCtrl[i-1], b=projCtrl[i]; if(!a||!b) continue;
-      add((a[2]+b[2])/2, g=>g.append("line")
-        .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
-        .attr("stroke","#c89bff").attr("stroke-width",1).attr("stroke-dasharray","2 3").attr("opacity",.4));
-    }
     projCtrl.forEach(p=>{
       if (!p) return;
       add(p[2]-1e-6, g=>g.append("circle")
@@ -1437,14 +1552,16 @@ function renderViewport(){
       : d3.interpolateRgb("#1f6feb","#7cc0ff");
     return ramp(zscale(z));
   };
-  for (let i=1;i<projPts.length;i++){
-    const a=projPts[i-1], b=projPts[i]; if(!a||!b) continue;
-    const reached = i <= cstep;
-    add((a[2]+b[2])/2, g=>g.append("line")
-      .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
-      .attr("stroke", stageColor(i, b[2]))
-      .attr("stroke-width", reached?2.2:1.4)
-      .attr("opacity", reached?0.95:0.22));
+  if (opt.exec) {
+    for (let i=1;i<projPts.length;i++){
+      const a=projPts[i-1], b=projPts[i]; if(!a||!b) continue;
+      const reached = i <= cstep;
+      add((a[2]+b[2])/2, g=>g.append("line")
+        .attr("x1",a[0]).attr("y1",a[1]).attr("x2",b[0]).attr("y2",b[1])
+        .attr("stroke", stageColor(i, b[2]))
+        .attr("stroke-width", reached?2.2:1.4)
+        .attr("opacity", reached?0.95:0.22));
+    }
   }
 
   // Stage boundary marker (staged runs): where stage 1 ends and stage 2 begins.
@@ -1459,14 +1576,14 @@ function renderViewport(){
   }
 
   // Start marker.
-  const sp = projPts[0];
+  const sp = opt.exec ? projPts[0] : null;
   if (sp) add(sp[2], g=>{
     g.append("circle").attr("cx",sp[0]).attr("cy",sp[1]).attr("r",5).attr("fill","#56d364").attr("stroke","#000").attr("stroke-width",1);
     g.append("text").attr("x",sp[0]+7).attr("y",sp[1]+4).attr("fill","#56d364").attr("font-size",10).text("start");
   });
 
   // End marker (only when fully reached).
-  const ep = projPts[pts.length-1];
+  const ep = opt.exec ? projPts[pts.length-1] : null;
   if (ep && cstep >= pts.length-1) add(ep[2], g=>{
     g.append("circle").attr("cx",ep[0]).attr("cy",ep[1]).attr("r",5).attr("fill","#e5534b").attr("stroke","#000").attr("stroke-width",1);
     g.append("text").attr("x",ep[0]+7).attr("y",ep[1]+4).attr("fill","#e5534b").attr("font-size",10).text("end");
@@ -1480,14 +1597,18 @@ function renderViewport(){
   const tipPt = pts[cstep];
   if (tipPt) {
     const N = 24;
+    // Cylinders are built directly in aspect space (tip mapped via toWorld,
+    // radius already normalized by maxL) so they stay circular on non-cubic
+    // stock — hence PW, not P, for projection.
+    const tipW = toWorld(tipPt);
     // Draw a vertical Z cylinder from bottomZ..topZ on the tip axis in `fill` color.
     const drawCyl = (bottomZ, topZ, R, fill) => {
       const ring = (zz) => {
         const out = [];
-        for (let i=0;i<N;i++){ const a=(i/N)*Math.PI*2; out.push([tipPt[0]+R*Math.cos(a), tipPt[1]+R*Math.sin(a), zz]); }
+        for (let i=0;i<N;i++){ const a=(i/N)*Math.PI*2; out.push([tipW[0]+R*Math.cos(a), tipW[1]+R*Math.sin(a), zz]); }
         return out;
       };
-      const Pb = ring(bottomZ).map(P), Pt = ring(topZ).map(P);
+      const Pb = ring(bottomZ).map(PW), Pt = ring(topZ).map(PW);
       for (let i=0;i<N;i++){
         const j=(i+1)%N;
         const a=Pb[i], b=Pb[j], c=Pt[j], d=Pt[i];
@@ -1505,8 +1626,8 @@ function renderViewport(){
           .attr("stroke",fill).attr("stroke-width",0.5));
       }
     };
-    const toolTop = tipPt[2] + curToolGeom.toolHeight;
-    drawCyl(tipPt[2], toolTop, curToolGeom.toolRadius, "#e63333");
+    const toolTop = tipW[2] + curToolGeom.toolHeight;
+    drawCyl(tipW[2], toolTop, curToolGeom.toolRadius, "#e63333");
     drawCyl(toolTop, toolTop + curToolGeom.holderHeight, curToolGeom.holderRadius, "#8c939c");
   }
 

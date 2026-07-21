@@ -76,13 +76,22 @@ def _tuple3(v, default):
 def build_sim(args):
     """Reconstruct the CSGSimulatorDelta from a run's args.json (mirrors train_csg)."""
     max_steps = int(args.get("max_steps", 128))
+    # Grid/STEP targets carry their stock box in the target NPZ and don't pass
+    # --stock-size-in; hand the sim None so the NPZ's box is used directly
+    # (passing the 1" default would only trigger the sim's conflict warning).
+    stock_in = args.get("stock_size_in")
+    if stock_in is None and args.get("target_shape") == "grid":
+        stock_size_in = None
+    else:
+        stock_size_in = _tuple3(stock_in, (1.0, 1.0, 1.0))
     sim = CSGSimulatorDelta(
         resolution=int(args.get("resolution", 32)),
         max_steps=max_steps,
         k_init=float(args.get("k_init", 10.0)),
         target_shape=args.get("target_shape", "sphere"),
+        target_sdf_path=args.get("target_sdf_path"),
         tool_start=(0.5, 0.5, 1.0),
-        stock_size_in=_tuple3(args.get("stock_size_in"), (1.0, 1.0, 1.0)),
+        stock_size_in=stock_size_in,
         voxel_size_mm=float(args.get("voxel_size_mm", 0.5) or 0.5),
         work_volume_in=_tuple3(args.get("workspace_in"), (16.0, 12.0, 10.0)),
         stock_origin_in=_tuple3(args.get("stock_origin_in"), None) if args.get("stock_origin_in") is not None else None,
