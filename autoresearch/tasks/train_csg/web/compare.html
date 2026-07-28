@@ -76,6 +76,10 @@
     display:flex; flex-wrap:wrap; gap:10px; align-items:center; }
   #answer-bar .hint { color:var(--muted); font-size:13px; }
   #answer-bar .spacer { flex:1; }
+  #save-note { background:var(--panel2); color:var(--ink); border:1px solid var(--grid);
+    border-radius:6px; padding:8px 12px; font-size:13px; cursor:pointer; }
+  #save-note:hover:not(:disabled) { border-color:var(--accent); }
+  #save-note:disabled { opacity:.45; cursor:default; }
   .pick { font-size:15px; padding:9px 18px; border-radius:8px; font-weight:600; }
   .pick.A { background:var(--a); color:#0b0e12; border-color:var(--a); }
   .pick.B { background:var(--b); color:#0b0e12; border-color:var(--b); }
@@ -160,6 +164,7 @@
     <span class="hint" id="ans-hint">Pick the better trajectory.</span>
     <span class="spacer"></span>
     <textarea id="ans-note" rows="2" placeholder="Why? (the agent reads this)"></textarea>
+    <button id="save-note" disabled>Save note</button>
     <button class="pick A" id="pick-a">◀ A is better</button>
     <button class="pick tie" id="pick-tie">Tie / both bad</button>
     <button class="pick B" id="pick-b">B is better ▶</button>
@@ -426,8 +431,12 @@ function setAnswerEnabled(on){
   document.getElementById("pick-a").disabled = !on;
   document.getElementById("pick-b").disabled = !on;
   document.getElementById("pick-tie").disabled = !on;
+  // The note can always be edited on a queued pair; the save button is live
+  // once a pair is loaded (including already-answered ones), so the user can
+  // add or revise the rationale on previously answered comparisons.
+  document.getElementById("save-note").disabled = !activePair;
   document.getElementById("ans-hint").textContent =
-    on ? "Pick the better trajectory." : (activePair ? "Already answered — use Next pending." : "Ad-hoc compare — not recorded.");
+    on ? "Pick the better trajectory." : (activePair ? "Already answered — you can still update the note." : "Ad-hoc compare — not recorded.");
 }
 
 function escapeHtml(s){ return (""+s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
@@ -449,6 +458,20 @@ async function answer(ans){
   refreshDigest();   // reflect the just-recorded answer in the learned-so-far panel
   toast("Saved: "+ans.toUpperCase()+". Loading next pending…");
   setTimeout(nextPending, 600);
+}
+
+async function saveNote(){
+  if (!activePair){ toast("no pair loaded"); return; }
+  const note = document.getElementById("ans-note").value.trim();
+  const r = await fetch(`${BASE}__api/pairs`, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ id: activePair.id, note, update_note: true })
+  });
+  const j = await r.json();
+  if (!j.ok){ toast("save failed: "+(j.error||"")); return; }
+  Object.assign(activePair, j.pair);
+  refreshDigest();   // note text feeds the digest's per-dimension notes
+  toast(activePair.answer ? "Note updated." : "Note saved (still pending — pick A/B/tie to answer).");
 }
 
 function nextPending(){
@@ -566,6 +589,7 @@ function wire(){
   document.getElementById("pick-a").onclick  = ()=>answer("a");
   document.getElementById("pick-b").onclick  = ()=>answer("b");
   document.getElementById("pick-tie").onclick= ()=>answer("tie");
+  document.getElementById("save-note").onclick = saveNote;
   document.getElementById("adhoc-load").onclick = adhocLoad;
   bindOrbit(sideA); bindOrbit(sideB);
   setAnswerEnabled(false);

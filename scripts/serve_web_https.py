@@ -424,6 +424,22 @@ def record_pair_answer(root: Path, pair_id: str, answer: str, note: str = "") ->
         return None
 
 
+def update_pair_note(root: Path, pair_id: str, note: str) -> dict | None:
+    """Update only the free-text note on an already-answered pair.
+
+    Leaves the recorded answer (and answer_ts) untouched so the learned
+    preference is not disturbed; lets a user refine the rationale later.
+    """
+    with _PAIRS_LOCK:
+        data = load_pairs(root)
+        for p in data:
+            if p.get("id") == pair_id:
+                p["note"] = str(note).strip() if note is not None else ""
+                save_pairs(root, data)
+                return p
+        return None
+
+
 def generate_run_video(root: Path, run_rel: str, force: bool = False) -> dict:
     """Ensure runs/<run>/videos/run.mp4 exists; generate it if missing.
 
@@ -649,6 +665,12 @@ def main() -> None:
                     body = json.loads(raw.decode() or "{}")
                 except (ValueError, OSError):
                     return self._json({"ok": False, "error": "invalid JSON body"}, 400)
+                if body.get("update_note") and body.get("id"):
+                    pair = update_pair_note(
+                        root, str(body["id"]).strip(), body.get("note", ""))
+                    if pair is None:
+                        return self._json({"ok": False, "error": "unknown pair id"}, 400)
+                    return self._json({"ok": True, "pair": pair})
                 if "answer" in body and body.get("id"):
                     pair = record_pair_answer(
                         root, str(body["id"]).strip(), str(body["answer"]).strip(),
