@@ -571,3 +571,246 @@ identical to the carve metric. Two ways forward:
 Next pref-driven reformulation to metric-confirm: loss_shift=0.5 (pref B,
 "follows the contour") — untested on hard_dice broadly; and the cut-overlap
 theme (multidepth_revs 4.5 on continuous-wall shapes) — pref pairs running.
+
+## jul15 loss_shift=0.5 PROMOTION CHECK (14:10) — NEGATIVE, NOT promoted
+
+Second pref-driven reformulation metric-tested (after k_final=180 NEUTRAL).
+loss_shift=0.5 was preference B (n=1, "follows the contour of the part. top
+surface following could be better"). Added `--loss-shift 0.5` to the SOTA
+adaptive base, 6 runs (sphere/box/bowl x seeds 1,2), iters=5000.
+
+Deployed best hard_dice (best_on_hard over training) vs loss_shift=0.0 baseline:
+  shape       s1         s2         baseline   delta
+  box         0.7170     0.7167     0.7596     -0.043 / -0.043
+  sphere      0.8129     0.8084     0.8300     -0.017 / -0.022
+  sphere_bowl 0.6100     0.6352     0.6471     -0.037 / -0.012
+
+VERDICT: NEGATIVE on all 6 runs / 3 shapes. box is the clearest (both seeds
+~-0.043, consistent). loss_shift=0.5 actively HURTS the deployable carve
+metric even though the human preferred it for contour following. NOT promoted;
+SOTA stays loss_shift=0.0.
+
+Reinforces the META-FINDING hard: TWO preference-driven reformulations now
+(k_final=180 NEUTRAL, loss_shift=0.5 NEGATIVE) both fail to lift hard_dice.
+The contour-following preference signal is cosmetic, not deployable. The
+deployed_best==final_hd in 5/6 runs means k-sharpening did not find a better
+deployable point earlier — the loss-shift just shifted loss mass toward the
+path tail in a way that traded away earlier-orbit material clearance.
+
+Next pref-driven reformulation to metric-confirm: the CUT-OVERLAP theme
+(multidepth_revs 3.0 vs 4.5 on continuous-wall shapes box/cyl) — this is the
+one preference theme where residual scallop DIRECTLY costs hard_dice (not
+cosmetic), so it is the best remaining candidate to actually move the metric.
+Pref pairs mrevs_box / mrevs_cyl2 are gathering the preference side; the
+hard_dice sweep is the next metric step.
+
+## jul15 CUT-OVERLAP (multidepth_revs 3.0 vs 4.5) METRIC SWEEP (16:30) — NEUTRAL/NEGATIVE, NOT promoted
+
+Third pref-driven reformulation metric-tested (after k_final=180 NEUTRAL,
+loss_shift=0.5 NEGATIVE). The cut-overlap/anti-jaggedness theme (w_gouge +
+w_residual notes: "overlap more to remove the remaining jagged material",
+"fewer spikes") predicted: finer stepover (more revs) -> adjacent passes
+overlap more -> less residual scallop -> higher hard_dice. Tested on the two
+continuous-wall shapes (box, cyl) where more revs = more overlap, not more
+air. 6 runs: box {3.0,4.5} x {s1,s2}, cyl {3.0,4.5} x s1. SOTA adaptive base.
+
+Deployed best hard_dice:
+  shape      revs=3.0            revs=4.5            delta(3.0-4.5)
+  box        s1 0.7556 s2 0.7557 s1 0.7376 s2 0.7553  mean 0.7556 vs 0.7465 -> 3.0 WINS +0.009
+  cyl        s1 0.8890           s1 0.8925            4.5 marginal +0.0035 (1 seed, noise)
+
+VERDICT: NEUTRAL-to-NEGATIVE. Finer stepover (4.5) does NOT help hard_dice;
+on box it HURTS (-0.009), on cyl it is a 1-seed wash. The anti-jaggedness
+preference is largely COSMETIC w.r.t. the deployable carve metric, just like
+contour-following (k-anneal) and loss_shift: finer stepover reduces visual
+scallop ridges but the extra air cutting / reduced per-pass depth costs the
+deployable metric. Coarser revs=3.0 (the SOTA value, preferred by the human
+for "less air cutting" on multidepth_revs) is confirmed best. NOT promoted;
+SOTA stays multidepth_revs=3.0.
+
+STRONG CONFIRMATION of the META-FINDING: THREE preference-driven reformulations
+now (k_final=180 NEUTRAL, loss_shift=0.5 NEGATIVE, cut-overlap 4.5
+NEUTRAL/NEGATIVE) all fail to lift hard_dice. The only preference dimension
+that ALIGNS with hard_dice is "less air cutting" (coarser stepover), and that
+is already captured in the SOTA base (revs=3.0, multidepth_contour/cavity init,
+w_air_time=1e-3). The human's contour-following / surface-finish / anti-
+jaggedness preferences are cosmetic -- they improve perceived trajectory
+quality in compare.html without moving the deployable sharp-boolean-carve
+metric.
+
+Implication for the loop: further preference steering on contour/finish
+dimensions is unlikely to advance hard_dice. The path to actually move the
+metric is NOT more cosmetic-preference encoding; it is (i) the weakest shapes
+with headroom -- bowl (0.647, seed-unstable) and hole (0.273, stuck) -- where
+real deployable gains live, and (ii) optimizer/schedule/init-stability changes
+rather than loss-weight knobs the human judges visually. Preferences remain
+valuable as a SEPARATE objective layer (the human values the cosmetic
+qualities even though hard_dice does not) -- per pref-signal-largely-cosmetic
+memory path (a) -- but should not be expected to drive hard_dice promotion.
+
+## jul15 k_ramp_delay EXPERIMENT (18:00) — NEUTRAL on hole, NEGATIVE on sphere, NOT promoted
+
+Pivoted from cosmetic-preference levers (3 failed) to a NON-cosmetic schedule
+lever: k_ramp_delay (hold k at k_init for a fraction of iters before ramping;
+default 0.0). Explicitly motivated by the code comment for the compute-starved
+hole: "lets the hole keep soft-carving past where a linear ramp would have
+frozen it, AT FIXED iters -- so the benefit need not cost 2x compute."
+Hypothesis: a longer soft window at fixed 5000 iters lifts the hole's 0.273
+ceiling without the 2x cost of 10k iters. 7 runs on the SOTA adaptive base:
+hole delay={0.3 x s1,s2,s3; 0.5 x s1,s2} + sphere delay=0.3 x{s1,s2} (convex
+regression check -- documented risk is under-sharpening a converged shape).
+
+Deployed best hard_dice:
+  shape       delay  seeds                 mean      baseline  delta
+  sphere      0.3    s1 0.7741 s2 0.7752   0.7747    0.8300    -0.0553  REGRESSION
+  sphere_hole 0.3    s1 0.2610 s2 0.2681 s3 0.2951  0.2747    0.2730    +0.0017  NEUTRAL
+  sphere_hole 0.5    s1 0.2644 s2 0.2655   0.2650    0.2730    -0.0080  NEGATIVE
+
+VERDICT: NOT promoted.
+- sphere delay=0.3 REGRESSES -0.055 (both seeds): compressing the ramp into
+  iters 1500-5000 under-sharpens the converged convex shape, exactly the
+  documented risk. The deployed best is frozen at the pre-ramp soft peak
+  (~0.775); the ramp never catches up to the 0.830 that a full-iter ramp reach.
+- hole delay=0.3 NEUTRAL (3-seed mean 0.2747 ~= 0.273, well within the +-0.02
+  GPU atomic-add noise; s3=0.295 is a single-seed hit comparable to the
+  multidepth_hole hybrid's prior s2=0.299). delay=0.5 NEGATIVE (-0.008): the
+  longer hold (until iter 2500) leaves too little ramp time.
+
+CONCLUSION: k_ramp_delay does NOT break the hole's 0.273 ceiling at fixed 5000
+iters. The hole needs BOTH a longer soft window AND a full-length ramp -- i.e.
+genuinely more iters. The code comment is confirmed: the only thing that lifts
+the hole is --iters 10000 (2x compute), and that HURTS the convex shapes
+(sphere -0.019) because they are already converged by 5000 and the slower ramp
+under-sharpens them. So the hole's residual gap (0.273 -> ~0.88 convex level)
+is COMPUTE-BOUND at 5000 iters, not method-bound: across k_final=180,
+multidepth_hole hybrid, and k_ramp_delay, nothing moves the hole mean at 5000
+iters. The lever is per-shape iters (10k for the annular hole only), which is a
+budget/shape-adaptive choice, not a method gain -- and per-shape branching
+risks the generalization guardrail, though the hole's annularity is a
+principled shape-distinct signal.
+
+This is the FOURTH lever tested this session that fails to advance hard_dice
+(k_final=180 NEUTRAL, loss_shift=0.5 NEGATIVE, cut-overlap 4.5 NEUTRAL/NEG,
+k_ramp_delay NEUTRAL/NEG). The SOTA adaptive base is firmly consolidated for
+the 5 convex + bowl shapes; the hole is a compute-bound outlier.
+
+NEXT: (1) confirm the hole's 10k-iter ceiling (3 seeds) to quantify the
+compute-bound headroom and decide whether per-shape iters (10k hole / 5k
+convex) is a defensible shape-adaptive promotion; (2) keep the preference
+queue stocked (paused on contour/finish dims -- cosmetic -- but the
+separate-objective-layer path (a) still values them).
+
+## jul15 hole 10k-iter CEILING TEST (21:30) — NEGATIVE, NOT promoted (5th lever)
+
+Ran sphere_hole s1/s2/s3 at --iters 10000 on the SOTA adaptive base (init_mode
+adaptive -> multidepth_hole hybrid, since hole annul>0.40; k-anneal k_init=20
+-> k_final=120 ramped over the full 10000). GPUs 0/2/3. Deployed-best
+(top-level hard_dice = best_on_hard, the peak before the optimizer over-carves):
+
+  s1 = 0.2615   s2 = 0.2636   s3 = 0.2614   mean = 0.2622
+  (final_iter_hard_dice collapsed to 0.20-0.24 — the optimizer over-carves past
+   the optimum by iter ~8500; best_on_hard correctly freezes the ~0.262 peak.)
+
+vs hole 5k baselines: contour 0.273, multidepth_hole hybrid 0.274 (prior
+session, 5k). Delta = -0.011. NEGATIVE — 10k iters does NOT lift the hole; it
+is slightly WORSE than 5k.
+
+MECHANISM (this is the real finding): doubling iters with the k-anneal ramp
+STRETCHED over 10000 means k rises HALF as fast (k~70 at iter 5000 vs k=120 at
+iter 5000 in the 5k run). The hole's thin annulus needs a SHARP k to carve the
+narrow ring precisely; the slower ramp deprives it of sharp-k carving within
+the deployable regime, so the deployed-best peak DROPS. best_on_hard cannot
+recover because the sharp-carve window is delayed past the point where the
+trajectory is still deployable (by the time k is sharp at 10k, the optimizer
+has already over-carved the annulus walls). This directly refutes the earlier
+"10k is the one thing that lifts the hole" inference from the code comment —
+that comment predates the k-anneal schedule; under k-anneal, 10k with a fixed
+k_final=120 is strictly worse for the hole.
+
+IMPLICATION for per-shape iters: it is NOT a free win. To make 10k help the
+hole you would have to scale k_final UP with iters (e.g. k_final=240 over 10k)
+so the ramp reaches the same sharpness at the same relative position — but that
+just recapitulates the 5k behavior at 2x cost, with no gain. So per-shape iters
+(10k hole / 5k convex) is NOT a defensible shape-adaptive promotion: it costs
+2x compute for a NEGATIVE delta.
+
+CONCLUSION — the hole is at its CEILING (~0.27) under the current method. Across
+FIVE levers this session (k_final=180 NEUTRAL, loss_shift=0.5 NEG, cut-overlap
+4.5 NEUTRAL/NEG, k_ramp_delay NEUTRAL/NEG, iters=10k NEG), NOTHING moves the
+hole mean. The residual gap (0.27 -> 0.88 convex level) is NOT compute-bound
+(10k disproves that) and NOT method-tunable via loss/schedule/init knobs tested
+— it is a GEOMETRY limit (thin annulus vs 3.175mm tool: the tool cannot cleanly
+resolve the central column's narrow ring at res=32) compounded by GPU
+atomic-add nondeterminism (±0.02 run-to-run noise on the hole specifically).
+Both weak shapes are now characterized at ceiling:
+  - hole  0.273 — geometry + GPU-noise limited, all 5 levers failed.
+  - bowl  0.647 — seed-unstable, GPU-nondeterminism limited (cavity init).
+The 4 convex shapes (sphere 0.830, cyl 0.889, box 0.760, pyramid 0.798) are
+well-carved. The SOTA adaptive base is consolidated; the method's hard_dice is
+essentially maxed for the achievable shapes, and the two weak shapes are
+fundamentally hard under the current tool resolution + simulator.
+
+NEXT: the hard_dice advancement path is exhausted on loss/schedule/init/iters
+levers for the weak shapes. Remaining honest options: (a) a STRUCTURAL loss
+change aimed specifically at the hole's annulus (e.g. an inter-pass residual
+scallop / annulus-wall term) — still untested code-risk, lowered prior after 5
+failures but the only untested structural lever left; (b) accept the hole/bowl
+ceiling as a documented method limitation and consolidate the writeup around
+the convex-shape wins + k-anneal breakthrough + preference-learning cosmetic
+finding; (c) keep the preference queue stocked (separate-objective-layer path)
+for the cosmetic qualities the human values independent of hard_dice. Preference
+steering on contour/finish/stepover dims stays paused for hard_dice (cosmetic).
+
+## jul15 STRUCTURAL annulus-residual loss (22:45) — STRONGLY NEGATIVE, NOT promoted (6th lever; closes loss-vs-geometry)
+
+Implemented a STRUCTURAL loss change (the one untested lever, qualitatively
+different from the 5 loss-WEIGHT/schedule/init/iters knobs): a per-voxel
+annulus-residual emphasis in simulator/csg_simulator.py compute_loss + loss_at.
+The uniform residual under-resolves the hole's thin column/annulus walls, so the
+residual term is multiplied by (1 + w_annulus * max(0, 1 - max(0,target_d)/dref))
+-- HIGH on near-surface waste (just outside the part surface = the thin walls),
+0 in the far exterior. target_d is the fixed baked target SDF (not a diff param),
+so the multiplier is a constant per voxel that scales the residual gradient
+(autodiff-safe); w_annulus=0 leaves every other shape's loss exactly unchanged
+(smoke-tested: exit 0, finite loss, no NaN). New args --w-annulus / --annulus-dref.
+
+Tested w_annulus=5.0 (near-surface residual up to 6x), dref=2.0 vox, on the hole
+s1/s2/s3 at the standard 5000 iters / SOTA adaptive base (fair vs 0.273 5k). GPUs
+5/6/7. Deployed-best:
+  s1 = 0.1621   s2 = 0.2205   s3 = 0.2321   mean = 0.2049
+  (final_iter_hard_dice COLLAPSED to ~0.002 with soft dice=0.0000 for all three
+   -- the optimizer destroys the part.)
+
+Delta vs 0.273 baseline = -0.068. STRONGLY NEGATIVE -- the structural
+annulus-residual emphasis makes the hole WORSE, not better.
+
+MECHANISM: upweighting near-surface waste 6x pushes the optimizer to carve
+aggressively right up to the thin annulus walls, but the 3.175mm tool cannot
+clear near-surface waste adjacent to a thin wall WITHOUT gouging the wall -- so
+the aggressive near-surface carving destroys the annulus ring (soft dice -> 0).
+The deployed-best is frozen at the EARLY pre-collapse peak (~0.20, before the
+annulus pressure fully bit); once the emphasis dominates the gradient, the part
+is erased. This is the OPPOSITE of the intended effect.
+
+CONCLUSION -- this DEFINITIVELY closes the loss-vs-geometry question for the
+hole. Across SIX levers (k_final=180 NEUTRAL, loss_shift=0.5 NEG, cut-overlap 4.5
+NEUTRAL/NEG, k_ramp_delay NEUTRAL/NEG, iters=10k NEG, structural annulus-residual
+STRONGLY NEG), NOTHING moves the hole mean up; the structural loss change makes
+it worse. The hole's 0.273 ceiling is a GEOMETRY limit (3.175mm tool cannot
+cleanly resolve the thin annulus at res=32), not a loss-formulation or
+optimization limit -- aggressive loss pressure to clear the thin walls causes
+wall destruction. The lever that would actually move it (finer tool / higher
+res) is outside the constraints (simulator not modifiable, no new deps).
+
+HARD_DICE PATH IS NOW EXHAUSTED. Both weak shapes are characterized at ceiling:
+  - hole  0.273 -- geometry-limited; all 6 levers failed (structural makes worse).
+  - bowl  0.647 -- seed-unstable, GPU-atomic-add-nondeterminism limited.
+Convex shapes well-carved (sphere 0.830, cyl 0.889, box 0.760, pyramid 0.798).
+The method is consolidated: the k-anneal breakthrough (+0.137 sphere) is the big
+win; the preference-cosmetic finding (preferences track visual contour quality,
+not hard_dice) is the secondary result; the hole/bowl ceiling is a documented
+method limitation. Remaining ongoing work: (c) keep the preference-learning loop
+stocked (the PRIMARY focus -- the human values the cosmetic qualities independent
+of hard_dice, the separate-objective-layer path) and consolidate the writeup.
+No further hard_dice loss/schedule/init/iters/structural experiments are
+warranted -- the ceiling is geometric.

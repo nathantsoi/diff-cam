@@ -449,6 +449,12 @@ class Args:
     """weight on leftover material outside the part -- the objective that REWARDS cutting"""
     w_gouge: float = 4.0
     """weight on cutting INTO the part -- barrier; > w_residual keeps the cutter just outside the surface"""
+    w_annulus: float = 0.0
+    """STRUCTURAL annulus-residual emphasis (hole-targeted, shape-agnostic). Multiplies the residual term by
+    (1 + w_annulus * max(0, 1 - max(0,target_d)/annulus_dref)), upweighting NEAR-SURFACE waste (the thin
+    column/annulus walls a uniform residual under-resolves) vs the easy far-exterior waste. 0 = off (no change)."""
+    annulus_dref: float = 2.0
+    """near-surface waste band width (voxels) for the annulus-residual emphasis; aw=1 at the part surface, 0 beyond."""
     holder_penalty_weight: float = 50.0
     """weight on the holder/stock penetration barrier (one-sided; inactive until the holder contacts stock)"""
     holder_margin: float = 0.0
@@ -1240,6 +1246,8 @@ def main():
     # Loss balancing: objective (residual) vs. safety barriers (gouge, holder).
     sim.w_residual[None] = args.w_residual
     sim.w_gouge[None] = args.w_gouge
+    sim.w_annulus[None] = args.w_annulus
+    sim.annulus_dref[None] = args.annulus_dref
     sim.loss_shift[None] = args.loss_shift
     sim.holder_penalty_weight[None] = args.holder_penalty_weight
     sim.holder_margin[None] = args.holder_margin

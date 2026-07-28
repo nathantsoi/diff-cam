@@ -171,30 +171,52 @@ Recurring themes (the real signal — repeated across unrelated dimensions):
 
 → next reformulations to try (swept as hard_dice experiments; preference
 steering picks what to try, the metric confirms):
-- **Sharper surface proxy**: k-anneal B preferred for "better contour following"
-  → test k_final above 120 (e.g. 180) on a surface-finish-sensitive shape
-  (sphere / bowl) with the SOTA base. Does a sharper final k lift hard_dice, or
-  only cosmetic dice?
-- **Promote loss_shift=0.5** into the SOTA base (loss_shift B preferred,
-  "follows the contour... top surface could be better") → test loss_shift 0.0 vs
-  0.5 on sphere/box across seeds; watch for over-fitting the path tail.
-- **Top-surface following**: the loss_shift note flags the TOP surface
-  specifically — a candidate for a z-weighted contour term later if the metric
-  confirms loss_shift helps.
-- **NEW (cut-overlap / anti-jaggedness)**: the w_gouge + w_residual notes want
-  adjacent passes to overlap enough to clear all material (no scallop ridges).
-  Candidate reformulations, swept as hard_dice experiments:
-  (a) raise `--multidepth-revs` ONLY on shapes where the exterior is material-
-  bearing all around (so more revs = more overlap, not more air) — but note
-  multidepth_revs A=3.0 was preferred for "less air", so test 3.0 vs 4.5 (not
-  6.0) on box/cyl where the wall is continuous;
-  (b) a loss term that penalizes residual scallop between adjacent orbits
-  (inter-pass residual) — a structural objective change, higher code risk;
-  preference steering says TRY (a) first (cheap flag sweep), the metric
-  confirms whether overlap helps hard_dice without the air-cutting penalty.
-- Air-cutting theme reinforces keeping w_air_time nonzero (1e-3 in SOTA) and
-  the multidepth_contour init; multidepth_revs A=3.0 preferred over higher →
-  keep revs=3.0 (do NOT push finer stepover).
+
+**METRIC OUTCOMES (2026-07-15, all three pref-driven reformulations FAILED to
+lift hard_dice — strong confirmation that contour/finish preferences are
+COSMETIC w.r.t. the deployable carve metric):**
+- **k_final=180** (k-anneal B "better contour following"): NEUTRAL/marginal on
+  all 5 shapes (sphere +0.002, cyl +0.001, pyramid +0.002, bowl +0.0002, box
+  +0.016 1-seed). NOT promoted. See [[pref-signal-largely-cosmetic]].
+- **loss_shift=0.5** (loss_shift B "follows the contour"): NEGATIVE on all 6
+  runs / 3 shapes (box -0.043 both seeds, sphere -0.02, bowl -0.02 to -0.04).
+  NOT promoted; SOTA stays loss_shift=0.0.
+- **cut-overlap / multidepth_revs 4.5** (anti-jaggedness "overlap more"):
+  NEUTRAL/NEGATIVE — box 3.0 beats 4.5 by +0.009 (finer stepover HURTS, extra
+  air), cyl 4.5 +0.0035 (1-seed noise). NOT promoted; SOTA stays revs=3.0.
+  The only preference that ALIGNS with hard_dice is "less air cutting"
+  (coarser stepover), already captured in SOTA.
+
+**PIVOT (2026-07-15):** further preference steering on contour/finish/stepover
+dimensions is unlikely to advance hard_dice — three cosmetically-preferred
+changes all failed the metric. The path to actually move hard_dice is NOT more
+cosmetic-preference encoding; it is non-cosmetic levers the human does NOT
+judge visually, applied where headroom exists (weakest shapes: hole 0.273
+stuck, bowl 0.647 seed-unstable). Both weak shapes are GPU atomic-add
+nondeterminism-limited (variance run-to-run, not init-seed — simulator not
+modifiable), so init tweaks won't help; the lever is the k-anneal SCHEDULE.
+Currently testing:
+- **k_ramp_delay** (hold k at k_init for a fraction of iters before ramping;
+  default 0.0): explicitly motivated by the compute-starved hole — lets it keep
+  soft-carving at fixed 5000 iters without the 2x cost of 10k iters. Sweeping
+  delay 0.3 / 0.5 on the hole (3-seed / 2-seed) + sphere delay=0.3 (regression
+  check on a converged convex shape — risk is under-sharpening). Shape-agnostic.
+  This is the active hard_dice experiment; preference steering is paused on
+  contour/finish dims (queue still stocked for the separate-objective-layer
+  path (a) — the human values the cosmetic qualities even though hard_dice does
+  not).
+
+Legacy reformulation entries (kept for the record; all three have now been
+metric-tested and REJECTED above):
+- **Sharper surface proxy**: k_final=180 → NEUTRAL (rejected).
+- **Promote loss_shift=0.5** → NEGATIVE (rejected).
+- **Top-surface following**: z-weighted contour term — only worth pursuing if a
+  metric-positive lever is found; loss_shift (its proxy) was NEGATIVE, so deprioritize.
+- **NEW (cut-overlap / anti-jaggedness)**: multidepth_revs 4.5 → NEUTRAL/
+  NEGATIVE (rejected); the structural inter-pass residual scallop loss (b) is
+  still untested code-risk, but the stepover sweep failing lowers its prior.
+- Air-cutting theme: keep w_air_time=1e-3, multidepth_contour/cavity init,
+  revs=3.0 (all confirmed by the metric, not just preferred).
 
 ## 7. Gate (Idea 9)
 

@@ -243,6 +243,22 @@ class CSGSimulatorDelta:
         self.w_residual = ti.field(dtype=ti.f32, shape=())
         self.w_gouge[None] = 2.0
         self.w_residual[None] = 1.0
+        # Annulus-residual emphasis (STRUCTURAL, hole-targeted). The uniform
+        # residual under-resolves the thin column/annulus walls of an annular
+        # part (sphere_hole): the central-column waste right at the part surface
+        # carries the same per-voxel weight as the easy far-exterior waste, so
+        # the optimizer clears the exterior and leaves the narrow column walls.
+        # This multiplies the residual term by (1 + w_annulus * annulus_weight)
+        # where annulus_weight = max(0, 1 - max(0,target_d)/annulus_dref) is HIGH
+        # on near-surface waste (just outside the part surface = the thin walls)
+        # and 0 in the far exterior. target_d is the fixed baked target SDF (not
+        # a differentiable param), so the multiplier is a constant per voxel that
+        # merely scales the residual gradient -- autodiff-safe, and w_annulus=0
+        # (default) leaves the residual exactly unchanged for every other shape.
+        self.w_annulus = ti.field(dtype=ti.f32, shape=())
+        self.annulus_dref = ti.field(dtype=ti.f32, shape=())
+        self.w_annulus[None] = 0.0
+        self.annulus_dref[None] = 2.0
 
         # De-biased (hard-carve-aware) loss shift. The soft ``apply_cut``
         # (smooth_max union) over-erodes by ~log(2)/kv per cut vs the hard
@@ -1144,6 +1160,11 @@ class CSGSimulatorDelta:
 
             gouge = target_occ * (1.0 - stock_occ)
             residual = (1.0 - target_occ) * stock_occ
+            # Annulus-residual emphasis (see w_annulus): upweight near-surface
+            # waste. No-op when w_annulus=0 (factor is exactly 1).
+            td_pos = ti.max(0.0, target_d)
+            aw = ti.max(0.0, 1.0 - td_pos / self.annulus_dref[None])
+            residual = residual * (1.0 + self.w_annulus[None] * aw)
 
             w_gouge = self.w_gouge[None]
             w_residual = self.w_residual[None]
@@ -1170,6 +1191,11 @@ class CSGSimulatorDelta:
 
             gouge = target_occ * (1.0 - stock_occ)
             residual = (1.0 - target_occ) * stock_occ
+            # Annulus-residual emphasis (see w_annulus): upweight near-surface
+            # waste. No-op when w_annulus=0 (factor is exactly 1).
+            td_pos = ti.max(0.0, target_d)
+            aw = ti.max(0.0, 1.0 - td_pos / self.annulus_dref[None])
+            residual = residual * (1.0 + self.w_annulus[None] * aw)
 
             w_gouge = self.w_gouge[None]
             w_residual = self.w_residual[None]

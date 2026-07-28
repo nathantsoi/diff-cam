@@ -34,3 +34,7 @@ wandb/
 
 # Local throwaway diagnostic scripts (not part of the repo)
 /diag_init.py
+
+# Independent Overleaf paper clones — nested git repos, not part of this project
+/overleaf-2025-aamas-bluesky/
+/overleaf-autoresearch/
