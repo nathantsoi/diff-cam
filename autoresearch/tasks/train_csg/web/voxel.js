@@ -361,8 +361,14 @@ export async function createVoxelViewer(canvas, options = {}) {
     return { available: false };
   }
 
-  // Stock in normalized [0,1]^3. toolRadius normalized (3.175mm / 25.4mm).
-  const stockSize = [1, 1, 1];
+  // Stock box in "aspect space": each axis spans L_axis/L_max, so cubic stock is
+  // [1,1,1] and a non-cubic (grid/STEP) stock is a box. Run trajectories stay
+  // per-axis normalized [0,1]; `wpt` maps them into aspect space at use. All
+  // radii/heights (tool, holder) are normalized by L_max, so physical shapes
+  // stay undistorted and the tool stays circular on every axis.
+  let ASPECT = [1, 1, 1];
+  const wpt = p => [p[0]*ASPECT[0], p[1]*ASPECT[1], p[2]*ASPECT[2]];
+  let stockSize = [1, 1, 1];
   const stockLocation = [0, 0, 0];
   const uiScale = 1.0;
   // Tool + holder geometry, in stock-normalized units, matching the Taichi
@@ -385,8 +391,9 @@ export async function createVoxelViewer(canvas, options = {}) {
   const numVoxels = gridSize[0]*gridSize[1]*gridSize[2];
   const maxTriangles = Math.floor(numVoxels * 0.2);
   const maxVertices = maxTriangles * 3;
-  const voxelSize = [stockSize[0]/userGridSize[0], stockSize[1]/userGridSize[1], stockSize[2]/userGridSize[2]];
-  const gridOffset = [stockLocation[0]-padding*voxelSize[0], stockLocation[1]-padding*voxelSize[1], stockLocation[2]-padding*voxelSize[2]];
+  // `let`: both are recomputed when a run's aspect changes (see setToolGeometry).
+  let voxelSize = [stockSize[0]/userGridSize[0], stockSize[1]/userGridSize[1], stockSize[2]/userGridSize[2]];
+  let gridOffset = [stockLocation[0]-padding*voxelSize[0], stockLocation[1]-padding*voxelSize[1], stockLocation[2]-padding*voxelSize[2]];
 
   const U = GPUBufferUsage;
   const gridBuffer = device.createBuffer({ size: numVoxels*4, usage: U.STORAGE | U.COPY_DST | U.COPY_SRC });
@@ -733,6 +740,18 @@ export async function createVoxelViewer(canvas, options = {}) {
     if (typeof g.toolHeight === "number") TOOL_HEIGHT = g.toolHeight;
     if (typeof g.holderRadius === "number") holderRadius = g.holderRadius;
     if (typeof g.holderHeight === "number") HOLDER_HEIGHT = g.holderHeight;
+    // Stock-box aspect (L/maxL per axis, from the run's stock or its target
+    // NPZ): resize the SDF grid's world box so non-cubic (grid/STEP) stock
+    // renders and carves undistorted. The grid resolution stays fixed; only
+    // the per-axis voxel size changes.
+    if (Array.isArray(g.aspect) && g.aspect.length === 3
+        && g.aspect.some((v, i) => Math.abs(v - ASPECT[i]) > 1e-9)) {
+      ASPECT = g.aspect.map(v => Math.max(1e-3, Number(v) || 1));
+      stockSize = [...ASPECT];
+      voxelSize = [stockSize[0]/userGridSize[0], stockSize[1]/userGridSize[1], stockSize[2]/userGridSize[2]];
+      gridOffset = [stockLocation[0]-padding*voxelSize[0], stockLocation[1]-padding*voxelSize[1], stockLocation[2]-padding*voxelSize[2]];
+      updateParams(0);
+    }
     toolLogged = false;
     // The cut radius may have changed, so re-carve the already-played prefix from
     // a fresh stock up to the current step.
@@ -767,7 +786,7 @@ export async function createVoxelViewer(canvas, options = {}) {
     let hasTool = false, hasHolder = false;
     if (trajectoryPts) {
       const rstep = Math.max(0, Math.min(reachedStep, trajectoryPts.length-1));
-      const tip = trajectoryPts[rstep];
+      const tip = wpt(trajectoryPts[rstep]);
       // Match the Taichi CSGSimulatorDelta tool model (simulator/csg_simulator.py):
       //   tool:   flat-end Z cylinder, bottom at tip, height TOOL_HEIGHT.
       //   holder: Z cylinder stacked on the tool's top (bottom = tip + tool_height),
@@ -825,7 +844,7 @@ export async function createVoxelViewer(canvas, options = {}) {
     const ctrlPts = opts.ctrlPts || null;
     const segs = [];
     if (showCube) {
-      STOCK_WIRE.forEach(([a,b]) => segs.push({ a, b, color:[0.22,0.26,0.30,0.5] }));
+      STOCK_WIRE.forEach(([a,b]) => segs.push({ a: wpt(a), b: wpt(b), color:[0.22,0.26,0.30,0.5] }));
     }
     if (showAxes) {
       const L = 0.5;
@@ -836,17 +855,18 @@ export async function createVoxelViewer(canvas, options = {}) {
     if (cmdPts && cmdPts.length > 1) {
       const cc = ctrlPts ? [0.72,0.52,0.92,0.6] : [0.6,0.65,0.7,0.35];
       for (let i=1;i<cmdPts.length;i++){
-        segs.push({ a:cmdPts[i-1], b:cmdPts[i], color:cc });
+        segs.push({ a:wpt(cmdPts[i-1]), b:wpt(cmdPts[i]), color:cc });
       }
     }
     if (ctrlPts && ctrlPts.length) {
       // Control polygon chords (the spline lives inside this hull)…
       for (let i=1;i<ctrlPts.length;i++){
-        segs.push({ a:ctrlPts[i-1], b:ctrlPts[i], color:[0.85,0.60,1.0,0.30] });
+        segs.push({ a:wpt(ctrlPts[i-1]), b:wpt(ctrlPts[i]), color:[0.85,0.60,1.0,0.30] });
       }
       // …and a small 3-axis cross marking each control point.
       const Lc = 0.012;
-      ctrlPts.forEach(p => {
+      ctrlPts.forEach(pn => {
+        const p = wpt(pn);
         [[1,0,0],[0,1,0],[0,0,1]].forEach(([dx,dy,dz])=>{
           segs.push({ a:[p[0]-dx*Lc,p[1]-dy*Lc,p[2]-dz*Lc],
                       b:[p[0]+dx*Lc,p[1]+dy*Lc,p[2]+dz*Lc], color:[0.90,0.62,1.0,0.95] });
@@ -858,26 +878,26 @@ export async function createVoxelViewer(canvas, options = {}) {
       // Not-yet-reached suffix: dim, so playback progress is visible.
       for (let i=1;i<trajectoryPts.length;i++){
         if (i <= rstep) continue;
-        segs.push({ a:trajectoryPts[i-1], b:trajectoryPts[i], color:[0.22,0.45,0.66,0.25] });
+        segs.push({ a:wpt(trajectoryPts[i-1]), b:wpt(trajectoryPts[i]), color:[0.22,0.45,0.66,0.25] });
       }
       // Reached prefix: bright; stage 2 (staged runs) in amber to distinguish
       // the second trajectory from the first.
       for (let i=1;i<=rstep;i++){
         const c = (stageBoundaryIdx != null && i > stageBoundaryIdx)
           ? [0.98,0.75,0.14,0.95] : [0.36,0.75,1.0,0.95];
-        segs.push({ a:trajectoryPts[i-1], b:trajectoryPts[i], color:c });
+        segs.push({ a:wpt(trajectoryPts[i-1]), b:wpt(trajectoryPts[i]), color:c });
       }
       // Stage boundary marker (staged runs): amber 3-axis cross where stage 1
       // ends and stage 2 begins.
       if (stageBoundaryIdx != null && stageBoundaryIdx < trajectoryPts.length) {
-        const bp = trajectoryPts[stageBoundaryIdx], L = 0.06;
+        const bp = wpt(trajectoryPts[stageBoundaryIdx]), L = 0.06;
         [[1,0,0],[0,1,0],[0,0,1]].forEach(([dx,dy,dz])=>{
           segs.push({ a:bp, b:[bp[0]+dx*L,bp[1]+dy*L,bp[2]+dz*L], color:[0.98,0.75,0.14,1] });
           segs.push({ a:bp, b:[bp[0]-dx*L,bp[1]-dy*L,bp[2]-dz*L], color:[0.98,0.75,0.14,1] });
         });
       }
       // tool-tip marker: small 3-axis cross at the current tip.
-      const tip = trajectoryPts[rstep], L = 0.05;
+      const tip = wpt(trajectoryPts[rstep]), L = 0.05;
       [[1,0,0,1.0,0.82,0.47],[0,1,0,0.34,0.83,0.39],[0,0,1,0.35,0.63,1.0]].forEach(([dx,dy,dz,r,g,b])=>{
         segs.push({ a:tip, b:[tip[0]+dx*L,tip[1]+dy*L,tip[2]+dz*L], color:[r,g,b,1] });
         segs.push({ a:tip, b:[tip[0]-dx*L,tip[1]-dy*L,tip[2]-dz*L], color:[r,g,b,1] });

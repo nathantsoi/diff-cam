@@ -1861,11 +1861,18 @@ let voxelBadge = null;
 // (so non-default stock/tool sizes match their video too); we fall back to the
 // sim's own defaults (tool_radius_mm 3.175, tool_height_mm 25.0, 2.5"-diameter
 // holder, 10"-Z work volume, 1" stock) when the field is absent.
-const DEFAULT_TOOL_GEOM = { toolRadius: 0.125, toolHeight: 0.984, holderRadius: 1.25, holderHeight: 10.0 };
+const DEFAULT_TOOL_GEOM = { toolRadius: 0.125, toolHeight: 0.984, holderRadius: 1.25, holderHeight: 10.0, aspect: [1,1,1] };
 let curToolGeom = { ...DEFAULT_TOOL_GEOM };
 function toolGeomForRun(d){
   if (d && d.tool_geom) return { ...DEFAULT_TOOL_GEOM, ...d.tool_geom };
   return { ...DEFAULT_TOOL_GEOM };
+}
+// Normalized run coords -> "aspect space" (each axis L/maxL): the display
+// space where non-cubic (grid/STEP) stock renders undistorted. Cubic stock
+// has aspect [1,1,1], so this is a no-op for the classic scenarios.
+function toWorld(p){
+  const A = curToolGeom.aspect || [1,1,1];
+  return [p[0]*A[0], p[1]*A[1], p[2]*A[2]];
 }
 
 function setVoxelBadge(text, ok){
@@ -2204,8 +2211,13 @@ function renderViewport(){
   const cmd = opt.cmd ? curD.trajectory.cmd : null;
   const cstep = Math.max(0, Math.min(pts.length-1, Math.round(pbStep)));
 
-  // Pre-project everything (with depth) for sorting.
-  const P = p => project(p, cam, W, H);
+  // Pre-project everything (with depth) for sorting. Run coordinates are
+  // per-axis normalized [0,1]; `P` maps them into aspect space first so
+  // non-cubic (grid/STEP) stock draws undistorted. `Praw` projects points
+  // that are ALREADY in aspect space (e.g. the tool-cylinder rings, whose
+  // radius must stay circular and so must not be scaled per-axis).
+  const P = p => project(toWorld(p), cam, W, H);
+  const Praw = p => project(p, cam, W, H);
   const projPts = pts.map(P);
   const projCmd = cmd ? cmd.map(P) : null;
 
@@ -2327,14 +2339,19 @@ function renderViewport(){
   const tipPt = pts[cstep];
   if (tipPt) {
     const N = 24;
+    // Tip mapped into aspect space once; the rings are then built directly in
+    // that space with an unscaled radius (tool/holder radii are already
+    // normalized by the longest stock axis), so the cutter stays circular on
+    // non-cubic stock instead of being squashed with the geometry.
+    const tipW = toWorld(tipPt);
     // Draw a vertical Z cylinder from bottomZ..topZ on the tip axis in `fill` color.
     const drawCyl = (bottomZ, topZ, R, fill) => {
       const ring = (zz) => {
         const out = [];
-        for (let i=0;i<N;i++){ const a=(i/N)*Math.PI*2; out.push([tipPt[0]+R*Math.cos(a), tipPt[1]+R*Math.sin(a), zz]); }
+        for (let i=0;i<N;i++){ const a=(i/N)*Math.PI*2; out.push([tipW[0]+R*Math.cos(a), tipW[1]+R*Math.sin(a), zz]); }
         return out;
       };
-      const Pb = ring(bottomZ).map(P), Pt = ring(topZ).map(P);
+      const Pb = ring(bottomZ).map(Praw), Pt = ring(topZ).map(Praw);
       for (let i=0;i<N;i++){
         const j=(i+1)%N;
         const a=Pb[i], b=Pb[j], c=Pt[j], d=Pt[i];
@@ -2352,8 +2369,10 @@ function renderViewport(){
           .attr("stroke",fill).attr("stroke-width",0.5));
       }
     };
-    const toolTop = tipPt[2] + curToolGeom.toolHeight;
-    drawCyl(tipPt[2], toolTop, curToolGeom.toolRadius, "#e63333");
+    // Heights are normalized by the longest stock axis, i.e. already aspect
+    // space, so they stack on the aspect-space tip Z (not the raw run Z).
+    const toolTop = tipW[2] + curToolGeom.toolHeight;
+    drawCyl(tipW[2], toolTop, curToolGeom.toolRadius, "#e63333");
     drawCyl(toolTop, toolTop + curToolGeom.holderHeight, curToolGeom.holderRadius, "#8c939c");
   }
 
