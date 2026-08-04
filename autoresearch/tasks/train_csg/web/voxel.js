@@ -694,15 +694,11 @@ export async function createVoxelViewer(canvas, options = {}) {
 
   // ---- public API ----
   // Trajectory points are normalized [0,1]^3. Re-init stock and carve 0..step-1.
+  // The SDF grid lives in aspect space (stock box = [0, ASPECT]), so cut segments
+  // must be mapped through wpt() — the radius stays as-is (normalized by L_max,
+  // circular in aspect space, matching the physical tool).
   let carvedStep = 0, trajectoryPts = null, stageBoundaryIdx = null;
-  const cutsFor = (upto) => {
-    const cuts = [];
-    for (let i=0; i<upto && i+1<trajectoryPts.length; i++){
-      cuts.push({ startX:trajectoryPts[i][0], startY:trajectoryPts[i][1], startZ:trajectoryPts[i][2], radius:toolRadius,
-                  endX:trajectoryPts[i+1][0], endY:trajectoryPts[i+1][1], endZ:trajectoryPts[i+1][2] });
-    }
-    return cuts;
-  };
+  const cutsFor = (upto) => cutsForRange(0, upto);
   const carveToStep = (step) => {
     if (!trajectoryPts) return;
     const upto = Math.max(0, Math.min(step, trajectoryPts.length-1));
@@ -717,8 +713,9 @@ export async function createVoxelViewer(canvas, options = {}) {
   const cutsForRange = (from, to) => {
     const cuts = [];
     for (let i=from; i<to && i+1<trajectoryPts.length; i++){
-      cuts.push({ startX:trajectoryPts[i][0], startY:trajectoryPts[i][1], startZ:trajectoryPts[i][2], radius:toolRadius,
-                  endX:trajectoryPts[i+1][0], endY:trajectoryPts[i+1][1], endZ:trajectoryPts[i+1][2] });
+      const a = wpt(trajectoryPts[i]), b = wpt(trajectoryPts[i+1]);
+      cuts.push({ startX:a[0], startY:a[1], startZ:a[2], radius:toolRadius,
+                  endX:b[0], endY:b[1], endZ:b[2] });
     }
     return cuts;
   };
