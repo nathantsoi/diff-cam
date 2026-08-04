@@ -22,9 +22,25 @@ Install [uv](https://docs.astral.sh/uv/) and sync the environment:
 uv sync
 ```
 
-GPU work runs on Taichi's CUDA backend. Live GUIs (the continuous gradient-descent
-viewer and the discrete env's GGUI window) need a display; on headless machines
-install TurboVNC and start a server, then run inside that session:
+GPU work runs on Taichi's CUDA backend.
+
+**On WSL2, export `LD_LIBRARY_PATH` before any GPU run:**
+
+```bash
+export LD_LIBRARY_PATH=/usr/lib/wsl/lib:$LD_LIBRARY_PATH
+```
+
+WSL ships the driver as `/usr/lib/wsl/lib/libcuda.so`, but only registers
+`libcuda.so.1` with `ldconfig`. Taichi's loader asks for the unversioned
+`libcuda.so`, misses it, and **silently falls back to CPU** — it prints
+`libcuda.so lib not found` / `Starting on arch=x64` and then trains ~100x
+slower rather than failing. PyTorch is unaffected (`torch.cuda.is_available()`
+still reports `True`), so this is easy to miss. With the export, Taichi reports
+`Starting on arch=cuda`.
+
+Live GUIs (the continuous gradient-descent viewer and the discrete env's GGUI
+window) need a display; on headless machines install TurboVNC and start a
+server, then run inside that session:
 
 ```bash
 ./scripts/setup.sh
