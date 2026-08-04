@@ -660,11 +660,15 @@ def init_reference_path(sim, tool_start, n_samples, mode="raster", seed=0,
                                                   ramp_deg=ramp_deg)
             if new_total > 0.995 * total:
                 total = new_total
+                # Built outside the f-string: a multi-line expression inside
+                # braces is PEP 701 (Python 3.12+), but pyproject declares
+                # requires-python ">=3.10", where it is a SyntaxError.
+                ramp_note = ("; ramp entries at %.0f deg are irreducible -- "
+                             "raise --max-steps, --ramp-deg, or --dt" % ramp_deg
+                             if ramp_deg > 0 else "")
                 print(f"[sweep] init coarsening hit its floor at {total:.0f} mm "
                       f"> budget {max_len_mm:.0f} mm ({total - max_len_mm:.0f} mm "
-                      f"over{'; ramp entries at %.0f deg are irreducible -- '
-                            'raise --max-steps, --ramp-deg, or --dt' % ramp_deg
-                            if ramp_deg > 0 else ''})", flush=True)
+                      f"over{ramp_note})", flush=True)
                 break
             total = new_total
         if stepover_frac > 0.8:
