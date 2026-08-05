@@ -45,6 +45,7 @@ class CSGSimulatorDelta:
         enforce_speed_limits=True,
         target_sdf_path=None,
         target_sdf_array=None,
+        stock_history_grad=True,
     ):
         """Differentiable CSG simulator over a small STOCK box placed inside a
         larger machine work volume.
@@ -548,10 +549,16 @@ class CSGSimulatorDelta:
         self.acc_psum = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
 
         # ---- Stock ----
+        # The (T+1) x N^3 history is the memory wall: with needs_grad Taichi
+        # allocates primal + adjoint, 2*(T+1)*N^3*4 bytes (34 GB at N=128,
+        # T=2048 — the July TACC scaling OOMs). The sweep method never runs
+        # this field under a Tape (its own SweepCarve loss owns the autodiff;
+        # sim.forward here is eval-only), so the adjoint half is dead weight
+        # there — callers pass stock_history_grad=False for method=sweep.
         self.stock = ti.field(
             dtype=ti.f32,
             shape=(max_steps + 1, self.Nx, self.Ny, self.Nz),
-            needs_grad=True,
+            needs_grad=bool(stock_history_grad),
         )
         self.stock_volume = ti.field(dtype=ti.f32, shape=())
         # Saved mid-cut stock init (for staged training): when use_saved_init

@@ -978,7 +978,11 @@ def main():
                             rapid_ipm=args.rapid_ipm, feed_ipm=args.feed_ipm,
                             safe_distance_in=args.safe_distance_in,
                             enforce_speed_limits=args.enforce_speed_limits,
-                            target_sdf_path=args.target_sdf_path)
+                            target_sdf_path=args.target_sdf_path,
+                            # Sweep never differentiates through the stock
+                            # history (SweepCarve owns the loss Tape), so skip
+                            # the adjoint half of the (T+1) x N^3 field.
+                            stock_history_grad=(args.method != "sweep"))
     # Grid targets define their own physical stock box (from the NPZ); reflect
     # the sim's actual box back into args so downstream consumers (z-floor,
     # structured inits, G-code export) use the real dimensions.
