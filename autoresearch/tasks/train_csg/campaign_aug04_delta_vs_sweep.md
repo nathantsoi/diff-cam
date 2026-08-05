@@ -29,8 +29,31 @@ Sweep = Aditya's waypoint/B-spline method at its tuned operating point (2000 ite
 
 A100 vs 4070 training time (same config, rrph sweep): 844 s vs 2060 s (2.4x).
 
-Still pending: the N/T resolution-scaling matrix redo (array job 3341627, running —
-July's runs died to the mis-tagged taichi 1.7.4 wheel [instant GLIBC_2.32
-ImportError on ls6's glibc 2.28] plus the real (T+1)*N^3 adjoint OOMs; both fixed).
+## Resolution/T scaling matrix redo (array 3341627, A100-40GB, sha cd96daa)
+
+July's attempt died twice over: the mis-tagged taichi 1.7.4 wheel (claims
+manylinux_2_27, needs GLIBC_2.32 — instant ImportError on ls6's glibc 2.28)
+killed fresh envs, and the (T+1)*N^3 stock adjoint OOM'd the rest. Redo with
+the dead-adjoint fix (c65fe2d) + taichi==1.7.2 pin, vs July per cell:
+
+| method | N | T | July vram | redo vram | outcome change |
+|---|---|---|---|---|---|
+| sweep | 96 | 128 | 1142 MB | **694 MB** | ok, -adjoint exactly |
+| sweep | 128 | 256 | 4406 MB | **2358 MB** | ok, -2048 MB = T=256 adjoint |
+| sweep | 192 | 128 | 7350 MB | **3862 MB** | ok — sweep now ~half of delta (7254 MB) |
+| delta | any | any | unchanged | unchanged | fix is sweep-only, as designed |
+| sweep | 128 | 1024 | fail (OOM) | fail (**int32**) | alloc now SUCCEEDS (8.5 GB recorded), then Taichi asserts `total_n <= int32max` |
+| sweep | 256 | 128 | fail (OOM) | fail (**int32**) | same: 129*256^3 = 2.16e9 > 2^31 |
+| sweep | 128/320 | 2048/128 | oom | cuda_illegal_address | int32 overflow wrapping indices in another kernel path |
+| both | 128 | 5120 | oom | oom | genuine bytes > 40 GB |
+
+**Finding: memory is no longer sweep's binding wall — indexing is.** The
+stock history field's ELEMENT COUNT (T+1)*N^3 crosses Taichi's int32
+dense-field limit (2.147e9) at exactly T=1024/N=128 and N=256/T=128; past it,
+kernels either assert (demote_dense_struct_fors) or wrap into illegal
+addresses. The tier-2 fix (2-slot rolling stock for sweep, needs rolling
+per-step diagnostics) caps elements at 2*N^3 — int32-safe to N~1000 — and
+makes sweep memory T-independent. It is not an optimization; it is the
+enabling change for T>=1024 or N>=256.
 
 Historical anchors: delta-on-rrph 3x5000 iters = 0.6870 flatline (delta_vs_sweep_step.md); delta analytic bests from the July W&B evals = sphere 0.9306 (physically invalid), cylinder 0.9162, box 0.8921, pyramid 0.8565 (hard, executed); Nathan's feedback-loop champion sphere 0.741.
