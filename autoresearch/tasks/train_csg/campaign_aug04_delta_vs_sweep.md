@@ -56,4 +56,38 @@ per-step diagnostics) caps elements at 2*N^3 — int32-safe to N~1000 — and
 makes sweep memory T-independent. It is not an optimization; it is the
 enabling change for T>=1024 or N>=256.
 
+## Limits campaign (rolling stock, commit cc59940; A100 fleet 3341748 + matrix 3341749, Aug 5)
+
+The 2-slot rolling stock (slot 0 = pristine, slot 1 = in-place working stock;
+history diagnostics recomputed by one cached replay) removes both walls and,
+by retiring the bulk eval kernels, makes sweep ~3x faster wall-clock at equal
+iters. Validated: delta byte-identical (rrph champion config, exact hard
+metrics + identical peak VRAM); sweep sphere reproduces to best-checkpoint
+noise; titan T=832 runs on the 8 GB 4070 at 1.25 GB.
+
+**Probe matrix (iters=2):** every sweep cell passes — T-axis at N=128 up to
+**T=20,480 at a flat 310 MB** (memory provably T-independent; 156x delta's
+numeric T ceiling), N-axis at T=128 up to **N=896 at 22.2 GB** (bytes match
+2*N^3 + aux fields exactly; the 40 GB frontier extrapolates to N~1024 =
+0.1 mm voxels on a 100 mm part), corners N=256/T=2048 (758 MB) and
+N=512/T=832 (4.3 GB) both fine. Delta control rows fail with exit 134
+exactly as in July — the fix touched nothing on that path.
+
+**Quality at scale (2000 iters, seed 1):**
+
+| target | T=832 | T=1536 | T=2048 | T=2560 | T=4096 | reading |
+|---|---|---|---|---|---|---|
+| titan_hi | 0.8616 | **0.9462** | — | 0.9342 | — | path-starved until T~1536, then iteration-bound: more ctrl points dilute a fixed 2000-iter budget |
+| rrph_hi | 0.9742 | — | **0.9742** | — | — | control: at the reachability ceiling, 2.5x more program changes nothing |
+| bowl_hi | (OOM pre-fix) | — | 0.0644 | — | 0.0712 | +~0.007 per doubling: removal-volume arithmetic, not simulator limits; needs multi-pass roughing structurally |
+
+**The limits of the algorithm, stated:** with the rolling stock, sweep's
+scaling is bounded by (1) compute time, linear in T*N^3 per argmin refresh;
+(2) ~N=1024 on 40 GB from the auxiliary N^3 fields; (3) optimization budget —
+past coverage sufficiency, quality declines unless iters scale with n_ctrl;
+and (4) single-continuous-path removal volume on bulk-removal parts (bowl),
+which no feasible T fixes — the structural next step is CAM-style multi-pass
+roughing. Force scheduling held <=90 N with zero tool/part breakage across
+every run at every scale.
+
 Historical anchors: delta-on-rrph 3x5000 iters = 0.6870 flatline (delta_vs_sweep_step.md); delta analytic bests from the July W&B evals = sphere 0.9306 (physically invalid), cylinder 0.9162, box 0.8921, pyramid 0.8565 (hard, executed); Nathan's feedback-loop champion sphere 0.741.
