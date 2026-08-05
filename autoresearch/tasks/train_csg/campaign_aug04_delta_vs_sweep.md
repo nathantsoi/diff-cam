@@ -19,6 +19,18 @@ Sweep = Aditya's waypoint/B-spline method at its tuned operating point (2000 ite
 | grid:titan_hi | delta | **0.6080** | 0.6060 | +0.005 | 0.611 | 3446 | 94% | 0 | — | OK |
 | grid:bowl_hi | delta | **0.0591** | 0.0590 | +0.000 | 0.052 | 4698 | 4% | 0 | — | OK |
 
-Pending cells (TACC, awaiting tunnel): sweep on titan_hi / bowl_hi at full T=832 (local 8 GB OOM pre-fix), the N/T resolution-scaling matrix redo, and A100 training-time columns.
+## TACC A100 cells (Aug 5, ls6 gpu-a100, commit c65fe2d fix + taichi 1.7.2 pin)
+
+| target | method | hard dice | baseline | improv | train s | peak VRAM | note |
+|---|---|---|---|---|---|---|---|
+| grid:rrph_hi | sweep | **0.9739** | 0.6870 | +0.917 | 844 | 2.6 GB | validation: reproduces local 0.9742; VRAM halved by the dead-adjoint fix (was 5.1 GB) |
+| grid:titan_hi | sweep | **0.8616** | 0.6060 | +0.649 | 2778 | 3.9 GB | full T=832 (local 8 GB card OOM'd pre-fix); delta cell sits at baseline |
+| grid:bowl_hi | sweep | **0.0584** | 0.0590 | -0.001 | 4292 | 5.4 GB | **both methods fail bowl**: ~94% of a 260x260x76 mm block must go — orders beyond a T=832 program; the scaling-matrix motivation in one row |
+
+A100 vs 4070 training time (same config, rrph sweep): 844 s vs 2060 s (2.4x).
+
+Still pending: the N/T resolution-scaling matrix redo (array job 3341627, running —
+July's runs died to the mis-tagged taichi 1.7.4 wheel [instant GLIBC_2.32
+ImportError on ls6's glibc 2.28] plus the real (T+1)*N^3 adjoint OOMs; both fixed).
 
 Historical anchors: delta-on-rrph 3x5000 iters = 0.6870 flatline (delta_vs_sweep_step.md); delta analytic bests from the July W&B evals = sphere 0.9306 (physically invalid), cylinder 0.9162, box 0.8921, pyramid 0.8565 (hard, executed); Nathan's feedback-loop champion sphere 0.741.
