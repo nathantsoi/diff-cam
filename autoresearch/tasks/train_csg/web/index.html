@@ -389,6 +389,15 @@ const hd = d => {
   const v = d.metrics && d.metrics.hard_dice;
   return (typeof v === "number" && !Number.isNaN(v)) ? v : d.dice;
 };
+// SOFT dice for display. Prefer the run's own metrics: d.dice is the results.tsv
+// row value for matched experiments (soft by protocol) but load_run's
+// hard-preferred value for /__api/run records, which would render soft==hard and
+// hide exactly the soft/hard detachment worth seeing. The sweep trainer logs
+// soft as 0.0 (single hard carve) — fall through to d.dice there.
+const softd = d => {
+  const v = d.metrics && d.metrics.dice;
+  return (typeof v === "number" && v > 0 && !Number.isNaN(v)) ? v : d.dice;
+};
 // Discovered experiment batch directories under runs/<name>/ — populated from
 // /__api/batches so new branches appear without code changes.
 let BATCHES = [];
@@ -1072,7 +1081,7 @@ function renderScatter() {
     .on("mouseover",(ev,d)=>{
       tip.style.display="block";
       const m=d.metrics||{};
-      tip.innerHTML = `<div class="t-title">#${d.idx} · ${d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)}) · ${d.status}</div>` +
+      tip.innerHTML = `<div class="t-title">#${d.idx} · ${d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${softd(d).toFixed(4)}) · ${d.status}</div>` +
         (m.air_time!=null ? `<div>air ${m.air_time.toFixed(2)} s · break ${fmtBreak(m.break_prob_any)}</div>` : ``) +
         `<div>${d.description||"(no description)"}</div>` +
         (d.run_dir ? `<div class="t-cmd">▶ click to view trajectory &amp; downloads</div>` :
@@ -1663,7 +1672,7 @@ function renderScatter3D() {
     .on("mouseover",(ev,o)=>{
       tip.style.display="block";
       const m=o.d.metrics;
-      tip.innerHTML = `<div class="t-title">#${o.d.idx} · ${o.d.shape||"?"} · hdice ${hd(o.d).toFixed(4)} (soft ${o.d.dice.toFixed(4)}) · ${o.d.status}</div>` +
+      tip.innerHTML = `<div class="t-title">#${o.d.idx} · ${o.d.shape||"?"} · hdice ${hd(o.d).toFixed(4)} (soft ${softd(o.d).toFixed(4)}) · ${o.d.status}</div>` +
         `<div>air-cut time <b>${m.air_time.toFixed(2)} s</b> · total <b>${(m.total_time||0).toFixed(1)} s</b></div>` +
         `<div>break prob (any) <b>${fmtBreak(m.break_prob_any)}</b> · max <b>${fmtBreak(m.break_prob_max)}</b></div>` +
         `<div>${o.d.description||"(no description)"}</div>` +
@@ -1740,8 +1749,8 @@ function selectExperiment(d) {
   card.style.display = "block";
   const isRun = d.idx == null;
   document.getElementById("detail-title").textContent = isRun
-    ? `Run — ${d.name||d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)})`
-    : `Experiment #${d.idx} — ${d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${d.dice.toFixed(4)}) · ${d.status}`;
+    ? `Run — ${d.name||d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${softd(d).toFixed(4)})`
+    : `Experiment #${d.idx} — ${d.shape||"?"} · hdice ${hd(d).toFixed(4)} (soft ${softd(d).toFixed(4)}) · ${d.status}`;
 
   const meta = document.getElementById("meta");
   meta.innerHTML = `

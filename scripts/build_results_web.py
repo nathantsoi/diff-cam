@@ -336,6 +336,11 @@ def find_results_row(run_rec):
             d = abs(row_dice - rd)
             if hd is not None:
                 d = min(d, abs(row_dice - hd))
+            # Same soft-dice blind spot as match_row.dist: run_rec["dice"] is
+            # hard-preferred, so also test the raw soft metric.
+            soft = (run_rec.get("metrics") or {}).get("dice")
+            if soft:
+                d = min(d, abs(row_dice - float(soft)))
             if d <= best_d:
                 best_d, best = d, r
     return best
@@ -450,6 +455,13 @@ def match_row(row_dice, shape, iters, seed, index):
         hd = r.get("hard_dice")
         if hd is not None:
             d = min(d, abs(hd - row_dice))
+        # load_run's "dice" prefers hard_dice, so a modern run's SOFT dice never
+        # reaches this comparison — yet protocol rows carry soft in the dice
+        # column. Without this, any run whose soft/hard gap exceeds DICE_TOL
+        # (i.e. exactly the soft-collapse cases) can never match its row.
+        soft = (r.get("metrics") or {}).get("dice")
+        if soft:
+            d = min(d, abs(float(soft) - row_dice))
         return d
     best = min(cands, key=dist)
     if dist(best) > DICE_TOL:
