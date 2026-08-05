@@ -79,7 +79,7 @@ exactly as in July — the fix touched nothing on that path.
 |---|---|---|---|---|---|---|
 | titan_hi | 0.8616 | **0.9462** | — | 0.9342 | — | path-starved until T~1536, then iteration-bound: more ctrl points dilute a fixed 2000-iter budget |
 | rrph_hi | 0.9742 | — | **0.9742** | — | — | control: at the reachability ceiling, 2.5x more program changes nothing |
-| bowl_hi | (OOM pre-fix) | — | 0.0644 | — | 0.0712 | +~0.007 per doubling: removal-volume arithmetic, not simulator limits; needs multi-pass roughing structurally |
+| bowl_hi | (OOM pre-fix) | — | 0.0644 | — | 0.0712 | T=8192 (1000 it): **0.0800**. +~0.008 per T-doubling at 0.7 GB flat: removal-volume arithmetic, not simulator limits — reaching ~0.9 would need T in the hundreds of thousands. Structural next step: multi-pass roughing |
 
 **The limits of the algorithm, stated:** with the rolling stock, sweep's
 scaling is bounded by (1) compute time, linear in T*N^3 per argmin refresh;
