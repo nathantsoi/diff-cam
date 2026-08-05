@@ -637,7 +637,7 @@ def eval_metrics(sim, T, dx):
     accuracy score (0 = idle, 1 = perfect). stock[0] is the pristine uncut stock
     (forward writes stock[t+1], never stock[0]), so it is the right baseline for
     both soft and hard carves."""
-    stock = sim.stock.to_numpy()[T - 1]
+    stock = sim.stock.to_numpy()[sim.hist_index(T - 1)]
     target = sim.target.to_numpy()
     uncut = sim.stock.to_numpy()[0]
     m = _metrics(stock, target, dx, uncut)  # +dice_baseline/dice_improvement
@@ -717,7 +717,7 @@ def composite_score(m, args, T, dt):
 def export_stls(sim, T, dx, run_dir, step, track):
     """Export initial stock / carved stock / target meshes (shared `_sdf_to_stl`)."""
     initial_stock = sim.stock.to_numpy()[0].copy()      # before the first cut
-    carved_stock = sim.stock.to_numpy()[T - 1].copy()
+    carved_stock = sim.stock.to_numpy()[sim.hist_index(T - 1)].copy()
     target = sim.target.to_numpy().copy()
 
     mesh_dir = os.path.join(run_dir, "meshes")
@@ -980,9 +980,12 @@ def main():
                             enforce_speed_limits=args.enforce_speed_limits,
                             target_sdf_path=args.target_sdf_path,
                             # Sweep never differentiates through the stock
-                            # history (SweepCarve owns the loss Tape), so skip
-                            # the adjoint half of the (T+1) x N^3 field.
-                            stock_history_grad=(args.method != "sweep"))
+                            # history (SweepCarve owns the loss Tape), so it
+                            # gets the 2-slot rolling stock: no adjoint, no
+                            # (T+1)*N^3 element count — memory and Taichi's
+                            # int32 field limit both become T-independent.
+                            stock_history_grad=(args.method != "sweep"),
+                            stock_history_slots=(2 if args.method == "sweep" else None))
     # Grid targets define their own physical stock box (from the NPZ); reflect
     # the sim's actual box back into args so downstream consumers (z-floor,
     # structured inits, G-code export) use the real dimensions.
@@ -1884,7 +1887,7 @@ def main():
                 # (matches the jul1 baseline that the task spec ceilings refer
                 # to).
                 sim.forward(T)
-                soft_stock = sim.stock.to_numpy()[T - 1]
+                soft_stock = sim.stock.to_numpy()[sim.hist_index(T - 1)]
                 soft_target = sim.target.to_numpy()
                 soft_uncut = sim.stock.to_numpy()[0]
                 soft_m = _metrics(soft_stock, soft_target, dx, soft_uncut)

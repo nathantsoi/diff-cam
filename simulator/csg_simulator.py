@@ -46,6 +46,7 @@ class CSGSimulatorDelta:
         target_sdf_path=None,
         target_sdf_array=None,
         stock_history_grad=True,
+        stock_history_slots=None,
     ):
         """Differentiable CSG simulator over a small STOCK box placed inside a
         larger machine work volume.
@@ -549,17 +550,41 @@ class CSGSimulatorDelta:
         self.acc_psum = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
 
         # ---- Stock ----
-        # The (T+1) x N^3 history is the memory wall: with needs_grad Taichi
-        # allocates primal + adjoint, 2*(T+1)*N^3*4 bytes (34 GB at N=128,
-        # T=2048 — the July TACC scaling OOMs). The sweep method never runs
-        # this field under a Tape (its own SweepCarve loss owns the autodiff;
-        # sim.forward here is eval-only), so the adjoint half is dead weight
-        # there — callers pass stock_history_grad=False for method=sweep.
+        # The (T+1) x N^3 history is the scaling wall, twice over: with
+        # needs_grad Taichi allocates primal + adjoint (34 GB at N=128,
+        # T=2048 — the July TACC OOMs), and past (T+1)*N^3 > 2^31 ELEMENTS
+        # (T=1024 at N=128) Taichi's int32 dense indexing aborts outright.
+        # Delta training needs the full history (autodiff chains through
+        # every intermediate state). Sweep does not: SweepCarve owns the loss
+        # Tape and the chained carve here is eval-only, so callers pass
+        # stock_history_slots=2 — slot 0 holds the pristine uncut stock
+        # (written once by init_stock, the baseline every consumer reads at
+        # index 0) and slot 1 is the working stock, updated IN PLACE by
+        # apply_cut* (safe: the cut is pointwise per voxel). All indexing
+        # goes through _h(t) = min(t, hist_slots-1), which is the identity
+        # in full-history mode. History-reading diagnostics are recomputed
+        # per-step by _rolling_replay_diagnostics in rolling mode.
+        self.hist_slots = (max_steps + 1 if stock_history_slots is None
+                           else int(stock_history_slots))
+        assert 2 <= self.hist_slots <= max_steps + 1
+        self.rolling = self.hist_slots < max_steps + 1
+        assert not (self.rolling and stock_history_grad), \
+            "rolling stock keeps no history to differentiate through"
+        self.hist_cap = self.hist_slots - 1
         self.stock = ti.field(
             dtype=ti.f32,
-            shape=(max_steps + 1, self.Nx, self.Ny, self.Nz),
+            shape=(self.hist_slots, self.Nx, self.Ny, self.Nz),
             needs_grad=bool(stock_history_grad),
         )
+        # Rolling-replay diagnostic accumulators (scalars; only written in
+        # rolling mode) + the "replay already ran for this T" cache tag.
+        self._racc_holder_loss = ti.field(dtype=ti.f32, shape=())
+        self._racc_air_loss = ti.field(dtype=ti.f32, shape=())
+        self._racc_air_unw = ti.field(dtype=ti.f32, shape=())
+        self._racc_swept = ti.field(dtype=ti.f32, shape=())
+        self._racc_prox = ti.field(dtype=ti.f32, shape=())
+        self._racc_holder_vol = ti.field(dtype=ti.f32, shape=())
+        self._rolling_diag_T = None
         self.stock_volume = ti.field(dtype=ti.f32, shape=())
         # Saved mid-cut stock init (for staged training): when use_saved_init
         # is set, ``init_stock`` writes this SDF into stock[0] instead of the
@@ -1093,7 +1118,18 @@ class CSGSimulatorDelta:
                 self.tool_pos[t + 1] = self.tool_pos[t] + self.tool_delta[t]
 
     @ti.func
-    def stock_sdf_at(self, p, t_idx):
+    def _h(self, t):
+        """Map a step index into the stock history: identity in full-history
+        mode (hist_cap = max_steps), min(t, 1) in rolling mode — slot 0 stays
+        the pristine uncut stock, slot 1 the in-place working stock."""
+        return ti.min(t, self.hist_cap)
+
+    def hist_index(self, t):
+        """Python-side twin of _h for .to_numpy() consumers."""
+        return min(t, self.hist_cap)
+
+    @ti.func
+    def stock_sdf_at(self, p, t_idx_raw):
         """Trilinear lookup of the stock SDF in slot ``t_idx`` at point ``p``.
 
         Same interpolation as ``interpolate_stock`` but reads an explicit step
@@ -1101,6 +1137,7 @@ class CSGSimulatorDelta:
         measure how close the cutter is to the *remaining* stock at the start of
         a move. Returns a voxel-space signed distance (negative inside material).
         """
+        t_idx = self._h(t_idx_raw)
         p_grid = self._vox(p)
         x0 = ti.cast(ti.floor(p_grid.x), ti.i32)
         y0 = ti.cast(ti.floor(p_grid.y), ti.i32)
@@ -1217,7 +1254,8 @@ class CSGSimulatorDelta:
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             tool_d = self.tool_sdf(p, t)
-            self.stock[t + 1, i, j, k] = smooth_max(self.stock[t, i, j, k], -tool_d, kv)
+            self.stock[self._h(t + 1), i, j, k] = smooth_max(
+                self.stock[self._h(t), i, j, k], -tool_d, kv)
 
     @ti.kernel
     def apply_cut_hard(self, t: ti.i32):
@@ -1227,7 +1265,8 @@ class CSGSimulatorDelta:
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             tool_d = self.tool_sdf_sharp(p, t)
-            self.stock[t + 1, i, j, k] = ti.max(self.stock[t, i, j, k], -tool_d)
+            self.stock[self._h(t + 1), i, j, k] = ti.max(
+                self.stock[self._h(t), i, j, k], -tool_d)
 
     @ti.kernel
     def loss_at(self, t: ti.i32) -> ti.f32:
@@ -1242,7 +1281,7 @@ class CSGSimulatorDelta:
             scale = 1.0  # SDFs are already in voxels (1-voxel-wide sigmoid)
             inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
             p = ti.Vector([(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz])
-            stock_d = self.stock[t, i, j, k]
+            stock_d = self.stock[self._h(t), i, j, k]
             target_d = self.target_sdf(p)
 
             sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
@@ -1268,7 +1307,7 @@ class CSGSimulatorDelta:
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
-            stock_d = self.stock[T, i, j, k]
+            stock_d = self.stock[self._h(T), i, j, k]
             target_d = self.target_sdf(p)
 
             sa = ti.max(-50.0, ti.min(50.0, (stock_d + self.loss_shift[None]) * scale))
@@ -1318,7 +1357,7 @@ class CSGSimulatorDelta:
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
-            stock_d = self.stock[t + 1, i, j, k]
+            stock_d = self.stock[self._h(t + 1), i, j, k]
             holder_d = self.holder_sdf(p, t)
 
             sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
@@ -1373,7 +1412,7 @@ class CSGSimulatorDelta:
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
-            stock_d = self.stock[t + 1, i, j, k]
+            stock_d = self.stock[self._h(t + 1), i, j, k]
             tool_d = self.tool_sdf(p, t)
 
             sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
@@ -1644,7 +1683,7 @@ class CSGSimulatorDelta:
             tool_d = self.tool_sdf_tip(p, t)
             ta = ti.max(-50.0, ti.min(50.0, -tool_d))
             tool_occ = 1.0 / (1.0 + ti.exp(ta))             # ~1 inside swept tool
-            sa_pre = ti.max(-50.0, ti.min(50.0, self.stock[t, i, j, k]))
+            sa_pre = ti.max(-50.0, ti.min(50.0, self.stock[self._h(t), i, j, k]))
             stock_occ_pre = 1.0 / (1.0 + ti.exp(sa_pre))    # ~1 inside material
             ti.atomic_add(self.seg_swept[t], inv_n * tool_occ)
             ti.atomic_add(self.seg_air[t], inv_n * tool_occ * (1.0 - stock_occ_pre))
@@ -1728,7 +1767,7 @@ class CSGSimulatorDelta:
         ti.atomic_add(self.loss[None], w_b * p_traj)
 
     @ti.kernel
-    def compute_traj_diagnostics_hard(self, T: ti.i32):
+    def _traj_diag_hard_bulk(self, T: ti.i32):
         """Hard (non-differentiable) final-metric form of the three measures.
 
         Recomputes the per-segment volumes from the SHARP carve (tool_sdf_sharp,
@@ -1756,10 +1795,10 @@ class CSGSimulatorDelta:
             if tool_d < 0.0:
                 tool_occ = 1.0
             pre = 0.0
-            if self.stock[t, i, j, k] < 0.0:
+            if self.stock[self._h(t), i, j, k] < 0.0:
                 pre = 1.0
             post = 0.0
-            if self.stock[t + 1, i, j, k] < 0.0:
+            if self.stock[self._h(t + 1), i, j, k] < 0.0:
                 post = 1.0
             ti.atomic_add(self.seg_swept[t], inv_n * tool_occ)
             # Air = tool swept volume that is in ALREADY-EMPTY stock (pre-cut),
@@ -1845,7 +1884,7 @@ class CSGSimulatorDelta:
             self.diag_broken[None] = 1.0
 
     @ti.kernel
-    def compute_diagnostics(self, T: ti.i32):
+    def _compute_diagnostics_bulk(self, T: ti.i32):
         """Non-differentiable breakdown of the loss into its three components.
 
         Fills diag_gouge / diag_residual / diag_holder with the SAME weighted
@@ -1883,7 +1922,7 @@ class CSGSimulatorDelta:
         # Geometry terms on the final stock (stock[T]).
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             p = ti.Vector([(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz])
-            stock_d = self.stock[T, i, j, k]
+            stock_d = self.stock[self._h(T), i, j, k]
             target_d = self.target_sdf(p)
             sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
             ta = ti.max(-50.0, ti.min(50.0, target_d * scale))
@@ -1896,7 +1935,7 @@ class CSGSimulatorDelta:
         # Holder barrier + air-cut penalty summed over every segment.
         for t, i, j, k in ti.ndrange(T, self.Nx, self.Ny, self.Nz):
             p = ti.Vector([(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz])
-            stock_d = self.stock[t + 1, i, j, k]
+            stock_d = self.stock[self._h(t + 1), i, j, k]
             holder_d = self.holder_sdf(p, t)
             sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
             stock_occ = 1.0 / (1.0 + ti.exp(sa))
@@ -1907,7 +1946,7 @@ class CSGSimulatorDelta:
             # the tool re-traversing carved space. (Post-cut stock[t+1] was a bug:
             # the tool empties what it touches, so post-cut read as empty and
             # over-reported air / distorted the sigmoid-blurred fraction.)
-            stock_d_pre = self.stock[t, i, j, k]
+            stock_d_pre = self.stock[self._h(t), i, j, k]
             sa_pre = ti.max(-50.0, ti.min(50.0, stock_d_pre * scale))
             stock_occ_pre = 1.0 / (1.0 + ti.exp(sa_pre))
             tool_d = self.tool_sdf(p, t)
@@ -1980,7 +2019,7 @@ class CSGSimulatorDelta:
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
-            if self.stock[t + 1, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
+            if self.stock[self._h(t + 1), i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
                 vol += 1.0 / (self.Nx * self.Ny * self.Nz)
         return vol
 
@@ -2001,7 +2040,7 @@ class CSGSimulatorDelta:
         """
         self._clearance_buf[None] = 1e9
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            if self.stock[t + 1, i, j, k] < 0.0:
+            if self.stock[self._h(t + 1), i, j, k] < 0.0:
                 d = self.holder_sdf_sharp(
                     ti.Vector(
                         [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
@@ -2012,7 +2051,7 @@ class CSGSimulatorDelta:
         return self._clearance_buf[None]
 
     @ti.kernel
-    def holder_overlap_total(self, T: ti.i32) -> ti.f32:
+    def _holder_overlap_total_bulk(self, T: ti.i32) -> ti.f32:
         """Hard holder/stock overlap summed over all segments (diagnostics).
 
         Sum of per-segment overlap volume; > 0 means the trajectory collides
@@ -2023,9 +2062,272 @@ class CSGSimulatorDelta:
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
-            if self.stock[t + 1, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
+            if self.stock[self._h(t + 1), i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
                 vol += 1.0 / (self.Nx * self.Ny * self.Nz)
         return vol
+
+    # ------------------------------------------------------------------
+    # Rolling-mode diagnostics: with hist_slots=2 the bulk kernels above
+    # cannot read historical stock states, so ONE hard-carve replay
+    # recomputes every history-dependent quantity per step, at the moment
+    # the state it needs exists. Same formulas as the bulk kernels; the
+    # replay is cached per (T) until the next forward invalidates it.
+    # ------------------------------------------------------------------
+
+    @ti.kernel
+    def _zero_racc(self):
+        self._racc_holder_loss[None] = 0.0
+        self._racc_air_loss[None] = 0.0
+        self._racc_air_unw[None] = 0.0
+        self._racc_swept[None] = 0.0
+        self._racc_prox[None] = 0.0
+        self._racc_holder_vol[None] = 0.0
+
+    @ti.kernel
+    def _diag_pre_step(self, t: ti.i32):
+        """Pre-cut accumulators for segment t (call BEFORE apply_cut_hard(t)).
+
+        Hard tip swept/air/engage into seg_* (formulas of _traj_diag_hard_bulk)
+        plus the soft air/prox loss sums of _compute_diagnostics_bulk, both of
+        which read the PRE-cut stock. Slot _h(t) holds exactly that state.
+        """
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
+            scale = 1.0
+            p = ti.Vector(
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+            )
+            # Hard tip terms (sharp occupancy, binary pre-cut material).
+            tool_d = self.tool_sdf_sharp_tip(p, t)
+            tool_occ = 0.0
+            if tool_d < 0.0:
+                tool_occ = 1.0
+            pre = 0.0
+            if self.stock[self._h(t), i, j, k] < 0.0:
+                pre = 1.0
+            ti.atomic_add(self.seg_swept[t], inv_n * tool_occ)
+            ti.atomic_add(self.seg_air[t], inv_n * tool_occ * (1.0 - pre))
+            ti.atomic_add(self.seg_engage[t], inv_n * tool_occ * pre)
+            # Soft loss-breakdown terms (sigmoid occupancies, full tool SDF).
+            w_a = self.w_air[None]
+            w_p = self.w_prox[None]
+            r_vox = self.tool_radius[None] / self.v
+            r_safe = ti.max(r_vox, 1e-3)
+            stock_d_pre = self.stock[self._h(t), i, j, k]
+            sa_pre = ti.max(-50.0, ti.min(50.0, stock_d_pre * scale))
+            stock_occ_pre = 1.0 / (1.0 + ti.exp(sa_pre))
+            tool_d_soft = self.tool_sdf(p, t)
+            ta = ti.max(-50.0, ti.min(50.0, -tool_d_soft * scale))
+            tool_occ_soft = 1.0 / (1.0 + ti.exp(ta))
+            air = tool_occ_soft * (1.0 - stock_occ_pre)
+            ti.atomic_add(self._racc_air_loss[None], inv_n * w_a * air * air)
+            ti.atomic_add(self._racc_air_unw[None], inv_n * air)
+            ti.atomic_add(self._racc_swept[None], inv_n * tool_occ_soft)
+            d_t = ti.max(0.0, self.target[i, j, k])
+            w_dist = (d_t / r_safe) ** 2
+            ti.atomic_add(self._racc_prox[None], inv_n * w_p * air * air * w_dist)
+
+    @ti.kernel
+    def _diag_time_step(self, t: ti.i32):
+        """seg_time[t] from the PRE-cut stock (single-segment form of the
+        _traj_diag_hard_bulk time loop; call before apply_cut_hard(t))."""
+        for _ in range(1):
+            a = self.tool_pos[t]
+            delta = self.tool_delta[t]
+            dmm = ti.Vector([delta.x * self.Lx, delta.y * self.Ly, delta.z * self.Lz])
+            mag_mm = ti.sqrt(dmm.dot(dmm) + 1e-12)
+            probe = a + delta
+            stock_d = self.stock_sdf_at(probe, t)
+            cube_d = box_sdf(
+                self._vox(probe),
+                self._vox(ti.Vector([0.5, 0.5, 0.5])),
+                self._vox(ti.Vector([0.5, 0.5, 0.5])),
+            )
+            clearance = ti.max(stock_d, cube_d)
+            clearance_mm = clearance * self.v - self.tool_radius[None]
+            is_feed = ti.cast(clearance_mm <= self.safe_distance[None], ti.f32)
+            rapid_step = self.rapid_speed[None] * self.dt[None]
+            feed_step = self.feed_speed[None] * self.dt[None]
+            cap_mm = rapid_step + (feed_step - rapid_step) * is_feed
+            speed = self.rapid_speed[None] + (
+                self.feed_speed[None] - self.rapid_speed[None]
+            ) * is_feed
+            self.seg_time[t] = ti.min(mag_mm, cap_mm) / (speed + 1e-12)
+
+    @ti.kernel
+    def _diag_post_step(self, t: ti.i32):
+        """Post-cut accumulators for segment t (call AFTER apply_cut_hard(t)):
+        the soft holder barrier sum and the hard holder-overlap volume, both of
+        which the bulk kernels read from stock[t+1]."""
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
+            scale = 1.0
+            w_h = self.holder_penalty_weight[None]
+            margin = self.holder_margin[None]
+            p = ti.Vector(
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+            )
+            stock_d = self.stock[self._h(t + 1), i, j, k]
+            holder_d = self.holder_sdf(p, t)
+            sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
+            stock_occ = 1.0 / (1.0 + ti.exp(sa))
+            penetration = ti.max(0.0, (margin - holder_d) * scale)
+            ti.atomic_add(self._racc_holder_loss[None],
+                          inv_n * w_h * stock_occ * penetration * penetration)
+            if stock_d < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
+                ti.atomic_add(self._racc_holder_vol[None], inv_n)
+
+    @ti.kernel
+    def _diag_combine(self, T: ti.i32):
+        """Scalar reduction of seg_* into the diag_* fields — verbatim tail of
+        _traj_diag_hard_bulk (the seg arrays were filled by the replay)."""
+        inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
+        total_time = 0.0
+        air_time = 0.0
+        psum = 0.0
+        pmax = 0.0
+        emax = 0.0
+        esum = 0.0
+        fmax = 0.0
+        kc = self.kc[None]
+        f_ref = self.f_ref[None]
+        sigma_risk = ti.max(self.sigma_risk[None], 1e-6)
+        dt = self.dt[None]
+        D = 2.0 * self.tool_radius[None]
+        v_mm3 = self.v ** 3
+        for t in range(T):
+            st = self.seg_time[t]
+            eng = self.seg_engage[t]
+            is_air = ti.select(eng <= 0.5 * inv_n, 1.0, 0.0)
+            total_time += st
+            air_time += st * is_air
+            mu_F = kc * (eng * v_mm3) / (dt * D + 1e-12)
+            fmax = ti.max(fmax, mu_F)
+            emax = ti.max(emax, eng)
+            esum += eng
+            ln_mu = ti.log(ti.max(mu_F, 1e-12))
+            ln_ref = ti.log(ti.max(f_ref, 1e-12))
+            p_t = 1.0 / (1.0 + ti.exp(-(ln_mu - ln_ref) / sigma_risk))
+            psum += p_t
+            pmax = ti.max(pmax, p_t)
+        self.diag_time[None] = total_time
+        self.diag_air_time[None] = air_time
+        self.diag_break_prob_any[None] = 1.0 - ti.exp(-psum)
+        self.diag_break_prob_max[None] = pmax
+        self.diag_fcut_max[None] = fmax
+        self.diag_engage_max[None] = emax
+        self.diag_engage_mean[None] = esum / ti.max(1, T)
+        self.diag_broken[None] = 0.0
+        if fmax > self.f_max[None]:
+            self.diag_broken[None] = 1.0
+
+    @ti.kernel
+    def _diag_final_terms(self, T: ti.i32):
+        """History-free part of _compute_diagnostics_bulk (final-stock geometry
+        + trajectory-shape terms); the history sums come from the replay's
+        _racc_* accumulators."""
+        g = 0.0
+        r = 0.0
+        jk = 0.0
+        st = 0.0
+        tpx = 0.0
+        tg = 0.0
+        ln = 0.0
+        scale = 1.0
+        inv_n = 1.0 / (self.Nx * self.Ny * self.Nz)
+        w_g = self.w_gouge[None]
+        w_r = self.w_residual[None]
+        w_j = self.w_jerk[None]
+        w_s = self.w_step[None]
+        r_vox = self.tool_radius[None] / self.v
+        w_tp = self.w_traj_prox[None]
+        w_l = self.w_len[None]
+        w_tg = self.w_tool_gouge[None]
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            p = ti.Vector([(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz])
+            stock_d = self.stock[self._h(T), i, j, k]
+            target_d = self.target_sdf(p)
+            sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
+            ta = ti.max(-50.0, ti.min(50.0, target_d * scale))
+            stock_occ = 1.0 / (1.0 + ti.exp(sa))
+            target_occ = 1.0 / (1.0 + ti.exp(ta))
+            gouge = target_occ * (1.0 - stock_occ)
+            residual = (1.0 - target_occ) * stock_occ
+            g += inv_n * w_g * gouge * gouge
+            r += inv_n * w_r * residual * residual
+        nj = ti.max(1, T - 2)
+        for t in range(1, T - 1):
+            diff = self.tool_delta[t] - self.tool_delta[t - 1]
+            jk += w_j * diff.dot(diff) / nj
+        ns = ti.max(1, T - 2)
+        for t in range(1, T - 1):
+            d2_0 = self.tool_delta[t].dot(self.tool_delta[t])
+            d2_1 = self.tool_delta[t - 1].dot(self.tool_delta[t - 1])
+            sp = d2_0 - d2_1
+            st += w_s * sp * sp / ns
+        ntp = ti.max(1, T - 1)
+        for t in range(T - 1):
+            mx = 0.5 * (self.tool_pos[t].x + self.tool_pos[t + 1].x)
+            my = 0.5 * (self.tool_pos[t].y + self.tool_pos[t + 1].y)
+            mz = 0.5 * (self.tool_pos[t].z + self.tool_pos[t + 1].z)
+            mid = ti.Vector([mx, my, mz])
+            d = self.target_sdf_scalar(mid)
+            exc = ti.max(0.0, d - r_vox)
+            tpx += w_tp * exc * exc / ntp
+            pen = ti.max(0.0, r_vox + self.tool_gouge_margin[None] - d)
+            tg += w_tg * pen * pen / ntp
+        nl = ti.max(1, T)
+        for t in range(T):
+            d2 = self.tool_delta[t].dot(self.tool_delta[t])
+            ln += w_l * d2 / nl
+        self.diag_gouge[None] = g
+        self.diag_residual[None] = r
+        self.diag_holder[None] = self._racc_holder_loss[None]
+        self.diag_air[None] = self._racc_air_loss[None]
+        self.diag_jerk[None] = jk
+        self.diag_step[None] = st
+        self.diag_air_unweighted[None] = self._racc_air_unw[None]
+        self.diag_tool_swept[None] = self._racc_swept[None]
+        self.diag_prox[None] = self._racc_prox[None]
+        self.diag_traj_prox[None] = tpx
+        self.diag_len[None] = ln
+        self.diag_tool_gouge[None] = tg
+
+    def _rolling_replay_diagnostics(self, T):
+        """Re-run the hard carve from the (already reconstructed) tool positions,
+        accumulating every history-dependent diagnostic per step. Cached until
+        the next forward pass changes the trajectory."""
+        if self._rolling_diag_T == T:
+            return
+        self.zero_seg_volumes(0, T)
+        self._zero_racc()
+        self.init_stock()
+        for t in range(T):
+            self._diag_pre_step(t)
+            self._diag_time_step(t)
+            self.apply_cut_hard(t)
+            self._diag_post_step(t)
+        self._rolling_diag_T = T
+
+    def compute_traj_diagnostics_hard(self, T):
+        if self.rolling:
+            self._rolling_replay_diagnostics(T)
+            self._diag_combine(T)
+        else:
+            self._traj_diag_hard_bulk(T)
+
+    def compute_diagnostics(self, T):
+        if self.rolling:
+            self._rolling_replay_diagnostics(T)
+            self._diag_final_terms(T)
+        else:
+            self._compute_diagnostics_bulk(T)
+
+    def holder_overlap_total(self, T):
+        if self.rolling:
+            self._rolling_replay_diagnostics(T)
+            return float(self._racc_holder_vol[None])
+        return self._holder_overlap_total_bulk(T)
 
     def forward(self, num_active_steps):
         """Pure forward pass. Wrap in ti.ad.Tape externally if you need gradients.
@@ -2040,12 +2342,20 @@ class CSGSimulatorDelta:
         reconstruct the whole path up front. The whole loop must run inside the
         same Tape as the loss for ``tool_delta.grad`` to be correct.
         """
+        self._rolling_diag_T = None
         self.reconstruct_positions(0)  # set tool_pos[0] = tool_start
         self.init_stock()
         for t in range(num_active_steps - 1):
             self.advance_position(t)
             self.apply_cut(t)
         self.compute_loss(num_active_steps - 1)
+        if self.rolling:
+            # Rolling mode is eval-only (sweep): the soft penalty/seg kernels
+            # below read historical stock states that a 2-slot buffer no longer
+            # holds, and their only consumer is self.loss — which the sweep
+            # trainer overwrites. Skip them; the reported metrics come from the
+            # rolling replay diagnostics instead.
+            return
         self.compute_holder_penalty(0, num_active_steps - 1)
         self.compute_air_penalty(0, num_active_steps - 1)
         self.compute_jerk_penalty(0, num_active_steps - 1)
@@ -2080,6 +2390,7 @@ class CSGSimulatorDelta:
         uses exact apply_cut_hard (ti.max union with tool_sdf_sharp) instead of
         smooth_max. Step-count invariant and non-differentiable.
         """
+        self._rolling_diag_T = None
         self.reconstruct_positions(0)
         self.init_stock()
         if clip_speeds:
@@ -2139,6 +2450,7 @@ class CSGSimulatorDelta:
 
     def save_state(self, t):
         """Snapshot the stock SDF + tool position at step ``t`` (numpy copies)."""
+        assert not self.rolling, "save_state needs the full stock history"
         return {
             "stock": self.stock.to_numpy()[t].copy(),
             "tool_pos": self.tool_pos.to_numpy()[t].copy(),
@@ -2152,6 +2464,7 @@ class CSGSimulatorDelta:
         slot the caller wants to restart from. Caller then runs
         ``forward_from(t0, T)``.
         """
+        assert not self.rolling, "restore_state needs the full stock history"
         stock_np = self.stock.to_numpy()
         pos_np = self.tool_pos.to_numpy()
         stock_np[t0] = state["stock"]
@@ -2182,7 +2495,7 @@ class CSGSimulatorDelta:
     @ti.func
     def interpolate_stock(self, p):
         """Trilinear lookup into stock[current_step, ...]."""
-        t_idx = self.current_step[None]
+        t_idx = self._h(self.current_step[None])
         p_grid = self._vox(p)
 
         x0 = ti.cast(ti.floor(p_grid.x), ti.i32)
@@ -2277,7 +2590,7 @@ class CSGSimulatorDelta:
         height = self.raymarch_buffer.shape[1]
         aspect_ratio = float(width) / float(height)
 
-        t_idx = self.current_step[None]
+        t_idx = self._h(self.current_step[None])
 
         # Display-space constants (fixed at construction, inlined at compile).
         Lmax = max(self.Lx, self.Ly, self.Lz)
