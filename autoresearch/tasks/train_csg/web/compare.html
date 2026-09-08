@@ -619,9 +619,13 @@ function wire(){
   wire();
   masterLoop();
   try { await refreshPairs(); await loadRunList(); refreshDigest(); } catch(e){ console.warn(e); }
-  // show first pending pair if any, else leave ad-hoc ready.
+  // A stable ?pair=p_NNNN link lets an experiment protocol identify the exact
+  // observation to collect instead of depending on mutable queue order.
+  const requestedId = new URLSearchParams(window.location.search).get("pair");
+  const requested = requestedId ? PAIRS.find(p=>p.id===requestedId) : null;
   const pend = PAIRS.filter(p=>!p.answer);
-  if (pend.length) showPair(pend[0]);
+  if (requested) showPair(requested);
+  else if (pend.length) showPair(pend[0]);
   else {
     document.getElementById("pair-stats").textContent = "no pairs queued — use ad-hoc compare below";
   }
