@@ -60,6 +60,84 @@ def _set_source_pair_status(pair_id: str, status: str) -> None:
         fcntl.flock(lock, fcntl.LOCK_UN)
 
 
+def enqueue_weak_demo(iteration_id: str) -> dict:
+    """Enqueue a weak pair solely to exercise the loop, with explicit provenance."""
+    work = ITERATIONS / iteration_id
+    event = _read_json(work / "event.json")
+    evaluation = _read_json(work / "phase5_6_evaluation.json")
+    meaningful = evaluation["meaningful_difference"]
+    if meaningful.get("passed") or event.get("status") != "weak_intervention":
+        raise ValueError("demo override is only for a recorded weak intervention")
+    lock_path = PAIR_STORE.with_suffix(".lock")
+    with lock_path.open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        pairs = json.loads(PAIR_STORE.read_text())
+        existing = next(
+            (item for item in pairs if item.get("source_iteration_id") == iteration_id), None
+        )
+        if existing is None:
+            used = {item.get("id") for item in pairs}
+            number = 1
+            while f"p_{number:04d}" in used:
+                number += 1
+            run_a = Path(evaluation["runs"]["a"]).name
+            run_b = Path(evaluation["runs"]["b"]).name
+            loss_term = next(iter(event["variant_a"]["changes"]))
+            existing = {
+                "id": f"p_{number:04d}",
+                "run_a": run_a,
+                "run_b": run_b,
+                "prompt": (
+                    "Loop demonstration only — this pair did not pass the predeclared "
+                    "meaningful-difference threshold. Which trajectory do you prefer, and why?"
+                ),
+                "dimension": loss_term,
+                "magnitude_a": str(event["variant_a"]["changes"][loss_term]),
+                "magnitude_b": str(event["variant_b"]["changes"][loss_term]),
+                "scenario": "sphere s1 iters5000 — weak-intervention loop demo",
+                "display_order": ["a", "b"],
+                "explanation_a": evaluation["generated_explanations"]["a"],
+                "explanation_b": evaluation["generated_explanations"]["b"],
+                "ts": time.time(),
+                "first_view_ts": None,
+                "display_snapshot": None,
+                "answer": None,
+                "answer_ts": None,
+                "note": "",
+                "source_iteration_id": iteration_id,
+                "presentation_override": "weak_intervention_loop_demo",
+                "meaningful_difference_passed": False,
+                "experimental_evidence_eligible": False,
+            }
+            pairs.append(existing)
+            tmp = PAIR_STORE.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(pairs, indent=2, sort_keys=True))
+            os.replace(tmp, PAIR_STORE)
+        fcntl.flock(lock, fcntl.LOCK_UN)
+
+    event["next_pair_id"] = existing["id"]
+    event["presentation_override"] = {
+        "type": "weak_intervention_loop_demo",
+        "experimental_evidence_eligible": False,
+        "thresholds_unchanged": True,
+    }
+    tmp = work / "event.json.tmp"
+    tmp.write_text(json.dumps(event, indent=2, sort_keys=True))
+    os.replace(tmp, work / "event.json")
+    demo_event = {
+        "schema_version": 1,
+        "event_type": "phase7_weak_pair_demo_enqueued",
+        "iteration_id": iteration_id,
+        "ts": time.time(),
+        "pair": existing,
+        "scientific_classification": meaningful["classification"],
+        "experimental_evidence_eligible": False,
+        "thresholds_unchanged": True,
+    }
+    _append_event(demo_event)
+    return existing
+
+
 def _resolve_run(run_rel: str) -> Path:
     path = REPO / run_rel
     if not path.is_dir() or not str(path.resolve()).startswith(str((REPO / "runs").resolve())):
@@ -301,6 +379,10 @@ def main() -> None:
     )
     ap.add_argument("--record", action="store_true", help="persist the immutable evaluation event")
     ap.add_argument("--write-overlay", action="store_true", help="write a physical-space A/B path image")
+    ap.add_argument(
+        "--enqueue-weak-demo", action="store_true",
+        help="present a failed pair solely to demonstrate plumbing; preserves failed classification",
+    )
     args = ap.parse_args()
     if args.write_overlay:
         write_overlay(args.iteration_id, ITERATIONS / args.iteration_id / "trajectory_overlay.png")
@@ -308,7 +390,12 @@ def main() -> None:
         result = record_evaluation(args.iteration_id, args.visual_assessment)
     else:
         result, _ = evaluate(args.iteration_id, args.visual_assessment)
-    print(json.dumps(result, indent=2, sort_keys=True))
+    output = result
+    if args.enqueue_weak_demo:
+        if not args.record:
+            raise SystemExit("--enqueue-weak-demo requires --record")
+        output = {"evaluation": result, "demo_pair": enqueue_weak_demo(args.iteration_id)}
+    print(json.dumps(output, indent=2, sort_keys=True))
 
 
 if __name__ == "__main__":

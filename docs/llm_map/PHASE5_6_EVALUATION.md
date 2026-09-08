@@ -50,3 +50,9 @@ difference. Its paths were visually distinct and had 41.35 mm mean pointwise
 displacement. Both children passed the hard-Dice and gouge limits, but the
 targeted time difference again missed 20%. The retry is therefore recorded as
 weak and exhausted, and no follow-up comparison pair was enqueued.
+
+For end-to-end engineering validation only, `--enqueue-weak-demo` may present
+an already-recorded weak pair without changing any threshold or scientific
+classification. The pair, iteration event, and append-only event are all
+marked `experimental_evidence_eligible: false`; this override demonstrates the
+UI-to-agent plumbing and must not be counted as evidence of meaningful change.

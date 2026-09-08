@@ -65,3 +65,25 @@ def test_retry_explanation_uses_changed_time_loss():
     text = evaluation._explanation("b", "w_time", .001, .2, metrics)
     assert "w_time changed from 0.001 to 0.2" in text
     assert "directly increasing the differentiable time penalty" in text
+
+
+def test_weak_demo_pair_is_explicitly_ineligible(tmp_path, monkeypatch):
+    task = tmp_path / "autoresearch/tasks/train_csg"
+    work = task / "direct_feedback/df_retry"
+    work.mkdir(parents=True)
+    (task / "pairwise.json").write_text("[]")
+    event = {"status": "weak_intervention", "variant_a": {"changes": {"w_time": .02}},
+             "variant_b": {"changes": {"w_time": .2}}}
+    result = {"runs": {"a": "runs/x/run_a", "b": "runs/x/run_b"},
+              "generated_explanations": {"a": "facts a", "b": "facts b"},
+              "meaningful_difference": {"passed": False, "classification": "weak_intervention"}}
+    (work / "event.json").write_text(json.dumps(event))
+    (work / "phase5_6_evaluation.json").write_text(json.dumps(result))
+    monkeypatch.setattr(evaluation, "TASK", task)
+    monkeypatch.setattr(evaluation, "ITERATIONS", task / "direct_feedback")
+    monkeypatch.setattr(evaluation, "PAIR_STORE", task / "pairwise.json")
+    monkeypatch.setattr(evaluation, "EVENT_STORE", task / "direct_feedback_events.jsonl")
+    pair = evaluation.enqueue_weak_demo("df_retry")
+    assert pair["experimental_evidence_eligible"] is False
+    assert pair["meaningful_difference_passed"] is False
+    assert pair["presentation_override"] == "weak_intervention_loop_demo"
