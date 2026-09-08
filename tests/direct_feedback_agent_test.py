@@ -98,7 +98,10 @@ def test_process_consumes_raw_pair_and_writes_append_only_event(tmp_path, monkey
     monkeypatch.setattr(agent, "EVENT_STORE", task / "direct_feedback_events.jsonl")
     monkeypatch.setattr(agent, "ITERATIONS", task / "direct_feedback")
     monkeypatch.setattr(agent, "_call_model", fake_model)
-    monkeypatch.setattr(agent.subprocess, "check_output", lambda *a, **k: "deadbeef\n")
+    monkeypatch.setattr(
+        agent.subprocess, "check_output",
+        lambda cmd, **k: "" if "status" in cmd else "deadbeef\n",
+    )
 
     event = agent.process("p_0042", "http://local/v1", "local-model")
     assert captured["raw_critique"] == "reduce late air cutting"

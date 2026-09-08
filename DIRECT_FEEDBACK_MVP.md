@@ -108,8 +108,9 @@ from observed effects.
 
 ## Remaining work before Phase 7
 
-- Phase 4: turn validated variants into fixed-control training commands and
-  explicitly select the first scenario/critique.
+- Phase 4 is implemented in `scripts/run_direct_feedback_variants.py`; see
+  `PHASE4_CONTROLLED_VARIANTS.md`. A real initial pair/critique is still needed
+  before concrete child commands exist.
 - Phase 5: produce explanations grounded in actual metrics and trajectory
   measurements.
 - Phase 6: compute the predeclared meaningful-difference gate before enqueueing.

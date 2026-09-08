@@ -207,6 +207,12 @@ def _append_event(event: dict) -> None:
 
 
 def process(pair_id: str, base_url: str, model: str) -> dict:
+    dirty = subprocess.check_output(
+        ["git", "status", "--porcelain", "--untracked-files=all"],
+        cwd=REPO, text=True,
+    ).strip()
+    if dirty:
+        raise ValueError("direct-feedback decisions require a clean, versioned working tree")
     pair = _find_pair(pair_id)
     if pair.get("answer") not in ("a", "b", "tie"):
         raise ValueError(f"pair {pair_id} has not been answered")

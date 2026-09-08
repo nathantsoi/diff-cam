@@ -531,10 +531,30 @@ def trigger_direct_feedback(root: Path, pair_id: str) -> bool:
                 result = json.loads(proc.stdout)
             except ValueError:
                 result = {}
-            _set_direct_feedback_status(
-                root, pair_id, "agent_running", "objective_decided",
-                direct_feedback_iteration=result.get("iteration_id"),
+            iteration_id = result.get("iteration_id")
+            if not iteration_id:
+                _set_direct_feedback_status(
+                    root, pair_id, "agent_running", "agent_failed",
+                    direct_feedback_error="agent returned no iteration id",
+                )
+                return
+            planner = root / "scripts" / "run_direct_feedback_variants.py"
+            planned = subprocess.run(
+                [sys.executable, str(planner), "--iteration-id", iteration_id],
+                cwd=root, capture_output=True, text=True, timeout=60,
             )
+            if planned.returncode == 0:
+                _set_direct_feedback_status(
+                    root, pair_id, "agent_running", "launch_planned",
+                    direct_feedback_iteration=iteration_id,
+                )
+            else:
+                detail = (planned.stderr or planned.stdout or "planning failed").strip().splitlines()[-1]
+                _set_direct_feedback_status(
+                    root, pair_id, "agent_running", "planning_failed",
+                    direct_feedback_iteration=iteration_id,
+                    direct_feedback_error=detail[:500],
+                )
         else:
             detail = (proc.stderr or proc.stdout or "agent failed").strip().splitlines()[-1]
             _set_direct_feedback_status(
