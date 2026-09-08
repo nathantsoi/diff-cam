@@ -135,14 +135,29 @@ def write_overlay(iteration_id: str, output: Path) -> Path:
     return output
 
 
-def _explanation(side: str, before: float, after: float, metrics: dict) -> str:
+def _explanation(side: str, loss_term: str, before: float, after: float,
+                 metrics: dict) -> str:
     strength = "conservative" if side == "a" else "stronger"
+    if loss_term == "w_break":
+        label = "break-loss reduction"
+        intent = (
+            "test whether less break-loss pressure reduces time while keeping "
+            "measured break risk low"
+        )
+    elif loss_term == "w_time":
+        label = "total-time loss increase"
+        intent = (
+            "test whether directly increasing the differentiable time penalty "
+            "produces a quicker trajectory while preserving measured carving quality"
+        )
+    else:
+        label = f"{loss_term} adjustment"
+        intent = "test the saved objective adjustment against the recorded critique"
     return (
-        f"Option {side.upper()} — {strength} break-loss reduction. "
-        f"Change: w_break changed from {before:g} to {after:g}; other loss weights and "
+        f"Option {side.upper()} — {strength} {label}. "
+        f"Change: {loss_term} changed from {before:g} to {after:g}; other loss weights and "
         f"run controls were held fixed. Intent: respond to the preference for a quicker, "
-        f"similar trajectory by testing whether less break-loss pressure reduces time while "
-        f"keeping measured break risk low. Observed: total time {metrics['total_time']:.3f} s, "
+        f"similar trajectory and {intent}. Observed: total time {metrics['total_time']:.3f} s, "
         f"air time {metrics['air_time']:.3f} s, hard Dice {metrics['hard_dice']:.6f}, "
         f"gouge {metrics['gouge']:.3f}, residual {metrics['residual']:.3f}, and break "
         f"probability {metrics['break_prob_any']:.6f}."
@@ -196,6 +211,18 @@ def evaluate(iteration_id: str, visual_assessment: str) -> tuple[dict, dict]:
             "path": str(overlay.relative_to(REPO)),
             "sha256": hashlib.sha256(overlay.read_bytes()).hexdigest(),
         }
+    is_retry = bool(event.get("source_iteration_id"))
+    retry_recommendation = None
+    if not passed and not is_retry:
+        retry_recommendation = {
+            "action": "redesign_contrast_once",
+            "reason": (
+                "The total-time contrast missed its predeclared 20% gate, and the "
+                "stronger child already set w_break to its lower bound of zero."
+            ),
+            "proposed_target": "increase w_time directly in conservative and stronger variants",
+            "requires_new_gpu_authorization": True,
+        }
     result = {
         "target_metric": target_metric,
         "target_metric_a": metrics_a[target_metric],
@@ -211,21 +238,18 @@ def evaluate(iteration_id: str, visual_assessment: str) -> tuple[dict, dict]:
         "thresholds": thresholds,
         "passed": passed,
         "classification": "meaningful" if passed else "weak_intervention",
-        "retry_recommendation": None if passed else {
-            "action": "redesign_contrast_once",
-            "reason": (
-                "The total-time contrast missed its predeclared 20% gate, and the "
-                "stronger child already set w_break to its lower bound of zero."
-            ),
-            "proposed_target": "increase w_time directly in conservative and stronger variants",
-            "requires_new_gpu_authorization": True,
-        },
+        "retry_recommendation": retry_recommendation,
+        "retry_exhausted": is_retry and not passed,
     }
+    changed_terms = sorted(event["variant_a"]["changes"])
+    if changed_terms != sorted(event["variant_b"]["changes"]) or len(changed_terms) != 1:
+        raise ValueError("Phase 5 explanation requires one shared changed loss term")
+    loss_term = changed_terms[0]
     explanations = {
-        "a": _explanation("a", event["variant_a"]["before"]["w_break"],
-                          event["variant_a"]["changes"]["w_break"], metrics_a),
-        "b": _explanation("b", event["variant_b"]["before"]["w_break"],
-                          event["variant_b"]["changes"]["w_break"], metrics_b),
+        "a": _explanation("a", loss_term, event["variant_a"]["before"][loss_term],
+                          event["variant_a"]["changes"][loss_term], metrics_a),
+        "b": _explanation("b", loss_term, event["variant_b"]["before"][loss_term],
+                          event["variant_b"]["changes"][loss_term], metrics_b),
     }
     record = {
         "schema_version": 1,

@@ -37,3 +37,16 @@ so another same-direction weight step is impossible. The recorded one-time
 redesign recommendation is to act directly on `w_time`, using conservative and
 stronger increases under the same controls. That would be a new expensive GPU
 experiment and is not launched by the Phase 5/6 evaluator.
+
+## One-time redesign outcome
+
+The Phase 7 retry changed the direct differentiable `w_time` loss from the
+selected parent's 0.001 to 0.02 (A) and 0.2 (B), leaving all other controls
+fixed. The same predeclared gates apply. A failed retry is recorded with
+`retry_exhausted: true`; it does not recursively authorize more GPU attempts.
+
+The completed retry measured 36.882 s for A and 33.241 s for B, a 9.87%
+difference. Its paths were visually distinct and had 41.35 mm mean pointwise
+displacement. Both children passed the hard-Dice and gouge limits, but the
+targeted time difference again missed 20%. The retry is therefore recorded as
+weak and exhausted, and no follow-up comparison pair was enqueued.

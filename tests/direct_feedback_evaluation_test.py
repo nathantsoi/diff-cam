@@ -57,3 +57,11 @@ def test_all_gates_are_required(tmp_path, monkeypatch):
     assert result["meaningful_difference"]["trajectory_pass"] is True
     assert result["meaningful_difference"]["target_metric_pass"] is False
     assert result["meaningful_difference"]["passed"] is False
+
+
+def test_retry_explanation_uses_changed_time_loss():
+    metrics = {"total_time": 8, "air_time": 1, "hard_dice": .8,
+               "gouge": 2, "residual": 3, "break_prob_any": .0001}
+    text = evaluation._explanation("b", "w_time", .001, .2, metrics)
+    assert "w_time changed from 0.001 to 0.2" in text
+    assert "directly increasing the differentiable time penalty" in text
