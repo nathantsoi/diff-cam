@@ -23,6 +23,8 @@ Open in Chrome (accept the cert warning):
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import http.server
 import json
 import os
@@ -370,6 +372,19 @@ def _new_pair_id(pairs: list) -> str:
 _PAIRS_LOCK = threading.Lock()
 
 
+@contextmanager
+def _pair_store_lock(root: Path):
+    """Serialize pair mutations across the web server and CLI processes."""
+    lock_path = pairwise_path(root).with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def add_pair(
     root: Path,
     run_a: str,
@@ -379,6 +394,8 @@ def add_pair(
     magnitude_a: str = "",
     magnitude_b: str = "",
     scenario: str = "",
+    explanation_a: str = "",
+    explanation_b: str = "",
 ) -> dict:
     """Append a new unanswered pair; returns the stored pair object.
 
@@ -387,7 +404,7 @@ def add_pair(
     is a short label for the fixed config (shape/seed/iters). All optional and
     backward compatible — old callers and old pairs omit them.
     """
-    with _PAIRS_LOCK:
+    with _PAIRS_LOCK, _pair_store_lock(root):
         data = load_pairs(root)
         pair = {
             "id": _new_pair_id(data),
@@ -398,7 +415,12 @@ def add_pair(
             "magnitude_a": str(magnitude_a or "").strip(),
             "magnitude_b": str(magnitude_b or "").strip(),
             "scenario": (scenario or "").strip(),
+            "display_order": ["a", "b"],
+            "explanation_a": str(explanation_a or "").strip(),
+            "explanation_b": str(explanation_b or "").strip(),
             "ts": time.time(),
+            "first_view_ts": None,
+            "display_snapshot": None,
             "answer": None,
             "answer_ts": None,
             "note": "",
@@ -412,16 +434,116 @@ def record_pair_answer(root: Path, pair_id: str, answer: str, note: str = "") ->
     """Record a human answer for one pair. Returns the updated pair or None."""
     if answer not in ("a", "b", "tie"):
         return None
-    with _PAIRS_LOCK:
+    with _PAIRS_LOCK, _pair_store_lock(root):
         data = load_pairs(root)
         for p in data:
             if p.get("id") == pair_id:
+                # A human observation is immutable.  In particular, a retried
+                # browser POST must not overwrite it or trigger the agent twice.
+                if p.get("answer") in ("a", "b", "tie"):
+                    return p
                 p["answer"] = answer
                 p["answer_ts"] = time.time()
                 p["note"] = str(note).strip() if note is not None else ""
+                p["direct_feedback_status"] = "queued" if p["note"] else "needs_critique"
                 save_pairs(root, data)
                 return p
         return None
+
+
+def _displayed_run_summary(root: Path, run_name: str) -> dict:
+    """Capture exactly the factual run fields rendered by compare.html."""
+    run_dir = _resolve_run_by_name(root, run_name)
+    if run_dir is None:
+        return {"run": run_name, "error": "run not found"}
+    try:
+        args = json.loads((run_dir / "args.json").read_text())
+        metrics = json.loads((run_dir / "metrics.json").read_text())
+    except (OSError, ValueError):
+        return {"run": run_name, "error": "args/metrics unavailable"}
+    total = metrics.get("total_time")
+    air = metrics.get("air_time")
+    air_pct = 100.0 * air / total if isinstance(air, (int, float)) and isinstance(total, (int, float)) and total > 0 else None
+    return {
+        "run": run_name,
+        "shape": args.get("target_shape"),
+        "iters": args.get("iters"),
+        "hard_dice": metrics.get("hard_dice"),
+        "air_percent": air_pct,
+    }
+
+
+def mark_pair_viewed(root: Path, pair_id: str) -> dict | None:
+    """Record first-view time and the exact comparison framing once."""
+    with _PAIRS_LOCK, _pair_store_lock(root):
+        data = load_pairs(root)
+        for p in data:
+            if p.get("id") != pair_id:
+                continue
+            if p.get("first_view_ts") is None:
+                p["first_view_ts"] = time.time()
+                p.setdefault("display_order", ["a", "b"])
+                p["display_snapshot"] = {
+                    "prompt": p.get("prompt", ""),
+                    "dimension": p.get("dimension", ""),
+                    "magnitude_a": p.get("magnitude_a", ""),
+                    "magnitude_b": p.get("magnitude_b", ""),
+                    "explanation_a": p.get("explanation_a", ""),
+                    "explanation_b": p.get("explanation_b", ""),
+                    "a": _displayed_run_summary(root, p.get("run_a", "")),
+                    "b": _displayed_run_summary(root, p.get("run_b", "")),
+                }
+                save_pairs(root, data)
+            return p
+    return None
+
+
+def _set_direct_feedback_status(root: Path, pair_id: str, expected: str, status: str, **extra) -> bool:
+    with _PAIRS_LOCK, _pair_store_lock(root):
+        data = load_pairs(root)
+        for p in data:
+            if p.get("id") == pair_id and p.get("direct_feedback_status") == expected:
+                p["direct_feedback_status"] = status
+                p.update(extra)
+                save_pairs(root, data)
+                return True
+    return False
+
+
+def trigger_direct_feedback(root: Path, pair_id: str) -> bool:
+    """Claim one answer and run the bounded local-Qwen agent asynchronously."""
+    if not _set_direct_feedback_status(root, pair_id, "queued", "agent_running"):
+        return False
+
+    def worker():
+        script = root / "scripts" / "direct_feedback_agent.py"
+        cmd = [sys.executable, str(script), "--pair-id", pair_id]
+        try:
+            proc = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=660)
+        except subprocess.TimeoutExpired:
+            _set_direct_feedback_status(
+                root, pair_id, "agent_running", "agent_failed",
+                direct_feedback_error="local objective agent timed out after 660 seconds",
+            )
+            return
+        if proc.returncode == 0:
+            try:
+                result = json.loads(proc.stdout)
+            except ValueError:
+                result = {}
+            _set_direct_feedback_status(
+                root, pair_id, "agent_running", "objective_decided",
+                direct_feedback_iteration=result.get("iteration_id"),
+            )
+        else:
+            detail = (proc.stderr or proc.stdout or "agent failed").strip().splitlines()[-1]
+            _set_direct_feedback_status(
+                root, pair_id, "agent_running", "agent_failed",
+                direct_feedback_error=detail[:500],
+            )
+
+    threading.Thread(target=worker, daemon=True, name=f"direct-feedback-{pair_id}").start()
+    return True
 
 
 def update_pair_note(root: Path, pair_id: str, note: str) -> dict | None:
@@ -430,10 +552,15 @@ def update_pair_note(root: Path, pair_id: str, note: str) -> dict | None:
     Leaves the recorded answer (and answer_ts) untouched so the learned
     preference is not disturbed; lets a user refine the rationale later.
     """
-    with _PAIRS_LOCK:
+    with _PAIRS_LOCK, _pair_store_lock(root):
         data = load_pairs(root)
         for p in data:
             if p.get("id") == pair_id:
+                # New direct-feedback observations become immutable at answer
+                # time. Historical rows without a direct-feedback status retain
+                # the old note-edit behavior for backward compatibility.
+                if p.get("answer") and p.get("direct_feedback_status"):
+                    return None
                 p["note"] = str(note).strip() if note is not None else ""
                 save_pairs(root, data)
                 return p
@@ -671,13 +798,21 @@ def main() -> None:
                     if pair is None:
                         return self._json({"ok": False, "error": "unknown pair id"}, 400)
                     return self._json({"ok": True, "pair": pair})
+                if body.get("viewed") and body.get("id"):
+                    pair = mark_pair_viewed(root, str(body["id"]).strip())
+                    if pair is None:
+                        return self._json({"ok": False, "error": "unknown pair id"}, 400)
+                    return self._json({"ok": True, "pair": pair})
                 if "answer" in body and body.get("id"):
                     pair = record_pair_answer(
                         root, str(body["id"]).strip(), str(body["answer"]).strip(),
                         body.get("note", ""))
                     if pair is None:
                         return self._json({"ok": False, "error": "invalid answer or unknown pair id"}, 400)
-                    return self._json({"ok": True, "pair": pair})
+                    triggered = trigger_direct_feedback(root, pair["id"])
+                    if triggered:
+                        pair = next((p for p in load_pairs(root) if p.get("id") == pair["id"]), pair)
+                    return self._json({"ok": True, "pair": pair, "agent_triggered": triggered})
                 if body.get("run_a") and body.get("run_b"):
                     pair = add_pair(
                         root, str(body["run_a"]), str(body["run_b"]), body.get("prompt", ""),
@@ -685,6 +820,8 @@ def main() -> None:
                         magnitude_a=body.get("magnitude_a", ""),
                         magnitude_b=body.get("magnitude_b", ""),
                         scenario=body.get("scenario", ""),
+                        explanation_a=body.get("explanation_a", ""),
+                        explanation_b=body.get("explanation_b", ""),
                     )
                     return self._json({"ok": True, "pair": pair})
                 return self._json({"ok": False, "error": "provide {run_a,run_b} to add a pair or {id,answer} to record an answer"}, 400)

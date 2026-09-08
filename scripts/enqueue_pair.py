@@ -21,6 +21,8 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import json
 import os
 import threading
@@ -28,6 +30,18 @@ import time
 from pathlib import Path
 
 _LOCK = threading.Lock()
+
+
+@contextmanager
+def _store_lock():
+    lock_path = _pairwise_path().with_suffix(".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
 
 
 def _repo_root() -> Path:
@@ -73,9 +87,10 @@ def _new_pair_id(pairs: list) -> str:
 
 
 def enqueue(run_a: str, run_b: str, prompt: str = "", dimension: str = "",
-            magnitude_a: str = "", magnitude_b: str = "", scenario: str = "") -> dict:
+            magnitude_a: str = "", magnitude_b: str = "", scenario: str = "",
+            explanation_a: str = "", explanation_b: str = "") -> dict:
     """Append a new unanswered pair to the store; returns the stored pair."""
-    with _LOCK:
+    with _LOCK, _store_lock():
         data = _load()
         pair = {
             "id": _new_pair_id(data),
@@ -86,7 +101,12 @@ def enqueue(run_a: str, run_b: str, prompt: str = "", dimension: str = "",
             "magnitude_a": str(magnitude_a or "").strip(),
             "magnitude_b": str(magnitude_b or "").strip(),
             "scenario": (scenario or "").strip(),
+            "display_order": ["a", "b"],
+            "explanation_a": str(explanation_a or "").strip(),
+            "explanation_b": str(explanation_b or "").strip(),
             "ts": time.time(),
+            "first_view_ts": None,
+            "display_snapshot": None,
             "answer": None,
             "answer_ts": None,
             "note": "",
@@ -105,6 +125,8 @@ def main() -> None:
     ap.add_argument("--mag-b", default="", help="magnitude of the knob for side B")
     ap.add_argument("--scenario", default="", help="fixed config label, e.g. 'sphere s1 iters5000'")
     ap.add_argument("--prompt", default="", help="short prompt shown to the human in compare.html")
+    ap.add_argument("--explanation-a", default="", help="factual explanation shown below option A")
+    ap.add_argument("--explanation-b", default="", help="factual explanation shown below option B")
     args = ap.parse_args()
 
     if _run_key(args.run_a) == _run_key(args.run_b):
@@ -114,6 +136,7 @@ def main() -> None:
         args.run_a, args.run_b, args.prompt,
         dimension=args.dimension, magnitude_a=args.mag_a,
         magnitude_b=args.mag_b, scenario=args.scenario,
+        explanation_a=args.explanation_a, explanation_b=args.explanation_b,
     )
     print(json.dumps(pair, indent=2))
     print(f"[enqueue] {pair['id']} queued: {pair['run_a']} vs {pair['run_b']} "

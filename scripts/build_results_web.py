@@ -66,6 +66,14 @@ def clean_for_json(obj):
     return obj
 
 
+def safe_float(value, default=0.0):
+    """Parse legacy TSV/JSON numeric fields without poisoning the full index."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def parse_cmd(cmd):
     """Pull shape / iters / seed out of a results.tsv command string."""
     if not isinstance(cmd, str):
@@ -106,8 +114,11 @@ def tool_geom_from_args(args):
     wz = (win[2] if len(win) > 2 and win[2] else 10.0) * IN_TO_MM
     a = args or {}
     return {
-        "toolRadius": float(a.get("tool_radius_mm", 3.175)) / lx,
-        "toolHeight": float(a.get("tool_height_mm", 25.0)) / lz,
+        # Historical args may contain explicit null/"None" rather than omit the
+        # key. Treat both as the documented defaults so one legacy run cannot
+        # prevent the entire dashboard index from rebuilding.
+        "toolRadius": safe_float(a.get("tool_radius_mm"), 3.175) / lx,
+        "toolHeight": safe_float(a.get("tool_height_mm"), 25.0) / lz,
         "holderRadius": (IN_TO_MM * 2.5 / 2.0) / lx,   # 2.5"-diameter spindle
         "holderHeight": wz / lz,                       # machine Z travel
     }
@@ -634,7 +645,7 @@ def build_data_payload(generate_gcode=True, verbose=True):
             "idx": i,
             "commit": r.get("commit", ""),
             "dice": dice,
-            "memory_gb": float(r["memory_gb"]) if r.get("memory_gb") else 0.0,
+            "memory_gb": safe_float(r.get("memory_gb"), 0.0),
             "status": r.get("status", "discard"),
             "description": desc,
             "command": cmd,

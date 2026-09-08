@@ -30,7 +30,10 @@ wandb/
 # Local human-feedback / preference stores — live experiment data, never
 # committed (the agent reads/writes these at runtime; wipe between runs):
 /autoresearch/tasks/train_csg/pairwise.json
+/autoresearch/tasks/train_csg/pairwise.lock
 /autoresearch/tasks/train_csg/run_feedback.json
+/autoresearch/tasks/train_csg/direct_feedback_events.jsonl
+/autoresearch/tasks/train_csg/direct_feedback/
 
 # Local throwaway diagnostic scripts (not part of the repo)
 /diag_init.py

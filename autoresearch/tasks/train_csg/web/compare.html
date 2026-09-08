@@ -57,6 +57,8 @@
   .side.B .tag { background:var(--b); }
   .side .name { font-size:13px; word-break:break-all; }
   .side .meta { color:var(--muted); font-size:12px; font-variant-numeric:tabular-nums; }
+  .side .explanation { min-height:38px; padding:8px 10px; color:var(--ink); font-size:13px;
+    line-height:1.35; background:var(--panel2); border:1px solid var(--grid); border-radius:6px; }
   .viewport-wrap { position:relative; width:100%; aspect-ratio:1/1; background:#0d1117;
     border:1px solid var(--grid); border-radius:8px; overflow:hidden; touch-action:none; }
   .viewport-wrap canvas { width:100%; height:100%; display:block; }
@@ -136,6 +138,7 @@
     <div class="side A">
       <div class="head"><span class="tag">A</span><span class="name" id="name-a">—</span></div>
       <div class="meta" id="meta-a"></div>
+      <div class="explanation" id="explanation-a">No explanation recorded for this historical option.</div>
       <div class="viewport-wrap" id="wrap-a">
         <canvas id="canvas-a"></canvas>
         <div class="vbadge" id="badge-a">WebGPU…</div>
@@ -145,6 +148,7 @@
     <div class="side B">
       <div class="head"><span class="tag">B</span><span class="name" id="name-b">—</span></div>
       <div class="meta" id="meta-b"></div>
+      <div class="explanation" id="explanation-b">No explanation recorded for this historical option.</div>
       <div class="viewport-wrap" id="wrap-b">
         <canvas id="canvas-b"></canvas>
         <div class="vbadge" id="badge-b">WebGPU…</div>
@@ -420,6 +424,20 @@ async function showPair(pair){
   }
   setAnswerEnabled(!pair.answer);
   document.getElementById("ans-note").value = pair.note || "";
+  document.getElementById("explanation-a").textContent = pair.explanation_a || "No explanation recorded for this historical option.";
+  document.getElementById("explanation-b").textContent = pair.explanation_b || "No explanation recorded for this historical option.";
+  // Capture first view before either trajectory is loaded. The snapshot stores
+  // the fixed A/B order and exact prompt/explanations/summary metrics shown.
+  if (pair.first_view_ts == null){
+    try {
+      const vr = await fetch(`${BASE}__api/pairs`, {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({id:pair.id, viewed:true})
+      });
+      const vj = await vr.json();
+      if (vj.ok) Object.assign(pair, vj.pair);
+    } catch (e) { console.warn("could not record first view", e); }
+  }
   // Init the two WebGPU devices sequentially (concurrent adapter requests can
   // race in some browsers); the fetches still overlap with the first render.
   await sideA.loadRun(pair.run_a);
@@ -434,9 +452,9 @@ function setAnswerEnabled(on){
   // The note can always be edited on a queued pair; the save button is live
   // once a pair is loaded (including already-answered ones), so the user can
   // add or revise the rationale on previously answered comparisons.
-  document.getElementById("save-note").disabled = !activePair;
+  document.getElementById("save-note").disabled = !activePair || !!activePair.answer;
   document.getElementById("ans-hint").textContent =
-    on ? "Pick the better trajectory." : (activePair ? "Already answered — you can still update the note." : "Ad-hoc compare — not recorded.");
+    on ? "Pick the better trajectory and explain why." : (activePair ? "Already answered — this observation is immutable." : "Ad-hoc compare — not recorded.");
 }
 
 function escapeHtml(s){ return (""+s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
@@ -444,6 +462,7 @@ function escapeHtml(s){ return (""+s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
 async function answer(ans){
   if (!activePair || activePair.answer) return;
   const note = document.getElementById("ans-note").value.trim();
+  if (!note){ toast("Please explain why; the raw critique drives the next objective."); return; }
   const r = await fetch(`${BASE}__api/pairs`, {
     method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({ id: activePair.id, answer: ans, note })
@@ -456,7 +475,8 @@ async function answer(ans){
   document.getElementById("pair-answered").textContent = "answered "+ans;
   setAnswerEnabled(false);
   refreshDigest();   // reflect the just-recorded answer in the learned-so-far panel
-  toast("Saved: "+ans.toUpperCase()+". Loading next pending…");
+  const agentMsg = j.agent_triggered ? " Local objective agent started." : "";
+  toast("Saved: "+ans.toUpperCase()+"."+agentMsg+" Loading next pending…");
   setTimeout(nextPending, 600);
 }
 
