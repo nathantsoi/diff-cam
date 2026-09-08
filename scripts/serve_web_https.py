@@ -856,7 +856,14 @@ def main() -> None:
     httpd = Server((args.host, args.port), handler)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
-    httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
+    # Do not perform the TLS handshake in ThreadingTCPServer.get_request().
+    # Browsers commonly open speculative/preconnect sockets and leave them
+    # idle; a handshake on the main accept thread lets one such socket stall
+    # every subsequent dashboard asset request.  With deferred handshakes,
+    # the first read in each request-handler thread performs its own handshake.
+    httpd.socket = ctx.wrap_socket(
+        httpd.socket, server_side=True, do_handshake_on_connect=False
+    )
 
     rel = os.path.relpath(str(web_dir), str(root))
     urls = [
