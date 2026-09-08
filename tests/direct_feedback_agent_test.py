@@ -71,6 +71,8 @@ def test_process_consumes_raw_pair_and_writes_append_only_event(tmp_path, monkey
         "id": "p_0042", "run_a": "run-a", "run_b": "run-b",
         "answer": "a", "answer_ts": 1234.5, "note": "reduce late air cutting",
         "display_order": ["a", "b"],
+        "experimental_evidence_eligible": False,
+        "presentation_override": "weak_intervention_loop_demo",
     }
     pair_store = task / "pairwise.json"
     pair_store.write_text(json.dumps([pair]))
@@ -107,6 +109,8 @@ def test_process_consumes_raw_pair_and_writes_append_only_event(tmp_path, monkey
     assert captured["raw_critique"] == "reduce late air cutting"
     assert event["variant_a"]["changes"] == {"w_air_late": 0.002}
     assert event["variant_b"]["changes"] == {"w_air_late": 0.006}
+    assert event["experimental_evidence_eligible"] is False
+    assert event["presentation_override"] == "weak_intervention_loop_demo"
     lines = (task / "direct_feedback_events.jsonl").read_text().splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["raw_critique"] == "reduce late air cutting"

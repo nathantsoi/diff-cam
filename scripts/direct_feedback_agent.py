@@ -261,6 +261,12 @@ def process(pair_id: str, base_url: str, model: str) -> dict:
         "status": "objective_decided",
         "recorded_ts": time.time(),
         "pair_snapshot": pair,
+        # Demo-overridden weak pairs may exercise the plumbing, but neither
+        # their feedback nor descendants may silently become research evidence.
+        "experimental_evidence_eligible": bool(
+            pair.get("experimental_evidence_eligible", True)
+        ),
+        "presentation_override": pair.get("presentation_override"),
         "raw_choice": pair["answer"],
         "raw_critique": pair["note"],
         "agent": {"base_url": base_url, "model": model, "temperature": 0.1},
