@@ -1,0 +1,19 @@
+**Week of 9/14/2026 Work**  
+**Context**  
+Now that we have the loop setup to provide feedback to the user based on the changes (and we’ve shown significant change; we discussed and decided in the meeting the supposedly “insiginificant” changes of about 10% were in fact significant) we want to start modeling the latent state of the human. To do this, we want to train/fine-tune/develop an LLM-based classifier that will try to predict whether or not there was a shift in the human’s belief about what is “important” in the CNC machining process. For example, we might want to predict whether or not the human suddenly valued the quality of the finish more; we want a Classifier to be able to determine this. Here is semi-formally how  we’re defining this:
+
+**Classifier Formulation**  
+Consider ${Q}_{t}=\{{\tau }_{a},{\tau }_{b},c,T\}$ as one iteration at step $t$, where $\tau$ are the two trajectories generated at the step, $c$ is the choice the human makes, and $T$ is the text feedback inputted by the human at this step.   
+We want to define a classifier ${C}_{\theta }({Q}_{n}^{T},{{Q}_{n+1}^{T})\Rightarrow \Delta =\{x\in [0,1],T\}}_{}^{}$, where $x$ is the prediction of whether or not a value changed happened and $T$ (note: referring to ${\Delta }^{T}$) being the text prediction of how exactly the human’s value changed between the two steps (given $x=1$; if $x=0$, then $T$ is null or non-existent or empty). 
+
+There are two main end goals for this process of developing a classifier:
+
+- We want to fine-tune $C$ such that $\Delta$ matches as much as possible the user input (see “**Our main implementation goals for this week**” for more info). The success of this means we will have successfully modeled the human’s internal state predicting what they want (i.e. $\Delta$). This then will be able to be influencing the changes to the human’s reward function. So, to define how well our $C$ is doing, we need to compare predicted to actual (for the ${\Delta }^{x}$, we’d use a confusion matrix for error i.e. misclassification rate, and for ${\Delta }^{T}$ we need to decide and implement some way to compare how similar the expected to actual text is).  
+- In tandem, we want a substantial log of running experiments in this framework; we want all of this (the $Q$s and the $\Delta$s and the human-inputted actual data during training) logged in a way that (should we decide to go down this route) all the data could/will be used in context by the LLM as a reference for predicting human intent).
+
+**Our main implementation goals for this week**:  
+Broadly, by next lab meeting in two days, we need to have the implementation of infrastructure necessary to start training the classifier.
+
+- In an effort to train/fine-tune/whatever this model, we want there to be a UI popup after finishing a $Q$ step (i.e. after the human finished inputting their choice and text feedback) if there is a predicted value change; this will then allow the user to input text explanation of how their values changed (prompt them in a non-leading way, something like “We noticed your priorities might’ve changed; can you describe how so?”). We will then take in that text feedback to compare to the classifier ${C}_{\Theta }$’s prediction at that step.  
+- Implement the setup for $C$ as described above using our LLM (Qwen, as of right now) such that we are ready to start training the classifier. This will include the loop that will take in the data $C$ needs, a means to train/finetune $C$ to be more accurate, as well as the substantial logging system to later be pulled from (see the two main goals for the classifier in the formulation).  
+- Demonstrate in a test one loop of this whole infra working; we will scope out actually running these experiments until the near future. The goal before the next lab meeting is the necessary infra.
