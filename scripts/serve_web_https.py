@@ -32,9 +32,11 @@ import socketserver
 import ssl
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
+import uuid
 from pathlib import Path
 
 
@@ -331,9 +333,54 @@ def set_feedback(root: Path, run: str, stars=_UNSET, feedback=_UNSET) -> dict:
 # are stored as basenames (the unique key, same convention as the star-rating
 # store) so a pair survives regardless of batch folder moves.
 # ---------------------------------------------------------------------------
+_PAIRWISE_PATH_OVERRIDE: Path | None = None
+
+
 def pairwise_path(root: Path) -> Path:
     """Path to pairwise.json under the train_csg task dir."""
+    if _PAIRWISE_PATH_OVERRIDE is not None:
+        return _PAIRWISE_PATH_OVERRIDE
     return root / "autoresearch" / "tasks" / "train_csg" / "pairwise.json"
+
+
+def seed_isolated_smoke_pairs(root: Path, destination: Path, count: int = 2) -> list:
+    """Copy pending pair descriptions into a disposable, non-research store."""
+    source = root / "autoresearch" / "tasks" / "train_csg" / "pairwise.json"
+    try:
+        records = json.loads(source.read_text() or "[]")
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"cannot read source pair store for smoke mode: {source}") from exc
+    pending = [
+        record
+        for record in records
+        if isinstance(record, dict) and not record.get("answer")
+    ]
+    if len(pending) < count:
+        raise ValueError(
+            f"smoke mode requires {count} pending pairs; found {len(pending)}"
+        )
+    seeded = []
+    for index, source_pair in enumerate(pending[:count], 1):
+        pair = dict(source_pair)
+        for key in list(pair):
+            if key.startswith("direct_feedback_"):
+                pair.pop(key)
+        pair.update(
+            {
+                "id": f"smoke_{index:04d}",
+                "smoke_source_pair_id": source_pair.get("id"),
+                "experimental_evidence_eligible": False,
+                "answer": None,
+                "answer_ts": None,
+                "note": "",
+                "first_view_ts": None,
+                "display_snapshot": None,
+            }
+        )
+        seeded.append(pair)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(seeded, indent=2, sort_keys=True))
+    return seeded
 
 
 def load_pairs(root: Path) -> list:
@@ -566,6 +613,292 @@ def trigger_direct_feedback(root: Path, pair_id: str) -> bool:
     return True
 
 
+def trigger_direct_feedback_for_answer(
+    root: Path, pair_id: str, *, smoke_mode: bool
+) -> tuple[bool, dict | None]:
+    """Trigger normal processing or explicitly suppress it for isolated smoke."""
+    if smoke_mode:
+        _set_direct_feedback_status(root, pair_id, "queued", "smoke_disabled")
+        pair = next((p for p in load_pairs(root) if p.get("id") == pair_id), None)
+        return False, pair
+    triggered = trigger_direct_feedback(root, pair_id)
+    pair = next((p for p in load_pairs(root) if p.get("id") == pair_id), None)
+    return triggered, pair
+
+
+# ---------------------------------------------------------------------------
+# Text-only human-belief change collection.  This remains separate from the
+# direct objective-editing agent above: it observes adjacent critique text,
+# launches the frozen classifier, and stores an independent training label.
+# ---------------------------------------------------------------------------
+_HUMAN_STATE_WORKER_LOCK = threading.Lock()
+_HUMAN_STATE_ACTIVE_WORKERS: set[str] = set()
+
+
+def _human_state_module():
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import human_state_lib
+    return human_state_lib
+
+
+def trigger_human_state_classifier(
+    root: Path,
+    observation_id: str,
+    *,
+    task_dir: Path | None = None,
+) -> bool:
+    """Launch at most one classifier worker per observation in this server."""
+    with _HUMAN_STATE_WORKER_LOCK:
+        if observation_id in _HUMAN_STATE_ACTIVE_WORKERS:
+            return False
+        _HUMAN_STATE_ACTIVE_WORKERS.add(observation_id)
+
+    task_dir = task_dir or root / "autoresearch" / "tasks" / "train_csg"
+
+    def record_unexpected_failure(error_type: str, detail: str) -> None:
+        module = _human_state_module()
+        store = module.HumanStateStore(task_dir)
+        audit = store.get_observation(observation_id)
+        if audit["prediction"] is None and audit["prediction_failure"] is None:
+            store.record_prediction_failure(
+                observation_id,
+                error_type=error_type,
+                detail=detail[:1000],
+            )
+
+    def worker():
+        script = root / "scripts" / "human_state_classifier.py"
+        command = [
+            sys.executable,
+            str(script),
+            "--task-dir",
+            str(task_dir),
+            "--observation-id",
+            observation_id,
+        ]
+        try:
+            proc = subprocess.run(
+                command,
+                cwd=root,
+                capture_output=True,
+                text=True,
+                timeout=660,
+            )
+            if proc.returncode != 0:
+                detail = (proc.stderr or proc.stdout or "classifier failed").strip()
+                record_unexpected_failure("worker_failed", detail)
+        except subprocess.TimeoutExpired:
+            record_unexpected_failure(
+                "worker_timeout", "classifier worker timed out after 660 seconds"
+            )
+        except Exception as exc:
+            record_unexpected_failure("worker_failed", str(exc))
+        finally:
+            with _HUMAN_STATE_WORKER_LOCK:
+                _HUMAN_STATE_ACTIVE_WORKERS.discard(observation_id)
+
+    threading.Thread(
+        target=worker,
+        daemon=True,
+        name=f"human-state-{observation_id}",
+    ).start()
+    return True
+
+
+class HumanStateController:
+    """Server-side Phase 3 orchestration with prediction-hidden status views."""
+
+    MODES = frozenset({"off", "training", "deployment"})
+    QUESTION = (
+        "Compared with your previous response, did what you considered important "
+        "in judging these machining results change?"
+    )
+    CHANGE_QUESTION = "What changed in what you considered important?"
+
+    def __init__(
+        self,
+        *,
+        root: Path,
+        mode: str,
+        participant_id: str | None,
+        git_revision: str,
+        session_id: str | None = None,
+        store=None,
+        classifier_trigger=None,
+        smoke_mode: bool = False,
+    ) -> None:
+        if mode not in self.MODES:
+            raise ValueError(f"invalid human-state mode: {mode!r}")
+        module = _human_state_module()
+        if mode != "off":
+            if not isinstance(participant_id, str) or not module.IDENTIFIER_RE.fullmatch(
+                participant_id
+            ):
+                raise ValueError(
+                    "non-off human-state mode requires a pseudonymous participant ID"
+                )
+        self.root = root
+        self.mode = mode
+        self.participant_id = participant_id if mode != "off" else None
+        self.git_revision = git_revision
+        self.smoke_mode = bool(smoke_mode)
+        self.store = store or module.HumanStateStore(
+            root / "autoresearch" / "tasks" / "train_csg"
+        )
+        self._classifier_trigger = classifier_trigger or (
+            lambda observation_id: trigger_human_state_classifier(
+                root, observation_id, task_dir=self.store.task_dir
+            )
+        )
+        self._session_lock = threading.Lock()
+        self._session_id = session_id or uuid.uuid4().hex
+
+    @property
+    def session_id(self) -> str:
+        with self._session_lock:
+            return self._session_id
+
+    def config(self) -> dict:
+        return {
+            "mode": self.mode,
+            "smoke_mode": self.smoke_mode,
+            "participant_id": self.participant_id,
+            "session_id": self.session_id if self.mode != "off" else None,
+            "question": self.QUESTION if self.mode == "training" else None,
+            "change_question": self.CHANGE_QUESTION if self.mode == "training" else None,
+            "labels": (
+                ["change", "no_change", "not_sure", "skip"]
+                if self.mode == "training"
+                else []
+            ),
+        }
+
+    def new_session(self) -> dict:
+        if self.mode == "off":
+            raise ValueError("human-state collection is off")
+        with self._session_lock:
+            self._session_id = uuid.uuid4().hex
+        return self.config()
+
+    def record_pair(self, pair: dict) -> dict:
+        if self.mode == "off":
+            return {"mode": "off", "status": "off"}
+        result = self.store.record_critique(
+            participant_id=self.participant_id,
+            session_id=self.session_id,
+            step_id=str(pair.get("id", "")),
+            text=pair.get("note", ""),
+            git_revision=self.git_revision,
+        )
+        transition = result["transition_event"]
+        if transition is None:
+            return {
+                "mode": self.mode,
+                "status": "insufficient_history",
+                "observation_id": None,
+                "classifier_triggered": False,
+            }
+        observation_id = transition["observation_id"]
+        triggered = self._classifier_trigger(observation_id)
+        status = self.observation_status(observation_id)
+        status["classifier_triggered"] = triggered
+        return status
+
+    def observation_status(self, observation_id: str) -> dict:
+        audit = self.store.get_observation(observation_id)
+        if audit["prediction"] is not None:
+            prediction_status = "completed"
+        elif audit["prediction_failure"] is not None:
+            prediction_status = "failed"
+        else:
+            prediction_status = "pending"
+        label_status = "saved" if audit["human_label"] is not None else "pending"
+        # Deliberately omit prediction content.  The training UI sees status,
+        # never Qwen's decision or delta text before providing its own label.
+        return {
+            "mode": self.mode,
+            "status": "transition_created",
+            "observation_id": observation_id,
+            "prediction_status": prediction_status,
+            "human_label_status": label_status,
+        }
+
+    def record_label(
+        self,
+        observation_id: str,
+        *,
+        label: str,
+        change_text: str | None,
+    ) -> dict:
+        if self.mode != "training":
+            raise ValueError("human-state labels are accepted only in training mode")
+        self.store.record_human_label(
+            observation_id,
+            label=label,
+            change_text=change_text,
+        )
+        return self.observation_status(observation_id)
+
+
+def _human_state_endpoint(path: str, suffix: str) -> bool:
+    endpoint = f"/__api/human-state/{suffix}"
+    return path == endpoint or path.endswith(endpoint)
+
+
+def human_state_get_response(
+    controller: HumanStateController,
+    path: str,
+    query: dict[str, list[str]],
+) -> tuple[dict, int] | None:
+    """Map a human-state GET to its exact JSON response, or decline it."""
+    if _human_state_endpoint(path, "config"):
+        return controller.config(), 200
+    if not _human_state_endpoint(path, "status"):
+        return None
+    observation_id = (query.get("id", [""])[0] or "").strip()
+    if not observation_id:
+        return {"ok": False, "error": "missing observation id"}, 400
+    try:
+        return {"ok": True, **controller.observation_status(observation_id)}, 200
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}, 404
+
+
+def human_state_post_response(
+    controller: HumanStateController,
+    path: str,
+    body: dict,
+) -> tuple[dict, int] | None:
+    """Map a validated JSON-object POST to its exact JSON response."""
+    if _human_state_endpoint(path, "label"):
+        try:
+            observation_id = str(body.get("observation_id", "")).strip()
+            label = str(body.get("label", "")).strip()
+            if not observation_id or not label:
+                raise ValueError("observation_id and label are required")
+            result = controller.record_label(
+                observation_id,
+                label=label,
+                change_text=body.get("change_text"),
+            )
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}, 400
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}, 409
+        return {"ok": True, **result}, 200
+    if _human_state_endpoint(path, "session"):
+        try:
+            if body.get("action") != "new":
+                raise ValueError("action must be 'new'")
+            config = controller.new_session()
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}, 400
+        return {"ok": True, **config}, 200
+    return None
+
+
 def update_pair_note(root: Path, pair_id: str, note: str) -> dict | None:
     """Update only the free-text note on an already-answered pair.
 
@@ -625,6 +958,8 @@ def generate_run_video(root: Path, run_rel: str, force: bool = False) -> dict:
 
 
 def main() -> None:
+    global _PAIRWISE_PATH_OVERRIDE
+
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8443)
@@ -642,6 +977,53 @@ def main() -> None:
         else:
             sys.exit(f"error: web dir not found: {web_dir}")
 
+    smoke_mode = os.environ.get("DIFFCAM_HUMAN_STATE_SMOKE", "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    human_state_mode = os.environ.get("DIFFCAM_HUMAN_STATE_MODE", "off").strip().lower()
+    participant_id = os.environ.get("DIFFCAM_HUMAN_STATE_PARTICIPANT_ID")
+    participant_id = participant_id.strip() if participant_id else None
+    smoke_workspace = None
+    human_state_store = None
+    if smoke_mode:
+        human_state_mode = "training"
+        participant_id = participant_id or "isolated-smoke"
+        smoke_workspace = tempfile.TemporaryDirectory(
+            prefix="diffcam-human-state-smoke-"
+        )
+        smoke_task_dir = Path(smoke_workspace.name) / "train_csg"
+        smoke_pair_path = smoke_task_dir / "pairwise.json"
+        try:
+            seed_isolated_smoke_pairs(root, smoke_pair_path)
+        except ValueError as exc:
+            smoke_workspace.cleanup()
+            sys.exit(f"error: {exc}")
+        _PAIRWISE_PATH_OVERRIDE = smoke_pair_path
+        module = _human_state_module()
+        human_state_store = module.HumanStateStore(smoke_task_dir)
+    try:
+        git_revision = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=repo,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.strip()
+    except Exception:
+        git_revision = "unknown"
+    try:
+        human_state = HumanStateController(
+            root=root,
+            mode=human_state_mode,
+            participant_id=participant_id,
+            git_revision=git_revision,
+            store=human_state_store,
+            smoke_mode=smoke_mode,
+        )
+    except ValueError as exc:
+        sys.exit(f"error: {exc}")
+
     cert, key = ensure_cert(web_dir / ".cert", args.host)
 
     os.chdir(root)
@@ -649,20 +1031,32 @@ def main() -> None:
     scripts_dir = str(Path(__file__).resolve().parent)
     if scripts_dir not in sys.path:
         sys.path.insert(0, scripts_dir)
-    from build_results_web import IncrementalResultsBuilder
+    from build_results_web import IncrementalResultsBuilder, build_data_payload
 
-    builder = IncrementalResultsBuilder(generate_gcode=True, verbose=True)
-    builder.get_payload()
+    if smoke_mode:
+        # IncrementalResultsBuilder always refreshes web/data.json.  Use an
+        # in-memory immutable payload so isolated smoke mode performs no writes
+        # to real dashboard or run artifacts.
+        smoke_payload = build_data_payload(generate_gcode=False, verbose=True)
 
-    def background_builder_loop():
-        while True:
-            time.sleep(3)
-            try:
-                builder.get_payload()
-            except Exception as e:
-                print(f"[builder sync error] {e}")
+        class ReadOnlySmokeBuilder:
+            def get_payload(self, force=False):
+                return smoke_payload
 
-    threading.Thread(target=background_builder_loop, daemon=True).start()
+        builder = ReadOnlySmokeBuilder()
+    else:
+        builder = IncrementalResultsBuilder(generate_gcode=True, verbose=True)
+        builder.get_payload()
+
+        def background_builder_loop():
+            while True:
+                time.sleep(3)
+                try:
+                    builder.get_payload()
+                except Exception as e:
+                    print(f"[builder sync error] {e}")
+
+        threading.Thread(target=background_builder_loop, daemon=True).start()
 
     # Dev server: send no-store so browsers never serve a cached JS module (the
     # dynamic import("./voxel.js") otherwise stays stale across edits, making code
@@ -684,8 +1078,22 @@ def main() -> None:
             self.end_headers()
             self.wfile.write(body)
 
+        def _json_body(self):
+            length = int(self.headers.get("Content-Length", "0") or "0")
+            raw = self.rfile.read(length) if length > 0 else b"{}"
+            value = json.loads(raw.decode() or "{}")
+            if not isinstance(value, dict):
+                raise ValueError("JSON body must be an object")
+            return value
+
         def do_GET(self):
             parsed = urllib.parse.urlparse(self.path)
+            human_state_response = human_state_get_response(
+                human_state, parsed.path, urllib.parse.parse_qs(parsed.query)
+            )
+            if human_state_response is not None:
+                payload, status = human_state_response
+                return self._json(payload, status)
             if parsed.path in ("/web/data.json", "/data.json", "/__api/data.json") or parsed.path.endswith("/data.json"):
                 data = builder.get_payload()
                 if data is not None:
@@ -776,14 +1184,23 @@ def main() -> None:
 
         def do_POST(self):
             parsed = urllib.parse.urlparse(self.path)
+            if _human_state_endpoint(parsed.path, "label") or _human_state_endpoint(
+                parsed.path, "session"
+            ):
+                try:
+                    body = self._json_body()
+                except (ValueError, OSError):
+                    return self._json({"ok": False, "error": "invalid JSON body"}, 400)
+                payload, status = human_state_post_response(
+                    human_state, parsed.path, body
+                )
+                return self._json(payload, status)
             # Save one run's star rating / feedback note. Body is JSON:
             # {"run": "runs/<batch>/<name>" | "<name>", "stars": 1-7|null,
             #  "feedback": "..."}. Returns the stored entry.
             if parsed.path == "/__api/feedback" or parsed.path.endswith("/__api/feedback"):
                 try:
-                    length = int(self.headers.get("Content-Length", "0") or "0")
-                    raw = self.rfile.read(length) if length > 0 else b"{}"
-                    body = json.loads(raw.decode() or "{}")
+                    body = self._json_body()
                 except (ValueError, OSError):
                     return self._json({"ok": False, "error": "invalid JSON body"}, 400)
                 run = (body.get("run") or "").strip()
@@ -807,9 +1224,7 @@ def main() -> None:
             #  - record an answer:  {"id": "p_0001", "answer": "a"|"b"|"tie", "note": "..."}
             if parsed.path == "/__api/pairs" or parsed.path.endswith("/__api/pairs"):
                 try:
-                    length = int(self.headers.get("Content-Length", "0") or "0")
-                    raw = self.rfile.read(length) if length > 0 else b"{}"
-                    body = json.loads(raw.decode() or "{}")
+                    body = self._json_body()
                 except (ValueError, OSError):
                     return self._json({"ok": False, "error": "invalid JSON body"}, 400)
                 if body.get("update_note") and body.get("id"):
@@ -829,10 +1244,28 @@ def main() -> None:
                         body.get("note", ""))
                     if pair is None:
                         return self._json({"ok": False, "error": "invalid answer or unknown pair id"}, 400)
-                    triggered = trigger_direct_feedback(root, pair["id"])
-                    if triggered:
-                        pair = next((p for p in load_pairs(root) if p.get("id") == pair["id"]), pair)
-                    return self._json({"ok": True, "pair": pair, "agent_triggered": triggered})
+                    triggered, refreshed_pair = trigger_direct_feedback_for_answer(
+                        root, pair["id"], smoke_mode=smoke_mode
+                    )
+                    pair = refreshed_pair or pair
+                    try:
+                        human_state_result = human_state.record_pair(pair)
+                    except Exception as exc:
+                        # The immutable pair answer is already safely stored.
+                        # Surface collection failure without pretending the
+                        # preference save failed or losing the critique.
+                        human_state_result = {
+                            "mode": human_state.mode,
+                            "status": "error",
+                            "error": str(exc),
+                        }
+                    return self._json({
+                        "ok": True,
+                        "pair": pair,
+                        "agent_triggered": triggered,
+                        "smoke_mode": smoke_mode,
+                        "human_state": human_state_result,
+                    })
                 if body.get("run_a") and body.get("run_b"):
                     pair = add_pair(
                         root, str(body["run_a"]), str(body["run_b"]), body.get("prompt", ""),
@@ -880,6 +1313,18 @@ def main() -> None:
         ]
     print(f"serving {root} over HTTPS on {args.host}:{args.port}")
     print(f"cert: {cert}")
+    print(
+        "human-state collection: "
+        f"{human_state.mode}"
+        + (
+            f" (participant={human_state.participant_id}, session={human_state.session_id})"
+            if human_state.mode != "off"
+            else ""
+        )
+    )
+    if smoke_mode:
+        print(f"ISOLATED SMOKE MODE: disposable data only in {smoke_workspace.name}")
+        print("ISOLATED SMOKE MODE: direct-feedback agent and GPU launch are disabled")
     print("open in Chrome (accept the self-signed cert warning):")
     for u in urls:
         print(f"  {u}")
@@ -890,6 +1335,10 @@ def main() -> None:
         print("\nshutting down.")
     finally:
         httpd.server_close()
+        if smoke_workspace is not None:
+            _PAIRWISE_PATH_OVERRIDE = None
+            smoke_workspace.cleanup()
+            print("isolated smoke data deleted")
 
 
 if __name__ == "__main__":

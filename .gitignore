@@ -37,6 +37,11 @@ docs/llm_map/paper_references/Text-Based-Critques.pdf
 /autoresearch/tasks/train_csg/run_feedback.json
 /autoresearch/tasks/train_csg/direct_feedback_events.jsonl
 /autoresearch/tasks/train_csg/direct_feedback/
+/autoresearch/tasks/train_csg/human_state_events.jsonl
+/autoresearch/tasks/train_csg/human_state.lock
+/autoresearch/tasks/train_csg/human_state/
+/autoresearch/tasks/train_csg/human_state_datasets/
+/autoresearch/tasks/train_csg/human_state_evaluations/
 
 # Local throwaway diagnostic scripts (not part of the repo)
 /diag_init.py

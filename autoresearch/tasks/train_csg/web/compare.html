@@ -110,13 +110,31 @@
     background:var(--panel2); border:1px solid var(--accent); color:var(--ink); padding:8px 16px;
     border-radius:8px; font-size:13px; opacity:0; transition:opacity .2s; pointer-events:none; }
   .toast.show { opacity:1; }
+  .hs-status { color:var(--muted); font-size:12px; }
+  .hs-modal { position:fixed; inset:0; z-index:100; display:flex; align-items:center;
+    justify-content:center; padding:20px; background:rgba(5,8,12,.76); backdrop-filter:blur(3px); }
+  .hs-modal[hidden] { display:none; }
+  .hs-card { width:min(620px,100%); background:var(--panel); border:1px solid var(--grid);
+    border-radius:12px; padding:20px; box-shadow:0 18px 70px rgba(0,0,0,.5); }
+  .hs-card h2 { margin:0 0 10px; font-size:18px; }
+  .hs-card p { margin:0 0 14px; line-height:1.45; }
+  .hs-choices { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+  .hs-choice.selected { border-color:var(--accent); background:#183957; }
+  .hs-change { display:flex; flex-direction:column; gap:7px; margin:0 0 14px; color:var(--muted);
+    font-size:13px; }
+  .hs-change textarea { width:100%; min-height:88px; resize:vertical; font:inherit; padding:9px;
+    color:var(--ink); background:var(--bg); border:1px solid var(--grid); border-radius:6px; }
+  .hs-footer { display:flex; align-items:center; gap:10px; }
+  .hs-footer .hs-progress { flex:1; color:var(--muted); font-size:12px; }
 </style>
 </head>
 <body>
 <header>
   <h1>Pairwise trajectory comparison</h1>
   <span class="stats" id="pair-stats">loading…</span>
+  <span class="hs-status" id="hs-status">human-state: loading…</span>
   <div class="ctrls">
+    <button id="hs-new-session" hidden>New study session</button>
     <button id="btn-prev">◀ Prev</button>
     <button id="btn-next" class="primary">Next pending ▶</button>
     <a href="index.html">← dashboard</a>
@@ -191,6 +209,27 @@
 </main>
 
 <div class="toast" id="toast"></div>
+
+<div class="hs-modal" id="hs-modal" hidden role="dialog" aria-modal="true" aria-labelledby="hs-title">
+  <div class="hs-card">
+    <h2 id="hs-title">One follow-up about your reasoning</h2>
+    <p id="hs-question"></p>
+    <div class="hs-choices" id="hs-choices">
+      <button class="hs-choice" data-label="change">Yes</button>
+      <button class="hs-choice" data-label="no_change">No</button>
+      <button class="hs-choice" data-label="not_sure">Not sure</button>
+      <button class="hs-choice" data-label="skip">Skip</button>
+    </div>
+    <label class="hs-change" id="hs-change-wrap" hidden>
+      <span id="hs-change-question"></span>
+      <textarea id="hs-change-text"></textarea>
+    </label>
+    <div class="hs-footer">
+      <span class="hs-progress" id="hs-progress">Classifier running independently…</span>
+      <button class="primary" id="hs-submit" disabled>Save response</button>
+    </div>
+  </div>
+</div>
 
 <script>
 // Page lives 4 dirs deep under the repo root; API + static paths are repo-relative.
@@ -349,6 +388,10 @@ let PAIRS = [];            // full list from /__api/pairs
 let curIdx = -1;           // index into PAIRS currently shown
 let activePair = null;     // the pair object being judged (null => ad-hoc)
 let pendingOnly = true;    // "next" navigates pending pairs
+let humanStateConfig = {mode:"off"};
+let activeHumanObservation = null;
+let selectedHumanLabel = null;
+let humanStatePoll = 0;
 
 const sideA = new Side("a", "canvas-a", "badge-a", "fall-a");
 const sideB = new Side("b", "canvas-b", "badge-b", "fall-b");
@@ -476,8 +519,147 @@ async function answer(ans){
   setAnswerEnabled(false);
   refreshDigest();   // reflect the just-recorded answer in the learned-so-far panel
   const agentMsg = j.agent_triggered ? " Local objective agent started." : "";
-  toast("Saved: "+ans.toUpperCase()+"."+agentMsg+" Loading next pending…");
-  setTimeout(nextPending, 600);
+  toast("Saved: "+ans.toUpperCase()+"."+agentMsg);
+  handleHumanStateAfterAnswer(j.human_state || {mode:"off",status:"off"});
+}
+
+function humanStateLabelName(label){
+  return {change:"Yes", no_change:"No", not_sure:"Not sure", skip:"Skip"}[label] || label;
+}
+
+function renderHumanStateHeader(message){
+  const el = document.getElementById("hs-status");
+  if (humanStateConfig.mode === "off") el.textContent = "human-state: "+(message || "off");
+  else {
+    const mode = humanStateConfig.smoke_mode ? "ISOLATED SMOKE" : humanStateConfig.mode;
+    el.textContent = "human-state: "+mode+(message ? " · "+message : "");
+    el.style.color = humanStateConfig.smoke_mode ? "#f0b429" : "";
+  }
+}
+
+async function loadHumanStateConfig(){
+  try {
+    const r = await fetch(`${BASE}__api/human-state/config`);
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || "configuration unavailable");
+    humanStateConfig = j;
+    document.getElementById("hs-new-session").hidden = j.mode === "off";
+    renderHumanStateHeader(j.mode === "off" ? "" : "session "+j.session_id.slice(0,8));
+  } catch (e) {
+    humanStateConfig = {mode:"off"};
+    renderHumanStateHeader("unavailable");
+  }
+}
+
+function stopHumanStatePolling(){
+  clearTimeout(humanStatePoll); humanStatePoll = 0;
+}
+
+async function pollHumanState(observationId){
+  stopHumanStatePolling();
+  try {
+    const r = await fetch(`${BASE}__api/human-state/status?id=${encodeURIComponent(observationId)}`);
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || "status unavailable");
+    const summary = `Qwen ${j.prediction_status} · label ${j.human_label_status}`;
+    renderHumanStateHeader(summary);
+    if (activeHumanObservation === observationId){
+      document.getElementById("hs-progress").textContent =
+        `Classifier: ${j.prediction_status}. Your response is recorded independently.`;
+    }
+    if (j.prediction_status === "pending") {
+      humanStatePoll = setTimeout(()=>pollHumanState(observationId), 1000);
+    }
+  } catch (e) {
+    renderHumanStateHeader("status unavailable");
+  }
+}
+
+function openHumanStatePrompt(state){
+  activeHumanObservation = state.observation_id;
+  selectedHumanLabel = null;
+  document.getElementById("hs-question").textContent = humanStateConfig.question;
+  document.getElementById("hs-change-question").textContent = humanStateConfig.change_question;
+  document.getElementById("hs-change-text").value = "";
+  document.getElementById("hs-change-wrap").hidden = true;
+  document.getElementById("hs-submit").disabled = true;
+  document.querySelectorAll(".hs-choice").forEach(button=>button.classList.remove("selected"));
+  document.getElementById("hs-progress").textContent =
+    `Classifier: ${state.prediction_status || "pending"}. Your response is recorded independently.`;
+  document.getElementById("hs-modal").hidden = false;
+  pollHumanState(state.observation_id);
+}
+
+function handleHumanStateAfterAnswer(state){
+  if (state.status === "error") {
+    renderHumanStateHeader("collection error");
+    toast("Preference saved; human-state collection failed: "+state.error);
+    return setTimeout(nextPending, 700);
+  }
+  if (state.status === "insufficient_history") {
+    renderHumanStateHeader("first critique recorded");
+    return setTimeout(nextPending, 500);
+  }
+  if (state.status !== "transition_created") return setTimeout(nextPending, 500);
+  pollHumanState(state.observation_id);
+  if (humanStateConfig.mode === "training") openHumanStatePrompt(state);
+  else setTimeout(nextPending, 500);
+}
+
+function chooseHumanStateLabel(label){
+  selectedHumanLabel = label;
+  document.querySelectorAll(".hs-choice").forEach(button=>{
+    button.classList.toggle("selected", button.dataset.label === label);
+  });
+  document.getElementById("hs-change-wrap").hidden = label !== "change";
+  document.getElementById("hs-submit").disabled = false;
+  if (label === "change") document.getElementById("hs-change-text").focus();
+}
+
+async function submitHumanStateLabel(){
+  if (!activeHumanObservation || !selectedHumanLabel) return;
+  const text = document.getElementById("hs-change-text").value.trim();
+  if (selectedHumanLabel === "change" && !text){
+    toast("Please briefly describe what changed."); return;
+  }
+  const submit = document.getElementById("hs-submit");
+  submit.disabled = true;
+  const body = {
+    observation_id:activeHumanObservation,
+    label:selectedHumanLabel,
+    change_text:selectedHumanLabel === "change" ? text : null,
+  };
+  try {
+    const r = await fetch(`${BASE}__api/human-state/label`, {
+      method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)
+    });
+    const j = await r.json();
+    if (!r.ok || !j.ok) throw new Error(j.error || "save failed");
+    const observationId = activeHumanObservation;
+    const labelName = humanStateLabelName(selectedHumanLabel);
+    activeHumanObservation = null; selectedHumanLabel = null;
+    document.getElementById("hs-modal").hidden = true;
+    renderHumanStateHeader(`Qwen ${j.prediction_status} · label saved`);
+    toast("Self-report saved: "+labelName+".");
+    if (j.prediction_status === "pending") pollHumanState(observationId);
+    setTimeout(nextPending, 500);
+  } catch (e) {
+    submit.disabled = false;
+    toast("Self-report save failed: "+e.message);
+  }
+}
+
+async function newHumanStateSession(){
+  if (!confirm("Start a new study session? The next critique will establish new history.")) return;
+  const r = await fetch(`${BASE}__api/human-state/session`, {
+    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({action:"new"})
+  });
+  const j = await r.json();
+  if (!r.ok || !j.ok){ toast("Could not start session: "+(j.error||"")); return; }
+  humanStateConfig = j;
+  stopHumanStatePolling();
+  renderHumanStateHeader("new session "+j.session_id.slice(0,8));
+  toast("New study session started.");
 }
 
 async function saveNote(){
@@ -611,6 +793,11 @@ function wire(){
   document.getElementById("pick-tie").onclick= ()=>answer("tie");
   document.getElementById("save-note").onclick = saveNote;
   document.getElementById("adhoc-load").onclick = adhocLoad;
+  document.querySelectorAll(".hs-choice").forEach(button=>{
+    button.onclick = ()=>chooseHumanStateLabel(button.dataset.label);
+  });
+  document.getElementById("hs-submit").onclick = submitHumanStateLabel;
+  document.getElementById("hs-new-session").onclick = newHumanStateSession;
   bindOrbit(sideA); bindOrbit(sideB);
   setAnswerEnabled(false);
 }
@@ -618,6 +805,7 @@ function wire(){
 (async function init(){
   wire();
   masterLoop();
+  await loadHumanStateConfig();
   try { await refreshPairs(); await loadRunList(); refreshDigest(); } catch(e){ console.warn(e); }
   // A stable ?pair=p_NNNN link lets an experiment protocol identify the exact
   // observation to collect instead of depending on mutable queue order.
