@@ -10,6 +10,9 @@ wandb/
 /trajectory_deltas.npy
 /args.json
 
+# paper outline
+docs/llm_map/paper_references/Text-Based-Critques.pdf
+
 # self-signed HTTPS cert for the results dashboard (scripts/serve_web_https.py)
 **/web/.cert/
 *.log
