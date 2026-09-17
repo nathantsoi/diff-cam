@@ -40,6 +40,7 @@ docs/llm_map/paper_references/Text-Based-Critques.pdf
 /autoresearch/tasks/train_csg/human_state_events.jsonl
 /autoresearch/tasks/train_csg/human_state.lock
 /autoresearch/tasks/train_csg/human_state/
+/autoresearch/tasks/train_csg/human_belief_state.json
 /autoresearch/tasks/train_csg/human_state_datasets/
 /autoresearch/tasks/train_csg/human_state_evaluations/
 

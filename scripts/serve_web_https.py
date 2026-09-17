@@ -633,6 +633,7 @@ def trigger_direct_feedback_for_answer(
 # ---------------------------------------------------------------------------
 _HUMAN_STATE_WORKER_LOCK = threading.Lock()
 _HUMAN_STATE_ACTIVE_WORKERS: set[str] = set()
+_HUMAN_BELIEF_STATE_LOCK = threading.Lock()
 
 
 def _human_state_module():
@@ -643,11 +644,28 @@ def _human_state_module():
     return human_state_lib
 
 
+def refresh_human_belief_state(task_dir: Path) -> dict:
+    """Serialize replay+write so concurrent label/prediction completions converge."""
+    scripts_dir = str(Path(__file__).resolve().parent)
+    if scripts_dir not in sys.path:
+        sys.path.insert(0, scripts_dir)
+    import human_belief_state
+
+    with _HUMAN_BELIEF_STATE_LOCK:
+        store = _human_state_module().HumanStateStore(task_dir)
+        state = human_belief_state.replay_belief_state(store)
+        human_belief_state.write_belief_state(
+            task_dir / "human_belief_state.json", state
+        )
+        return state
+
+
 def trigger_human_state_classifier(
     root: Path,
     observation_id: str,
     *,
     task_dir: Path | None = None,
+    trace_exchange: bool = False,
 ) -> bool:
     """Launch at most one classifier worker per observation in this server."""
     with _HUMAN_STATE_WORKER_LOCK:
@@ -678,6 +696,11 @@ def trigger_human_state_classifier(
             "--observation-id",
             observation_id,
         ]
+        if trace_exchange:
+            command.extend([
+                "--trace-exchange",
+                str(task_dir / "human_state" / observation_id / "qwen_exchange.json"),
+            ])
         try:
             proc = subprocess.run(
                 command,
@@ -696,6 +719,10 @@ def trigger_human_state_classifier(
         except Exception as exc:
             record_unexpected_failure("worker_failed", str(exc))
         finally:
+            try:
+                refresh_human_belief_state(task_dir)
+            except Exception as exc:
+                print(f"[human-state replay error] {exc}")
             with _HUMAN_STATE_WORKER_LOCK:
                 _HUMAN_STATE_ACTIVE_WORKERS.discard(observation_id)
 
@@ -728,6 +755,7 @@ class HumanStateController:
         store=None,
         classifier_trigger=None,
         smoke_mode: bool = False,
+        belief_state_refresh=None,
     ) -> None:
         if mode not in self.MODES:
             raise ValueError(f"invalid human-state mode: {mode!r}")
@@ -749,11 +777,26 @@ class HumanStateController:
         )
         self._classifier_trigger = classifier_trigger or (
             lambda observation_id: trigger_human_state_classifier(
-                root, observation_id, task_dir=self.store.task_dir
+                root,
+                observation_id,
+                task_dir=self.store.task_dir,
+                trace_exchange=self.smoke_mode,
             )
+        )
+        self._belief_state_refresh = belief_state_refresh or (
+            lambda: refresh_human_belief_state(self.store.task_dir)
         )
         self._session_lock = threading.Lock()
         self._session_id = session_id or uuid.uuid4().hex
+
+    def _refresh_belief_state_safely(self) -> None:
+        # This derived Phase 5 artifact has no authority over observation
+        # collection. A replay/write problem must not block Qwen or discard a
+        # human label; the immutable source stream remains replayable later.
+        try:
+            self._belief_state_refresh()
+        except Exception as exc:
+            print(f"[human-state replay error] {exc}")
 
     @property
     def session_id(self) -> str:
@@ -801,6 +844,7 @@ class HumanStateController:
                 "classifier_triggered": False,
             }
         observation_id = transition["observation_id"]
+        self._refresh_belief_state_safely()
         triggered = self._classifier_trigger(observation_id)
         status = self.observation_status(observation_id)
         status["classifier_triggered"] = triggered
@@ -839,6 +883,7 @@ class HumanStateController:
             label=label,
             change_text=change_text,
         )
+        self._refresh_belief_state_safely()
         return self.observation_status(observation_id)
 
 
