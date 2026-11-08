@@ -24,8 +24,8 @@ class _HardCarveSimulator(CSGSimulatorDelta):
     That soft union adds a small ``log(2)/k`` bias per step, so the carved result
     depends on how many steps the path is split into — a dense executed
     trajectory (hundreds of samples) erodes far more than the same path described
-    by a few waypoints. Real machining is a *hard* boolean subtraction, which is
-    idempotent and therefore step-count invariant. We reuse the parent's existing
+    by a few waypoints. Hard Boolean subtraction is idempotent; subdivision invariance also
+    requires a geometrically correct swept tool (see the report limitations). We reuse the parent's existing
     sharp capped-cylinder SDF (``tool_sdf_sharp``) to get exactly that.
     """
 
@@ -40,14 +40,14 @@ def carve_stock(
     tool_radius=3.175,   # mm (1/4" end mill)
     tool_height=25.0,    # mm
     stock_size_in=(1.0, 1.0, 1.0),   # stock box (the normalized cube), inches
-    voxel_size_mm=0.5,               # sub-mm precision knob
+    voxel_size_mm=None,              # explicit spacing overrides resolution
     work_volume_in=(16.0, 12.0, 10.0),
     stock_origin_in=None,
 ):
     """Run ``positions`` through the simulator and return the final stock SDF grid.
 
-    Uses a hard (idempotent) CSG carve so the result depends only on the
-    geometric path, not on how finely it is sampled. A fresh simulator is
+    Uses hard CSG subtraction. The inherited sweep approximation has known
+    limitations for vertical and sloped segments; see the status report. A fresh simulator is
     constructed (which re-initialises Taichi), so callers comparing two
     trajectories should carve one, copy the result to NumPy, then carve the next.
     """

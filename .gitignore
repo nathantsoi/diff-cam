@@ -1,40 +1,15 @@
-imgui.in
-imgui.ini
-runs/*
-*.egg-info
+.venv/
+.pytest_cache/
 __pycache__/
-/data/
-wandb/
+*.egg-info/
+*.log
 .env
+/runs/*
+!/runs/.gitkeep
+/data/
 /trajectory.npy
 /trajectory_deltas.npy
 /args.json
-
-# self-signed HTTPS cert for the results dashboard (scripts/serve_web_https.py)
-**/web/.cert/
-*.log
-*.nohup
-
-# Generated experiment data — regenerated from runs/ by the build/plot scripts,
-# never committed (the experiment log + per-run artifacts are the source of truth):
-#   scripts/build_results_web.py            -> autoresearch/tasks/train_csg/web/data.json
-#   scripts/plot_results.py                 -> results_over_time.png
-#   autoresearch/tasks/train_csg/plot_results.py -> autoresearch/tasks/train_csg/results_plot.png
-#   (the autoresearch harness)              -> results.tsv (local experiment log)
-/results.tsv
-/autoresearch/tasks/train_csg/results.tsv
-/autoresearch/tasks/train_csg/web/data.json
-/results_over_time.png
-/autoresearch/tasks/train_csg/results_plot.png
-
-# Local human-feedback / preference stores — live experiment data, never
-# committed (the agent reads/writes these at runtime; wipe between runs):
-/autoresearch/tasks/train_csg/pairwise.json
-/autoresearch/tasks/train_csg/run_feedback.json
-
-# Local throwaway diagnostic scripts (not part of the repo)
-/diag_init.py
-
-# Independent Overleaf paper clones — nested git repos, not part of this project
 /overleaf-2025-aamas-bluesky/
 /overleaf-autoresearch/
+/report/build/

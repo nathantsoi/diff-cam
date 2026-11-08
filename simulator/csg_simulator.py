@@ -80,11 +80,12 @@ class CSGSimulatorDelta:
         if init_taichi:
             try:
                 if ti._lib.core.with_cuda():
-                    ti.init(arch=ti.gpu, debug=False, default_fp=ti.f32)
+                    ti.init(arch=ti.gpu, debug=False, default_fp=ti.f32, offline_cache=False)
                 else:
-                    ti.init(arch=ti.cpu, debug=False, default_fp=ti.f32)
-            except:
-                pass  # taichi already initialized
+                    ti.init(arch=ti.cpu, debug=False, default_fp=ti.f32, offline_cache=False)
+            except RuntimeError:
+                # A CUDA-enabled build does not imply an available device.
+                ti.init(arch=ti.cpu, debug=False, default_fp=ti.f32, offline_cache=False)
             ti.set_logging_level(ti.WARN)
 
         self.max_steps = max_steps
@@ -557,11 +558,6 @@ class CSGSimulatorDelta:
 
         # ---- Loss ----
         self.loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
-
-        # ---- Rendering state ----
-        self.current_step = ti.field(dtype=ti.i32, shape=())
-        self.current_step[None] = 0
-        self.raymarch_buffer = ti.Vector.field(3, dtype=ti.f32, shape=(1024, 768))
 
         ti.root.lazy_grad()
 
@@ -2024,8 +2020,8 @@ class CSGSimulatorDelta:
         """Hard boolean forward pass for evaluation and rendering.
 
         Position advancement follows forward() when clip_speeds is True, but carving
-        uses exact apply_cut_hard (ti.max union with tool_sdf_sharp) instead of
-        smooth_max. Step-count invariant and non-differentiable.
+        uses hard apply_cut_hard (ti.max union with tool_sdf_sharp) instead of
+        smooth_max. Sweep accuracy for vertical/sloped paths is a known limitation.
         """
         self.reconstruct_positions(0)
         self.init_stock()
@@ -2125,235 +2121,6 @@ class CSGSimulatorDelta:
     # ========================================================================
     # Rendering
     # ========================================================================
-
-    @ti.func
-    def interpolate_stock(self, p):
-        """Trilinear lookup into stock[current_step, ...]."""
-        t_idx = self.current_step[None]
-        p_grid = self._vox(p)
-
-        x0 = ti.cast(ti.floor(p_grid.x), ti.i32)
-        y0 = ti.cast(ti.floor(p_grid.y), ti.i32)
-        z0 = ti.cast(ti.floor(p_grid.z), ti.i32)
-        x1, y1, z1 = x0 + 1, y0 + 1, z0 + 1
-        tx, ty, tz = p_grid.x - x0, p_grid.y - y0, p_grid.z - z0
-
-        x0 = ti.max(0, ti.min(self.Nx - 1, x0))
-        x1 = ti.max(0, ti.min(self.Nx - 1, x1))
-        y0 = ti.max(0, ti.min(self.Ny - 1, y0))
-        y1 = ti.max(0, ti.min(self.Ny - 1, y1))
-        z0 = ti.max(0, ti.min(self.Nz - 1, z0))
-        z1 = ti.max(0, ti.min(self.Nz - 1, z1))
-
-        c000 = self.stock[t_idx, x0, y0, z0]
-        c100 = self.stock[t_idx, x1, y0, z0]
-        c010 = self.stock[t_idx, x0, y1, z0]
-        c110 = self.stock[t_idx, x1, y1, z0]
-        c001 = self.stock[t_idx, x0, y0, z1]
-        c101 = self.stock[t_idx, x1, y0, z1]
-        c011 = self.stock[t_idx, x0, y1, z1]
-        c111 = self.stock[t_idx, x1, y1, z1]
-
-        c00 = c000 * (1 - tx) + c100 * tx
-        c10 = c010 * (1 - tx) + c110 * tx
-        c01 = c001 * (1 - tx) + c101 * tx
-        c11 = c011 * (1 - tx) + c111 * tx
-        c0 = c00 * (1 - ty) + c10 * ty
-        c1 = c01 * (1 - ty) + c11 * ty
-        return c0 * (1 - tz) + c1 * tz
-
-    @ti.func
-    def stock_normal(self, p):
-        """Approximate surface normal of stock via central differences."""
-        eps = 1.5 / self.resolution  # ~1.5 voxels in normalized coords
-        dx = ti.Vector([eps, 0.0, 0.0])
-        dy = ti.Vector([0.0, eps, 0.0])
-        dz = ti.Vector([0.0, 0.0, eps])
-        nx = self.interpolate_stock(p + dx) - self.interpolate_stock(p - dx)
-        ny = self.interpolate_stock(p + dy) - self.interpolate_stock(p - dy)
-        nz = self.interpolate_stock(p + dz) - self.interpolate_stock(p - dz)
-        return ti.math.normalize(ti.Vector([nx, ny, nz]) + 1e-8)
-
-    @ti.func
-    def target_normal(self, p):
-        """Analytic-ish normal of target via central differences on target_sdf."""
-        eps = 1.5 / self.resolution  # ~1.5 voxels in normalized coords
-        dx = ti.Vector([eps, 0.0, 0.0])
-        dy = ti.Vector([0.0, eps, 0.0])
-        dz = ti.Vector([0.0, 0.0, eps])
-        nx = self.target_sdf(p + dx) - self.target_sdf(p - dx)
-        ny = self.target_sdf(p + dy) - self.target_sdf(p - dy)
-        nz = self.target_sdf(p + dz) - self.target_sdf(p - dz)
-        return ti.math.normalize(ti.Vector([nx, ny, nz]) + 1e-8)
-
-    @ti.func
-    def tool_normal(self, p, t):
-        """Central-diff normal of the SHARP tool SDF (rendering only)."""
-        eps = 1e-3
-        dx = ti.Vector([eps, 0.0, 0.0])
-        dy = ti.Vector([0.0, eps, 0.0])
-        dz = ti.Vector([0.0, 0.0, eps])
-        nx = self.tool_sdf_sharp(p + dx, t) - self.tool_sdf_sharp(p - dx, t)
-        ny = self.tool_sdf_sharp(p + dy, t) - self.tool_sdf_sharp(p - dy, t)
-        nz = self.tool_sdf_sharp(p + dz, t) - self.tool_sdf_sharp(p - dz, t)
-        return ti.math.normalize(ti.Vector([nx, ny, nz]) + 1e-8)
-
-    @ti.kernel
-    def render_raymarch(
-        self,
-        cam_pos: ti.types.vector(3, ti.f32),
-        cam_up: ti.types.vector(3, ti.f32),
-        cam_dir: ti.types.vector(3, ti.f32),
-        show_stock: ti.i32,
-        show_target: ti.i32,
-        show_tool: ti.i32,
-    ):
-        """Raymarch the scene and fill raymarch_buffer with RGB."""
-        cam_right = cam_dir.cross(cam_up).normalized()
-        cam_up_actual = cam_right.cross(cam_dir).normalized()
-        fov_scale = ti.tan(3.14159 / 4.0)
-        width = self.raymarch_buffer.shape[0]
-        height = self.raymarch_buffer.shape[1]
-        aspect_ratio = float(width) / float(height)
-
-        t_idx = self.current_step[None]
-
-        for i, j in self.raymarch_buffer:
-            u = (2.0 * (i + 0.5) / float(width) - 1.0) * aspect_ratio * fov_scale
-            v = (2.0 * (j + 0.5) / float(height) - 1.0) * fov_scale
-            ray_dir = (cam_dir + cam_right * u + cam_up_actual * v).normalized()
-
-            t = 0.0
-            max_t = 10.0
-            max_steps = 150
-            color = ti.Vector([0.1, 0.1, 0.1])  # background
-
-            for _step in range(max_steps):
-                p = cam_pos + ray_dir * t
-                d_stock = 1e6
-                d_target = 1e6
-                d_tool = 1e6
-                d_holder = 1e6
-
-                # The march runs in the normalized [0,1] box, but the SDFs now
-                # return VOXEL distances, so scale them back to normalized units
-                # (1 voxel ~= 1/resolution along the longest axis -- conservative
-                # for the others, which just means slightly smaller safe steps).
-                inv_R = 1.0 / self.resolution
-
-                # Inside the normalized box — use interpolated voxel SDFs.
-                # Outside — fall back to an AABB so rays from the camera
-                # can still hit something on their way in.
-                inside_cube = (
-                    0.0 <= p.x
-                    and p.x <= 1.0
-                    and 0.0 <= p.y
-                    and p.y <= 1.0
-                    and 0.0 <= p.z
-                    and p.z <= 1.0
-                )
-
-                if inside_cube:
-                    if show_stock == 1:
-                        d_stock = self.interpolate_stock(p) * inv_R
-                    if show_target == 1:
-                        d_target = self.target_sdf(p) * inv_R
-                else:
-                    d_box = p - ti.Vector([0.5, 0.5, 0.5])
-                    d_aabb = (
-                        ti.max(
-                            ti.abs(d_box.x), ti.max(ti.abs(d_box.y), ti.abs(d_box.z))
-                        )
-                        - 0.5
-                    )
-                    if show_stock == 1:
-                        d_stock = ti.max(d_aabb, 2e-3)
-                    if show_target == 1:
-                        d_target = ti.max(d_aabb, 2e-3)
-
-                if show_tool == 1:
-                    d_tool = self.tool_sdf_sharp(p, t_idx) * inv_R
-                    d_holder = self.holder_sdf_sharp(p, t_idx) * inv_R
-
-                d = ti.min(d_stock, ti.min(d_target, ti.min(d_tool, d_holder)))
-
-                if d < 1e-3:
-                    # Hit — shade with the material whose distance dominated.
-                    mat_color = ti.Vector([0.8, 0.8, 0.8])
-                    norm = ti.Vector([0.0, 0.0, 1.0])
-
-                    if d == d_tool:
-                        mat_color = ti.Vector([1.0, 0.2, 0.2])  # red tool
-                        norm = self.tool_normal(p, t_idx)
-                    elif d == d_holder:
-                        mat_color = ti.Vector([0.55, 0.55, 0.6])  # gray holder
-                        norm = self.holder_normal(p, t_idx)
-                    elif d == d_stock:
-                        mat_color = ti.Vector([0.2, 0.8, 0.2])  # green stock
-                        norm = self.stock_normal(p)
-                        # Voxel-checker shading: darken every other voxel so
-                        # the discrete grid is visible. This is what gives the
-                        # "voxelized" look and makes individual cuts pop.
-                        grid_p = self._vox(p)
-                        cx = int(grid_p.x) % 2
-                        cy = int(grid_p.y) % 2
-                        cz = int(grid_p.z) % 2
-                        if (cx + cy + cz) % 2 == 0:
-                            mat_color = mat_color * 0.8
-                    elif d == d_target:
-                        mat_color = ti.Vector([0.5, 0.5, 1.0])  # light blue target
-                        norm = self.target_normal(p)
-
-                    light_dir = ti.Vector([1.0, 1.0, 1.0]).normalized()
-                    diffuse = ti.max(0.0, norm.dot(light_dir))
-                    ambient = 0.2
-                    color = mat_color * (diffuse * 0.8 + ambient)
-                    break
-
-                t += d
-                if t > max_t:
-                    break
-
-            self.raymarch_buffer[i, j] = color
-
-    # ----- Python-side helpers around rendering -----
-
-    def set_current_step(self, t):
-        """Tell the renderer which stock slot and tool position to draw.
-
-        After apply_cut(t), the freshly-cut stock lives at slot t+1, so a
-        typical call is set_current_step(t+1).
-        """
-        self.current_step[None] = int(t)
-
-    def render(
-        self,
-        cam_pos=(2.0, 2.0, 2.0),
-        cam_target=(0.5, 0.5, 0.5),
-        cam_up=(0.0, 0.0, 1.0),
-        show_stock=True,
-        show_target=False,
-        show_tool=True,
-    ):
-        """Render the current scene into raymarch_buffer.
-
-        cam_pos: camera position in world coords.
-        cam_target: point the camera looks at.
-        cam_up: world up vector.
-        show_*: toggles for each layer.
-        """
-        cp = ti.Vector(list(cam_pos))
-        ct = ti.Vector(list(cam_target))
-        cu = ti.Vector(list(cam_up))
-        cd = (ct - cp).normalized()
-        self.render_raymarch(
-            cp,
-            cu,
-            cd,
-            int(show_stock),
-            int(show_target),
-            int(show_tool),
-        )
 
     @ti.func
     def tool_sdf_sharp(self, p, t):
@@ -2470,15 +2237,3 @@ class CSGSimulatorDelta:
         outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
         inside = -ti.max(-ti.max(d_xy, d_z), 0.0)
         return outside + inside
-
-    @ti.func
-    def holder_normal(self, p, t):
-        """Central-diff normal of the SHARP holder SDF (rendering only)."""
-        eps = 1e-3
-        dx = ti.Vector([eps, 0.0, 0.0])
-        dy = ti.Vector([0.0, eps, 0.0])
-        dz = ti.Vector([0.0, 0.0, eps])
-        nx = self.holder_sdf_sharp(p + dx, t) - self.holder_sdf_sharp(p - dx, t)
-        ny = self.holder_sdf_sharp(p + dy, t) - self.holder_sdf_sharp(p - dy, t)
-        nz = self.holder_sdf_sharp(p + dz, t) - self.holder_sdf_sharp(p - dz, t)
-        return ti.math.normalize(ti.Vector([nx, ny, nz]) + 1e-8)

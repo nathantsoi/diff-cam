@@ -1,0 +1,45 @@
+Core cleanup validation — 2026-11-08
+Source: autoresearch 41b7355f05a6315bf2af47ee478501e519ca9232
+Working branch: core.
+
+Environment:
+Python 3.10.18, Taichi 1.7.4, NumPy 2.2.6, SciPy 1.15.3, pytest 9.2.0.
+An isolated /tmp/diffcam-core-test venv reads compatible installed package
+archives from the existing uv cache via a .pth file. No global packages changed.
+Normal uv sync could not fetch packages because pypi.org DNS was unavailable.
+The pre-existing .venv had a missing interpreter and uv recreated it; it remains
+unpopulated. The obsolete autoresearch uv.lock was removed. A fresh online
+uv sync and lock generation remain to be performed before a reproducible release.
+
+Tests:
+TI_OFFLINE_CACHE_FILE_PATH=/tmp/diffcam-ti UV_CACHE_DIR=/tmp/diffcam-uv \
+uv run --no-project --python /tmp/diffcam-core-test/bin/python python -m pytest -q
+Result: 20 passed in 7.31 seconds, one upstream Taichi DeprecationWarning.
+Includes finite-difference agreement with a smooth delta-action gradient,
+horizontal hard-carve monotonicity/subdivision invariance, units, arc/motion
+parsing, trajectory timing and carved-stock round-trip regression.
+These checks do not certify vertical/sloped sweep geometry or physical safety.
+
+Smoke:
+TI_OFFLINE_CACHE_FILE_PATH=/tmp/diffcam-ti UV_CACHE_DIR=/tmp/diffcam-uv \
+uv run --no-project --python /tmp/diffcam-core-test/bin/python python \
+-m algorithms.optimize --cpu --iters 2 --steps 4 --resolution 10 \
+--output /tmp/diffcam-core-final-smoke
+Passed. Saved initial trajectory, best deltas/positions, config, history, metrics,
+and both NC posts. Both posted files parsed (RS274: 4, Haas: 8 segments).
+Best hard Dice 0.2794759825, IoU 0.1624365482; this is only a wiring test.
+
+Static checks:
+Python compileall passed for algorithms, cam, simulator and tests.
+git diff --check passed.
+LaTeX environment nesting and citation-key checks passed.
+
+Report build:
+make -C report failed because pdflatex is not installed (exit 127).
+No PDF compilation or visual typesetting check is claimed. Install a TeX
+ distribution with the packages named in the preamble and rerun the Makefile.
+
+Scope:
+The swept-cutter and holder-chronology issues documented in the report remain
+research/validation tasks. No large optimization sweep, independent MachineBench
+evaluation, GPU benchmark, or physical machining was performed in this cleanup.

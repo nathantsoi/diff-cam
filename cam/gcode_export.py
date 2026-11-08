@@ -2,13 +2,13 @@
 
 A diff-cam trajectory is an ``(T, 3)`` array of tool-tip positions in the unit
 cube ``[0, 1]^3``. Coordinates are scaled from the unit cube to millimetres via
-``MachineConfig.workspace_mm`` so the parser can invert the mapping exactly.
+``MachineConfig.stock_size_vec`` so the parser can invert the mapping exactly.
 
 The actual G-code dialect is chosen by ``post`` (see :mod:`cam.posts`):
 
 * ``"rs274"`` (default) -- generic LinuxCNC-style program used for round-trip
   fidelity checks.
-* ``"haas"`` -- Fanuc-style program ready to run on a Haas Mini Mill.
+* ``"haas"`` -- Fanuc-style program for Haas validation.
 """
 
 from .config import MachineConfig

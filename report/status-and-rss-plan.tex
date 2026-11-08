@@ -1,0 +1,426 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,booktabs,longtable,array}
+\usepackage[hidelinks]{hyperref}
+\usepackage{microtype}
+\title{DiffCAM: Differentiable Core Status and a Research Plan for RSS}
+\author{Repository audit and proposed research program}
+\date{8 November 2026}
+\begin{document}
+\maketitle
+\begin{abstract}
+DiffCAM already contains a differentiable, history-dependent material-removal
+kernel, continuous delta actions, soft geometry objectives, hard-carve evaluation,
+and a G-code export/parse path. These support a focused robotics question:
+when do gradients through a relaxed irreversible geometric process improve an
+executable machining trajectory? The strongest prospective contribution is a
+controlled study, and ultimately an algorithm, for managing disagreement between
+smooth optimization and hard execution under structured CAM initialization.
+Neither arbitrary precision, autonomous safety, calibrated cutting physics, nor
+physical validation follows from the present implementation. This report audits
+those distinctions, preserves the useful findings of the autoresearch work, and
+specifies an experiment and release plan with explicit decision gates.
+\end{abstract}
+
+\section{Scope and evidence provenance}
+The source snapshot is branch \texttt{autoresearch}, commit
+\texttt{41b7355f05a6315bf2af47ee478501e519ca9232}. Branch \texttt{core}
+was created from that snapshot. Evidence comes from source inspection, local
+experiment notes and logs, the supplied Method section, and the supplied
+\emph{Differentiable CNC Simulator Paper Framing.md}. The framing prose is
+preserved in \texttt{docs/framing-source.txt}; its embedded formula images are
+not reproduced. It is a research proposal, not an independently verified survey.
+The cleanup inventory is \texttt{docs/cleanup-manifest.txt}. The complete local
+experiment directory was moved to
+\path{../backups/diffcam-core-2026-11-08/autoresearch/}; historical tracked files
+remain recoverable from the source commit. Local runs, credentials, and nested
+Overleaf repositories were not deleted.
+
+The supplied MachineBench description concerns a separate evaluation system.
+Its archive counts, collision validation, leaderboard behavior, and Fusion probe
+are author-provided context, not results reproduced in this repository audit.
+This distinction is essential: exporting NC from DiffCAM does not establish that
+MachineBench's independent evaluator accepts or safely executes it.
+
+\section{What the implementation actually does}
+\subsection{Representation, recurrence, and differentiation}
+\texttt{simulator/csg\_simulator.py} implements \texttt{CSGSimulatorDelta} in
+Taichi. Tool and target primitives are analytic implicit functions, but stock is
+stored on a dense grid with a time axis. With negative values denoting solid,
+\begin{align}
+ \phi_{t+1}(x_i)&=\max\{\phi_t(x_i),-d_{C_t}(x_i)\},\\
+ \widetilde\phi_{t+1}(x_i)&=\operatorname{smax}_{\kappa}
+ (\widetilde\phi_t(x_i),-\widetilde d_{C_t}(x_i)),\\
+ \operatorname{smax}_{\kappa}(a,b)&=m+\kappa^{-1}
+ \log(e^{\kappa(a-m)}+e^{\kappa(b-m)}),\quad m=\max(a,b).
+\end{align}
+Here $C_t$ is the segment's approximated swept cylindrical cutter, and
+$\kappa=k/\texttt{k\_ref}$. The stabilized log-sum-exp avoids exponential
+ overflow. Spatial grid updates are parallel; the history and stock-dependent
+motion updates are sequential. Analytic primitives do not make the state
+mesh-free or resolution-independent. Moreover, CSG combinations and several
+primitive functions are not exact Euclidean signed distances everywhere.
+
+Stock values and adjoints alone require approximately
+$8(T+1)N_xN_yN_z$ bytes in float32, before other fields and runtime allocations.
+Resolution refinement and long horizons therefore remain coupled memory costs.
+The current stock-only allocation is a useful engineering choice: the larger
+machine envelope is metadata, not a voxelized workspace.
+
+Delta parameters reconstruct positions through
+$p_{t+1}=p_t+\alpha_t\Delta_t$. The scale $\alpha_t$ clips requested speed
+against feed/rapid limits in physical units. The regime is selected by a hard
+stock-clearance test at the commanded destination. This is a piecewise
+geometric execution model, not the machine's full servo dynamics. The CAM
+planner separately models acceleration-limited exact-stop motion; training
+and posted execution are therefore not identical dynamics. The claim that
+absolute coordinates cause severe instability still needs a matched ablation.
+
+\subsection{Loss and the safety mismatch}
+The implemented terminal loss averages pointwise squared soft occupancy errors:
+\begin{align}
+ o_i&=\sigma(-\widetilde\phi_T(x_i)),\quad q_i=\sigma(-d_{\rm target}(x_i)),\\
+ L_{\rm geom}&=\frac1N\sum_i\left[
+ w_g\{q_i(1-o_i)\}^2+w_r\{(1-q_i)o_i\}^2\right].
+\end{align}
+This differs from squaring aggregate gouge and residual volumes. Occupancy uses
+an approximately one-voxel sigmoid scale; $k$ controls smooth geometry, rather
+than directly annealing this occupancy sigmoid. Optional annular weighting and
+loss shifts exist. Path proximity, length, jerk, step, air, and tool-gouge
+penalties are available, with many disabled by default.
+
+The holder objective is not the single-point expression in the supplied Method:
+\begin{equation}
+ L_h=\frac{w_h}{N}\sum_{t,i}\sigma(-\widetilde\phi_{t+1}(x_i))
+ [\max(0,m_h-d_{H_t}(x_i))]^2.
+\end{equation}
+It integrates squared penetration of the swept holder over soft remaining
+stock, using \emph{post-cut} stock. This can credit material removed during the
+same segment when checking its holder. It does not certify chronological
+clearance of the full assembly. A finite soft penalty cannot guarantee safety;
+rapid clearance, fixture collision, shank geometry, and controller semantics
+require separate validation. Use ``collision-penalized'' until independent hard
+checks establish the relevant property.
+
+\subsection{Swept-volume and export limitations}
+Both hard and soft cutter functions choose the segment parameter by closest
+projection in XY, then interpolate tool height at that parameter. Pure vertical
+motion has a zero XY direction and effectively selects the initial endpoint;
+it does not cover the complete vertical sweep. For simultaneous XYZ motion,
+closest XY is not generally the minimizer over the full cylindrical sweep.
+Consequently hard Boolean subtraction is exact \emph{for the supplied implicit
+operand}, not necessarily for the physical swept cutter. Existing comments
+claiming universal subdivision invariance should be read as an intended
+property; horizontal fixed-Z tests alone cannot establish it for general paths.
+This is a publication-blocking geometry issue, especially for plunges and holes.
+
+\texttt{cam/} contains physical units, stock/work-origin transforms, Haas and
+RS274 posts, a modal motion parser, trajectory planning, path metrics, and hard
+carve execution. The Haas post adds approach/retract motion. A round trip
+through the local parser is valuable regression evidence but shares assumptions
+with the exporter. It is not independent controller validation or a machining
+trial. All added approach, retract, rapid, and unit conversions must be graded
+from the actual posted file.
+
+\subsection{Capability and claim ledger}
+\begin{longtable}{p{0.23\linewidth}p{0.32\linewidth}p{0.36\linewidth}}
+\toprule Capability & Evidence now & Required before publication claim\\\midrule
+Differentiable removal & Taichi tape through soft cuts and deltas & Gradient checks across shapes, motion regimes, horizons and scales\\
+Hard checkpoint selection & Present historically; retained in minimal runner & Independent NC score, fixed validation rule, no test-set selection\\
+CAM initialization & Historical contour, cavity, shell and adaptive heuristics & Reusable seed generation, unmodified-seed baseline and held-out geometries\\
+Safety & Soft holder penalty and geometric diagnostics & Pre-removal chronological swept tests, adversarial fixtures and fixture model\\
+Process quality & Air/time and heuristic force/breakage fields & Calibrated force/engagement model and controller timing validation\\
+Physical execution & Export/parse/planner support & Measured parts, real cycle time and matched baseline trials\\
+MachineBench integration & Described in supplied manuscript & Versioned independent evaluator and retained NC records\\
+\bottomrule
+\end{longtable}
+
+\section{What autoresearch contributes}
+The archived \texttt{idea.md} reports a dual-adaptive contour scheme: angular
+and vertical cross-section variation select smoothing and finishing behavior
+without directly branching on the shape name. Its historical best hard-Dice
+values are reproduced below as \emph{unreproduced log claims}, not means,
+confidence intervals, or comparative publication results.
+\begin{center}
+\begin{tabular}{lrl}
+\toprule Target & Reported best hard Dice & Interpretation\\\midrule
+Cylinder & 0.8898 & Contour plus finishing\\
+Sphere & 0.8311 & Finishing disabled\\
+Box & 0.7596 & Softer initialization\\
+Pyramid & 0.7976 & Contour initialization\\
+Sphere bowl & 0.6471 & Cavity initialization\\
+Sphere hole & 0.2630 & Persistent failure; later variants also logged\\\bottomrule
+\end{tabular}
+\end{center}
+The note attributes these to experiments near commits \texttt{02fb503} and
+\texttt{845999e}; provenance and exact configurations must be reconstructed
+before reuse. It also reports benefits from hard selection and annealing, and
+geometry-dependent regressions from finishing passes. These motivate hypotheses,
+not numerical claims of superiority. The TSV's column named \texttt{dice}
+is not consistently a hard score: one pyramid entry gives 0.873104 while its
+description explicitly says hard Dice 0.277. Do not pool that column.
+
+Promising existing ideas are (i) target-derived topology priors, (ii) morphology-
+conditioned smoothing/finishing, (iii) history-dependent stock and holder coupling,
+(iv) saved intermediate stock for staged optimization, and (v) deployment-aware
+checkpoint selection. Preference feedback and breakage proxies are exploratory
+extensions; they should not expand the central paper before geometric validity
+is established. A sphere with inaccessible undercuts is also not automatically
+a feasible one-setup three-axis target. Separate accessibility limits from
+optimizer failures with reachable target definitions and an oracle feasibility
+check.
+
+\section{Prior work and defensible positioning}
+The framing memo's broad ``first differentiable CNC'' claim is not defensible.
+CNC-Net already learns CNC operation parameters from target shapes
+\cite{cncnet}; CNCGEN explicitly couples operation planning, intermediate stock,
+and learned verifier feedback \cite{cncgen}. DiffCAM's candidate distinction is
+explicit analytic removal derivatives for refining a fixed target's executable
+trajectory, without a learned removal verifier. Demonstrating that distinction
+requires implementation and equal-budget experiments, not terminology alone.
+
+DiSECt differentiates FEM/contact/damage for soft-material cutting and optimizes
+force-related controls \cite{disect}. It provides a robotics precedent, but
+DiffCAM currently models rigid removal geometry rather than fracture or calibrated
+cutting dynamics. PlasticineLab motivates comparing gradients and RL on
+long-horizon shape manipulation \cite{plasticine}. Neither establishes that
+one optimizer must win on CNC machining.
+
+Suh et al. analyze why stiffness and discontinuities can undermine first-order
+estimators \cite{suh}. Pang et al. connect analytic and randomized smoothing
+in contact-rich planning \cite{pang}. These motivate studying the analogous
+tradeoff in irreversible stock removal; the equivalence does not automatically
+transfer to DiffCAM's surrogate or to PPO training.
+
+Implicit neural-field process planning \cite{dutta}, four-axis continuous
+path optimization \cite{zhang}, and design-for-machinability optimization
+\cite{chen} delimit the landscape: implicit fields, continuous path refinement,
+and manufacturing-aware gradients are already established. The memo's Lichter
+and Hadhazi item could not be independently verified in this audit's primary-
+source search; do not use its numerical comparisons or claimed novelty boundary
+until its full text and publication metadata are obtained. TopoCut and the
+remaining specialized CAM/RL references likewise need individual full-text
+verification before their detailed claims enter a submission.
+
+\paragraph{Recommended thesis.}
+\emph{History-aware differentiable machining can efficiently refine structured
+CAM trajectories, provided that smoothing bias and execution disagreement are
+measured and controlled against hard posted-path evaluation.} This is a testable
+hypothesis, not a conclusion. Suggested title: \emph{DiffCAM: Controlling the
+Relaxation-to-Execution Gap in Differentiable Machining}.
+
+\paragraph{Candidate algorithmic contribution.}
+Develop a hard-validated continuation method: optimize within a trust region
+around a CAM seed, measure soft/hard/posted disagreement, and adjust smoothing,
+step size, or topology when disagreement or stagnation exceeds a validation-set
+threshold. Hard selection alone is a useful baseline, not sufficient novelty.
+Compare this proposed method against fixed annealing with identical evaluation
+budgets. Preserve and ablate the existing morphology-based schedule as a distinct
+alternative. Topology search followed by gradient refinement is an optional
+extension; do not claim a hybrid method before implementing it.
+
+\section{A falsifiable experimental program}
+\subsection{Stage 0: establish a trustworthy oracle}
+Before optimizer sweeps, fix and test pure-Z and sloped swept cutters against
+independent analytic fixtures. Include horizontal slots of known volume, vertical
+plunges, diagonal entries, repeated cuts, reversals, tool-length changes, narrow
+pockets, and legitimate through-holes. Test subdivision and permutation
+invariance of final hard geometry where applicable; safety remains order-sensitive.
+Cross-check hard carving against an independently implemented NC evaluator and
+refine its resolution until numerical uncertainty is below the claimed effect.
+Test \emph{pre-cut} holder occupancy and rapid interiors, including endpoints
+that are clear while the segment crosses solid stock. Correct the holder's
+chronology and validate shank/holder geometry before asserting collision freedom.
+
+Check autodiff against central differences of the \emph{same smooth objective}
+away from gates, and report behavior at gates separately. Sweep finite-difference
+step sizes to distinguish truncation from float32 cancellation. A gradient of a
+hard voxel score is often zero almost everywhere; estimate gradients of an
+explicitly randomized hard objective when studying bias/variance. Compare the
+same perturbation distribution and objective, and report estimator uncertainty.
+
+\subsection{Stage 1: initialization and solver study}
+Build three task families: stepped/asymmetric facing; pockets with islands and
+narrow channels; and variable-width slots/deep pockets. Use multiple dimensions
+and held-out topologies per family. Current analytic primitives are diagnostic
+fixtures, not sufficient coverage. Supply facing raster, contour offset, and
+adaptive/trochoidal seeds, with feasibility checked under the same cutter,
+stock, setup, motion budget and tolerances. Target-generated seeds already solve
+part of the geometry problem, so their unoptimized score must be reported.
+
+The minimum comparison is nominal CAM; CAM plus hard CEM; random/line plus
+smooth Adam; CAM plus smooth Adam with fixed $k$; and CAM plus annealed Adam
+with hard selection. Add morphology-adaptive and disagreement-adaptive variants
+only after those baselines work. Residual PPO on the hard simulator directly
+tests the framing memo's RL question, but requires a restored, controlled
+experiment layer outside the minimal runtime dependencies. If retained, compare
+both end-to-end training cost and amortized per-part inference; separate policy
+learning across parts from per-instance trajectory optimization.
+
+Use paired seeds and identical initial paths, trajectory degrees of freedom,
+constraints and task splits. Five seeds per cell is a starting minimum, not a
+power guarantee. Record simulator calls, gradient calls, measured wall time,
+peak memory, hardware, warm-up and compilation separately. Give both equal-time
+and equal-simulation-budget results. The initial pilot determines attainable
+sample size and practical effect thresholds before freezing the test protocol.
+
+\subsection{Stage 2: mechanism and ablations}
+Sweep $k$, annealing schedule, temporal segmentation, grid spacing, and horizon.
+Measure hard IoU, soft/hard Dice disagreement, gouge, residual, gradient norm,
+finite-difference agreement, and optimization progress. Repeat one geometric
+path at several segment counts to isolate representation bias from better path
+coverage. For exact log-sum-exp aggregation over $M$ fixed operands,
+\begin{equation}
+0\leq\operatorname{smax}_{\kappa}(a_1,\ldots,a_M)-\max_i a_i
+\leq \frac{\log M}{\kappa}.
+\end{equation}
+This motivates a segmentation/smoothing study. It is \emph{not} a complete error
+bound for this code: tool operands are also smoothed and stock-dependent speed
+clipping changes the path. Distinguish operator bias at a fixed path from
+trajectory drift under coupled dynamics.
+
+Ablate delta versus absolute positions with matched executed paths, constraints
+and parameter scales; hard versus soft selection; geometry-only versus holder
+penalties; fixed versus morphology-conditioned schedules; and full versus
+truncated adjoints with saved stock. No universal U-shaped curve or orders-of-
+magnitude solver advantage should be presupposed. Report counterexamples,
+including narrow features, topology changes and inaccessible targets.
+
+\subsection{Stage 3: posted NC and physical evidence}
+Grade the emitted file, including approach/retract moves, through MachineBench's
+independent NC-only path. The supplied description supports geometric fidelity,
+stock containment, holder clearance and rapid-stock checks for all sources;
+Fusion-specific engagement and sequencing remain unavailable for NC-only runs.
+Missing measurements must remain null, never a pass. The reported 51 real
+programs and thirteen adversarial cases belong to MachineBench validation and
+must be cited to its records; four flags associated with reduced-shank geometry
+need careful interpretation as a model limitation, not unqualified physical
+collision ground truth. The corrected contradictory synthetic fixture should
+retain its original record and corrected geometry.
+
+Use wax trials to validate geometry and work offsets, then matched Al 6061-T6
+trials under a fixed qualified machining setup. Measure actual cycle time and
+part deviations with CMM or scanning. Treat spindle load as a proxy unless
+calibrated against force instrumentation. No force reduction claim is supported
+by the current heuristic force/breakage fields. Compare nominal CAM and the
+chosen optimizer on identical tools, stock and material settings; do not run
+known-unsafe baseline trajectories merely to complete a table. Retain NC,
+controller settings, stock/fixture dimensions, tool geometry and measurement
+uncertainty with each physical record.
+
+\section{Evaluation and reporting contract}
+The primary outcome should be hard posted-path geometric quality subject to
+predeclared gouge and safety criteria. Report IoU, Dice, gouge/residual volumes
+and explicitly named denominators, maximum/p99 surface deviation in mm,
+clearance failure counts, cycle time and air-cut fraction. Current core metrics
+include Dice, ASD and HD95; those are not interchangeable with MachineBench's
+maximum/p99 metrics. For identical binary masks,
+$\mathrm{IoU}=\mathrm{Dice}/(2-\mathrm{Dice})$, but conversion does not resolve
+different grids, trajectories or definitions.
+
+Use paired per-instance comparisons and task-stratified reporting; do not pool
+uneven task coverage. Continuous means may use $t$ intervals when justified by
+the data, while binary rates use Clopper--Pearson intervals. At five successes
+in five trials, the two-sided 95\% lower bound is approximately
+$(0.025)^{1/5}=0.478$: a perfect observed rate is weak evidence of universal
+safety. Show all trial records, seeds, exclusions and failures. Exclude
+infrastructure/document-compromised trials under a predeclared rule, while
+retaining valid algorithm failures in the outcome analysis.
+
+MachineBench's win ranking and IoU $\geq0.5$ efficiency gate can be retained for
+compatibility, but the RSS paper should prioritize effect sizes and uncertainty
+over leaderboard wins. Its Fusion collision flag means ``no collision reported''
+until fault-injection validation. Holder, rapid and containment checks are
+separate outcomes, including when not ranked. Material-blind geometric scores
+do not establish shop readiness. Do not transplant LLM token/cache metrics into
+a solver comparison without a scientific reason.
+
+\section{Milestones, stop conditions, and manuscript plan}
+\begin{longtable}{p{0.13\linewidth}p{0.48\linewidth}p{0.29\linewidth}}
+\toprule Window & Deliverable & Exit gate\\\midrule
+Weeks 1--2 & Sweep geometry corrections, gradient tests, chronological safety fixtures, evaluator contract & Known-volume and motion fixtures pass; discrepancy quantified\\
+Weeks 3--4 & Feasible task suite, reusable CAM seeds, nominal and hard-CEM baselines, pilot & Frozen configurations, splits, budgets and effect thresholds\\
+Weeks 5--6 & Paired solver comparison and smoothing/segmentation/horizon ablations & Reproducible effects on held-out parts; failures disclosed\\
+Weeks 7--8 & Hard-validated continuation and independent NC evaluation & Improvement beyond ordinary annealing/selection at matched budget\\
+Weeks 9--10 & Wax/Al trials, measured timing and geometry & Physical tolerances and predicted effects verified\\
+Weeks 11--12 & Artifact audit, figures, literature update, manuscript & Claims traceable to records; independent reproduction\\\bottomrule
+\end{longtable}
+These are effort estimates, not a promise to meet an unverified conference
+deadline. The retrieved official RSS 2026 call specifies eight main-text pages,
+excluding references \cite{rss}; the memo's five-to-six-page assumption is not
+a current submission rule. RSS 2026 is already past at this audit date. Verify
+the target year's official call, template, anonymity and artifact rules before
+committing to its deadline; this audit did not verify RSS 2027 requirements.
+
+Allocate roughly one page to the problem and contribution, one to related work
+and formulation, two to the mechanism/algorithm, three to evidence, and one to
+limitations and discussion, adapting to the actual call. Key figures are:
+(1) hard/soft/posted stock disagreement along one trajectory; (2) quality versus
+compute with unoptimized CAM anchors; (3) segmentation--sharpness and horizon
+ablations; (4) physical part measurements with matched NC and timing.
+
+If geometric corrections erase the historical gains, report that finding and
+rebuild the experiment rather than preserving the old headline. If continuation
+adds nothing beyond fixed annealing, frame the contribution as a validated
+simulator and mechanistic study only if its insight is strong enough. If physical
+or force validation is unavailable, narrow the claims explicitly; a benchmark
+integration alone does not establish a robotics algorithm contribution.
+
+\section{Core release and reproducibility}
+The reduced tree retains the Taichi kernel, geometry metrics, CAM bridge,
+CAM regression fixture, and a small NumPy Adam runner. RL environments/trainers,
+preference dashboards, cluster/bootstrap tooling, obsolete diagnostics and GUI
+rendering were removed. Optional differentiable penalties and saved-state APIs
+remain because they support the proposed mechanism experiments. The historical
+large training harness and seed heuristics remain on \texttt{autoresearch}; the
+new runner accepts externally supplied seed trajectories and is not a drop-in
+reproduction of historical experiments.
+
+\texttt{algorithms/optimize.py} records configuration, soft/hard score histories,
+selected hard-score checkpoint, deltas, executed hard-path positions and both
+NC dialects. The smoke initializer is deliberately just a wiring test; its score
+is not a machining result. Preserve raw artifacts and hashes for future runs,
+including the initial trajectory, software/environment versions and evaluator
+revision. The cleanup validation passed 20 CPU tests, including a finite-difference
+gradient check and CAM carve round trip. A two-update optimizer smoke run
+exported and parsed both NC dialects. These are regression results, not research
+performance evidence. Normal dependency synchronization was blocked by DNS, so
+tests used compatible cached packages in an isolated environment. PDF compilation
+was unavailable because \texttt{pdflatex} is not installed. Full commands and
+limitations are recorded in \texttt{report/validation.txt}; the adjacent Makefile
+provides the report build.
+
+\begin{thebibliography}{99}
+\bibitem{cncnet} M. Yavartanoo, S. Hong, R. Neshatavar, and K. M. Lee.
+CNC-Net: Self-Supervised Learning for CNC Machining Operations. CVPR, 2024.
+\url{https://arxiv.org/abs/2312.09925}.
+\bibitem{cncgen} X. Zhou, B. Lin, Y. Feng, and J. Zheng.
+CNCGEN: A Dataset and Framework for Machining Process Planning and Toolpath
+Generation from B-rep Models. Preprint, 2026.
+\url{https://arxiv.org/abs/2609.39738}.
+\bibitem{disect} E. Heiden et al. DiSECt: A Differentiable Simulation Engine
+for Autonomous Robotic Cutting. RSS, 2021.
+\url{https://arxiv.org/abs/2105.12244}.
+\bibitem{plasticine} Z. Huang et al. PlasticineLab: A Soft-Body Manipulation
+Benchmark with Differentiable Physics. ICLR, 2021.
+\url{https://arxiv.org/abs/2104.03311}.
+\bibitem{suh} H. J. T. Suh, M. Simchowitz, K. Zhang, and R. Tedrake.
+Do Differentiable Simulators Give Better Policy Gradients? ICML, 2022.
+\url{https://arxiv.org/abs/2202.00817}.
+\bibitem{pang} T. Pang, H. J. T. Suh, L. Yang, and R. Tedrake.
+Global Planning for Contact-Rich Manipulation via Local Smoothing of
+Quasi-dynamic Contact Models. \url{https://arxiv.org/abs/2206.10787}.
+\bibitem{dutta} Implicit Neural Field-Based Process Planning for Multi-Axis
+Manufacturing: Direct Control over Collision Avoidance and Toolpath Geometry.
+Preprint, 2025, revised 2026. \url{https://arxiv.org/abs/2511.17578}.
+\bibitem{zhang} Z. Zhang et al. Continuous Toolpath Optimization for Simultaneous
+Four-Axis Subtractive Manufacturing. Computer Graphics Forum, 2024.
+\url{https://haisenzhao.github.io/FourAxis/index.html}.
+\bibitem{chen} H. Chen and L. B. Kara. Design for Machinability: Topology
+Optimization for Subtractive Machining Using Trimmed Neural Fields. Preprint,
+2026. \url{https://arxiv.org/abs/2610.15301}.
+\bibitem{rss} Robotics: Science and Systems. Official 2026 Call for Papers.
+Accessed 8 November 2026.
+\url{https://roboticsconference.org/information/cfp/index.html}.
+\end{thebibliography}
+\end{document}
