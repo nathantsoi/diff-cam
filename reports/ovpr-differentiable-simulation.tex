@@ -1,0 +1,229 @@
+\documentclass[11pt, letterpaper]{article}
+
+% --- UNIVERSAL PREAMBLE BLOCK ---
+\usepackage[margin=1in]{geometry}
+\usepackage[no-math]{fontspec}
+% Define the main font, bold font, and italic font
+\setmainfont{Aptos.ttf}[
+    BoldFont = {Aptos-Bold.ttf}, % Replace with exact filename if necessary
+    ItalicFont = {Aptos-Italic.ttf},
+    BoldItalicFont = {Aptos-Bold-Italic.ttf}
+]
+\usepackage[english, bidi=default, provide=*]{babel}
+
+
+\babelprovide[import, onchar=ids fonts]{english}
+
+% Set default/Latin font to Sans Serif in the main (rm) slot
+%\babelfont{rm}{Noto Sans}
+
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage[numbers, square, sort&compress]{natbib}
+\setlength{\bibsep}{0.0pt}
+\bibliographystyle{unsrtnat}
+
+\usepackage{graphicx}
+\usepackage{subcaption}
+\usepackage{xurl}
+
+
+\begin{document}
+
+\section*{Project Description}
+
+\subsection*{Current Research and New Direction}
+
+Computer-aided manufacturing (CAM) is a necessary programming step performed before CNC machining.
+Given a target 3D shape, the objective is to specify how to cut the shape from a raw block of stock material.
+CAM programmers must take into account many factors including the 3D shape of the part, stock geometry, potential cutting tools, machine properties, and desired finishing tolerances.
+Despite its necessity in modern manufacturing, machining is severely bottlenecked by the CAM programming process.
+Currently, creating CNC programs requires deep human expertise and is incredibly time-consuming.
+The process relies on manual trial and error on real machines, often breaking tools before safe yet effective toolpaths and speeds are identified.
+The ultimate objective of our research is to learn AI models that can fully automate this CAM process, relieving a critical bottleneck in advanced manufacturing pipelines.
+
+\textbf{The Motivating Challenge:}
+Training AI models to automate CNC programming is severely limited by existing simulation environments.
+Unlike most robotics problems where start and final states are relatively sparse (e.g., moving an object from point A to point B), the state space in machining is incredibly dense; the precise volumetric configuration of the stock at every micro-step dictates the outcome.
+Numerical approaches like finite element analysis (FEA) are computationally intractable at the resolutions required for machining parts accurate within thousandths of an inch.
+Standard 3D simulations for manufacturing use Boundary Representations (B-Reps) or voxels.
+B-Reps break mathematical differentiability during material removal (yielding zero-gradient learning signals) and voxels require massive memory overhead.
+In sum, existing simulators are not designed to train the AI models necessary for CNC milling.
+
+\textbf{Key Insights:}
+First, while CNC machined parts can theoretically take any arbitrary form, in practice, they are typically constructed from parametric combinations of primitive shapes.
+Second, by representing CNC machined parts using Parametric Signed Distance Fields (PSDFs), rather than discrete meshes, we can achieve arbitrary precision in simulation.
+We propose a novel simulation framework, \textbf{DiffCAM (Differentiable Computer Aided Manufacturing)} that leverages our insights within a simulation engine built on an automatic differentiation compiler.
+By simulating the cutting interaction between 3D tools and stock materials as continuous, PSDFs, the Boolean operations that would typically produce no gradient information, now yield gradients useful for optimization.
+With gradient information, we replace stochastic trial and error with first-order gradient descent, mathematically guiding an AI agent toward optimal, collision-free toolpaths.
+
+\textbf{Proposed Solution:}
+We treat CNC programming as a Task and Motion Planning (TAMP) problem, a well-studied robotics framework~\cite{garrett2021integrated}.
+The ``task'' planning dictates high-level actions (tool selection, operation sequencing), while ``motion'' planning dictates the tool trajectory.
+Our initial research scaffold simplifies the problem to a single tool cutting from a stock state to a final shape state.
+Future NSF-funded work will incorporate task planning over multiple tools and complex sequences to realize end-to-end automation.
+
+\textbf{Connections to existing research and future trajectory:}
+While the immediate research area of this proposal is advanced cybermanufacturing (NSF Program Solicitation PD-19-088Y), the core AI challenge of developing continuous, gradient-guided algorithms is fundamental to Embodied AI.
+By studying learning via analytic gradient flow in the structured environment of cybermanufacturing, PI Biswas and Co-PI Tsoi will leverage their extensive experience in robotic perception, long-term autonomy, and high-fidelity simulation to tackle the complex dynamics of modern manufacturing.
+
+\textbf{Broader Impacts:}
+The U.S. manufacturing sector faces a critical labor crisis, with up to 2.1 million skilled positions projected to go unfilled by 2030~\cite{deloitteCreatingPathways}.
+Although the CAM market is expected to double to nearly \$6B over the next five years~\cite{mordorintelligenceComputerAided}, the requirement for highly skilled labor in traditional CNC programming has created a severe bottleneck.
+It is estimated that up to 20\% of U.S. manufacturing plant capacity is stranded due to skilled labor shortages~\cite{randstadusa2026Skilled}.
+To better equip the workforce, our objective is to transition CNC machine programming from a manual process to an AI-assisted workflow, resulting in autonomous cyber-physical systems capable of executing complex manufacturing tasks with minimal human intervention.
+Successful deployment will mitigate supply chain vulnerabilities and bolster U.S. national security.
+To ensure rapid transition to practice, we will explore affiliations with Manufacturing USA institutes, such as the ARM Institute\footnote{\url{https://arminstitute.org/}}, pipelining these predictive models into industrial applications.
+OVPR seed funding will generate the empirical baselines required to move this technology from theoretical trial-and-error to verified predictive methodologies, positioning the research team to secure subsequent full-scale funding under the NSF Advanced Manufacturing program.
+
+\subsection*{Funding Target(s)}
+
+The core algorithmic advancements, simulation platform, data, and empirical results generated by this OVPR New Directions seed funding will be used to target the \textbf{National Science Foundation (NSF)'s Advanced Manufacturing (AM): \href{https://www.grants.gov/search-results-detail/306824}{Program Solicitation PD-19-088Y}}\footnote{\url{https://www.nsf.gov/funding/opportunities/am-advanced-manufacturing}}.
+This program targets research that breaks away from traditional manufacturing paradigms to accelerate the transition of advanced algorithms into physical production.
+
+\subsection*{Proposed Research Activities}
+
+The primary objective of this research is to develop and empirically validate sample-efficient policy learning methods within a differentiable simulation environment for computer-aided manufacturing.
+Unlike recent differentiable simulators that model the plastic deformation and topological tearing of soft, compliant materials using finite element or material point methods~\cite{xu2023roboninja,heiden2021disect,wang2025autonomous}, industrial CNC machining requires simulating the total volumetric removal of rigid, non-compliant solid metal~\cite{zhou2025spatially} and therefore requires a compatible representation for 3D shapes.
+Furthermore, unlike standard robotic tasks where the state space is relatively sparse (e.g., object coordinates), the state space in machining is incredibly dense; the chosen tool trajectory dictates the final physical outcome at extreme tolerances.
+We hypothesize that analytic, differentiable gradients from our simulation environment can overcome the sample-inefficiency inherent in the high-dimensional CNC machining tasks.
+Instead of treating the environment as an opaque transition function, we will formulate the machining process as an end-to-end differentiable Task and Motion Planning (TAMP) system.
+
+We validated the feasibility of learning from volumetric state representations through a preliminary study, shown in Figure \ref{fig:results}.
+The study utilized a 3D Convolutional Neural Network (CNN) encoder to map a dense voxel grid to a 512-dimensional feature space, fused with a 3D tool position coordinate.
+A single-threaded OpenAI Gymnasium interface was used to train a model to execute discrete tool motions using Proximal Policy Optimization.
+It approximated material removal using a composite heuristic reward function consisting of a linear combination of localized and global metric terms.
+
+%% KEEP THIS 
+% In our preliminary baseline, the action space is modeled as discrete grid movements, and the volume of removed material is approximated using a differentiable sigmoid function applied to the SDF grid ($1 / (1 + \exp(k \cdot \phi_{stock}))$, with steepness $k=10$). The corresponding baseline reward function is a weighted linear combination of localized and global metrics terms including a positive reward ($w=5.0$) for good cuts outside the target volume, a strong penalty ($w=-10.0$) for bad cuts into the target, a bonus ($w=0.5$) for cutting locally near the target boundary, a global progress metric ($w=1.0$) evaluating overall stock reduction, and an idle penalty to discourage stationary policies.
+% %
+% $$r = 5.0 \, \mathcal{R}_{\text{good\_cuts}} - 10.0 \, \mathcal{R}_{\text{bad\_cuts}} + 0.5 \, \mathcal{R}_{\text{boundary\_bonus}} + \mathcal{R}_{\text{progress}} + \mathcal{R}_{\text{idle\_penalty}}$$
+% %
+% While this composite formulation successfully validates model-free RL algorithms, CNC machining fundamentally requires continuous toolpaths and exact continuous geometric precision. 
+%% END KEEP THIS
+
+\begin{figure}[htbp]
+  \centering
+  \begin{subfigure}[b]{0.49\textwidth}
+    \centering
+    \includegraphics[width=0.48\textwidth]{fig/cut_1.png}
+    \hfill
+    \includegraphics[width=0.48\textwidth]{fig/cut_4.png}
+  \end{subfigure}
+  \hfill
+  \begin{subfigure}[b]{0.49\textwidth}
+    \centering
+    \includegraphics[width=0.48\textwidth]{fig/ray_marching_1.png}
+    \hfill
+    \includegraphics[width=0.48\textwidth]{fig/ray_marching_2.png}
+  \end{subfigure}
+  \caption{Two types of visual results from our preliminary feasibility study demonstrating a trained, gradient-free baseline policy. The left images show a voxel grid visualization, and the right images use ray marching to visualize underlying Signed Distance Fields (SDFs) for four policies in which a spherical part (blue) is being cut from rectangular cuboid stock material (green). The tool cutter (red) is mounted in a tool holder (grey). Note the collision between the grey tool holder and the green stock material in the far-right image, an unsafe behavior that our proposed analytic gradient flow will solve.}
+  \label{fig:results}
+\end{figure}
+
+The proposed DiffCAM framework will open the door to NSF funding by building the foundations for a competitive research program in AI-driven manufacturing.
+We will study continuous action domains for policies updated via exact analytic gradients derived from direct geometric loss and differentiable safety constraints, culminating in the demonstration of AI advances on a real-world CNC machining task.
+The research will be conducted across four key milestones.
+
+\subsubsection*{Milestone 1: Formulating Continuous Volumetric State Representations}
+
+Current CAM simulations rely on Boundary Representation (B-Rep) meshes~\cite{nguyen2019triangular, bank2026fusioncut}.
+While accurate for static modeling, dynamic geometric Boolean subtractions between a tool and stock mesh do not scale effectively and are inherently non-differentiable.
+While standard voxels solve this differentiability issue, they introduce an unsustainable $\mathcal{O}(N^3)$ memory scaling.
+We will replace these paradigms under a core insight: engineered parts are practically always parametric combinations of specific primitive shapes.
+We will represent the state space using Parametric Signed Distance Fields (PSDFs), providing arbitrary continuous precision without the memory overhead of dense grids.
+An SDF is a continuous volumetric function $\phi(\mathbf{x})$ where the exact surface is implicitly defined as the zero-level set ($\phi(\mathbf{x})=0$)~\cite{osher2001level}.
+We will model material removal as a parallelized Boolean subtraction using simple min/max mathematical kernels executed instantly via Taichi's GPU acceleration~\cite{hu2019difftaichi}:
+%
+$$\phi_{result}(\mathbf{x}) = \max(\phi_{stock}(\mathbf{x}), -\phi_{tool}(\mathbf{x}))$$
+%
+The primary objective of milestone 1 is to establish a differentiable, parametric framework that composes 3D primitive shapes in SDF representation and yields exact, high-frequency geometric detail necessary for analytic gradient transition while bypassing the memory scaling issues common with finite element approaches.
+
+\subsubsection*{Milestone 2: Differentiable Dynamics and Safety Constraints}
+
+Traditional RL methods rely on sparse rewards and end-of-episode penalties to encourage the agent to distinguish between safe and unsafe actions through random sampling that often result in catastrophic failures~\cite{dulac2021challenges}.
+A recent approach to improving sample efficiency to learn safe actions is to include a human in the loop to monitor and correct potential errors~\cite{saunders2017trial}.
+However, in structured environments with clear safety constraints, such oversight should not be necessary.
+Framing CNC machining as a Task and Motion Planning (TAMP) problem, our proposed approach aims to improve sample efficiency without requiring human oversight by making the ``motion'' safety constraints strictly differentiable~\cite{guthrie2022differentiable}.
+The proposed differentiable simulator will utilize a multi-part tool SDF, mathematically isolating the active cutting flutes from the passive tool holder.
+This allows us to formulate and identify unsafe outcomes as a continuous penalty function where any intersection triggers a violation:
+%
+$$\mathcal{L}_{collision} = \max(0, -\phi_{stock}(\mathbf{x}_{holder}))$$
+%
+If the policy steers the holder dangerously close to the stock, the simulator generates an exact, analytic gradient vector that acts as a repulsive mathematical force, explicitly teaching the agent to generate safely spaced motion toolpaths.
+
+\subsubsection*{Milestone 3: Reward Design and Analytic Gradient Flow}
+
+Because the problem of CNC machining is defined by dense start and end states, it requires continuous toolpaths, and exact continuous geometric precision, the proposed work will drive advances in core optimization techniques by minimizing exact geometric differences between the stock material and the desired parametric part.
+We will explore direct comparison methods that can be computed on the SDF directly, such as volumetric loss, zero-level set error, and normal consistency.
+Crucially, we will integrate this geometric reward with the differentiable safety penalties proposed in Milestone 2 to explicitly resolve unsafe actions, such as the toolholder collision observed in our preliminary study (Figure \ref{fig:results}). 
+Because every operation will be tracked in the DiffTaichi~\cite{hu2019difftaichi} computational graph, the exact gradients of this combined objective will be passed backward directly to the continuous toolpath parameters (the agent's motion actions).
+This analytic gradient flow ensures immediate, mathematically directed policy updates~\cite{xu2022accelerated}, entirely replacing the inefficient stochastic sampling required by model-free RL algorithms.
+
+\subsubsection*{Milestone 4: Evaluation and Physical Deployment}
+
+To isolate the impact of analytic gradients on sample efficiency, we will quantitatively benchmark the proposed DiffCAM architecture against state-of-the-art model-free RL algorithms.
+Building upon the vectorized OpenAI Gymnasium~\cite{towers2024gymnasium} and PufferLib~\cite{suarez2024pufferlib} infrastructure established in our preliminary study, the proposed gradient-based methods of the DiffCAM system will be evaluated on the Texas Advanced Computing Center (TACC) Lonestar6 high-performance computing systems\footnote{https://tacc.utexas.edu/systems/lonestar6/}.
+We will benchmark DiffCAM against Proximal Policy Optimization (PPO)~\cite{schulman2017proximal} and Soft Actor Critic (SAC)~\cite{haarnoja2018soft} baselines under identical task configurations.
+
+Our chosen evaluation will utilize a deliberate research scaffold: initially simplifying the problem to validate a single tool cutting from a stock state to a final shape state.
+Future NSF-funded work will interleave multiple tools and complex sequences of operations, fully realizing both the ``task'' (tool selection) and ``motion'' (toolpath) components of the TAMP framework.
+
+Evaluation metrics will allow the study of sample efficiency by comparing wall-clock training time vs. final part accuracy in terms of 3D shape similarity via measures such as Intersection over Union and Chamfer Distance.
+Policy robustness will be measured by varying starting stock geometries and part geometries.
+Because differentiable simulators over long time horizons are highly susceptible to vanishing and exploding gradients~\cite{newbury2024review}, we will conduct ablation studies to evaluate the sensitivity of hyperparameter selection and gradient clipping techniques on geometric operations to ensure mathematical stability.
+Finally, after extensive simulated evaluation, we will translate the validated algorithms into a physical, deployable AI system on a real-world CNC machining task utilizing the Texas Robotics
+%
+%
+facility located within Anna Hiss Gymnasium.
+Deployment of DiffCam will demonstrate the feasibility of using sample-efficient, gradient-based methods for the high-precision tasks of CNC machining and open doors to future NSF funding through the Advanced Manufacturing call.
+
+\section*{Budget Justification}
+
+The budget includes 12-month support (stipend, fringe, and tuition)\footnote{We assume that there is no overhead, but that the budget includes fringe costs.} for one Graduate Research Assistant (GRA) and for research equipment.
+The GRA will develop the core differentiable Taichi simulation engine and establish the motion planning component of the Task and Motion Planning System using a reinforcement learning approach.
+We have secured an allocation on the TACC GPU supercomputing cluster for large-scale training of AI models.
+
+Additional funds are allocated to research equipment for an NVIDIA Thor edge computing device that is uniquely designed for embodied AI inference.
+We will use CNC milling machine in the Texas Robotics facility\footnote{https://robotics.utexas.edu/} for model testing.
+However, even modern machine tools lack the necessary GPU computing infrastructure to run our proposed algorithms in real-time.
+We request therefore, as part of this proposal, an NVIDIA Thor for edge computing (Research Equipment).
+This specialized device designed for embodied AI inference will be used to run our AI models in real-time on the existing machine tools in the Texas Robotics facility.
+This will allow us to run our trained models in real-time on the CNC milling machine in the Texas Robotics facility, which lacks the necessary onboard compute capabilities.
+
+Collectively, this personnel and equipment will allow us to generate the rigorous empirical baselines required to successfully compete for full-scale funding under the NSF Advanced Manufacturing solicitation (PD-19-088Y).
+
+\vspace{1em}
+\begin{center}
+\begin{tabular}{lcrrr}
+\hline
+\textbf{Item} & \textbf{Wks.} & \textbf{Salary \& Fringe} & \textbf{Tuition Charge} & \textbf{Total} \\
+\hline
+CS PhD Student & 52 & \$45,540 & \$11,317 & \$56,857 \\
+Research equipment: NVIDIA Jetson Thor & -- & \$0 & \$0 & \$3,499 \\
+\hline \hline
+\textbf{Project Total} & \textbf{--} & \textbf{\$45,540} & \textbf{\$11,317} & \textbf{\$60,356} \\
+\hline
+\end{tabular}
+\end{center}
+
+% \section*{Current, Pending, and Recently Completed Support}
+
+% \noindent\textit{[No page limit. Provide a list of all current and pending funding for research. A copy of a current/pending support form used for federal agencies may be provided here. Include the following:}
+% \begin{itemize}
+%     \item \textit{Sponsored research funds from any external source}
+%     \item \textit{Internal research funds from any source (department, CSU, central/OVPR)}
+%     \item \textit{Gift or IAP funds}
+%     \item \textit{Discretionary funds provided via endowed chair or other source}
+%     \item \textit{Any grants that ended (for any reason) between 9/1/2024 and present]}
+% \end{itemize}
+
+% \section*{Biosketch/CV}
+
+% \noindent\textit{[Include short Biosketch/CV for the Principal Investigator. SciENcv or NIH/NSF formatted biosketches are suitable to use, as is any other short format.]}
+
+
+\bibliography{refs}
+\end{document}
