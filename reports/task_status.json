@@ -138,13 +138,13 @@
    "branch": "task/T4.1-runner",
    "blocker": "T2.2, T1.3",
    "next": null,
-   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min."
+   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts. | DECISION 2026-11-09: pilot launches as an infrastructure/cost pilot once w2 gates are green; fixed/annealed-Adam (gradient) rows are PROVISIONAL until T3.3b characterizes the systematic AD/FD mismatch; if T3.3b finds a real backward bug, Adam rows are rerun after the fix."
   },
   "T3.4": {
    "status": "in_progress",
    "owner": "diffcam-worker-1",
    "branch": "task/T3.4-continuation",
-   "blocker": null,
+   "blocker": "T3.4b (K1/K2) + T3.3b AD/FD characterization before dev ablations",
    "next": "dev ablations after pilot",
    "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot."
   },
@@ -153,7 +153,8 @@
    "owner": "diffcam-worker-3",
    "branch": "task/T3.3-gradient-mechanics",
    "blocker": null,
-   "next": "real study after T4.1b pilot"
+   "next": "real study after pilot; first characterize index-35 AD/FD sign difference",
+   "note": "tooling merged c955b60 (antithetic estimator w/ exact 2N accounting + uncertainty; AD/FD same-objective tooling; cost probe 0.25 mm: 39 fwd/1 bwd/21 hard in 93 s, 1.94 GB). OPEN DIAGNOSTIC: AD vs FD on 4 axes cosine 0.9999996 but L2 discrepancy 0.0205 and index 35 sign flip \u2014 must be characterized (component magnitude vs FD noise floor across eps) before any gradient-mechanics claim."
   },
   "T3.5": {
    "status": "planned",
@@ -184,13 +185,13 @@
    "branch": "task/T5.2-external-titan",
    "blocker": null,
    "next": null,
-   "note": "T5.2 adapters merged (1070c1c): isolated OCP 7.7.2 STEP import of Titan-M1 (inch->mm verified), sampled P/T, bounded native partial-roughing pilot. Production eval UNSUPPORTED for sampled P/T -> T1.3f (worker-3). Excluded-volume convention decided (grid-resolved, tol 0; native 82.20 mm3 diagnostic; grid 139.29 mm3 declared). Titan provenance/license still unknown (local only). | Production evaluation now runs (T1.3f): geometry False / safety null honestly reported; Titan nominal is a partial roughing pilot only."
+   "note": "T5.2 adapters merged (1070c1c): isolated OCP 7.7.2 STEP import of Titan-M1 (inch->mm verified), sampled P/T, bounded native partial-roughing pilot. Production eval UNSUPPORTED for sampled P/T -> T1.3f (worker-3). Excluded-volume convention decided (grid-resolved, tol 0; native 82.20 mm3 diagnostic; grid 139.29 mm3 declared). Titan provenance/license still unknown (local only). | Production evaluation now runs (T1.3f): geometry False / safety null honestly reported; Titan nominal is a partial roughing pilot only. | T5.2b merged: independent analytic bore raster (plug \u2229 nominal source void, native face z-ranges recorded) matches 68/68 cells; negative r=0.875 \u2192 56 mismatches; RESOLUTION LIMIT at 1.27 mm: small bore D=2.057 mm \u22481.6 cells, 1.25\u00d7 radius undetectable (documented). Artifacts data/external/titan-m1-t52b."
   },
   "T4.2": {
    "status": "planned",
    "owner": null,
    "branch": null,
-   "blocker": null,
+   "blocker": "T4.1b pilot + T3.3b (gradient validity) + T2.3 counts",
    "next": null,
    "note": "Protocol must state: real-simulator objectives reproduce only to ~1 float32 ulp (Taichi CPU atomics, e.g. holder_overlap_total); same-seed CMA runs are approximately (not bitwise) repeatable since ulp ties can flip rankings; replay agreement uses rel 1e-5. Option to make hard-path reductions deterministic (fixed-order f64) if exact repeatability is required."
   },
@@ -202,11 +203,12 @@
    "next": null
   },
   "T6.1": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T6.1-packets",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "software-only exporter now; final packets after T4.2 freeze"
   },
   "T6.2": {
    "status": "planned",
@@ -313,6 +315,38 @@
    "blocker": null,
    "next": null,
    "note": "merged a212925+62e5573: exact-grid sampled P/T in production evaluator (no resampling), analytic regressions preserved; Titan production posts: coverage complete, geometry False (single roughing plunge), safety null (rapid-cutter penetration upper bound 1.67 mm vs tol 0). Evaluator/task tests 106 passed on core."
+  },
+  "T2.2b": {
+   "status": "complete",
+   "owner": "diffcam-worker-1",
+   "branch": null,
+   "blocker": null,
+   "next": null,
+   "note": "reachable pilot target; merged 77a319b (G1 exact grid exclusion)"
+  },
+  "T5.2b": {
+   "status": "complete",
+   "owner": "diffcam-worker-3",
+   "branch": null,
+   "blocker": null,
+   "next": null,
+   "note": "independent Titan bore raster 68/68; merged bb552e8"
+  },
+  "T3.4b": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T3.4b-shift",
+   "blocker": null,
+   "next": null,
+   "note": "shift via sim per-voxel field, field-gap calibration in voxel SDF units, leak tests, C2"
+  },
+  "T3.3b": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T3.3b-adfd",
+   "blocker": null,
+   "next": null,
+   "note": "SYSTEMATIC AD/FD mismatch: idx2 AD -0.4785 vs FD -0.4990 (4.1%, eps-independent), idx35 sign flip; per-component bisect (sigmoid clamp, ti.max carve, stop-gradients, f32 backward). Affects Adam/T3.4 step quality. | PRIORITY right after pilot launch; gates T3.4 ablations and any optimizer choice for T4.2."
   }
  }
 }

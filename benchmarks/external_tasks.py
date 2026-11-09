@@ -460,7 +460,8 @@ class _BoundaryDistance:
 def _vertical_cylinders_at(solid: Any, xy: Sequence[float]) -> list[dict[str, Any]]:
     result = []
     for shape in _walk(solid, TopAbs_FACE):
-        adapter = BRepAdaptor_Surface(TopoDS.Face_s(shape))
+        face = TopoDS.Face_s(shape)
+        adapter = BRepAdaptor_Surface(face)
         if adapter.GetType() != GeomAbs_SurfaceType.GeomAbs_Cylinder:
             continue
         cylinder = adapter.Cylinder()
@@ -469,10 +470,12 @@ def _vertical_cylinders_at(solid: Any, xy: Sequence[float]) -> list[dict[str, An
             continue
         if max(abs(location.X() - xy[0]), abs(location.Y() - xy[1])) > 1e-6:
             continue
+        lower, upper = _bounds(face)
         result.append({
             "centre_xy_mm": [float(location.X()), float(location.Y())],
             "radius_mm": float(cylinder.Radius()),
             "axis": [float(axis.X()), float(axis.Y()), float(axis.Z())],
+            "face_z_range_mm": [float(lower[2]), float(upper[2])],
         })
     return result
 
@@ -482,6 +485,60 @@ def _common_volume(left: Any, right: Any) -> float:
     if not common.IsDone():
         raise CADValidationError("native common Boolean failed")
     return _volume(common.Shape())
+
+
+def _nominal_void_profiles(source: Any, faces: Sequence[Mapping[str, Any]],
+                           opening_z_mm: float) -> list[dict[str, Any]]:
+    """Record conservative nominal bore void, verified against the source.
+
+    Every cylinder starts at an observed native face's lower Z bound and ends
+    at the validated solid's upper Z bound. The face's own z-range is retained
+    separately; it is not asserted to bound the full nominal void. A nonzero
+    common with the original source rejects the profile before any sampling.
+    """
+    profiles = []
+    seen = set()
+    previous_upper = None
+    for face in sorted(faces, key=lambda record: record["face_z_range_mm"]):
+        z_min, face_max = map(float, face["face_z_range_mm"])
+        if not (math.isfinite(z_min) and math.isfinite(face_max)):
+            raise CADValidationError("non-finite native bore face z-range")
+        if face["axis"][2] <= 0:
+            raise CADValidationError("this +Z nominal void needs a positive native bore axis")
+        radius = float(face["radius_mm"])
+        key = tuple(round(value, 8)
+                    for value in (*face["centre_xy_mm"], radius, z_min, face_max))
+        if key in seen:
+            continue
+        seen.add(key)
+        if previous_upper is not None and abs(z_min - previous_upper) > 1e-6:
+            raise CADValidationError("native bore face depth intervals are not contiguous")
+        if opening_z_mm <= z_min:
+            raise CADValidationError("nominal bore opening height must exceed its lower bound")
+        centre = face["centre_xy_mm"]
+        nominal = BRepPrimAPI_MakeCylinder(
+            gp_Ax2(gp_Pnt(float(centre[0]), float(centre[1]), z_min), gp_Dir(0, 0, 1)),
+            radius, opening_z_mm - z_min,
+        ).Shape()
+        source_common = _common_volume(source, nominal)
+        if abs(source_common) > 1e-6:
+            raise CADValidationError(
+                f"nominal bore void has {source_common} mm^3 common with original part"
+            )
+        profiles.append({
+            "radius_mm": radius,
+            "source_z_min_mm": z_min,
+            "source_opening_z_mm": opening_z_mm,
+            "face_z_range_mm": [z_min, face_max],
+            "nominal_cylinder_common_with_original_part_mm3": source_common,
+            "construction": "face lower z to source upper z; source-negative native common zero",
+        })
+        previous_upper = face_max
+    if len(profiles) != 2:
+        raise CADValidationError(
+            f"this bounded pilot requires two contiguous bore profiles, got {len(profiles)}"
+        )
+    return profiles
 
 
 def _point_from_work(point: Sequence[float], source_to_work: Sequence[float]) -> tuple[float, float, float]:
@@ -545,6 +602,7 @@ def _pilot(request: Mapping[str, Any]) -> dict[str, Any]:
     if _inside(source, hole_probe):
         raise CADValidationError("selected source bore is not an actual through-hole void at its centre")
     lower, upper = _bounds(source)
+    nominal_void_profile = _nominal_void_profiles(source, faces, upper[2])
     # The plug uses native model-unit millimetres.  Tiny bounding-box tolerance
     # padding is not silently added to physical dimensions.  The selected bore
     # is verified to fit inside the declared stock before constructing the plug.
@@ -619,6 +677,7 @@ def _pilot(request: Mapping[str, Any]) -> dict[str, Any]:
                 "plug_radius_mm": radius,
                 "plug_min_source_z_mm": stock_native[0][2],
                 "plug_max_source_z_mm": upper[2],
+                "nominal_void_profile": nominal_void_profile,
                 "native_excluded_volume_mm3": excluded_volume,
                 "source_void_probe_source_mm": list(hole_probe),
                 "source_void_probe_is_outside_P": True,

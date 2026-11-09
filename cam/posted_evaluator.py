@@ -33,6 +33,7 @@ from simulator import csg_metrics
 from simulator.csg_metrics import compute_grid_metrics
 
 EVALUATOR_ID = "posted_hard/production"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _PLANE_AXES = {C.ArcPlane.XY: (0, 1, 2), C.ArcPlane.XZ: (2, 0, 1), C.ArcPlane.YZ: (1, 2, 0)}
 
 
@@ -297,6 +298,9 @@ def _sampled_mask(geometry, task_grid):
     if geometry.grid.sign_convention != "negative_inside":
         raise ValueError("sampled geometry must use the negative_inside sign convention")
     path = Path(geometry.path)
+    if not path.is_absolute():
+        # Runner paths are repository-relative; never depend on invocation CWD.
+        path = (PROJECT_ROOT / path).resolve()
     try:
         size = path.stat().st_size
         # A simple numeric NPY header is tiny. The allowance also covers a

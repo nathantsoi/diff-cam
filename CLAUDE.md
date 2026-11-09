@@ -35,4 +35,5 @@
 - Never claim a gate passed without running it; report commands + exit codes.
 - Record pass / fail / blocked / not-applicable / incomplete-coverage distinctly. Missing tools are "blocked", not passing.
 - Mocks are fine for unit development, never as end-to-end evidence. Negative results are valid outcomes.
+- Slow opt-in tests: `DIFFCAM_REAL_NOMINAL=1` (real pilot nominal, ~7 min), `DIFFCAM_REAL_PILOT_SMOKE=1` (runner real-task smoke); run alone, required for pilot-affecting changes.
 - Units: internal physical dimensions are millimetres; G54 at stock top-centre (see README.md and docs/contracts.md once T0.0 lands).

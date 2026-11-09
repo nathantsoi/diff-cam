@@ -231,9 +231,176 @@ def _checked_sampled_values(source: C.GeometrySource) -> np.ndarray:
     return values
 
 
+def bore_profile_from_native(native: Mapping[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Read the backend's nominal void specification, not a hardcoded profile."""
+    operation = native["operation_geometry"]
+    shift = np.asarray(operation["source_to_work_mm"], dtype=np.float64)
+    if shift.shape != (3,) or not np.isfinite(shift).all():
+        raise ValueError("source-to-work translation must be three finite millimetres")
+    return np.asarray(operation["hole_centre_source_xy_mm"], dtype=np.float64), shift, np.asarray(
+        operation["exclusion"]["nominal_void_profile"], dtype=object
+    )
+
+
+def _expected_bore_mask(grid: C.GridSpec, initial: np.ndarray,
+                        native: Mapping[str, Any], profiles: Sequence[Mapping[str, Any]]) -> np.ndarray:
+    """Nominal plug ∩ source-negative void, independently of field-inferred counts."""
+    centre, shift, _ = bore_profile_from_native(native)
+    exclusion = native["operation_geometry"]["exclusion"]
+    plug_radius = float(exclusion["plug_radius_mm"])
+    if centre.shape != (2,) or not np.isfinite(centre).all():
+        raise ValueError("bore centre must be two finite source-frame millimetres")
+    if not math.isfinite(plug_radius) or plug_radius <= 0:
+        raise ValueError("plug radius must be finite and positive")
+    xyz = grid_centres(grid)
+    source_x = xyz[0] - shift[0]
+    source_y = xyz[1] - shift[1]
+    source_z = xyz[2] - shift[2]
+    radial = np.hypot(source_x - centre[0], source_y - centre[1])
+    plug_z_min = float(exclusion["plug_min_source_z_mm"] + shift[2])
+    plug_z_max = float(exclusion["plug_max_source_z_mm"] + shift[2])
+    if not (math.isfinite(plug_z_min) and math.isfinite(plug_z_max) and plug_z_min < plug_z_max):
+        raise ValueError("plug z-range must be finite and increasing")
+    nominal_void = np.zeros(grid.shape, dtype=bool)
+    previous_face_upper = None
+    if len(profiles) != 2:
+        raise ValueError("bounded bore cross-check requires two nominal profile segments")
+    for face in profiles:
+        raw_z_min = float(face["source_z_min_mm"] + shift[2])
+        raw_open = float(face["source_opening_z_mm"] + shift[2])
+        radius = float(face["radius_mm"])
+        if not all(math.isfinite(value) and value > 0 for value in (radius,)):
+            raise ValueError("bore radii must be finite and positive")
+        if radius >= plug_radius:
+            raise ValueError("bore exclusion requires a larger encompassing plug")
+        if (
+            not math.isfinite(raw_z_min)
+            or not math.isfinite(raw_open)
+            or raw_open <= raw_z_min
+        ):
+            raise ValueError("nominal void opening must exceed its finite lower z bound")
+        z_min = float(face["source_z_min_mm"]) + shift[2]
+        opening = float(face["source_opening_z_mm"]) + shift[2]
+        face_range = face["face_z_range_mm"]
+        if len(face_range) != 2 or not all(math.isfinite(float(v)) for v in face_range):
+            raise ValueError("native face z-range must contain two finite bounds")
+        face_upper = float(face_range[1]) + shift[2]
+        if previous_face_upper is not None and abs(z_min - previous_face_upper) > 1e-6:
+            raise ValueError("nominal void depth segments are not contiguous")
+        if z_min < plug_z_min - 1e-9 or opening > plug_z_max + 1e-9:
+            raise ValueError("nominal void exceeds the recorded plug z-range")
+        if face_upper - z_min <= 0 or opening - z_min <= 0:
+            raise ValueError("nominal void has invalid native depth bounds")
+        native_common = float(face["nominal_cylinder_common_with_original_part_mm3"])
+        if not math.isfinite(native_common) or abs(native_common) > 1e-6:
+            raise ValueError("nominal void is not source-negative by the native backend proof")
+        nominal_void |= (source_z >= z_min) & (source_z <= opening) & (radial <= radius)
+        previous_face_upper = face_upper
+    expected = initial & (radial <= plug_radius)
+    expected &= (source_z >= plug_z_min) & (source_z <= plug_z_max) & nominal_void
+    return expected
+
+
+def independent_bore_crosscheck(native: Mapping[str, Any], grid: C.GridSpec,
+                                stock_field: np.ndarray, part_values: np.ndarray,
+                                target_values: np.ndarray, *,
+                                include_perturbations: bool = False) -> dict[str, Any]:
+    """Compare an independent nominal bore raster with actual sampled P and T.
+
+    The nominal mask is retained source-negative void inside the measured plug.
+    ``expected_mask`` is an ephemeral NumPy value for tests; the remaining report
+    is JSON-safe. It is not a replacement for the full native P or T geometry.
+    """
+    part = np.asarray(part_values, dtype=np.float64)
+    target = np.asarray(target_values, dtype=np.float64)
+    stock = np.asarray(stock_field, dtype=np.float64)
+    if part.shape != grid.shape or target.shape != grid.shape or stock.shape != grid.shape:
+        raise ValueError("bore cross-check arrays must share the declared physical grid")
+    if not (np.isfinite(part).all() and np.isfinite(target).all() and np.isfinite(stock).all()):
+        raise ValueError("bore cross-check requires finite sampled fields")
+    original = part <= 0.0
+    operation = target <= 0.0
+    initial = stock <= 0.0
+    if np.any(original & ~operation):
+        raise E.CADValidationError("original part is not a subset of the operation target")
+    exclusion = native["operation_geometry"]["exclusion"]
+    profiles = exclusion["nominal_void_profile"]
+    expected_mask = _expected_bore_mask(grid, initial, native, profiles)
+    actual_mask = initial & operation & ~original
+    mismatch = np.argwhere(expected_mask != actual_mask)
+    first_radius = float(profiles[0]["radius_mm"])
+    last_radius = float(profiles[-1]["radius_mm"])
+    plug_radius = float(exclusion["plug_radius_mm"])
+    pitch = float(grid.voxel_mm)
+    result: dict[str, Any] = {
+        "schema": "independent-titan-bore-raster/1",
+        "definition": "initial & plug & nominal source-negative void vs actual initial & T & ~P",
+        "expected_mask": expected_mask,
+        "expected_cells": int(expected_mask.sum()),
+        "actual_cells": int(actual_mask.sum()),
+        "expected_volume_mm3": float(expected_mask.sum() * pitch ** 3),
+        "actual_volume_mm3": float(actual_mask.sum() * pitch ** 3),
+        "mismatched_cells": int(len(mismatch)),
+        "sample_mismatched_indices": [list(map(int, row)) for row in mismatch[:16]],
+        "sample_mismatched_cell_centres_mm": [
+            list(grid.cell_centre_mm(*map(int, row))) for row in mismatch[:8]
+        ],
+        "nominal_void_profile": [
+            {key: value for key, value in face.items() if key != "nominal_cylinder_common_with_original_part_mm3"}
+            for face in profiles
+        ],
+        "source_negative_common_mm3_max": max(
+            abs(float(face["nominal_cylinder_common_with_original_part_mm3"])) for face in profiles
+        ),
+        "same_physical_grid": {"shape": list(grid.shape), "origin_mm": list(grid.origin_mm),
+                               "voxel_mm": pitch, "frame": grid.frame.value},
+        "resolution": {
+            "small_bore_diameter_mm": 2 * first_radius,
+            "small_bore_cells_across_diameter": 2 * first_radius / pitch,
+            "counterbore_diameter_mm": 2 * last_radius,
+            "counterbore_cells_across_diameter": 2 * last_radius / pitch,
+            "plug_diameter_mm": 2 * plug_radius,
+            "plug_cells_across_diameter": 2 * plug_radius / pitch,
+            "small_bore_pitch_for_eight_cells_mm": 2 * first_radius / 8,
+            "small_bore_under_resolved": 2 * first_radius / pitch < 8,
+            "note": "span ratios, not a guarantee of feature accuracy or minimum occupied-cell count",
+        },
+        "nominal_mask_match": int(len(mismatch)) == 0,
+    }
+    if include_perturbations:
+        perturbations = []
+        for label, radius in (("primary_radius_0.875_mm", 0.875),
+                              ("primary_radius_times_1.25", 1.25 * first_radius)):
+            variant = [dict(face) for face in profiles]
+            variant[0]["radius_mm"] = radius
+            variant_mask = _expected_bore_mask(grid, initial, native, variant)
+            difference = int(np.count_nonzero(variant_mask != actual_mask))
+            perturbations.append({
+                "name": label, "radius_mm": radius,
+                "expected_cells": int(variant_mask.sum()),
+                "mismatched_cells": difference,
+                "actual_mask_mismatch_rejected": difference > 0,
+                "detectable_at_this_pitch": difference > 0,
+                "scope": "counterfactual analytic perturbation, not modified STEP geometry or a native common-volume proof",
+            })
+        result["perturbations"] = perturbations
+    return result
+
+
 def build_task(part_source: C.GeometrySource, target_source: C.GeometrySource,
-               native_excluded_volume_mm3: Optional[float] = None) -> C.TaskSpec:
-    """Use grid-resolved exclusion; native continuous volume is diagnostic only."""
+               native_excluded_volume_mm3: Optional[float] = None, *,
+              independent_bore_check: Optional[Mapping[str, Any]] = None) -> C.TaskSpec:
+    """Use grid-resolved exclusion; native continuous volume is diagnostic only.
+
+    This builder always constructs the registered Titan pilot. Requiring the
+    independent record prevents a caller from accidentally omitting the
+    metadata-driven bore raster by bypassing :func:`run_pilot`.
+    """
+    if independent_bore_check is None:
+        raise ValueError(
+            "registered Titan pilot requires the independent bore cross-check; "
+            "constructing it without that verification is not supported"
+        )
     if part_source.kind != "sampled" or target_source.kind != "sampled":
         raise ValueError("the real Titan pilot must retain its sampled native geometry")
     if part_source.frame != C.Frame.WORK or target_source.frame != C.Frame.WORK:
@@ -284,6 +451,15 @@ def build_task(part_source: C.GeometrySource, target_source: C.GeometrySource,
         "grid_declared_excluded_volume_mm3": excluded_volume_mm3,
         "native_excluded_volume_mm3_diagnostic": native_excluded_volume_mm3,
         "excluded_volume_convention": "initial & T & ~P cell-count at task-grid pitch, tolerance 0",
+        "independent_bore_verification": {
+            key: independent_bore_check[key]
+            for key in (
+                "schema", "definition", "nominal_void_profile", "resolution",
+                "expected_cells", "actual_cells", "mismatched_cells",
+                "nominal_mask_match", "perturbations",
+            )
+            if key in independent_bore_check
+        },
     })
     stock = C.GeometrySource(kind="analytic", params={
         "primitive": "box", "min_mm": list(lower), "max_mm": list(upper),
@@ -422,6 +598,17 @@ def run_pilot(output_dir: Optional[Path] = None, *, interpreter: Optional[Path] 
         grid.voxel_mm,
     )
     native_excluded = native["operation_geometry"]["exclusion"]["native_excluded_volume_mm3"]
+    bore_check = independent_bore_crosscheck(
+        native, grid, stock_field, fields["part"]["values"],
+        fields["operation_target"]["values"], include_perturbations=True,
+    )
+    if bore_check["mismatched_cells"]:
+        raise E.CADValidationError(
+            "independent nominal bore raster disagrees with sampled exclusion: "
+            f"{bore_check['mismatched_cells']} cells, expected={bore_check['expected_cells']}, "
+            f"actual={bore_check['actual_cells']}; "
+            f"first={bore_check['sample_mismatched_indices'][:4]}"
+        )
     task = build_task(
         C.GeometrySource(
             kind="sampled", path=str(fields["part"]["path"]),
@@ -432,7 +619,16 @@ def run_pilot(output_dir: Optional[Path] = None, *, interpreter: Optional[Path] 
             sha256=fields["operation_target"]["sha256"], grid=grid,
         ),
         native_excluded,
+        independent_bore_check=bore_check,
     )
+    declared_excluded = task.operation_target.excluded_volume_mm3
+    if abs(bore_check["expected_volume_mm3"] - declared_excluded) > 1e-12 * max(1.0, abs(declared_excluded)):
+        raise E.CADValidationError(
+            "independent bore volume disagrees with grid-resolved declaration: "
+            f"expected={bore_check['expected_volume_mm3']}, declared={declared_excluded}"
+        )
+    bore_check["task_declared_excluded_volume_mm3"] = declared_excluded
+    bore_check["native_excluded_volume_diagnostic_only_mm3"] = native_excluded
     motion = nominal_motion(task)
     initial = stock_field <= 0
     original = fields["part"]["values"] <= 0
@@ -495,6 +691,10 @@ def run_pilot(output_dir: Optional[Path] = None, *, interpreter: Optional[Path] 
         "motion_plan.json": C.dumps(motion).encode("utf-8"),
         "native_import_and_sweep.json": json.dumps(native, indent=2, sort_keys=True).encode("utf-8"),
         "grid_statistics.json": json.dumps(sampled, indent=2, sort_keys=True).encode("utf-8"),
+        "independent_bore_crosscheck.json": (
+            json.dumps({key: value for key, value in bore_check.items() if key != "expected_mask"},
+                       indent=2, sort_keys=True, allow_nan=False).encode("utf-8")
+        ),
         "sources.json": json.dumps({
             "original_part": _source_metadata(task.original_part),
             "operation_target": _source_metadata(task.operation_target.geometry),
@@ -528,6 +728,16 @@ def run_pilot(output_dir: Optional[Path] = None, *, interpreter: Optional[Path] 
         ),
         "single_tool_plus_z_only": True,
         "one_selected_hole_excluded": True,
+        "independent_bore_crosscheck": {
+            "definition": bore_check["definition"],
+            "expected_cells": bore_check["expected_cells"],
+            "actual_cells": bore_check["actual_cells"],
+            "mismatched_cells": bore_check["mismatched_cells"],
+            "nominal_mask_match": bore_check["nominal_mask_match"],
+            "small_bore_cells_across_diameter": bore_check["resolution"]["small_bore_cells_across_diameter"],
+            "small_bore_under_resolved": bore_check["resolution"]["small_bore_under_resolved"],
+            "perturbations": bore_check["perturbations"],
+        },
         "all_other_features_certified_accessible": False,
         "native_sweep_no_original_or_target_gouge": (
             native_sweep["part_no_gouge_supported"]

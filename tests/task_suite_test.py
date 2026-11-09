@@ -17,6 +17,8 @@ import subprocess
 import sys
 
 import numpy as np
+import os
+
 import pytest
 
 from benchmarks import contracts as C
@@ -580,11 +582,15 @@ def test_nominal_output_directory_cannot_be_reused(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.slow
+@pytest.mark.skipif(os.environ.get("DIFFCAM_REAL_NOMINAL") != "1",
+                    reason="explicit slow real nominal pipeline (~7 min at 0.25 mm, load-sensitive): set DIFFCAM_REAL_NOMINAL=1 "
+                           "and run it on its own")
 def test_real_nominal_pipeline_and_evidence(tmp_path):
     output = tmp_path / "real-nominal"
     command = [sys.executable, "-m", "benchmarks.pilot_task", "--output", str(output)]
     completed = subprocess.run(
-        command, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=540,
+        command, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=1200,  # opt-in slow test; ~7 min idle, allow shared-box load (review D2)
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + "\n" + completed.stderr
