@@ -93,11 +93,11 @@
    "note": "code merged (seed, pilot task, zero-residual pipeline; retained run at runs/retained/pilot-pocket-20261108-t22-retained). OPEN T2.2b: op-target inset excludes 4554 mm3 (~half pocket) by fixed corridor -> derive reachable target from accessibility and re-run nominal. geometry_pass null pending T1.3. | T1.3b verdict on nominal @1mm: geometry_pass False (gouge 48 mm3 > 1 mm3 tol; max surface err 1.0 mm); T2.2b must make grid/tolerances coherent."
   },
   "T2.3": {
-   "status": "planned",
-   "owner": null,
+   "status": "ready",
+   "owner": "diffcam-worker-1",
    "branch": null,
    "blocker": null,
-   "next": null
+   "next": "after T2.2b; generator now, counts after pilot"
   },
   "T3.0": {
    "status": "complete",
@@ -137,7 +137,7 @@
    "branch": "task/T4.1-runner",
    "blocker": "T2.2, T1.3",
    "next": null,
-   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator."
+   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot."
   },
   "T3.4": {
    "status": "planned",
