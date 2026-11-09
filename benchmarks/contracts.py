@@ -405,7 +405,8 @@ class Tolerances:
     ``gouge_volume_mm3``: max removed volume inside the part. ``local_surface_error_mm``:
     max local deviation on the operation-target surface. ``clearance_mm``: min
     clearance of the NON-CUTTING assembly (shank + holder) to remaining stock and fixtures
-    during rapids and feeds. ``rapid_penetration_mm`` (v1.1): during rapids the cutter may
+    during rapids and feeds -- a reported qualification threshold (physical packets), not part of
+    ``safety_pass``, which requires no strict-interior non-cutting overlap. ``rapid_penetration_mm`` (v1.1): during rapids the cutter may
     graze remaining stock (e.g. retracting out of its own slot); a rapid is a collision only
     if the cutter penetrates deeper than this, and safety is certified only if the evaluator's
     upper bound on possible rapid penetration is <= this value. 0 means any possible

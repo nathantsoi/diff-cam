@@ -30,7 +30,8 @@ initial_state, tool, limits, tolerances, motion_semantics, fixtures`.
   measured from the tip. Consumers that model only flat cutters report coverage `unsupported` for ball tools.
 - `MachineState.known=False` ⇒ `position_mm` must be null. An evaluator cannot claim complete coverage of the approach.
 - `Tolerances` are absolute (mm³ / mm), not percentages: `completion_residual_mm3, gouge_volume_mm3, local_surface_error_mm, clearance_mm`
-  (non-cutting shank + holder only), `rapid_penetration_mm` (max cutter penetration of remaining stock during a rapid; safety needs the
+  (non-cutting shank + holder only; a reported qualification threshold used by physical packets, NOT part of `safety_pass`, which
+  requires no strict-interior non-cutting overlap), `rapid_penetration_mm` (max cutter penetration of remaining stock during a rapid; safety needs the
   evaluator's penetration upper bound ≤ this; 0 ⇒ any possible overlap is unsafe/unknown).
 - `task_hash` covers the whole spec. `tool_setup_hash` covers tool + transform + fixtures + initial state.
 
