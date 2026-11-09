@@ -210,6 +210,11 @@ def test_analytic_hard_smooth_shared_objective_and_incomplete_posted_artifacts(t
 
     record = B.emit_optimization_artifacts(smooth, smooth_evaluator, tmp_path / "smooth", Path.cwd())
     assert record.status == C.RunStatus.INCOMPLETE
+    config = json.loads((tmp_path / "smooth" / "config.json").read_text())
+    assert config["budgets"]["limits"]["candidate_evaluations"] == 4
+    assert config["budgets"]["limits"]["max_validation_calls"] == 1
+    assert config["budgets"]["spent"] == {"candidate_evaluations": 4,
+                                          "validation_calls": 1, "generations": 2}
     assert "posted evaluation" in record.failure_reason.lower()
     run_dir = tmp_path / "smooth"
     assert (run_dir / "run.json").is_file()

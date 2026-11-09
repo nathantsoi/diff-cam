@@ -69,6 +69,7 @@ class CmaRunResult:
     run_id: str
     objective_kind: str
     seed: int
+    budget: OptimizationBudget
     best: Optional[C.CandidateResult]
     best_theta: Optional[np.ndarray]
     initial_theta: np.ndarray
@@ -301,6 +302,7 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
         checkpoint_path = final_path
     return CmaRunResult(
         run_id=state.run_id, objective_kind=state.objective_kind, seed=state.seed,
+        budget=state.budget,
         best=state.best, best_theta=state.best_theta, initial_theta=state.initial_theta,
         evaluations=state.evaluations, validation_calls=state.validation_calls,
         generations=state.generations, invalid_candidates=state.invalid_candidates,
@@ -379,9 +381,12 @@ def emit_optimization_artifacts(result: CmaRunResult, evaluator: Any, run_dir: s
     config = R.build_run_config(result.run_id, task, motion, seed=result.seed,
                                 parameterization=evaluator.parameterization,
                                 objective=evaluator.spec,
-                                budgets={"candidate_evaluations": result.evaluations,
-                                         "validation_calls": result.validation_calls,
-                                         "generations": result.generations},
+                                budgets={
+                                    "limits": dataclasses.asdict(result.budget),
+                                    "spent": {"candidate_evaluations": result.evaluations,
+                                              "validation_calls": result.validation_calls,
+                                              "generations": result.generations},
+                                },
                                 repository=repository)
     initial_positions = evaluator.parameterization.positions(result.initial_theta)
     best_positions = evaluator.parameterization.positions(result.best_theta)
