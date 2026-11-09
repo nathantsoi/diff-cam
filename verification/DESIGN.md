@@ -1,8 +1,6 @@
 # T1.0 independent carve and chronology design
 
-Status: read-only fixture design at input commit `352205bfc05e982d323fab210de8700539f8e544`.
-
-Scope: specifications and independently derived expectations for `reference_carve.py`, `fixtures.py`, and `reference_geometry_test.py`. This note is not a test result. The implementation gate remains to be run after T0.0/T0.2 are merged.
+Status: fixture design plus implementation reconciliation. Input design commit was `352205bfc05e982d323fab210de8700539f8e544`; T0.0 contracts were acknowledged after their timing-validation update. Executed validation is recorded in `reference_convergence.json` and the T1.0 handoff, not inferred from this design.
 
 ## 1. Independence and model boundary
 
@@ -10,14 +8,14 @@ The only production sources consulted for conventions were `simulator/csg_simula
 
 The existing simulator has a **flat capped cutting cylinder**. It has no ball-end cutter. Ball-end cases are therefore **not applicable**, not passed. A discriminated ball tool can be added later with its own independent derivations.
 
-Reference coordinates are float64 physical millimetres in the machine frame (`+Z` up). The tool reference point is cutter bottom-centre. For base position `p=(x,y,z_b)`, the flat cutting solid is
+Reference geometry is evaluated in float64 physical millimetres in the **work** frame (`+Z` up). Machine-frame motion is converted through the inverse rigid transform; tilted work/machine Z axes are explicitly unsupported in this reference revision. The tool reference point is cutter bottom-centre. For base position `p=(x,y,z_b)`, the flat cutting solid is
 
 ```
 C(p) = {(X,Y,Z): (X-x)^2 + (Y-y)^2 <= r^2,
                   z_b <= Z <= z_b+h_c}.
 ```
 
-The holder is coaxial, starts at `z_b+h_c`, and has radius `R` and height `H`. It never removes material. Geometry-only volume fixtures use `holder=None`; they are not physical safety qualifications. A finite tool or holder boundary has zero volume, but the discrete convention is still fixed:
+T0.0 tooling includes a cutting cylinder, a non-cutting shank from `h_c` to `holder_bottom_mm`, and a coaxial holder from that offset upward. Neither shank nor holder removes material. Geometry-heavy fixtures use a flush shank/holder with cutter radius and `holder_bottom_mm=h_c`, rather than pretending the mandatory assembly is absent. They are not physical safety qualifications. A finite tool or holder boundary has zero volume, but the discrete convention is still fixed:
 
 - removal uses closed-set membership (`distance <= 0`);
 - collision requires strict interior overlap (`distance < 0`) and positive sampled volume;
@@ -99,7 +97,7 @@ Refine `v <- v/2` and at least double temporal `m`. For unchanged geometry, full
 - successive estimate changes and bracket widths;
 - any case where refinement budget is exhausted before its required absolute uncertainty budget.
 
-An analytic fixture passes only when its independently derived `V*` lies in `[L,U]` (apart from a declared float64 numerical epsilon), and the finest bracket meets that fixture's stored **absolute mm^3 budget**. There is no universal percentage tolerance. Comparison roundoff may use a tiny scale-derived numerical epsilon based on millimetre lengths and voxel counts; geometric acceptance comes from the physical bracket.
+An analytic fixture passes containment only when its independently derived `V*` lies in `[L,U]` (apart from a declared float64 numerical epsilon). The saved convergence report records absolute widths and monotonic refinement rather than retro-fitting a numeric acceptance budget to observed output. Any downstream evaluator requiring a tighter absolute mm^3 budget must declare it before comparing results. There is no universal percentage tolerance. Comparison roundoff may use a tiny scale-derived numerical epsilon based on millimetre lengths and voxel counts; geometric acceptance comes from the physical bracket.
 
 ### 3.3 Chronological safety is tri-state
 
@@ -139,7 +137,7 @@ For a stock cross-section smaller than the cutter disk, replace `pi*r^2` by the 
 
 ## 5. Fixture catalogue
 
-All positions are `(x,y,z_base)` in mm. Unless stated otherwise, stock is `B`, there is no holder, the motion is feed, and `V*` is exact **continuous** removed volume, not an expected coarse voxel count. Exact expressions are authoritative; decimals are review aids.
+All positions are `(x,y,z_base)` in the work frame, in mm. Unless stated otherwise, stock is `B`, the flush assembly uses cutter radius with `holder_bottom_mm=h_c`, the motion is feed, and `V*` is exact **continuous** removed volume, not an expected coarse voxel count. Exact expressions are authoritative; decimals are review aids.
 
 ### Pure volume and motion cases
 
@@ -151,7 +149,7 @@ All positions are `(x,y,z_base)` in mm. Unless stated otherwise, stock is `B`, t
 | `horizontal_slot` | `r=3,h_c=20`, `(14,20,0) -> (38,20,0)` | Cutter covers all stock Z. Exact 2-D capsule area is rectangular middle `2*r*24=144` plus two end disks totalling `9*pi`. `V*=12*(144+9*pi) = 2067.2920065876975 mm^3`. The starting/end disks must not be omitted as "initial placement." |
 | `sloped_ramp` | `r=2,h_c=12`, `(8,20,8) -> (32,20,-4)` | `ell=24`, downward `D=12`; union spans stock Z, so `W=12`. Here `I(z)=[(8-z)/12,(20-z)/12] intersect [0,1]`. Thus `q(z)=(z+4)/12` for `0<=z<=8`, and `q(z)=(20-z)/12` for `8<=z<=12`. `Q=16/3+10/3=26/3` mm. `V*=4*pi*12 + 2*2*24*(26/3) = 48*pi+832 = 982.7964473723101 mm^3`. |
 | `near_vertical` | `r=3,h_c=10`, `(20,20,30) -> (20.8,20.3,-10)` | `D=40`, `ell=sqrt(0.73)`, `W=12`. For every `0<=z<=12`, `I(z)=[(30-z)/40,(40-z)/40]`, so `q=1/4` and `Q=3`. `V*=108*pi + 2*3*sqrt(0.73)*3 = 108*pi+18*sqrt(0.73) = 354.6712133292692 mm^3`. A nonzero horizontal component is intentional. |
-| `reversal` | `r=3,h_c=20`, `(12,20,0) -> (40,20,0) -> (20,20,0)` | The return lies inside the first capsule. Union remains one length-28 capsule: `V*=12*(2*3*28+9*pi) = 12*(168+9*pi) = 2355.2920065876977 mm^3`. It equals single-segment `12 -> 40`, not the sum of two cuts. |
+| `reversal` | `r=3,h_c=20`, `(12,20,0) -> (40,20,0) -> (26,20,0)` | The half-length return lies inside the first capsule and its dyadic stations are a subset of the outward stations. Union remains one length-28 capsule: `V*=12*(2*3*28+9*pi) = 12*(168+9*pi) = 2355.2920065876977 mm^3`. It equals single-segment `12 -> 40`, not the sum of two cuts. Arbitrary segment partition/phasing need not give identical discrete occupancy until refined. |
 | `repeated_plunge` | Same tool as `plunge_above`, feed `18 -> 8 -> 18 -> 8` at `x=y=20` | All three sweeps have the same stock intersection: `V*=36*pi = 113.09733552923255 mm^3`, exactly the one-plunge result. Segment work/count diagnostics may grow; unique removed volume may not. |
 | `through_hole` | `r=4,h_c=6`, `(20,20,16) -> (20,20,-2)` | Swept vertical range is `-2..22`, clipping to stock height 12. `V*=16*pi*12 = 192*pi = 603.1857894892403 mm^3`; the cylindrical hole has no remaining floor in this geometric model. |
 | `zero_length_feed` | `r=3,h_c=6`, one feed `(20,20,4) -> (20,20,4)`, duration 0 | One stationary solid intersects stock over `z=4..10`: `V*=9*pi*6 = 54*pi = 169.64600329384882 mm^3`. No division by segment length; integrated overlap is zero. |
@@ -166,7 +164,7 @@ Ball-end plunge: **N/A for current production geometry**. It must not be reporte
 |---|---|---|
 | `cutter_leading_holder_safe` | Narrow stock `[17.5,22.5]^2 x [0,12]`; `r=6,h_c=4`, holder `R=10,H=20`; feed `(20,20,14) -> (20,20,5)` | The square corner radius is `2.5*sqrt(2)`, leaving radial cutter coverage margin `6-2.5*sqrt(2)=2.464466094...` mm. Continuous removal is stock area `25` times depth `7`: **`V*=175 mm^3`**. After each instantaneous cut, remaining stock in the holder's radial column lies below the cutter base while the holder begins 4 mm above it; expected chronological verdict is **safe**. A whole-segment check against pre-segment stock sees holder disk height `z=9..12`, an overlap up to `25*3=75 mm^3`, and is a documented conservative false positive—not the reference verdict. |
 | `genuine_holder_collision` | Full stock `B`; same cutter/holder and motion as above | Continuous cutter removal is **`V*=36*pi*7 = 252*pi = 791.6813487046279 mm^3`**. Holder bottom is `18-9*lambda`; its top-stock contact is at `lambda=2/3`, with penetration for `lambda>2/3`. The cutter clears only radius 6, leaving an annulus `6<rho<=10`. At completion, annular residual contact spans `z=9..12`: **`unique_contacted_volume*=pi*(10^2-6^2)*3 = 192*pi = 603.1857894892403 mm^3`** and safety must **fail**. For 1 s duration, `V_overlap(lambda)=576*pi*max(0,lambda-2/3)`, so **`time_integrated_overlap*=32*pi = 100.53096491487338 mm^3*s`**. With `m=3` uniform stations only `lambda=1` has positive penetration; with `m=6`, exactly two stations do, illustrating why count is not unique volume or time integral. |
-| `rapid_through_solid` | Stock `B`, `r=3,h_c=4`, no holder; rapid `(-10,20,6) -> (70,20,6)`, duration 8 s | **`V_removed*=0`**, and continuous final stock equals initial stock despite crossing it. First cutter contact is at centre x=-3, `lambda=7/80=0.0875`, penetration immediately after; rapid safety must **fail**. The continuous unique cutter/stock contact over the complete path is `60*6*4 = 1440 mm^3`. For instantaneous overlap `A(x)`, `integral A(x) dx = pi*r^2*60` over the trans-stock traversal; hence with uniform 80 mm motion in 8 s, **`time_integrated_overlap*= (8/80)*4*pi*9*60 = 216*pi = 678.5840131753953 mm^3*s`**. This nonzero collision integral must never become carved volume. |
+| `rapid_through_solid` | Stock `B`, `r=3,h_c=4`, flush radius-3 holder from tool-relative height 4; rapid `(-10,20,6) -> (70,20,6)`, duration 8 s | **`V_removed*=0`**, and continuous final stock equals initial stock despite crossing it. First cutter contact is at centre x=-3, `lambda=7/80=0.0875`, penetration immediately after; rapid safety must **fail**. Continuous unique cutter-only contact is `60*6*4 = 1440 mm^3`, retained as a separate component diagnostic. The mandatory assembly also intersects stock from z=10..12, so total unique assembly contact is **`60*6*6 = 2160 mm^3`**. For a traversal with vertical overlap `a`, the integrated overlap formula is `(duration/80)*a*pi*r^2*60`; cutter-only is `216*pi`, while the full six-mm assembly is **`324*pi = 1017.876019763093 mm^3*s`**. These nonzero collision quantities must never become carved volume. |
 
 The safe and unsafe holder cases share exactly the same tool and motion and differ only in stock width. This isolates chronology from a trivial "wide holder is always bad" rule.
 
@@ -185,7 +183,7 @@ For the narrow-stock safe case, phase translation moves stock and tool together;
 
 ## 7. Test and handoff plan
 
-`fixtures.py` will contain declarative physical inputs, exact expected expressions/constants, derivations, and required absolute uncertainty budgets. Expected numbers must not be produced by calling the reference sweep itself. `reference_carve.py` will provide the slow chronological reference and conservative bounds. Tests will verify:
+`fixtures.py` contains declarative physical inputs, exact expected expressions/constants, and derivations. Expected numbers are not produced by calling the reference sweep itself. `reference_carve.py` provides the slow chronological reference and conservative bounds. Tests verify:
 
 - every tabled analytic value against its independent formula and the `[L,U]` bracket;
 - monotone sampled removal under dyadic temporal refinement on a fixed grid;
@@ -197,7 +195,7 @@ For the narrow-stock safe case, phase translation moves stock and tool together;
 - unchanged continuous expectations across radius/phase variants, with separately reported voxel discretization bias;
 - static independence from production geometry imports.
 
-The implementation acceptance command is `uv run python -m pytest tests/reference_geometry_test.py -q`. A saved `verification/reference_convergence.json` will record fixture/task hashes when available, exact expected values, grid/temporal settings, brackets, refinements, collision states, failures, and unknown coverage. No gate or convergence result is claimed by this design.
+The implementation acceptance command is `uv run python -m pytest tests/reference_geometry_test.py -q`; `DIFFCNC_REFERENCE_CONVERGENCE=1` enables the explicit refinement test. `verification/reference_convergence.json` is generated separately by `uv run python -m verification.fixtures --output verification/reference_convergence.json` and records task/motion hashes, exact expectations, grid/temporal settings, brackets, collision states, failures, and unknown coverage. On the tested narrow-stock grid, two poses cause undercutting and a coarse false collision, two to three poses leave the conservative bound unknown, and four or more establish the expected safe chronology. Contact-volume uncertainty is reported through sampled refinement diagnostics, not falsely labelled a certified continuous contact bracket.
 
 Downstream consumers need both the continuous expectation and the discretization record. Passing only a scalar volume or only an occupancy mask would hide either voxel bias or temporal under-sampling.
 

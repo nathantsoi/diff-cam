@@ -1,0 +1,556 @@
+{
+  "chronology_cases": [
+    {
+      "analytic_removed_mm3": 175.0,
+      "analytic_time_integrated_overlap_mm3_s": 0.0,
+      "analytic_unique_contacted_mm3": 0.0,
+      "expected_safety": true,
+      "first_events": {},
+      "fixture_id": "cutter_leading_holder_safe",
+      "motion_hash": "sha256:a3a594e0d7caf8de2f63e62288f213aff828270d262d717c08bb3104285460fc",
+      "rows": [
+        {
+          "collision_sample_count": 1.0,
+          "safety_pass": false,
+          "sampled_removed_mm3": 100.0,
+          "subdivisions": 1,
+          "time_integrated_overlap_mm3_s": 33.75,
+          "unique_contacted_mm3": 75.0,
+          "voxel_mm": 1.0
+        },
+        {
+          "collision_sample_count": 0.0,
+          "safety_pass": null,
+          "sampled_removed_mm3": 175.0,
+          "subdivisions": 2,
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 1.0
+        },
+        {
+          "collision_sample_count": 0.0,
+          "safety_pass": null,
+          "sampled_removed_mm3": 175.0,
+          "subdivisions": 3,
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 1.0
+        },
+        {
+          "collision_sample_count": 0.0,
+          "safety_pass": true,
+          "sampled_removed_mm3": 175.0,
+          "subdivisions": 4,
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 1.0
+        },
+        {
+          "collision_sample_count": 0.0,
+          "safety_pass": true,
+          "sampled_removed_mm3": 175.0,
+          "subdivisions": 6,
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 1.0
+        },
+        {
+          "collision_sample_count": 0.0,
+          "safety_pass": true,
+          "sampled_removed_mm3": 175.0,
+          "subdivisions": 8,
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 1.0
+        },
+        {
+          "collision_sample_count": 0.0,
+          "safety_pass": true,
+          "sampled_removed_mm3": 175.0,
+          "subdivisions": 16,
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 1.0
+        },
+        {
+          "collision_sample_count": 0.0,
+          "safety_pass": true,
+          "sampled_removed_mm3": 175.0,
+          "subdivisions": 32,
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 1.0
+        }
+      ],
+      "task_hash": "sha256:7b09898ef15dfbaf0a4ffadc4f9d1d1258ad8b4280db8e41c9173863e919cd05"
+    },
+    {
+      "analytic_removed_mm3": 791.6813487046279,
+      "analytic_time_integrated_overlap_mm3_s": 100.53096491487338,
+      "analytic_unique_contacted_mm3": 603.1857894892403,
+      "expected_safety": false,
+      "first_events": {
+        "holder_collision": [
+          "wide_plunge",
+          0.6666666666666666
+        ]
+      },
+      "fixture_id": "genuine_holder_collision",
+      "motion_hash": "sha256:3ab43285cf218b32040d4240faf7d5130b94269af7dc324d79a9f0ef8d7787db",
+      "rows": [
+        {
+          "collision_sample_count": 1.0,
+          "safety_pass": false,
+          "sampled_removed_mm3": 768.0,
+          "subdivisions": 1,
+          "time_integrated_overlap_mm3_s": 320.0,
+          "unique_contacted_mm3": 640.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "collision_sample_count": 1.0,
+          "safety_pass": false,
+          "sampled_removed_mm3": 1024.0,
+          "subdivisions": 2,
+          "time_integrated_overlap_mm3_s": 96.0,
+          "unique_contacted_mm3": 384.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "collision_sample_count": 1.0,
+          "safety_pass": false,
+          "sampled_removed_mm3": 1024.0,
+          "subdivisions": 3,
+          "time_integrated_overlap_mm3_s": 64.0,
+          "unique_contacted_mm3": 384.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "collision_sample_count": 1.0,
+          "safety_pass": false,
+          "sampled_removed_mm3": 1024.0,
+          "subdivisions": 4,
+          "time_integrated_overlap_mm3_s": 48.0,
+          "unique_contacted_mm3": 384.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "collision_sample_count": 2.0,
+          "safety_pass": false,
+          "sampled_removed_mm3": 1024.0,
+          "subdivisions": 6,
+          "time_integrated_overlap_mm3_s": 96.0,
+          "unique_contacted_mm3": 384.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "collision_sample_count": 2.0,
+          "safety_pass": false,
+          "sampled_removed_mm3": 1024.0,
+          "subdivisions": 8,
+          "time_integrated_overlap_mm3_s": 72.0,
+          "unique_contacted_mm3": 384.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "collision_sample_count": 4.0,
+          "safety_pass": false,
+          "sampled_removed_mm3": 1024.0,
+          "subdivisions": 16,
+          "time_integrated_overlap_mm3_s": 84.0,
+          "unique_contacted_mm3": 384.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "collision_sample_count": 8.0,
+          "safety_pass": false,
+          "sampled_removed_mm3": 1024.0,
+          "subdivisions": 32,
+          "time_integrated_overlap_mm3_s": 90.0,
+          "unique_contacted_mm3": 384.0,
+          "voxel_mm": 2.0
+        }
+      ],
+      "task_hash": "sha256:fafa7fc227bc42decec24ff9c59816a94a3914b643edeb5baafc0caa43a005c7"
+    }
+  ],
+  "continuous_volume_cases": [
+    {
+      "base_motion_hash": "sha256:4c5f91803be7548f34bcd3728cab1c5bfe1e387b17bf0061791e1cee4cc6b154",
+      "base_task_hash": "sha256:d660b9acd32053ad72f8a7fc2ba9a791c8810fac72c12fdddf30c64975684435",
+      "derivation": "pi*r^2*4: start above stock and include stock intersection only",
+      "fixture_id": "plunge_above",
+      "rows": [
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 113.09733552923255,
+          "bounds": {
+            "lower_mm3": 0.0,
+            "spatial_uncertainty_mm3": 1024.0,
+            "station_upper_mm3": 1024.0,
+            "temporal_uncertainty_mm3": 512.0,
+            "upper_mm3": 1536.0,
+            "width_mm3": 1536.0
+          },
+          "motion_hash": "sha256:4c5f91803be7548f34bcd3728cab1c5bfe1e387b17bf0061791e1cee4cc6b154",
+          "safety_pass": true,
+          "sampled_removed_mm3": 256.0,
+          "settings": {
+            "max_step_mm": 2.0
+          },
+          "task_hash": "sha256:802af147c13e7955586ac3b1011ebafaab41e5c99ddaa3781adaf03f252daea6",
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 4.0
+        },
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 113.09733552923255,
+          "bounds": {
+            "lower_mm3": 0.0,
+            "spatial_uncertainty_mm3": 384.0,
+            "station_upper_mm3": 384.0,
+            "temporal_uncertainty_mm3": 0.0,
+            "upper_mm3": 384.0,
+            "width_mm3": 384.0
+          },
+          "motion_hash": "sha256:4c5f91803be7548f34bcd3728cab1c5bfe1e387b17bf0061791e1cee4cc6b154",
+          "safety_pass": true,
+          "sampled_removed_mm3": 64.0,
+          "settings": {
+            "max_step_mm": 1.0
+          },
+          "task_hash": "sha256:d660b9acd32053ad72f8a7fc2ba9a791c8810fac72c12fdddf30c64975684435",
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 113.09733552923255,
+          "bounds": {
+            "lower_mm3": 32.0,
+            "spatial_uncertainty_mm3": 220.0,
+            "station_upper_mm3": 252.0,
+            "temporal_uncertainty_mm3": 8.0,
+            "upper_mm3": 260.0,
+            "width_mm3": 228.0
+          },
+          "motion_hash": "sha256:4c5f91803be7548f34bcd3728cab1c5bfe1e387b17bf0061791e1cee4cc6b154",
+          "safety_pass": true,
+          "sampled_removed_mm3": 128.0,
+          "settings": {
+            "max_step_mm": 0.5
+          },
+          "task_hash": "sha256:f2a1f7a7ce766347557362bd7c456eb53b3abb197cfe340a7d4e692d3feaaeae",
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 1.0
+        }
+      ]
+    },
+    {
+      "base_motion_hash": "sha256:9744e4a72735c9c6eb065c105c4603e28e8385719bae76002b46037124a45b38",
+      "base_task_hash": "sha256:273e4151ef6b5c309bfadcf84656dc78d46dc83500da4323229798768830a055",
+      "derivation": "12*(2*r*24 + pi*r^2): full-depth swept capsule incl. both end disks",
+      "fixture_id": "horizontal_slot",
+      "rows": [
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 2067.2920065876974,
+          "bounds": {
+            "lower_mm3": 0.0,
+            "spatial_uncertainty_mm3": 6144.0,
+            "station_upper_mm3": 6144.0,
+            "temporal_uncertainty_mm3": 768.0,
+            "upper_mm3": 6912.0,
+            "width_mm3": 6912.0
+          },
+          "motion_hash": "sha256:9744e4a72735c9c6eb065c105c4603e28e8385719bae76002b46037124a45b38",
+          "safety_pass": true,
+          "sampled_removed_mm3": 2688.0,
+          "settings": {
+            "max_step_mm": 2.0
+          },
+          "task_hash": "sha256:c3b2d46f8313893ff241100e09937675fe34f8b82554db2e0365153c33abee26",
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 4.0
+        },
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 2067.2920065876974,
+          "bounds": {
+            "lower_mm3": 768.0,
+            "spatial_uncertainty_mm3": 2304.0,
+            "station_upper_mm3": 3072.0,
+            "temporal_uncertainty_mm3": 1536.0,
+            "upper_mm3": 4608.0,
+            "width_mm3": 3840.0
+          },
+          "motion_hash": "sha256:9744e4a72735c9c6eb065c105c4603e28e8385719bae76002b46037124a45b38",
+          "safety_pass": true,
+          "sampled_removed_mm3": 1728.0,
+          "settings": {
+            "max_step_mm": 1.0
+          },
+          "task_hash": "sha256:273e4151ef6b5c309bfadcf84656dc78d46dc83500da4323229798768830a055",
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 2067.2920065876974,
+          "bounds": {
+            "lower_mm3": 1120.0,
+            "spatial_uncertainty_mm3": 1808.0,
+            "station_upper_mm3": 2928.0,
+            "temporal_uncertainty_mm3": 0.0,
+            "upper_mm3": 2928.0,
+            "width_mm3": 1808.0
+          },
+          "motion_hash": "sha256:9744e4a72735c9c6eb065c105c4603e28e8385719bae76002b46037124a45b38",
+          "safety_pass": true,
+          "sampled_removed_mm3": 2112.0,
+          "settings": {
+            "max_step_mm": 0.5
+          },
+          "task_hash": "sha256:d881c0c94eed85efdcec17ba9a5a01089e66a54a5f491eb2cd3a2de0a4c6c216",
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 1.0
+        }
+      ]
+    },
+    {
+      "base_motion_hash": "sha256:139a8cf751bba52f1098ba9ca59f9b0aa5274172593f6d22b30a05f7b74d0390",
+      "base_task_hash": "sha256:061a4fad8f84e2cfcbb52b701aeb66ea94c706f44f380cd59323b10847f878c8",
+      "derivation": "pi*r^2*12 + 2*r*24*(26/3): integrate the temporal cross-section interval",
+      "fixture_id": "sloped_ramp",
+      "rows": [
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 982.79644737231,
+          "bounds": {
+            "lower_mm3": 0.0,
+            "spatial_uncertainty_mm3": 2816.0,
+            "station_upper_mm3": 2816.0,
+            "temporal_uncertainty_mm3": 2176.0,
+            "upper_mm3": 4992.0,
+            "width_mm3": 4992.0
+          },
+          "motion_hash": "sha256:139a8cf751bba52f1098ba9ca59f9b0aa5274172593f6d22b30a05f7b74d0390",
+          "safety_pass": null,
+          "sampled_removed_mm3": 640.0,
+          "settings": {
+            "max_step_mm": 2.0
+          },
+          "task_hash": "sha256:d55cd58b67918345e668acdf1351e47250806d4984ed2f016bc6a37c871fb8f5",
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 4.0
+        },
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 982.79644737231,
+          "bounds": {
+            "lower_mm3": 0.0,
+            "spatial_uncertainty_mm3": 2432.0,
+            "station_upper_mm3": 2432.0,
+            "temporal_uncertainty_mm3": 0.0,
+            "upper_mm3": 2432.0,
+            "width_mm3": 2432.0
+          },
+          "motion_hash": "sha256:139a8cf751bba52f1098ba9ca59f9b0aa5274172593f6d22b30a05f7b74d0390",
+          "safety_pass": false,
+          "sampled_removed_mm3": 1024.0,
+          "settings": {
+            "max_step_mm": 1.0
+          },
+          "task_hash": "sha256:061a4fad8f84e2cfcbb52b701aeb66ea94c706f44f380cd59323b10847f878c8",
+          "time_integrated_overlap_mm3_s": 12.745587471748802,
+          "unique_contacted_mm3": 64.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 982.79644737231,
+          "bounds": {
+            "lower_mm3": 360.0,
+            "spatial_uncertainty_mm3": 1248.0,
+            "station_upper_mm3": 1608.0,
+            "temporal_uncertainty_mm3": 96.0,
+            "upper_mm3": 1704.0,
+            "width_mm3": 1344.0
+          },
+          "motion_hash": "sha256:139a8cf751bba52f1098ba9ca59f9b0aa5274172593f6d22b30a05f7b74d0390",
+          "safety_pass": false,
+          "sampled_removed_mm3": 976.0,
+          "settings": {
+            "max_step_mm": 0.5
+          },
+          "task_hash": "sha256:7dfb2ee9291c5d1599f5885e085ccbd826873b7e77a0e93ac68ffbef4735617a",
+          "time_integrated_overlap_mm3_s": 15.303090221014187,
+          "unique_contacted_mm3": 64.0,
+          "voxel_mm": 1.0
+        }
+      ]
+    },
+    {
+      "base_motion_hash": "sha256:2ee1527e1bddd80a455c5024f6e55945f590ff7c07f567ca32b73a9ad4a12584",
+      "base_task_hash": "sha256:e5882197fddcdd69e5e90ecd46b95279d8b1dfe6118f3597f758f977cdcb01af",
+      "derivation": "12*pi*r^2 + 2*r*sqrt(.73)*3: q=1/4 throughout stock Z",
+      "fixture_id": "near_vertical",
+      "rows": [
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 354.6712133292692,
+          "bounds": {
+            "lower_mm3": 0.0,
+            "spatial_uncertainty_mm3": 1728.0,
+            "station_upper_mm3": 1728.0,
+            "temporal_uncertainty_mm3": 576.0,
+            "upper_mm3": 2304.0,
+            "width_mm3": 2304.0
+          },
+          "motion_hash": "sha256:2ee1527e1bddd80a455c5024f6e55945f590ff7c07f567ca32b73a9ad4a12584",
+          "safety_pass": null,
+          "sampled_removed_mm3": 384.0,
+          "settings": {
+            "max_step_mm": 2.0
+          },
+          "task_hash": "sha256:6e7641705d6d8bb54fc653ba91617a3aeba0a03d0cfd150f08675fc7631c98dc",
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 4.0
+        },
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 354.6712133292692,
+          "bounds": {
+            "lower_mm3": 32.0,
+            "spatial_uncertainty_mm3": 824.0,
+            "station_upper_mm3": 856.0,
+            "temporal_uncertainty_mm3": 112.0,
+            "upper_mm3": 968.0,
+            "width_mm3": 936.0
+          },
+          "motion_hash": "sha256:2ee1527e1bddd80a455c5024f6e55945f590ff7c07f567ca32b73a9ad4a12584",
+          "safety_pass": null,
+          "sampled_removed_mm3": 336.0,
+          "settings": {
+            "max_step_mm": 1.0
+          },
+          "task_hash": "sha256:e5882197fddcdd69e5e90ecd46b95279d8b1dfe6118f3597f758f977cdcb01af",
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 354.6712133292692,
+          "bounds": {
+            "lower_mm3": 157.0,
+            "spatial_uncertainty_mm3": 423.0,
+            "station_upper_mm3": 580.0,
+            "temporal_uncertainty_mm3": 57.0,
+            "upper_mm3": 637.0,
+            "width_mm3": 480.0
+          },
+          "motion_hash": "sha256:2ee1527e1bddd80a455c5024f6e55945f590ff7c07f567ca32b73a9ad4a12584",
+          "safety_pass": false,
+          "sampled_removed_mm3": 357.0,
+          "settings": {
+            "max_step_mm": 0.5
+          },
+          "task_hash": "sha256:fbf39697411cb36ee4c476fe92a3c8a22832569bfa3acc445d42c9a9b70edde2",
+          "time_integrated_overlap_mm3_s": 4.125940908314885,
+          "unique_contacted_mm3": 12.0,
+          "voxel_mm": 1.0
+        }
+      ]
+    },
+    {
+      "base_motion_hash": "sha256:0bffd7ccdcd14dd7a61551764036fb322da7deda2f3f2cacd9afd98dc38662c5",
+      "base_task_hash": "sha256:57782180df5496c518826bbb065bd2d880694145131acd8ba0b02947b8db0e88",
+      "derivation": "rapid removes zero; unique assembly contact = 60*6*6, cutter-only contact = 60*6*4",
+      "fixture_id": "rapid_through_solid",
+      "rows": [
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 0.0,
+          "bounds": {
+            "lower_mm3": 0.0,
+            "spatial_uncertainty_mm3": 0.0,
+            "station_upper_mm3": 0.0,
+            "temporal_uncertainty_mm3": 0.0,
+            "upper_mm3": 0.0,
+            "width_mm3": 0.0
+          },
+          "motion_hash": "sha256:0bffd7ccdcd14dd7a61551764036fb322da7deda2f3f2cacd9afd98dc38662c5",
+          "safety_pass": null,
+          "sampled_removed_mm3": 0.0,
+          "settings": {
+            "max_step_mm": 2.0
+          },
+          "task_hash": "sha256:3a0dd1e5afd8f9aaa4e73b2379420c27f3f92d426b78fe4c3c4836c5c82d9ecd",
+          "time_integrated_overlap_mm3_s": 0.0,
+          "unique_contacted_mm3": 0.0,
+          "voxel_mm": 4.0
+        },
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 0.0,
+          "bounds": {
+            "lower_mm3": 0.0,
+            "spatial_uncertainty_mm3": 0.0,
+            "station_upper_mm3": 0.0,
+            "temporal_uncertainty_mm3": 0.0,
+            "upper_mm3": 0.0,
+            "width_mm3": 0.0
+          },
+          "motion_hash": "sha256:0bffd7ccdcd14dd7a61551764036fb322da7deda2f3f2cacd9afd98dc38662c5",
+          "safety_pass": false,
+          "sampled_removed_mm3": 0.0,
+          "settings": {
+            "max_step_mm": 1.0
+          },
+          "task_hash": "sha256:57782180df5496c518826bbb065bd2d880694145131acd8ba0b02947b8db0e88",
+          "time_integrated_overlap_mm3_s": 810.0,
+          "unique_contacted_mm3": 1440.0,
+          "voxel_mm": 2.0
+        },
+        {
+          "analytic_inside_bounds": true,
+          "analytic_removed_mm3": 0.0,
+          "bounds": {
+            "lower_mm3": 0.0,
+            "spatial_uncertainty_mm3": 0.0,
+            "station_upper_mm3": 0.0,
+            "temporal_uncertainty_mm3": 0.0,
+            "upper_mm3": 0.0,
+            "width_mm3": 0.0
+          },
+          "motion_hash": "sha256:0bffd7ccdcd14dd7a61551764036fb322da7deda2f3f2cacd9afd98dc38662c5",
+          "safety_pass": false,
+          "sampled_removed_mm3": 0.0,
+          "settings": {
+            "max_step_mm": 0.5
+          },
+          "task_hash": "sha256:6f0b6df7d1963088e110015b388307eb5f441b4a70add5dd463e3ad2ec5b922a",
+          "time_integrated_overlap_mm3_s": 1039.5,
+          "unique_contacted_mm3": 2160.0,
+          "voxel_mm": 1.0
+        }
+      ]
+    }
+  ],
+  "evaluator_revision": "reference_carve/1+sha256:30adc7d1be654779870526033f933915330d29edb462b7158d892a7ec43f26c1",
+  "notes": [
+    "Analytic continuous volumes are independent of sampled voxel volumes.",
+    "lower/station_upper/upper brackets concern removed stock, not collision contact volumes.",
+    "collision_sample_count changes with stations; unique contact and time integral are distinct diagnostics."
+  ],
+  "schema": "diffcam-reference-convergence/1"
+}
