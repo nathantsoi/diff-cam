@@ -110,7 +110,7 @@ def test_fixed_adam_known_gradient_step_clip_schedule_and_budget():
     assert result.history[-1]["soft_objective"] < result.history[0]["soft_objective"]
     ledger = evaluator.ledger.snapshot()
     # Four gradient evaluations plus one independent hard validation call.
-    assert ledger["candidate_evaluations"] == 5 and ledger["validation_calls"] == 1
+    assert ledger["candidate_evaluations"] == 4 and ledger["validation_calls"] == 1
 
 
 def test_fixed_and_annealed_schedule_is_predeclared_and_generation_limited():
@@ -143,8 +143,9 @@ def test_checkpoint_resume_matches_full_run_and_schedule_state(tmp_path):
     initial, directory = _checkpoint_pair(tmp_path)
     checkpoint = directory / "ckpt-000002.json"
     assert checkpoint.is_file()
+    restored_evaluator = DifferentiableObjective()
     resumed = opt.resume_adam(
-        checkpoint, DifferentiableObjective(), budget=_budget(5, interval=2, max_validation=2),
+        checkpoint, restored_evaluator, budget=_budget(5, interval=2, max_validation=2),
         run_id="resumed",
     )
     fresh = opt.solve_adam(
@@ -161,6 +162,12 @@ def test_checkpoint_resume_matches_full_run_and_schedule_state(tmp_path):
     assert resumed.backward_calls == fresh.backward_calls == 5
     assert resumed.validation_calls == fresh.validation_calls == 2
     assert resumed.best.objective == fresh.best.objective
+    restored_snapshot = restored_evaluator.ledger.snapshot()
+    assert restored_snapshot["candidate_evaluations"] == 5
+    assert restored_snapshot["validation_calls"] == 2
+    assert restored_snapshot["forward_calls"] == 7
+    assert restored_snapshot["backward_calls"] == 5
+    assert any(entry.get("validation", False) for entry in restored_snapshot["entries"])
     replayed = opt.replay_adam_checkpoint(checkpoint, DifferentiableObjective())
     assert replayed["objective_matches_backend_equality"]
     assert replayed["replayed"].objective == initial.best.objective

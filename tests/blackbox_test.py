@@ -198,7 +198,8 @@ def test_analytic_hard_smooth_shared_objective_and_incomplete_posted_artifacts(t
     assert smooth.best.valid and smooth.best_theta.shape == (6,)
     assert smooth.validation_calls == 1
     assert smooth_evaluator.ledger.snapshot()["validation_calls"] == 1
-    assert smooth_evaluator.ledger.snapshot()["candidate_evaluations"] == 5
+    assert smooth_evaluator.ledger.snapshot()["candidate_evaluations"] == 4
+    assert smooth.forward_calls == 5 and smooth.backward_calls == 0
 
     hard_evaluator = _prototype()
     hard = B.solve_cma_es(hard_evaluator, budget, seed=5, objective_kind="hard", run_id="hard")

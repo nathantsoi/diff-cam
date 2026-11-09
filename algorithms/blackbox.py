@@ -82,6 +82,8 @@ class CmaRunResult:
     checkpoint_path: Optional[str] = None
     resumed_from: Optional[str] = None
     previous_evaluations: int = 0
+    forward_calls: int = 0
+    backward_calls: int = 0
 
     @property
     def consumed_budget(self) -> int:
@@ -104,6 +106,8 @@ class _State:
     generations: int
     invalid_candidates: int
     history: list[dict[str, Any]]
+    forward_calls: int = 0
+    backward_calls: int = 0
     resumed_from: Optional[str] = None
     previous_evaluations: int = 0
 
@@ -190,6 +194,7 @@ def _write_checkpoint(path: Path, state: _State, evaluator: Any) -> str:
         "budget": dataclasses.asdict(state.budget), "evaluations": state.evaluations,
         "validation_calls": state.validation_calls, "next_validation": state.next_validation,
         "generations": state.generations, "invalid_candidates": state.invalid_candidates,
+        "forward_calls": state.forward_calls, "backward_calls": state.backward_calls,
         "es_pickle_b64": base64.b64encode(state.es.pickle_dumps()).decode("ascii"),
     }
     payload = {
@@ -224,6 +229,16 @@ def _read_checkpoint(path: Path, evaluator: Any, objective_kind: str) -> dict[st
     if document.get("setup_hash") != _setup_signature(evaluator, objective_kind):
         raise BlackBoxError("checkpoint task/tool/motion/parameterization/objective identity differs")
     return document
+
+
+def _restore_ledger_payload(document: Mapping[str, Any], evaluator: Any) -> None:
+    snapshot = document.get("ledger_snapshot")
+    if snapshot is None:
+        raise BlackBoxError("missing ledger_snapshot; cannot restore compute accounting")
+    restore = getattr(evaluator.ledger, "restore", None)
+    if restore is None:
+        raise BlackBoxError("evaluator ledger cannot restore a matching cumulative history")
+    restore(snapshot)
 
 
 def _initial_state(evaluator: Any, budget: OptimizationBudget, seed: int,
@@ -267,7 +282,11 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
         for candidate_index, theta in enumerate(candidates):
             physical = np.asarray(theta, dtype=np.float64)
             candidate_id = f"{state.run_id}:g{state.generations}:m{candidate_index}"
+            before = evaluator.ledger.snapshot()
             result = evaluator.evaluate_candidate(physical, candidate_id, state.objective_kind)
+            after = evaluator.ledger.snapshot()
+            state.forward_calls += after["forward_calls"] - before["forward_calls"]
+            state.backward_calls += after["backward_calls"] - before["backward_calls"]
             if result.valid and result.objective is not None:
                 value = float(result.objective)
                 if state.best is None or value < state.best.objective:
@@ -295,10 +314,14 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
                 and state.validation_calls < state.budget.max_validation_calls
                 and state.evaluations >= state.next_validation):
             state.validation_calls += 1
-            evaluator.ledger.count_validation(1)
+            evaluator.ledger.start_validation()
+            before = evaluator.ledger.snapshot()
             evaluator.evaluate_candidate(state.best_theta,
                                          f"{state.run_id}:validation:{state.validation_calls}",
                                          "hard")
+            after = evaluator.ledger.snapshot()
+            state.forward_calls += after["forward_calls"] - before["forward_calls"]
+            state.backward_calls += after["backward_calls"] - before["backward_calls"]
             state.next_validation += state.budget.validation_interval
         if checkpoint_dir is not None:
             checkpoint_path = checkpoint_dir / f"ckpt-{state.evaluations:06d}.json"
@@ -315,6 +338,7 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
         best=state.best, best_theta=state.best_theta, initial_theta=state.initial_theta,
         evaluations=state.evaluations, validation_calls=state.validation_calls,
         generations=state.generations, invalid_candidates=state.invalid_candidates,
+        forward_calls=state.forward_calls, backward_calls=state.backward_calls,
         termination_reason=reason, history=state.history,
         checkpoint_path=str(checkpoint_path) if checkpoint_path else None,
         resumed_from=state.resumed_from,
@@ -360,6 +384,7 @@ def resume_cma_es(path: str | Path, evaluator: Any, *, budget: Optional[Optimiza
             or new_budget.max_validation_calls < document["state"]["validation_calls"]):
         raise BlackBoxError("resume may not change cadence or reduce already-used validation budget")
     es.opts["maxfevals"] = new_budget.candidate_evaluations
+    _restore_ledger_payload(document, evaluator)
     state_dict = document["state"]
     best = None
     if document["best"] is not None:
@@ -371,6 +396,8 @@ def resume_cma_es(path: str | Path, evaluator: Any, *, budget: Optional[Optimiza
         origin, int(state_dict["validation_calls"]), state_dict["next_validation"],
         int(state_dict["generations"]), int(state_dict["invalid_candidates"]), list(document["history"]),
         resumed_from=document["payload_hash"], previous_evaluations=origin,
+        forward_calls=int(state_dict.get("forward_calls", 0)),
+        backward_calls=int(state_dict.get("backward_calls", 0)),
     )
     return _run(state, evaluator, Path(checkpoint_dir) if checkpoint_dir is not None else None)
 

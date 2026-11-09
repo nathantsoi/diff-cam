@@ -103,6 +103,7 @@ class _Stamp:
     objective_kind: str
     started_s: float
     warmup: bool
+    validation: bool = False
 
 
 class ComputeLedger:
@@ -122,6 +123,7 @@ class ComputeLedger:
         self.voxel_steps = 0
         self.entries: list[dict[str, Any]] = []
         self._active: Optional[_Stamp] = None
+        self._pending_validation = False
         if not tracemalloc.is_tracing():
             tracemalloc.start()
 
@@ -129,8 +131,20 @@ class ComputeLedger:
         if self._active is not None:
             raise RuntimeError("ComputeLedger is sequential; finish the active candidate first")
         self._active = _Stamp(candidate_id, objective_kind, time.perf_counter(),
-                              warmup=self.candidate_evaluations == 0)
+                              warmup=self.candidate_evaluations == 0,
+                              validation=self._pending_validation)
+        self._pending_validation = False
         return self._active
+
+    def start_validation(self) -> None:
+        """Tag the next evaluation as validation, not an ordinary candidate.
+
+        finish_candidate records this execution only in validation_calls and never
+        increments candidate_evaluations for it. Disable duplicate manual counters.
+        """
+        if self._active is not None:
+            raise RuntimeError("must mark validation before starting the candidate")
+        self._pending_validation = True
 
     def finish_candidate(self, *, valid: bool, forward_calls: int, backward_calls: int,
                          segment_steps: int, voxel_steps: int) -> Dict[str, Any]:
@@ -138,15 +152,19 @@ class ComputeLedger:
             raise RuntimeError("no active candidate")
         stamp, self._active = self._active, None
         elapsed = max(0.0, time.perf_counter() - stamp.started_s)
-        self.candidate_evaluations += 1
+        if stamp.validation:
+            self.validation_calls += 1
+        else:
+            self.candidate_evaluations += 1
         self.forward_calls += int(forward_calls)
         self.backward_calls += int(backward_calls)
         self.segment_steps += int(segment_steps)
         self.voxel_steps += int(voxel_steps)
         entry = {
-            "ordinal": self.candidate_evaluations,
+            "ordinal": len(self.entries) + 1,
             "candidate_id": stamp.candidate_id, "objective_kind": stamp.objective_kind,
-            "valid": bool(valid), "wall_time_s": elapsed, "warmup": stamp.warmup,
+            "valid": bool(valid), "validation": stamp.validation,
+            "wall_time_s": elapsed, "warmup": stamp.warmup,
             "forward_calls": int(forward_calls), "backward_calls": int(backward_calls),
             "segment_steps": int(segment_steps), "voxel_steps": int(voxel_steps),
         }
@@ -154,9 +172,28 @@ class ComputeLedger:
         return entry
 
     def count_validation(self, count: int = 1) -> None:
+        """Legacy counter for calls outside this ledger. Do not also tag via start_validation."""
+        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
+            raise ValueError("validation count must be a positive integer")
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError("validation count must be a positive integer")
         self.validation_calls += count
+
+    def restore(self, snapshot: Mapping[str, Any]) -> None:
+        """Restore prior timing/tag/call history from a trusted checkpoint.
+
+        A resume reuses those historical cumulative counts and appends new work.
+        Memory measurements that follow describe the new process, not past ones.
+        """
+        for name in ("candidate_evaluations", "forward_calls", "backward_calls",
+                     "validation_calls", "segment_steps", "voxel_steps"):
+            value = snapshot.get(name, 0)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"invalid ledger counter in checkpoint: {name}")
+            setattr(self, name, value)
+        self.entries = [dict(entry) for entry in snapshot.get("entries", [])]
+        self._active = None
+        self._pending_validation = False
 
     def snapshot(self) -> Dict[str, Any]:
         current, python_peak = tracemalloc.get_traced_memory()

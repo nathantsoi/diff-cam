@@ -289,6 +289,7 @@ def _write_adam_checkpoint(path: Path, state: _AdamState, evaluator: Any) -> str
         "budget_at_checkpoint": _k_for_step(state.config, max(0, state.evaluations - 1), state.budget),
         "next_k": _k_for_step(state.config, state.evaluations, state.budget),
         "history": state.history, "previous_evaluations": state.previous_evaluations,
+        "ledger_snapshot": evaluator.ledger.snapshot(),
     }
     digest = C.content_hash(payload)
     R.ArtifactWriter._replace_bytes(path, R.json_bytes(dict(payload, payload_hash=digest)))
@@ -457,7 +458,9 @@ def solve_adam(evaluator: Any, budget: B.OptimizationBudget, config: AdamConfig,
 def resume_adam(path: str | Path, evaluator: Any, *, budget: Optional[B.OptimizationBudget] = None,
                 run_id: Optional[str] = None, checkpoint_dir: Optional[str | Path] = None) -> AdamResult:
     _required_budget(budget or B.OptimizationBudget(**json.loads(Path(path).read_text())["budget"]))
-    state = _restore_state(_read_adam_checkpoint(Path(path), evaluator), evaluator, budget=budget, run_id=run_id)
+    document = _read_adam_checkpoint(Path(path), evaluator)
+    state = _restore_state(document, evaluator, budget=budget, run_id=run_id)
+    B._restore_ledger_payload(document, evaluator)
     return _run_adam(state, evaluator, Path(checkpoint_dir) if checkpoint_dir is not None else None)
 
 
