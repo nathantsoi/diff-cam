@@ -37,10 +37,10 @@
   },
   "T1.1": {
    "status": "planned",
-   "owner": null,
+   "owner": "diffcam-worker-1",
    "branch": null,
    "blocker": null,
-   "next": null
+   "next": "after T1.0 merges"
   },
   "T1.2": {
    "status": "planned",
@@ -50,11 +50,12 @@
    "next": null
   },
   "T1.4": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-1",
    "branch": "task/T1.4-nc-semantics",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "merged; parse_motion_plan/post_motion_plan typed APIs; G54/G53/G43/arcs(3 planes, R, turns)/units/G91; G28/G30, G64, comp, canned cycles rejected; 57 focused tests; coordinator independently re-verified canonical machine coords + both-dialect round trip. Legacy parse_gcode kept for old callers (not an evaluation entry point)."
   },
   "T1.3": {
    "status": "planned",
@@ -115,9 +116,9 @@
    "next": null
   },
   "T4.0": {
-   "status": "ready",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T4.0-auditor",
    "blocker": null,
    "next": null
   },
