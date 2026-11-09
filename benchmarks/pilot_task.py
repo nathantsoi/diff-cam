@@ -26,6 +26,7 @@ import numpy as np
 import taichi as ti
 
 from algorithms.parameterization import DeltaSpline
+from algorithms.run_artifacts import simulator_array, simulator_precision_metadata
 from benchmarks import contracts as C
 from cam.gcode_parser import parse_motion_plan
 from cam.posted_evaluator import evaluate_posted_gcode
@@ -549,7 +550,7 @@ def _git_provenance():
     return head, dirty_hash
 
 
-def run_nominal(output_dir=None):
+def run_nominal(output_dir=None, *, precision="f64"):
     """Execute the one declared pilot and return its measurements and records."""
     task = build_pilot_task()
     motion = pocket_with_island_seed(task)
@@ -584,14 +585,16 @@ def run_nominal(output_dir=None):
 
     return evaluate_nominal(
         task, motion, parameterization, zero, source_paths,
-        required, retained, output_dir
+        required, retained, output_dir, precision=precision
     )
 
 
 def evaluate_nominal(task, motion, parameterization, theta, source_paths,
-                     required, retained, output_dir):
+                     required, retained, output_dir, *, precision="f64"):
+    if precision not in ("f32", "f64"):
+        raise ValueError("nominal simulator precision must be f32 or f64")
     if ti_impl.get_runtime().prog is None:
-        ti.init(arch=ti.cpu, offline_cache=False)
+        ti.init(arch=ti.cpu, offline_cache=False, default_fp=ti.f32 if precision == "f32" else ti.f64)
     extent = np.asarray(STOCK_MAX) - np.asarray(STOCK_MIN)
     normalized_expected = (
         expected_positions_from_motion(motion) - np.asarray(STOCK_MIN)
@@ -605,14 +608,16 @@ def evaluate_nominal(task, motion, parameterization, theta, source_paths,
         stock_geometry=source_paths["stock"],
         enforce_speed_limits=False,
         init_taichi=False,
+        precision=precision,
     )
+    precision_metadata = simulator_precision_metadata(sim, requested_precision=precision)
     sim.tool_radius[None] = task.tool.cutter_radius_mm
     sim.tool_height[None] = task.tool.flute_length_mm
     sim.holder_radius[None] = task.tool.holder_radius_mm
     sim.holder_height[None] = task.tool.holder_height_mm
     deltas = parameterization.forward(theta)
     normalized_deltas = np.asarray(deltas) / extent
-    sim.tool_delta.from_numpy(np.asarray(normalized_deltas, dtype=np.float32))
+    sim.tool_delta.from_numpy(simulator_array(sim, normalized_deltas))
     with ti.ad.Tape(loss=sim.loss):
         sim.forward(len(motion.segments) + 1)
     if not np.isfinite(float(sim.loss[None])) or not np.isfinite(sim.tool_delta.grad.to_numpy()).all():
@@ -764,7 +769,7 @@ def evaluate_nominal(task, motion, parameterization, theta, source_paths,
     return write_artifacts(
         output_dir, task, motion, parameterization, theta,
         source_paths, actual_positions, normalized_deltas, by_cell_removed,
-        evaluations, completion, motion_errors,
+        evaluations, completion, motion_errors, precision_metadata=precision_metadata,
     )
 
 
@@ -796,7 +801,7 @@ def _source_metadata(source):
 
 def write_artifacts(root, task, motion, parameterization, theta, sources,
                     actual_positions, actual_deltas, removed, evaluations, completion,
-                    motion_errors):
+                    motion_errors, *, precision_metadata=None):
     root = Path(root)
     expected_mm = expected_positions_from_motion(motion)
     expected_normalized = (expected_mm - np.asarray(STOCK_MIN)) / (
@@ -824,6 +829,7 @@ def write_artifacts(root, task, motion, parameterization, theta, sources,
         "source_commit": head,
         "dirty_patch_hash": dirty_hash,
         "seed_provenance": motion.provenance,
+        "simulator": precision_metadata,
         "parameterization": {
             "kind": "DeltaSpline",
             "scale_mm": parameterization._scale_mm,
@@ -927,6 +933,7 @@ def write_artifacts(root, task, motion, parameterization, theta, sources,
     result = {
         "run_id": run.run_id, "output_dir": str(root),
         "status": "complete", "run": run, "task": task, "motion": motion,
+        "simulator": precision_metadata,
         "hashes": {name: C.sha256_bytes(files[name]) for name in root_files},
         "completion": completion,
         "evaluations": evaluations,
@@ -935,6 +942,7 @@ def write_artifacts(root, task, motion, parameterization, theta, sources,
     root.joinpath("nominal_result.json").write_text(json.dumps({
         "run_id": result["run_id"], "status": result["status"],
         "hashes": result["hashes"], "completion": completion,
+        "simulator": precision_metadata,
     }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return result
 
@@ -943,8 +951,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path,
                         help="new, non-existing output directory; default creates a unique runs/pilot-pocket-* directory")
+    parser.add_argument("--precision", choices=["f32", "f64"], default="f64",
+                        help="differentiable runtime precision; the comparison protocol uses f64")
     args = parser.parse_args(argv)
-    result = run_nominal(args.output)
+    result = run_nominal(args.output, precision=args.precision)
     print(json.dumps({
         "run_id": result["run_id"], "output_dir": result["output_dir"],
         "hashes": result["hashes"], "completion": result["completion"],

@@ -25,7 +25,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
@@ -89,10 +89,21 @@ def _positive_int(value: Any, name: str, *, zero=False) -> int:
     return value
 
 
+def _requested_precision(config, *, pilot=False):
+    precision = config.get("precision")
+    if precision not in ("f32", "f64"):
+        raise RunnerError("config.precision must explicitly declare 'f32' or 'f64'")
+    if pilot and precision != "f64":
+        raise RunnerError("the comparison pilot requires precision='f64'; f32 is exploration-only")
+    return precision
+
+
 def _normalized_config(path: str | Path) -> dict[str, Any]:
     raw = _json(Path(path))
     if not isinstance(raw, dict) or raw.get("schema") != RUNNER_SCHEMA:
         raise RunnerError(f"config schema must be {RUNNER_SCHEMA}")
+    _requested_precision(raw, pilot=raw.get("task_source", "pilot_pocket") == "pilot_pocket")
+    _configured_typed_sources(raw)
     for name in ("candidate_evaluations", "population_size", "max_validation_calls"):
         _positive_int(raw.get(name), name, zero=name == "max_validation_calls")
     interval = _positive_int(raw.get("validation_interval"), "validation_interval")
@@ -169,7 +180,8 @@ class PilotCandidateEvaluator(O.CandidateEvaluator):
 
     def __init__(self, task, sampled_task, motion, parameterization, sim, config, seed, sources):
         super().__init__(task=sampled_task, motion=motion, parameterization=parameterization,
-                         simulator=sim, spec=O.ObjectiveSpec(k=float(config["k_smooth"])), seed=seed)
+                         simulator=sim, spec=O.ObjectiveSpec(k=float(config["k_smooth"])), seed=seed,
+        requested_precision=config["precision"])
         if sampled_task.operation_target.geometry.kind != "sampled" or sim.target_shape != "sampled":
             raise RunnerError("pilot requires task and simulator to use the same sampled operation target")
         self.task = task                 # production analytic operation target
@@ -266,7 +278,8 @@ def _pilot_evaluator(task, motion, parameterization, config, seed, *, repository
         raise RunnerError("each pilot child must own exactly one simulator")
     os.environ["DIFFCAM_RUNNER_SIMULATOR"] = "1"
     import taichi as ti
-    ti.init(arch=ti.cpu, offline_cache=False, default_fp=ti.f32)
+    precision = _requested_precision(config, pilot=True)
+    ti.init(arch=ti.cpu, offline_cache=False, default_fp=ti.f32 if precision == "f32" else ti.f64)
     if task.operation_target.geometry.kind != "analytic":
         raise RunnerError("pilot factory requires the original analytic operation target")
     sources = _sampled_pilot_sources(task, repository)
@@ -284,7 +297,7 @@ def _pilot_evaluator(task, motion, parameterization, config, seed, *, repository
         voxel_size_mm=task.grid.voxel_mm, target_shape=None,
         target_geometry=target_work, stock_geometry=sources["stock"],
         tool_start=tuple(normalized), enforce_speed_limits=False,
-        init_taichi=False, k_init=float(config["k_smooth"]),
+        init_taichi=False, k_init=float(config["k_smooth"]), precision=precision,
     )
     sim.set_tool_start(tuple(normalized))
     sim.tool_radius[None] = task.tool.cutter_radius_mm
@@ -495,6 +508,7 @@ def _posted_job_process(task, job, config):
     if job.reused_source is not None:
         source = job.reused_source.read_bytes()
         result = C.loads(source.decode("utf-8"))
+        _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, result)
         if R.record_bytes(result) != source:
             raise RunnerError("cached typed refinement is not canonical production evidence")
         return result, {
@@ -549,8 +563,8 @@ def _posted_job_process(task, job, config):
         code = process.wait()
         if code:
             raise RunnerError(f"posted worker failed ({timed_out_or_memory or 'exit'}): {log_path}")
-        if timed_out_or_memory == "memory_limit":
-            raise RunnerError(f"posted worker exceeded its declared memory ceiling: {log_path}")
+        if timed_out_or_memory is not None:
+            raise RunnerError(f"posted worker was stopped for {timed_out_or_memory}: {log_path}")
     text = log_path.read_text(encoding="utf-8")
     results = [line.removeprefix("POST_JOB_RESULT=") for line in text.splitlines()
                if line.startswith("POST_JOB_RESULT=")]
@@ -613,6 +627,7 @@ def _post_jobs(task, jobs, config):
                 "thread_environment": metadata.get("thread_environment"),
                 "max_step_mm": job.settings["max_step_mm"],
                 "expected_nc_hash": job.settings["expected_nc_hash"],
+                "source": metadata.get("source"),
                 "evaluation_path": metadata.get("evaluation_path"),
                 "evaluation_sha256": metadata["evaluation_sha256"],
                 "memory_note": "per-child process peak RSS; shared parent and all other system work excluded",
@@ -698,13 +713,16 @@ def _prototype_evaluator(task, motion, parameterization, config, seed):
     if arch not in ("cpu", "gpu"):
         raise RunnerError("arch must be cpu or gpu")
     import taichi as ti
-    ti.init(arch=ti.cpu if arch == "cpu" else ti.gpu, offline_cache=False, default_fp=ti.f32)
+    precision = _requested_precision(config)
+    ti.init(arch=ti.cpu if arch == "cpu" else ti.gpu, offline_cache=False,
+            default_fp=ti.f32 if precision == "f32" else ti.f64)
     initial = np.asarray(parameterization.initial_position_mm)
     normalized = (initial - task.grid.origin_mm) / task.grid.extent_mm
     sim = CSGSimulatorDelta(resolution=max(task.grid.shape), max_steps=parameterization.num_steps,
                             stock_size_mm=task.grid.extent_mm, voxel_size_mm=task.grid.voxel_mm,
                             target_shape="sphere", tool_start=tuple(normalized),
-                            enforce_speed_limits=False, init_taichi=False, k_init=config["k_fixed"])
+                            enforce_speed_limits=False, init_taichi=False, k_init=config["k_fixed"],
+                            precision=precision)
     sim.tool_radius[None] = task.tool.cutter_radius_mm
     sim.tool_height[None] = task.tool.flute_length_mm
     sim.tool_cut_height[None] = task.tool.flute_length_mm
@@ -713,7 +731,8 @@ def _prototype_evaluator(task, motion, parameterization, config, seed):
     sim.set_target_params(radius_mm=6.0)
     sim.bake_target_grid()
     return O.CandidateEvaluator(task, motion, parameterization, sim,
-                                spec=O.ObjectiveSpec(k=float(config["k_smooth"])), seed=seed)
+                                spec=O.ObjectiveSpec(k=float(config["k_smooth"])), seed=seed,
+                                requested_precision=precision)
 
 
 def _budget(config: Mapping[str, Any], method: str) -> B.OptimizationBudget:
@@ -731,6 +750,7 @@ def _identity(task: C.TaskSpec, config: Mapping[str, Any], split: str) -> str:
         "task_hash": task.task_hash, "task_split": task.split.value, "split": split,
         "experiment": config["experiment"], "task_source": config.get("task_source", "prototype_analytic"),
         "arch": config.get("arch", "cpu"),
+        "precision": _requested_precision(config, pilot=config.get("task_source", "pilot_pocket") == "pilot_pocket"),
         "seeds": config["seeds"], "candidate_evaluations": config["candidate_evaluations"],
         "population_size": config["population_size"], "validation_interval": config["validation_interval"],
         "max_validation_calls": config["max_validation_calls"],
@@ -807,7 +827,7 @@ def _pecent(config: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]) -> 
                     "worker_wall_seconds", "posted_seconds_dialects"}
         if not isinstance(evidence, Mapping) or any(key not in evidence for key in required):
             raise RunnerError("timing_evidence must include task identity, all measurement rates and wall time")
-        if evidence["schema"] != "diffcam-pilot-timing/1":
+        if evidence["schema"] != "diffcam-pilot-timing/2":
             raise RunnerError("unrecognized timing_evidence schema")
         if not isinstance(evidence["task_hash"], str) or not evidence["task_hash"].startswith("sha256:"):
             raise RunnerError("timing evidence task hash must have explicit SHA-256 form")
@@ -832,16 +852,17 @@ def _pecent(config: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]) -> 
             raise RunnerError("posted timing must contain exactly RS274 and Haas durations")
         if sorted(_finite_seconds(value, "posted evaluation") for value in raw_post) != sorted(labelled_post.values()):
             raise RunnerError("labelled and anonymous posted timings disagree")
-        measured_post = sum(labelled_post.values())
-    refinement_measurement = evidence.get("refinement_check_seconds") if evidence is not None else None
+        measured_post = _finite_seconds(
+            evidence["posted_evaluation_levels"]["screen"]["phase_wall_seconds"], "screen phase")
     if _refinement_policy(config)["enabled"]:
-        if not isinstance(refinement_measurement, Mapping):
-            raise RunnerError("refinement_check is enabled but no actual refinement timing was measured")
-        refined_seconds = _finite_seconds(refinement_measurement.get("wall_seconds"), "refinement evaluation")
-        if refinement_measurement.get("settings", {}).get("max_step_mm") != 0.125:
-            raise RunnerError("timing evidence refinement max_step_mm is not 0.125")
-        if not isinstance(refinement_measurement.get("comparison"), Mapping):
-            raise RunnerError("timing evidence lacks the primary/refined verdict comparison")
+        levels = evidence.get("posted_evaluation_levels")
+        if not isinstance(levels, Mapping) or any(
+                key not in levels or not isinstance(levels[key], Mapping)
+                for key in ("screen", "verdict", "convergence")):
+            raise RunnerError("timing evidence requires real screen, fine-verdict and convergence phases")
+        refined_seconds = (
+            _finite_seconds(levels["verdict"].get("phase_wall_seconds"), "fine verdict phase")
+            + _finite_seconds(levels["convergence"].get("phase_wall_seconds"), "convergence phase"))
     else:
         refined_seconds = 0.0
     for entry in entries:
@@ -888,49 +909,238 @@ def _pecent(config: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]) -> 
     return predicted
 
 
+class _OverridePhaseEvaluator:
+    """Unit seam for direct typed responses, never a claimed independent worker."""
+
+    def __init__(self, evaluator, config):
+        self.evaluate = getattr(evaluator, "evaluate_posted_gcode", evaluator)
+        if not callable(self.evaluate):
+            raise RunnerError("posted override must implement the typed evaluator protocol")
+        self._config = dict(config)
+        self.phase_records = []
+        self.timings = []
+
+    def evaluate_posting(self, task, posting, workspace, *, role, single_dialect=False):
+        outputs = {}
+        processes = []
+        phase_started = time.perf_counter()
+        for post in posting.posted:
+            nc_name, eval_name = C.DIALECT_ARTIFACTS[post.dialect]
+            nc_bytes = posting.files[nc_name]
+            settings = _phase_settings(task, self._config, post.dialect, nc_bytes, role)
+            started = time.perf_counter()
+            result = self.evaluate(task, nc_bytes, post.dialect, settings)
+            elapsed = time.perf_counter() - started
+            result = _validate_posted_result(task, nc_bytes, post.dialect, settings, result)
+            outputs[post.dialect] = result
+            path = workspace / eval_name
+            payload = R.record_bytes(result)
+            processes.append({
+                "role": role, "dialect": post.dialect.value, "status": "test_override",
+                "worker_pid": None, "worker_peak_rss_kib": None,
+                "evaluator_wall_seconds": elapsed, "process_wall_seconds": elapsed,
+                "evaluation_sha256": C.sha256_bytes(payload), "evaluation_path": str(path),
+                "source": str(path), "max_step_mm": settings["max_step_mm"],
+                "expected_nc_hash": result.nc_hash, "thread_environment": None,
+                "memory_note": "direct in-process test override; no independent worker or RSS measurement",
+            })
+            self.timings.append({"dialect": post.dialect.value, "nc_hash": result.nc_hash,
+                                 "wall_seconds": elapsed})
+        self.phase_records = [{"phase_wall_seconds": time.perf_counter() - phase_started,
+                               "processes": processes}]
+        return outputs
+
+
+def _phase_evaluator_adapter(task, config, override=None):
+    if override is None:
+        return PilotPostedEvaluator(task, config)
+    if callable(getattr(override, "evaluate_posting", None)):
+        return override
+    return _OverridePhaseEvaluator(override, config)
+
+
+def _collect_phase_sample(task, posting, evaluator, config, workspace, role, *, evaluation_root, in_process_override=False):
+    """Measure one fidelity phase and retain actual typed evaluation artifacts."""
+    evaluate = getattr(evaluator, "evaluate_posting", None)
+    if not callable(evaluate):
+        raise RunnerError("production timing requires the independent posted-batch protocol")
+    expected_dialects = [C.Dialect.RS274] if role == "convergence" else list(C.Dialect)
+    if [post.dialect for post in posting.posted] != expected_dialects:
+        raise RunnerError(f"{role} timing requires dialects {expected_dialects}")
+    for post in posting.posted:
+        if post.status != C.PostStatus.SUPPORTED:
+            raise RunnerError(f"{role} requires supported posting: {post.reason}")
+    workspace = Path(workspace).resolve()
+    workspace.mkdir(parents=True)
+    started = time.perf_counter()
+    if isinstance(getattr(evaluator, "timings", None), list):
+        evaluator.timings.clear()  # Events are for this role only, never an accumulated cross-phase estimate.
+    evaluations = evaluate(task, posting, workspace, role=role, single_dialect=(role == "convergence"))
+    artifacts = {}
+    for post in posting.posted:
+        nc_name, eval_name = C.DIALECT_ARTIFACTS[post.dialect]
+        nc_bytes = posting.files[nc_name]
+        if post.dialect not in evaluations:
+            raise RunnerError(f"{role} omitted typed evaluation for {post.dialect.value}")
+        actual = _validate_posted_result(
+            task, nc_bytes, post.dialect,
+            _phase_settings(task, config, post.dialect, nc_bytes, role), evaluations[post.dialect])
+        if role == "screen":
+            if not actual.efficiency_eligible:
+                raise RunnerError(
+                    f"timing nominal candidate is not eligible in {post.dialect.value}: "
+                    f"coverage={actual.coverage}, safety={actual.safety_pass}, geometry={actual.geometry_pass}")
+            if not actual.metrics["removed_volume_mm3"].value > 0:
+                raise RunnerError("timing measurement may not treat a no-cut path as completed material removal")
+        payload = R.record_bytes(actual)
+        nc_path = workspace / nc_name
+        eval_path = workspace / eval_name
+        R.ArtifactWriter._replace_bytes(nc_path, nc_bytes)
+        R.ArtifactWriter._replace_bytes(eval_path, payload)
+        artifacts[post.dialect.value] = {
+            "nc_path": str(nc_path.relative_to(evaluation_root)),
+            "evaluation_path": str(eval_path.relative_to(evaluation_root)),
+            "nc_hash": actual.nc_hash,
+            "evaluation_sha256": C.sha256_bytes(payload),
+        }
+    if getattr(evaluator, "phase_records", None):
+        phase = evaluator.phase_records[-1]
+        processes = phase["processes"]
+        for record in processes:
+            path = record.get("evaluation_path")
+            if path is not None and C.sha256_bytes(Path(path).read_bytes()) != record["evaluation_sha256"]:
+                raise RunnerError("native phase result does not match retained evaluation bytes")
+    else:
+        timings = list(getattr(evaluator, "timings", []))
+        processes = []
+        for post in posting.posted:
+            event = next((item for item in timings if item.get("dialect") == post.dialect.value), None)
+            seconds = event["wall_seconds"] if event is not None else 0.0
+            actual = evaluations[post.dialect]
+            processes.append({
+                "role": role, "dialect": post.dialect.value,
+                "status": "test_override",
+                "worker_pid": None, "worker_peak_rss_kib": None,
+                "evaluator_wall_seconds": seconds, "process_wall_seconds": seconds,
+                "evaluation_sha256": artifacts[post.dialect.value]["evaluation_sha256"],
+                "evaluation_path": artifacts[post.dialect.value]["evaluation_path"],
+                "source": str(workspace / (post.eval_file or C.DIALECT_ARTIFACTS[post.dialect][1])),
+                "max_step_mm": actual.discretization["settings"]["max_step_mm"],
+                "expected_nc_hash": actual.nc_hash,
+                "thread_environment": None,
+                "memory_note": "in-process evaluator override; no independent posted worker or measured peak RSS",
+            })
+    measured_time = time.perf_counter() - started
+    policy = _refinement_policy(config)
+    for record in processes:
+        if record.get("role") != role or record.get("dialect") not in artifacts:
+            raise RunnerError("phase resource record has a different role or dialect")
+        _validate_resource_record(
+            {"job_policy": dict(policy, total_posted_rss_ceiling_bytes=(
+                policy["parallel_jobs"] * policy["max_rss_bytes_per_job"])),
+             "phase_wall_seconds": measured_time, "processes": processes}, config,
+            {dialect: artifacts[dialect]["nc_hash"] for dialect in artifacts}, workspace,
+            phase=role, allow_test_override=in_process_override)
+    return {"job_policy": dict(policy, total_posted_rss_ceiling_bytes=(
+        policy["parallel_jobs"] * policy["max_rss_bytes_per_job"])),
+        "phase_wall_seconds": measured_time, "processes": processes, "artifacts": artifacts}
+
+
 def _refinement_projection(config, entries, evidence, root):
-    """Serialize separate refinement-phase cost without charging primary runs."""
+    """Project each posted fidelity phase from real typed, memory-limited jobs."""
     if evidence is None or not _refinement_policy(config)["enabled"]:
-        return {"enabled": False, "estimated_phase_wall_time_s": 0.0}
+        return {"enabled": False, "estimated_phase_wall_time_s": 0.0,
+                "levels": {}, "serial_evaluation_work_seconds": 0.0}
     if not isinstance(evidence, Mapping):
-        raise RunnerError("refinement cost requires measured typed evaluation evidence")
-    event = evidence.get("refinement_check_seconds")
-    if not isinstance(event, Mapping):
-        raise RunnerError("enabled refinement_check lacks real nominal RS274 refinement time")
-    per_program = _finite_seconds(event.get("wall_seconds"), "refinement evaluation")
-    artifacts = evidence.get("evaluation_artifacts", {}).get("rs274_refined")
-    if not isinstance(artifacts, Mapping):
-        raise RunnerError("refinement timing lacks its evaluation artifact/hash link")
-    required = {"nc_hash", "evaluation_path", "evaluation_sha256"}
-    if any(not isinstance(artifacts.get(key), str) or not artifacts[key] for key in required):
-        raise RunnerError(f"refinement artifact requires {sorted(required)}")
-    nc_path = audit._artifact_path(root, artifacts["nc_path"])
-    nc_bytes = nc_path.read_bytes()
-    if C.nc_hash(nc_bytes) != event.get("nc_hash"):
-        raise RunnerError("refinement timing evidence does not match the primary RS274 bytes")
-    evaluation_path = audit._artifact_path(root, artifacts["evaluation_path"])
-    payload = evaluation_path.read_bytes()
-    if C.sha256_bytes(payload) != artifacts["evaluation_sha256"]:
-        raise RunnerError("refinement evaluation file no longer matches its recorded SHA-256")
-    result = C.loads(payload)
-    if result.dialect != C.Dialect.RS274 or result.task_hash != evidence.get("task_hash"):
-        raise RunnerError("refinement artifact task/dialect mismatch")
-    jobs = _refinement_policy(config)["parallel_jobs"]
-    count = len(entries)
+        raise RunnerError("posted timing evidence must be a structured mapping")
+    samples = evidence.get("posted_evaluation_levels")
+    if not isinstance(samples, Mapping) or set(samples) != {"screen", "verdict", "convergence"}:
+        raise RunnerError("timing evidence must contain screen, verdict and convergence phase samples")
+    policy = _refinement_policy(config)
+    projected = {}
+    for role in ("screen", "verdict", "convergence"):
+        sample = samples[role]
+        if not isinstance(sample, Mapping):
+            raise RunnerError(f"missing typed phase measurement: {role}")
+        dialects = [C.Dialect.RS274.value] if role == "convergence" else [d.value for d in C.Dialect]
+        artifacts = sample.get("artifacts", {})
+        job_policy = dict(policy, total_posted_rss_ceiling_bytes=(
+            policy["parallel_jobs"] * policy["max_rss_bytes_per_job"]))
+        sample = dict(sample, job_policy=job_policy)
+        hashes = {}
+        for dialect in artifacts:
+            if C.Dialect(dialect).value not in dialects:
+                raise RunnerError(f"unexpected {role} phase dialect {dialect}")
+        for dialect in dialects:
+            artifact = artifacts.get(dialect, {})
+            nc_path = audit._artifact_path(root, artifact.get("nc_path"))
+            nc_bytes = nc_path.read_bytes()
+            nc_hash = C.nc_hash(nc_bytes)
+            if nc_hash != artifact.get("nc_hash"):
+                raise RunnerError(f"{role}/{dialect}: NC hash no longer matches the measured bytes")
+            eval_path = audit._artifact_path(root, artifact.get("evaluation_path"))
+            payload = eval_path.read_bytes()
+            if C.sha256_bytes(payload) != artifact.get("evaluation_sha256"):
+                raise RunnerError(f"{role}/{dialect}: evaluation file hash changed")
+            evaluation = C.loads(payload.decode("utf-8"))
+            if evaluation.dialect.value != dialect or evaluation.task_hash != evidence.get("task_hash"):
+                raise RunnerError(f"{role}/{dialect}: evaluation task/dialect mismatch")
+            if evaluation.tool_setup_hash != evidence.get("tool_setup_hash"):
+                raise RunnerError(f"{role}/{dialect}: tool identity mismatch")
+            if evaluation.discretization["settings"]["max_step_mm"] != policy[f"{role}_step_mm"]:
+                raise RunnerError(f"{role}/{dialect}: required role sampling step was not used")
+            hashes[dialect] = nc_hash
+        _validate_resource_record(sample, config, hashes, root, phase=role,
+                                  allow_test_override=bool(evidence.get("in_process_unit_override", False)))
+        processes = sample["processes"]
+        rows = {}
+        serial_program_seconds = 0.0
+        for dialect in dialects:
+            row = next(row for row in processes if row["dialect"] == dialect)
+            seconds = _finite_seconds(row["evaluator_wall_seconds"], f"{role}/{dialect}")
+            serial_program_seconds += seconds
+            rows[dialect] = seconds
+        phase_wall = _finite_seconds(sample["phase_wall_seconds"], f"{role} phase")
+        projected[role] = {
+            "max_step_mm": policy[f"{role}_step_mm"], "dialects": dialects,
+            "per_program_seconds": rows, "serial_evaluation_work_per_program_seconds": serial_program_seconds,
+            "measured_phase_wall_seconds": phase_wall,
+            "serial_evaluation_work_seconds": serial_program_seconds * len(entries),
+            "estimated_phase_wall_time_s": phase_wall * len(entries),
+            "actual_independent_job_count": sum(row["status"] == "complete" for row in processes),
+            "memory_ceiling_per_job_bytes": policy["max_rss_bytes_per_job"],
+            "concurrent_memory_ceiling_bytes": len(processes) * policy["max_rss_bytes_per_job"],
+            "peak_rss_kib_by_dialect": {row["dialect"]: row.get("worker_peak_rss_kib") for row in processes},
+            "resources": processes, "artifacts": artifacts,
+        }
+    refined_wall = sum(projected[role]["estimated_phase_wall_time_s"]
+                       for role in ("verdict", "convergence"))
+    intervals = [sum(projected[role]["serial_evaluation_work_seconds"] for role in projected)
+                 for role in ("screen", "verdict", "convergence")]
+    if len(set(intervals)) != 1:
+        raise RunnerError("per-role estimator serial-work accounting is inconsistent")
     return {
-        "enabled": True, "dialect": "rs274", "max_step_mm": 0.125,
-        "expected_program_count": count, "parallel_jobs": jobs,
-        "per_program_seconds": per_program,
-        "serial_evaluation_work_seconds": per_program * count,
-        "estimated_phase_wall_time_s": per_program * ((count + jobs - 1) // jobs),
-        "comparison": event.get("comparison"),
-        "evidence": artifacts,
-        "estimation_basis": "one real measurement; independent subprocess slots after primary runs, not a confidence interval or guaranteed parallel speedup",
+        "enabled": True, "expected_program_count": len(entries),
+        "parallel_jobs": policy["parallel_jobs"], "program_level_parallel_jobs": 1,
+        "screen_in_primary_estimates": True,
+        "levels": projected,
+        "serial_evaluation_work_seconds": intervals[0],
+        "estimated_phase_wall_time_s": refined_wall,
+        "memory_per_posted_job_bytes": policy["max_rss_bytes_per_job"],
+        "optimizer_parent_peak_rss_kib": evidence.get("optimizer_parent_peak_rss_kib"),
+        "optimizer_reference_peak_rss_bytes_estimated": evidence.get(
+            "optimizer_reference_peak_rss_bytes_estimated"),
+        "optimizer_reference_cost_note": evidence.get("optimizer_reference_cost_note"),
+        "optimizer_parallelism": "serialized by default",
+        "estimation_basis": (
+            "one real typed process batch per role; serial program groups; no parallel-speedup or confidence-interval claim"
+            if not evidence.get("in_process_unit_override", False)
+            else "explicit in-process typed unit fixture; not independent subprocess evidence or a production f64 cost estimate"),
     }
 
 
 def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None,
-                    refinement_evaluator_override=None):
+                    refinement_evaluator_override=None, posted_evaluator_override=None):
     """Measure one of each execution kind, with no population/Adam optimization.
 
     ``evaluator_override`` is a pure in-process test seam (no untrusted module
@@ -939,10 +1149,11 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None,
     """
     from datetime import datetime, timezone
     started_at = datetime.now(timezone.utc).isoformat()
-    if capture_dir is not None:
-        if capture_dir.exists():
-            raise RunnerError(f"timing evidence directory already exists: {capture_dir}")
-        capture_dir.mkdir(parents=True)
+    if capture_dir is None:
+        capture_dir = Path(root).resolve() / "posted-phase-artifacts"
+    if capture_dir.exists():
+        raise RunnerError(f"timing evidence directory already exists: {capture_dir}")
+    capture_dir.mkdir(parents=True)
     task, motion, parameterization, evaluator_factory, posted_factory = _context(config, root)
     if task.split != C.Split.DEV:
         raise RunnerError("timing collection is restricted to the declared dev task")
@@ -975,83 +1186,44 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None,
     posting = R.post_motion(task, plan)
     if any(post.status != C.PostStatus.SUPPORTED for post in posting.posted):
         raise RunnerError("timing measurement requires support for both posted dialects")
-    post_builder = posted_factory(task, config)
-    primary_rs274 = None
-    evaluation_artifacts = {}
-    for post in posting.posted:
-        nc, eval_name = C.DIALECT_ARTIFACTS[post.dialect]
-        actual = post_builder.evaluate_posted_gcode(task, posting.files[nc], post.dialect, {})
-        if actual.dialect != post.dialect or actual.nc_hash != post.nc_hash or actual.task_hash != task.task_hash:
-            raise RunnerError("measurement posted-evaluation identity mismatches source bytes")
-        if post.dialect == C.Dialect.RS274:
-            primary_rs274 = actual
-        if not actual.efficiency_eligible:
-            raise RunnerError(
-                f"timing nominal candidate is not geometry/safety eligible in {post.dialect.value}: "
-                f"coverage={actual.coverage}, safety={actual.safety_pass}, geometry={actual.geometry_pass}")
-        if not actual.metrics["removed_volume_mm3"].value > 0:
-            raise RunnerError("timing measurement may not treat a no-cut path as completed material removal")
-        if capture_dir is not None:
-            nc_path = capture_dir / f"{post.dialect.value}.nc"
-            result_path = capture_dir / eval_name
-            nc_payload = posting.files[nc]
-            result_payload = R.record_bytes(actual)
-            R.ArtifactWriter._replace_bytes(nc_path, nc_payload)
-            R.ArtifactWriter._replace_bytes(result_path, result_payload)
-            evaluation_artifacts[post.dialect.value] = {
-                "nc_path": str(nc_path.relative_to(root)),
-                "nc_hash": post.nc_hash,
-                "evaluation_path": str(result_path.relative_to(root)),
-                "evaluation_sha256": C.sha256_bytes(result_payload),
-            }
-    refinement = None
-    if config.get("task_source", "pilot_pocket") == "pilot_pocket" and _refinement_policy(config)["enabled"]:
-        if primary_rs274 is None:
-            raise RunnerError("refinement measurement requires the primary RS274 result")
-        refinement_evaluator = refinement_evaluator_override or PostedEvaluator()
-        evaluate_refinement = getattr(refinement_evaluator, "evaluate_posted_gcode", refinement_evaluator)
-        if not callable(evaluate_refinement):
-            raise RunnerError("refinement evaluator does not implement the typed protocol")
-        nc_bytes = posting.files["rs274.nc"]
-        refinement_policy = _refinement_policy(config)
-        settings = _refinement_settings_from_primary(primary_rs274, refinement_policy)
-        started = time.perf_counter()
-        refined = evaluate_refinement(task, nc_bytes, C.Dialect.RS274, settings)
-        seconds = _finite_seconds(time.perf_counter() - started, "refinement evaluation")
-        refined = _verified_refinement_result(primary_rs274, refined, refinement_policy)
-        payload = R.record_bytes(refined)
-        if capture_dir is not None:
-            refined_path = capture_dir / "eval_posted_rs274_refined.json"
-            R.ArtifactWriter._replace_bytes(refined_path, payload)
-            evaluation_artifacts["rs274_refined"] = {
-                "nc_path": evaluation_artifacts["rs274"]["nc_path"],
-                "nc_hash": primary_rs274.nc_hash,
-                "evaluation_path": str(refined_path.relative_to(root)),
-                "evaluation_sha256": C.sha256_bytes(payload),
-            }
+    if posted_evaluator_override is not None and refinement_evaluator_override is not None:
+        raise RunnerError("choose at most one posted-evaluation override")
+    in_process_override = bool(evaluator_override or posted_evaluator_override or refinement_evaluator_override)
+    posted_override = posted_evaluator_override or refinement_evaluator_override
+    override = posted_override if posted_override is not None else posted_factory(task, config)
+    post_builder = _phase_evaluator_adapter(task, config, override)
+    phases = {}
+    for role in ("screen", "verdict", "convergence"):
+        workspace = capture_dir / role
+        if role == "convergence":
+            sample_posting = R.PostingResult(
+                files={"rs274.nc": posting.files["rs274.nc"]},
+                posted=tuple(post for post in posting.posted if post.dialect == C.Dialect.RS274),
+            )
         else:
-            evaluation_artifacts["rs274_refined"] = {
-                "nc_hash": primary_rs274.nc_hash,
-                "evaluation_path": None, "evaluation_sha256": C.sha256_bytes(payload),
-            }
-        refinement_comparison = _refinement_comparison(primary_rs274, refined)
-        refinement_outcome, refinement_comparison = _conservative_outcome(
-            primary_rs274, refined, refinement_comparison, task)
-        refinement = {
-            "dialect": "rs274", "wall_seconds": seconds,
-            "nc_hash": primary_rs274.nc_hash,
-            "settings": refined.discretization["settings"],
-            "comparison": refinement_comparison,
-            "conservative_outcome": refinement_outcome,
-        }
-    posted_times = list(post_builder.timings)
+            sample_posting = posting
+        phases[role] = _collect_phase_sample(
+            task, sample_posting, post_builder, config, workspace, role,
+            evaluation_root=root, in_process_override=in_process_override)
+        if role == "screen":
+            posted_times = list(post_builder.timings)
     expected_events = [(post.dialect.value, post.nc_hash) for post in posting.posted]
     actual_events = [(event["dialect"], event["nc_hash"]) for event in posted_times]
     if len(posted_times) != 2 or actual_events != expected_events:
         raise RunnerError("exactly two real, identity-matched posted evaluations must be timed")
     posted_seconds = [float(record["wall_seconds"]) for record in posted_times]
+    if sys.platform.startswith("linux"):
+        import resource
+        optimizer_peak_rss_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+    else:
+        optimizer_peak_rss_kib = None
     return {
-        "schema": "diffcam-pilot-timing/1",
+        "schema": "diffcam-pilot-timing/2",
+        "in_process_unit_override": in_process_override,
+        "simulator_precision": R.simulator_precision_metadata(getattr(evaluator, "sim", None)),
+        "optimizer_parent_peak_rss_kib": optimizer_peak_rss_kib,
+        "optimizer_reference_peak_rss_bytes_estimated": 3_670_000_000,
+        "optimizer_reference_cost_note": "D-05 f64 coordinator estimate, not a measured claim about this sample",
         "thread_environment": {
             name: os.environ.get(name)
             for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TAICHI_NUM_THREADS")
@@ -1064,18 +1236,11 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None,
         "parameter_steps": parameterization.num_steps,
         "constructor_seconds": constructor_seconds,
         "config_sha256": C.sha256_bytes(R.json_bytes(config)),
-        "code_sha256": {
-            "runner": C.sha256_bytes(Path(__file__).read_bytes()),
-            "posted_evaluator": C.sha256_bytes(Path(sys.modules[PostedEvaluator.__module__].__file__).read_bytes()),
-            "strict_parser": C.sha256_bytes(Path(sys.modules["cam.gcode_parser"].__file__).read_bytes()),
-            "post_writer": C.sha256_bytes(Path(sys.modules["cam.posts"].__file__).read_bytes()),
-            "task_builder": C.sha256_bytes(Path(sys.modules[pilot_io.__name__].__file__).read_bytes()),
-        },
+        "code_sha256": _timing_module_hashes(),
         "candidate_seconds": records,
         "posted_seconds": posted_seconds,
         "posted_seconds_dialects": posted_times,
-        "evaluation_artifacts": evaluation_artifacts,
-        "refinement_check_seconds": refinement,
+        "posted_evaluation_levels": phases,
         "source_stage": {
             "target": "analytic operation target for posted execution; exact sampled copy for simulator",
             "sources": {name: {"path": source.path, "sha256": source.sha256}
@@ -1083,9 +1248,60 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None,
         },
         "started_at": started_at,
         "worker_wall_seconds": time.perf_counter() - created,
-        "post_file_preparation_seconds": time.perf_counter() - before_post,
-        "scope": "one real candidate of each kind, both primary dialects, and one real RS274 refinement per enabled policy; not the 7-run pilot",
+        "posted_phase_wall_seconds": time.perf_counter() - before_post,
+        "scope": "one real candidate of each kind, 1.0 mm screen in both dialects, 0.125 mm verdict in both dialects, and one 0.25 mm RS274 convergence evaluation; not the 7-run pilot",
     }
+
+
+def _timing_module_hashes():
+    modules = {
+        "runner": Path(__file__).resolve(),
+        "posted_evaluator": Path(sys.modules[PostedEvaluator.__module__].__file__).resolve(),
+        "strict_parser": Path(sys.modules["cam.gcode_parser"].__file__).resolve(),
+        "post_writer": Path(sys.modules["cam.posts"].__file__).resolve(),
+        "task_builder": Path(pilot_io.__file__).resolve(),
+        "objectives": Path(O.__file__).resolve(),
+        "simulator": Path(sys.modules[CSGSimulatorDelta.__module__].__file__).resolve(),
+        "run_artifacts": Path(R.__file__).resolve(),
+    }
+    return {name: C.sha256_bytes(path.read_bytes()) for name, path in modules.items()}
+
+
+def _validate_production_timing_evidence(config, evidence, task):
+    if not isinstance(evidence, Mapping) or evidence.get("schema") != "diffcam-pilot-timing/2":
+        raise RunnerError("production timing requires the current typed schema /2")
+    precision = _requested_precision(config, pilot=True)
+    if evidence.get("in_process_unit_override") is not False:
+        raise RunnerError("production timing requires real f64 simulation and independent posted workers, not in-process overrides")
+    if (evidence.get("task_hash") != task.task_hash
+            or evidence.get("tool_setup_hash") != task.tool_setup_hash):
+        raise RunnerError("timing evidence task/tool identity differs from the frozen task")
+    metadata = evidence.get("simulator_precision")
+    record = SimpleNamespace(
+        precision=metadata.get("requested_precision") if isinstance(metadata, Mapping) else None,
+        precision_metadata=lambda: metadata,
+    )
+    try:
+        R.simulator_precision_metadata(record, requested_precision=precision)
+    except ValueError as error:
+        raise RunnerError(f"timing evidence is not a valid {precision} simulator measurement: {error}") from error
+    expected_config = {key: value for key, value in config.items() if key != "timing_evidence"}
+    if evidence.get("config_sha256") != C.sha256_bytes(R.json_bytes(expected_config)):
+        raise RunnerError("timing evidence differs from the exact frozen pilot config")
+    if evidence.get("code_sha256") != _timing_module_hashes():
+        raise RunnerError("timing evidence module hashes differ from current evaluator/simulator code")
+    _positive_int(evidence.get("optimizer_parent_peak_rss_kib"), "optimizer parent peak RSS KiB")
+    _finite_seconds(evidence.get("worker_wall_seconds"), "timing worker whole process")
+    phases = evidence.get("posted_evaluation_levels")
+    if not isinstance(phases, Mapping):
+        raise RunnerError("production timing lacks role-specific independent process records")
+    for role, expected_jobs in (("screen", 2), ("verdict", 2), ("convergence", 1)):
+        phase = phases.get(role)
+        processes = phase.get("processes") if isinstance(phase, Mapping) else None
+        if (not isinstance(processes, list) or len(processes) != expected_jobs
+                or any(record.get("status") != "complete" for record in processes)):
+            raise RunnerError(f"timing phase {role} must contain independent posted-worker records, not reused or in-process data")
+    return evidence
 
 
 def _measure_timing_subprocess(config, root):
@@ -1137,7 +1353,7 @@ def _measure_timing_subprocess(config, root):
     if not isinstance(data, dict) or data.get("task_hash") != task.task_hash:
         raise RunnerError("timing evidence source/task identity mismatch")
     data["worker_wall_seconds"] = elapsed
-    data["schema"] = "diffcam-pilot-timing/1"
+    data["schema"] = "diffcam-pilot-timing/2"
     return data
 
 
@@ -1243,6 +1459,7 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
     posting = R.post_motion(task, motion)
     config_out = R.build_run_config(entry["run_id"], task, motion, seed=outcome.seed,
                                     parameterization=evaluator.parameterization, objective=evaluator.spec,
+                                    simulator=getattr(evaluator, "sim", None),
                                     budgets={"limits": dataclasses.asdict(outcome.budget),
                                              "spent": {"candidate_evaluations": outcome.evaluations,
                                                        "validation_calls": outcome.validation_calls,
@@ -1380,88 +1597,15 @@ def _refinement_comparison(primary, refined):
         result[name] = {"primary": values[0], "refined": values[1], "delta": delta,
                         "unit": expected_unit}
     result["any_outcome_verdict_change"] = any(
-        result[name]["changed"] for name in ("safety_pass", "geometry_pass", "coverage", "efficiency_eligible"))
+        result[name]["changed"] for name in (
+            "safety_pass", "geometry_pass", "coverage", "efficiency_eligible"))
     return result
-
-
-def _conservative_outcome(primary, refined, comparison, task):
-    comparison = dict(comparison)
-    if not isinstance(task, C.TaskSpec):
-        raise RunnerError("conservative completion requires the actual pilot TaskSpec")
-    if primary.task_hash != task.task_hash or refined.task_hash != task.task_hash:
-        raise RunnerError("conservative outcomes require one actual task identity")
-    task_info = audit.TaskInfo(
-        task.task_id, task.task_hash, task.family,
-        completion_residual_mm3=task.tolerances.completion_residual_mm3)
-    primary_completion = audit._completion_value(primary, task_info)
-    refined_completion = audit._completion_value(refined, task_info)
-    comparison["completion_pass"] = {
-        "primary": primary_completion, "refined": refined_completion,
-        "changed": primary_completion != refined_completion,
-    }
-    comparison["any_outcome_verdict_change"] = any(
-        comparison[name]["changed"]
-        for name in ("safety_pass", "geometry_pass", "completion_pass", "coverage", "efficiency_eligible"))
-
-    def combined(left, right):
-        if left is False or right is False:
-            return False
-        if left is None or right is None:
-            return None
-        if left is True and right is True:
-            return True
-        raise RunnerError("conservative evaluation outcomes must be bool or None")
-
-    disagreement_names = [
-        name for name in ("safety_pass", "geometry_pass", "completion_pass", "coverage")
-        if comparison[name]["changed"]]
-    completion = combined(primary_completion, refined_completion)
-    eligible = bool(primary.efficiency_eligible and refined.efficiency_eligible
-                    and completion is True and not disagreement_names)
-    return {
-        "safety_pass": combined(primary.safety_pass, refined.safety_pass),
-        "geometry_pass": combined(primary.geometry_pass, refined.geometry_pass),
-        "completion_pass": completion,
-        "efficiency_eligible": eligible,
-        "refinement_disagreement": bool(disagreement_names),
-        "disagreement_fields": disagreement_names,
-        "excluded_from_efficiency": not eligible,
-        "rule": "primary AND refined for safety/geometry/completion at the task threshold; unknown completion => efficiency_eligible false (conservative); None is never upgraded; disagreements exclude efficiency",
-    }, comparison
-
-
-def _refinement_settings_from_primary(primary, policy):
-    """Copy every primary sampling control and change only max_step_mm."""
-    primary_settings = primary.discretization.get("settings")
-    if not isinstance(primary_settings, Mapping):
-        raise RunnerError("refinement requires the primary discretization settings")
-    settings = dict(primary_settings)
-    if settings.get("compute_bounds") is not True or settings.get("safety_screen") is not True:
-        raise RunnerError("refinement may not disable primary bounds or safety screening")
-    if settings.get("expected_nc_hash") != primary.nc_hash:
-        raise RunnerError("refinement requires the primary exact-NC hash policy")
-    try:
-        copied = RefinementSettings.from_mapping(dict(settings, max_step_mm=policy["max_step_mm"]))
-    except ValueError as error:
-        raise RunnerError(f"invalid copied primary refinement settings: {error}") from error
-    return dataclasses.asdict(copied)
-
-
-def _verified_refinement_result(primary, refined, policy):
-    if not isinstance(refined, C.EvaluationResult) or refined.dialect != C.Dialect.RS274:
-        raise RunnerError("refinement did not return a typed RS274 EvaluationResult")
-    if refined.nc_hash != primary.nc_hash or refined.task_hash != primary.task_hash:
-        raise RunnerError("refinement result has a different task or NC hash")
-    expected = _refinement_settings_from_primary(primary, policy)
-    if refined.discretization.get("settings") != expected:
-        raise RunnerError("refinement result did not preserve every primary setting except max_step_mm")
-    return refined
 
 
 def _safe_refinement_directory(primary_root: Path, auxiliary_root: Path) -> tuple[Path, Path]:
     primary_root, auxiliary_root = primary_root.resolve(), auxiliary_root.resolve()
-    if primary_root == auxiliary_root or auxiliary_root.is_relative_to(primary_root):
-        raise RunnerError("auxiliary refinement root must be a sibling, not inside a primary run root")
+    if auxiliary_root.is_relative_to(primary_root) or primary_root.is_relative_to(auxiliary_root):
+        raise RunnerError("primary and auxiliary refinement roots must be disjoint sibling trees")
     return primary_root, auxiliary_root
 
 
@@ -1484,149 +1628,310 @@ def _load_refinement_case(root: Path, run_id: str):
     return directory, record, doc, task, primary, raw_nc
 
 
-def _compare_existing_refinement(directory: Path, task, primary_directory: Path, raw_nc):
-    """Accept a fully audited, identical copy; never overwrite another result."""
-    audit_doc = audit._audit_run(directory / "run.json")
-    if not audit_doc.complete_and_audited or audit_doc.record.task_hash != task.task_hash:
-        raise RunnerError(f"existing refinement directory is not a clean audited result: {directory}")
-    refined = C.loads((directory / "eval_posted_rs274.json").read_text(encoding="utf-8"))
-    if refined.nc_hash != C.nc_hash(raw_nc) or refined.task_hash != task.task_hash:
-        raise RunnerError("existing refinement has a different task/NC identity")
-    if refined.discretization["settings"]["max_step_mm"] != 0.125:
-        raise RunnerError("existing refinement has the wrong max_step_mm; refusing to overwrite it")
-    if (directory / "haas.nc").read_bytes() != (primary_directory / "haas.nc").read_bytes():
-        raise RunnerError("existing refinement changed primary Haas evidence")
-    return refined
+def _read_phase(task, directory, config, role, *, evaluated_dir=None, screen_copy=False, primary=None):
+    """Read and validate actual posted-evaluator JSON for one fidelity role."""
+    evaluated_dir = directory if evaluated_dir is None else evaluated_dir
+    dialects = (C.Dialect.RS274,) if role == "convergence" else tuple(C.Dialect)
+    evaluated = {}
+    for dialect in dialects:
+        nc_name, eval_name = C.DIALECT_ARTIFACTS[dialect]
+        if role == "convergence":
+            eval_name = "eval_convergence_rs274.json"
+        elif role == "screen" and screen_copy:
+            eval_name = "screen_" + eval_name
+        nc_bytes = (directory / nc_name).read_bytes()
+        source = primary.get(dialect) if isinstance(primary, Mapping) else primary if dialect == C.Dialect.RS274 else None
+        settings = _phase_settings(task, config, dialect, nc_bytes, role, primary=source)
+        try:
+            payload = (evaluated_dir / eval_name).read_bytes()
+        except FileNotFoundError as error:
+            raise RunnerError(f"missing {role} posted evaluation for {dialect.value}: {evaluated_dir / eval_name}") from error
+        try:
+            decoded = C.loads(payload.decode("utf-8"))
+        except (C.ContractError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise RunnerError(f"invalid {role} evaluation JSON for {dialect.value}: {evaluated_dir / eval_name}") from error
+        result = _validate_posted_result(task, nc_bytes, dialect, settings, decoded)
+        if R.record_bytes(result) != payload:
+            raise RunnerError(f"noncanonical {role} evaluation bytes: {evaluated_dir / eval_name}")
+        evaluated[dialect] = result
+    return evaluated
 
 
-def _refinement_worker(config, root, run_id, auxiliary_root, *, evaluator_override=None):
-    """Evaluate the original RS274 bytes and publish immutable primary/auxiliary evidence."""
+def _evaluation_outcome(evaluation, task):
+    """The shared task-qualified outcome for one actual typed evaluation."""
+    info = audit.TaskInfo(task.task_id, task.task_hash, task.family,
+                          completion_residual_mm3=task.tolerances.completion_residual_mm3)
+    return {
+        "coverage": evaluation.coverage.value,
+        "safety_pass": evaluation.safety_pass,
+        "geometry_pass": evaluation.geometry_pass,
+        "completion_pass": audit._completion_value(evaluation, info),
+        "efficiency_eligible": audit._outcome_value(evaluation, info, "efficiency_eligible"),
+    }
+
+
+def _fidelity_deltas(left, right, task):
+    comparison = _refinement_comparison(left, right)
+    left_outcome = _evaluation_outcome(left, task)
+    right_outcome = _evaluation_outcome(right, task)
+    comparison["completion_pass"] = {
+        "primary": left_outcome["completion_pass"], "refined": right_outcome["completion_pass"],
+        "changed": left_outcome["completion_pass"] != right_outcome["completion_pass"],
+    }
+    comparison["any_outcome_verdict_change"] = any(
+        comparison[name]["changed"] for name in (
+            "safety_pass", "geometry_pass", "completion_pass", "coverage", "efficiency_eligible"))
+    comparison["changed_outcome_fields"] = [
+        name for name in ("safety_pass", "geometry_pass", "completion_pass", "coverage", "efficiency_eligible")
+        if comparison[name]["changed"]]
+    return comparison
+
+
+def _provided_typed_source(task, job, override):
+    if override is None:
+        return None
+    if isinstance(override, C.EvaluationResult):
+        supplied = override
+    elif isinstance(override, Mapping):
+        supplied = override.get((job.role, job.dialect.value))
+    else:
+        evaluate = getattr(override, "evaluate_posted_gcode", override)
+        if not callable(evaluate):
+            raise RunnerError("posted-evaluation override must implement the typed protocol")
+        supplied = evaluate(task, job.nc_bytes, job.dialect, dict(job.settings))
+    if supplied is None:
+        return None
+    if isinstance(supplied, Path):
+        return supplied.resolve()
+    source_bytes = R.record_bytes(supplied)
+    _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, supplied)
+    job.workspace.mkdir(parents=True, exist_ok=False)
+    source = job.workspace / "provided-typed-result.json"
+    R.ArtifactWriter._replace_bytes(source, source_bytes)
+    return source
+
+
+def _configured_typed_sources(config):
+    """Explicit immutable, canonical typed sources; never automatic cache discovery."""
+    declared = config.get("reuse_typed_evaluations")
+    if declared is None:
+        return {}
+    if not isinstance(declared, Mapping):
+        raise RunnerError("reuse_typed_evaluations must be a mapping of role/dialect to path+sha256")
+    sources = {}
+    for key, entry in declared.items():
+        try:
+            role, dialect_name = key.split("/")
+            dialect = C.Dialect(dialect_name)
+            if role not in ("verdict", "convergence") or (role == "convergence" and dialect != C.Dialect.RS274):
+                raise ValueError("roles are verdict and RS274-only convergence")
+            if not isinstance(entry, Mapping) or set(entry) != {"path", "sha256"} or not isinstance(entry["path"], str):
+                raise ValueError("declared source requires exactly path and sha256")
+            source = Path(entry["path"])
+            if not source.is_absolute():
+                raise ValueError("reused source must be an explicitly named absolute path")
+            payload = source.resolve(strict=True).read_bytes()
+            if entry["sha256"] != C.sha256_bytes(payload):
+                raise ValueError("declared source hash differs from the actual bytes")
+            result = C.loads(payload.decode("utf-8"))
+            if R.record_bytes(result) != payload:
+                raise ValueError("reused result is not canonical typed production JSON")
+            source_key = (role, dialect.value)
+            if source_key in sources:
+                raise ValueError("duplicate role/dialect reuse declaration")
+            sources[source_key] = source.resolve()
+        except (ValueError, TypeError, OSError, AttributeError) as error:
+            raise RunnerError(f"invalid reuse_typed_evaluations[{key!r}]: {error}") from error
+    return sources
+
+
+def _refinement_worker(config, root, run_id, auxiliary_root, *, evaluator_override=None, reuse_sources=None):
+    """Create fine verdict evidence for both dialects and an RS274 convergence point."""
     policy = _refinement_policy(config)
     if not policy["enabled"]:
-        raise RunnerError("refinement checking was explicitly disabled by the frozen policy")
+        raise RunnerError("posted-fidelity evaluation was disabled by the frozen policy")
     root, auxiliary_root = _safe_refinement_directory(root, Path(auxiliary_root))
-    directory, record, parent_config, task, primary, raw_nc = _load_refinement_case(root, run_id)
-    auxiliary_id = f"{run_id}-refined"
+    directory, record, parent_config, task, primary, _ = _load_refinement_case(root, run_id)
+    auxiliary_id = f"{run_id}-verdict"
     auxiliary_dir = auxiliary_root / auxiliary_id
-    created = time.perf_counter()
-    computed = evaluator_override
+    started = time.perf_counter()
+    if reuse_sources is None:
+        reuse_sources = _configured_typed_sources(config)
+    if not isinstance(reuse_sources, Mapping):
+        raise RunnerError("reuse_sources must be keyed by (role, dialect)")
     if auxiliary_dir.exists():
-        refined = _compare_existing_refinement(auxiliary_dir, task, directory, raw_nc)
-        elapsed = 0.0
+        audited = audit._audit_run(auxiliary_dir / "run.json")
+        if not audited.complete_and_audited or audited.record.run_id != auxiliary_id:
+            raise RunnerError("existing verdict bundle is not a complete matching auxiliary run")
+        history = _json(auxiliary_dir / "history.json")
+        resources = history.get("resources")
+        if not isinstance(resources, Mapping) or not isinstance(resources.get("processes"), list):
+            raise RunnerError("existing verdict bundle lacks per-job process/resource records")
         status = "skipped_complete"
     else:
-        if computed is None:
-            computed = PostedEvaluator()
-        settings = _refinement_settings_from_primary(primary, policy)
-        evaluate = getattr(computed, "evaluate_posted_gcode", computed)
-        if not callable(evaluate):
-            raise RunnerError("refinement evaluator must implement the typed protocol or a callable")
-        started = time.perf_counter()
-        refined = evaluate(task, raw_nc, C.Dialect.RS274, settings)
-        elapsed = time.perf_counter() - started
+        batch_workspace = auxiliary_root / "posted-evaluation-work" / f"{run_id}-{time.time_ns()}"
+        jobs = []
+        for role, dialect in (("verdict", C.Dialect.RS274), ("verdict", C.Dialect.HAAS),
+                              ("convergence", C.Dialect.RS274)):
+            nc_bytes = (directory / C.DIALECT_ARTIFACTS[dialect][0]).read_bytes()
+            source = primary if dialect == C.Dialect.RS274 else None
+            settings = _phase_settings(task, config, dialect, nc_bytes, role, primary=source)
+            workspace = batch_workspace / role / dialect.value
+            reused = reuse_sources.get((role, dialect.value)) if reuse_sources is not None else None
+            conflicting_override = evaluator_override
+            if isinstance(evaluator_override, Mapping):
+                conflicting_override = evaluator_override.get((role, dialect.value))
+            if reused is not None and conflicting_override is not None:
+                raise RunnerError("declare either a reused typed result or an evaluator override per job, not both")
+            if reused is not None and not isinstance(reused, (C.EvaluationResult, Path)):
+                raise RunnerError("reused evidence must be a typed EvaluationResult or canonical JSON path")
+            job = PostedJob(role, dialect, nc_bytes, MappingProxyType(settings), workspace, reused)
+            if isinstance(reused, C.EvaluationResult):
+                job = dataclasses.replace(
+                    job, reused_source=_provided_typed_source(task, job, reused))
+            supplied = _provided_typed_source(task, job, evaluator_override)
+            if supplied is not None:
+                job = dataclasses.replace(job, reused_source=supplied)
+            jobs.append(job)
+        phases = []
+        for phase_name in ("verdict", "convergence"):
+            phase_jobs = [job for job in jobs if job.role == phase_name]
+            phase = _post_jobs(task, phase_jobs, config)
+            phases.append((phase_name, phase_jobs, phase))
+        resources = {
+            "job_policy": phases[0][2]["job_policy"],
+            "phase_wall_seconds": sum(phase[2]["phase_wall_seconds"] for phase in phases),
+            "processes": [record for _, _, phase in phases for record in phase["processes"]],
+            "phase_records": [
+                {"phase": name, "phase_wall_seconds": phase["phase_wall_seconds"],
+                 "processes": phase["processes"]}
+                for name, _, phase in phases
+            ],
+        }
         status = "complete"
-    refined = _verified_refinement_result(primary, refined, policy)
-    comparison = _refinement_comparison(primary, refined)
-    conservative, comparison = _conservative_outcome(primary, refined, comparison, task)
-    payload = R.record_bytes(refined)
 
-    auxiliary_config = dict(parent_config)
-    aux_spent = {
-        "candidate_evaluations": 0, "forward_calls": 0, "backward_calls": 0,
-        "generations": 0, "validation_calls": 0, "posted_refinement_evaluations": 1,
-    }
-    auxiliary_config.update({
-        "run_id": auxiliary_id, "refinement_of": record.run_id,
-        "dialect": C.Dialect.RS274.value, "max_step_mm": policy["max_step_mm"],
-        "budgets": {"limits": parent_config["budgets"]["limits"], "spent": aux_spent},
-    })
-    aux_files = {
-        "config.json": R.json_bytes(auxiliary_config),
-        "history.json": R.json_bytes({
-            "stage": "post-pilot-refinement-check", "parent_run_id": record.run_id,
-            "new_evaluation": "RS274 with max_step_mm=0.125 on the exact original NC bytes",
-            "primary_haas_evidence_copied": True, "wall_seconds": elapsed,
-            "thread_environment": {
-                key: os.environ.get(key)
-                for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TAICHI_NUM_THREADS")},
-        }),
-        "motion_plan.json": (directory / "motion_plan.json").read_bytes(),
-        "metrics.json": R.json_bytes({"evaluation": refined.to_dict(),
-                                      "comparison": comparison,
-                                      "conservative_outcome": conservative,
-                                      "refinement_of": record.run_id}),
-        "rs274.nc": raw_nc,
-        "haas.nc": (directory / "haas.nc").read_bytes(),
-        "eval_posted_haas.json": (directory / "eval_posted_haas.json").read_bytes(),
-        "eval_posted.json": (directory / "eval_posted.json").read_bytes(),
-        "eval_posted_rs274.json": payload,
-        "initial_trajectory.npy": (directory / "initial_trajectory.npy").read_bytes(),
-        "trajectory.npy": (directory / "trajectory.npy").read_bytes(),
-        "trajectory_deltas.npy": (directory / "trajectory_deltas.npy").read_bytes(),
-    }
-    source_meta = R.source_metadata(REPOSITORY)
-    auxiliary_record = R.assemble_record(
-        auxiliary_id, task, C.RunStatus.COMPLETE, posting=R.PostingResult(files={}, posted=record.posted),
-        artifact_names=tuple(sorted(aux_files)), source_commit=source_meta["source_commit"],
-        dirty_patch_hash=source_meta["dirty_patch_hash"])
+    screen = _read_phase(task, directory, config, "screen",
+                         evaluated_dir=auxiliary_dir if auxiliary_dir.exists() else directory,
+                         screen_copy=auxiliary_dir.exists(), primary=primary)
     if auxiliary_dir.exists():
-        # _compare_existing_refinement validated the immutable bundle and sidecar hashes.
-        auxiliary_payload = (auxiliary_dir / "run.json").read_bytes()
+        verdict = _read_phase(task, directory, config, "verdict", evaluated_dir=auxiliary_dir, primary=primary)
+        convergence = _read_phase(task, directory, config, "convergence", evaluated_dir=auxiliary_dir)[C.Dialect.RS274]
     else:
-        R.ArtifactWriter().write(str(auxiliary_dir), auxiliary_record, aux_files)
-        auxiliary_payload = (auxiliary_dir / "run.json").read_bytes()
+        all_results = [result for _, _, phase in phases for result in phase["results"]]
+        verdict = {evaluation.dialect: evaluation for evaluation, metadata in all_results
+                   if metadata["role"] == "verdict"}
+        convergence = next(evaluation for evaluation, metadata in all_results
+                           if metadata["role"] == "convergence")
+    screen_delta = _fidelity_deltas(screen[C.Dialect.RS274], verdict[C.Dialect.RS274], task)
+    convergence_delta = _fidelity_deltas(convergence, verdict[C.Dialect.RS274], task)
+    if not auxiliary_dir.exists():
+        aux_config = dict(parent_config, run_id=auxiliary_id, refinement_of=run_id,
+                          protocol="diffcam-posted-fidelity/4",
+                          verdict_step_mm=policy["verdict_step_mm"],
+                          convergence_step_mm=policy["convergence_step_mm"])
+        spent = {"candidate_evaluations": 0, "forward_calls": 0, "backward_calls": 0,
+                 "generations": 0, "validation_calls": 0,
+                 "posted_worker_jobs": sum(item["status"] == "complete" for item in resources["processes"])}
+        aux_config["budgets"] = {"limits": parent_config["budgets"]["limits"], "spent": spent}
+        hist = {"stage": "fine-verdict-and-convergence-posted-evaluations", "parent_run_id": run_id,
+                "resources": resources, "screen_is_diagnostic_only": True}
+        metrics = {
+            "screen_outcomes": {d.value: _evaluation_outcome(value, task) for d, value in screen.items()},
+            "verdict_outcomes": {d.value: _evaluation_outcome(value, task) for d, value in verdict.items()},
+            "screen_to_verdict_rs274": screen_delta,
+            "convergence_to_verdict_rs274": convergence_delta,
+            "resource_record": resources, "refinement_of": run_id,
+        }
+        files = {}
+        for dialect, nc_eval in screen.items():
+            nc_name, eval_name = C.DIALECT_ARTIFACTS[dialect]
+            files[nc_name] = (directory / nc_name).read_bytes()
+            files["screen_" + eval_name] = (directory / eval_name).read_bytes()
+        for dialect, evaluation in verdict.items():
+            files[C.DIALECT_ARTIFACTS[dialect][1]] = R.record_bytes(evaluation)
+        files["eval_convergence_rs274.json"] = R.record_bytes(convergence)
+        files.update({
+            "config.json": R.json_bytes(aux_config), "history.json": R.json_bytes(hist),
+            "metrics.json": R.json_bytes(metrics),
+            "motion_plan.json": (directory / "motion_plan.json").read_bytes(),
+            "eval_posted.json": (directory / "eval_posted.json").read_bytes(),
+            "initial_trajectory.npy": (directory / "initial_trajectory.npy").read_bytes(),
+            "trajectory.npy": (directory / "trajectory.npy").read_bytes(),
+            "trajectory_deltas.npy": (directory / "trajectory_deltas.npy").read_bytes(),
+        })
+        source_meta = R.source_metadata(REPOSITORY)
+        aux_record = R.assemble_record(
+            auxiliary_id, task, C.RunStatus.COMPLETE,
+            posting=R.PostingResult(files={}, posted=record.posted),
+            artifact_names=tuple(sorted(files)), source_commit=source_meta["source_commit"],
+            dirty_patch_hash=source_meta["dirty_patch_hash"])
+        R.ArtifactWriter().write(str(auxiliary_dir), aux_record, files)
 
-    # All new artifacts stay in the auxiliary namespace; never write primary files.
-    refined_path = auxiliary_dir / "eval_posted_rs274_refined.json"
-    if refined_path.exists() and refined_path.read_bytes() != payload:
-        raise RunnerError("existing refined artifact differs; refusing to overwrite it")
-    if not refined_path.exists():
-        R.ArtifactWriter._replace_bytes(refined_path, payload)
+    screen = _read_phase(task, directory, config, "screen", evaluated_dir=auxiliary_dir,
+                         screen_copy=True, primary=primary)
+    verdict = _read_phase(task, directory, config, "verdict", evaluated_dir=auxiliary_dir, primary=primary)
+    convergence = _read_phase(task, directory, config, "convergence", evaluated_dir=auxiliary_dir)[C.Dialect.RS274]
+    screen_delta = _fidelity_deltas(screen[C.Dialect.RS274], verdict[C.Dialect.RS274], task)
+    convergence_delta = _fidelity_deltas(convergence, verdict[C.Dialect.RS274], task)
+    disagreement_fields = screen_delta["changed_outcome_fields"]
     comparison_document = {
-        "primary_run_id": record.run_id, "refined_run_id": auxiliary_id,
-        "comparison": comparison, "conservative_outcome": conservative,
+        "schema": "diffcam-fidelity-comparison/1", "primary_run_id": run_id,
+        "verdict_run_id": auxiliary_id, "screen_to_verdict_rs274": screen_delta,
+        "convergence_to_verdict_rs274": convergence_delta,
+        "role": "diagnostics only; 0.125 mm posted evaluations in both dialects are the sole verdict source",
     }
     comparison_path = auxiliary_dir / "comparison.json"
     comparison_payload = R.json_bytes(comparison_document)
     if comparison_path.exists() and comparison_path.read_bytes() != comparison_payload:
-        raise RunnerError("existing refinement comparison differs; refusing to overwrite it")
+        raise RunnerError("existing fidelity comparison differs; refusing to overwrite it")
     if not comparison_path.exists():
         R.ArtifactWriter._replace_bytes(comparison_path, comparison_payload)
+    links = {}
+    for role, values in (("screen", screen), ("verdict", verdict), ("convergence", {C.Dialect.RS274: convergence})):
+        links[role] = {
+            "max_step_mm": policy[f"{role}_step_mm"],
+            "evaluations": {
+                dialect.value: {
+                    "evaluator_revision": evaluation.evaluator_revision,
+                    "path": f"{auxiliary_id}/{'screen_' if role == 'screen' else ''}{C.DIALECT_ARTIFACTS[dialect][1] if role != 'convergence' else 'eval_convergence_rs274.json'}",
+                    "sha256": C.sha256_bytes(R.record_bytes(evaluation)),
+                } for dialect, evaluation in values.items()
+            },
+        }
     link = {
-        "schema": "diffcam-refinement-link/3",
-        "primary_run_id": record.run_id,
+        "schema": "diffcam-refinement-link/4", "primary_run_id": run_id,
         "primary_run_path": str(directory.relative_to(root)),
         "primary_metrics_sha256": C.sha256_bytes((directory / "metrics.json").read_bytes()),
-        "primary_rs274_evaluation_sha256": C.sha256_bytes(
-            (directory / "eval_posted_rs274.json").read_bytes()),
-        "primary_haas_evaluation_sha256": C.sha256_bytes(
-            (directory / "eval_posted_haas.json").read_bytes()),
+        "primary_rs274_evaluation_sha256": C.sha256_bytes((directory / "eval_posted_rs274.json").read_bytes()),
+        "primary_haas_evaluation_sha256": C.sha256_bytes((directory / "eval_posted_haas.json").read_bytes()),
         "primary_run_json_sha256": C.sha256_bytes((directory / "run.json").read_bytes()),
-        "refined_run_id": auxiliary_id,
-        "refined_artifact_path": str(refined_path.relative_to(auxiliary_root)),
-        "refined_evaluation_sha256": C.sha256_bytes(payload),
-        "auxiliary_record": {"path": str((auxiliary_dir / "run.json").relative_to(auxiliary_root)),
-                             "sha256": C.sha256_bytes(auxiliary_payload)},
+        "verdict_run_id": auxiliary_id,
+        "auxiliary_record": {"path": f"{auxiliary_id}/run.json",
+                             "sha256": C.sha256_bytes((auxiliary_dir / "run.json").read_bytes())},
         "comparison_path": str(comparison_path.relative_to(auxiliary_root)),
         "comparison_sha256": C.sha256_bytes(comparison_payload),
-        "conservative_outcome": conservative,
-        "comparison": comparison,
+        "screen_disagreement_fields": disagreement_fields, "roles": links,
+        "rule": "only 0.125 mm evaluations in both dialects determine pilot verdicts; screen is diagnostic",
+        "resources": resources,
     }
-    link_path = auxiliary_root / f"{record.run_id}-refinement-link.json"
+    link_path = auxiliary_root / f"{run_id}-refinement-link.json"
     if link_path.exists() and _json(link_path) != link:
-        raise RunnerError("existing refinement link differs; refusing to overwrite it")
+        raise RunnerError("existing fidelity link differs; refusing to overwrite it")
     _atomic(link_path, link)
     return {
         "root": root, "run_id": run_id, "refined_run_id": auxiliary_id,
         "primary_config": parent_config, "source_config": config,
-        "source_commit": record.source_commit, "auxiliary_id": auxiliary_id,
         "auxiliary_root": auxiliary_root, "auxiliary_directory": auxiliary_dir,
-        "status": status, "comparison": comparison,
+        "auxiliary_link_path": link_path, "status": status,
+        "screen_disagreement_fields": disagreement_fields,
+        "comparison": screen_delta, "convergence_comparison": convergence_delta,
+        "verdict_evaluations": {d.value: {"path": str(auxiliary_dir / C.DIALECT_ARTIFACTS[d][1]),
+                                           "sha256": C.sha256_bytes(R.record_bytes(e))}
+                               for d, e in verdict.items()},
         "completion_residual_mm3": task.tolerances.completion_residual_mm3,
-        "refined_sha256": C.sha256_bytes(payload),
-        "link": link, "conservative_outcome": conservative,
-        "auxiliary_link_path": link_path,
-        "worker_seconds": time.perf_counter() - created,
+        "resources": resources, "link": link,
+        "worker_seconds": time.perf_counter() - started,
+        "new_spawned_workers": sum(item["status"] == "complete" for item in resources["processes"]),
     }
 
 
@@ -1650,9 +1955,21 @@ def _copy_primary_for_refinement(directory: Path, auxiliary_root: Path):
     return target
 
 
+def _case_fine_evaluations(case, auxiliary_root):
+    task = C.TaskSpec.from_dict(case["primary_config"]["task"])
+    directory = auxiliary_root / case["refined_run_id"]
+    primary = C.loads((case["root"] / case["run_id"] / "eval_posted_rs274.json").read_text())
+    verdict = _read_phase(task, case["root"] / case["run_id"], case["source_config"], "verdict",
+                          evaluated_dir=directory, primary=primary)
+    convergence = _read_phase(task, case["root"] / case["run_id"], case["source_config"],
+                              "convergence", evaluated_dir=directory)[C.Dialect.RS274]
+    return task, verdict, convergence
+
+
 def _audit_refinement_root(outcomes, auxiliary_root):
-    """Expose baseline and refined artifacts through the real benchmark auditor."""
-    tasks, runs, comparisons = {}, {}, []
+    """Audit immutable screen baselines and their two-dialect fine verdicts."""
+    tasks, runs, comparisons, reported = {}, {}, [], {}
+    diagnostic_counts, resources = {}, {}
     seen_methods = set()
     for case in outcomes:
         expected = case["manifest"].runs[case["run_id"]]
@@ -1661,56 +1978,56 @@ def _audit_refinement_root(outcomes, auxiliary_root):
             task_info = dataclasses.replace(
                 task_info, completion_residual_mm3=case["completion_residual_mm3"])
         previous = tasks.get(expected.task_id)
-        if previous is not None and previous.task_hash != task_info.task_hash:
-            raise RunnerError("one task id has different source hashes in a refinement bundle")
+        if previous is not None and previous != task_info:
+            raise RunnerError("one task id has inconsistent typed task/audit information")
         tasks[expected.task_id] = task_info
-        disagreement = bool(case.get("conservative_outcome", {}).get("refinement_disagreement"))
-        method = expected.method if not disagreement else f"{expected.method}-refinement-disagreement"
-        runs[case["run_id"]] = dataclasses.replace(expected, method=method)
+        runs[case["run_id"]] = expected
         _copy_primary_for_refinement(case["root"] / case["run_id"], auxiliary_root)
         aux_id = case["refined_run_id"]
         if aux_id in runs:
-            raise RunnerError(f"duplicate baseline/refinement run identifier: {aux_id}")
-        refined_method = method + "-refinement"
-        runs[aux_id] = audit.ExpectedRun(aux_id, expected.task_id, refined_method, expected.seed)
-        if disagreement:
-            continue
+            raise RunnerError(f"duplicate baseline/verdict run identifier: {aux_id}")
+        if case["auxiliary_directory"] != auxiliary_root / aux_id:
+            raise RunnerError("verdict record points outside its declared auxiliary root")
+        fine_method = expected.method + "-fine-verdict"
+        runs[aux_id] = audit.ExpectedRun(aux_id, expected.task_id, fine_method, expected.seed)
         if expected.method not in seen_methods:
             seen_methods.add(expected.method)
             comparisons.append(audit.ComparisonSpec(
-                name=f"{expected.method} RS274 refinement", method=refined_method,
+                name=f"{expected.method} 1.0-to-0.125 mm fidelity", method=fine_method,
                 baseline=expected.method, dialect=C.Dialect.RS274,
                 metrics=("residual_volume_mm3", "gouge_volume_mm3", "max_surface_error_mm"),
             ))
-    report_flags = {}
-    disagreement_counts = {}
     for case in outcomes:
+        task, verdict, convergence = _case_fine_evaluations(case, auxiliary_root)
         expected = case["manifest"].runs[case["run_id"]]
-        conservative = case.get("conservative_outcome")
-        if not isinstance(conservative, Mapping):
-            raise RunnerError("refinement result lacks conservative eligibility outcomes")
-        report_flags[case["run_id"]] = {
+        fields = case["screen_disagreement_fields"]
+        diagnostic_counts[expected.method] = diagnostic_counts.get(expected.method, 0) + int(bool(fields))
+        paths = {dialect.value: f"{case['refined_run_id']}/{C.DIALECT_ARTIFACTS[dialect][1]}" for dialect in verdict}
+        for dialect, evaluation in verdict.items():
+            path = auxiliary_root / paths[dialect.value]
+            if C.sha256_bytes(path.read_bytes()) != case["verdict_evaluations"][dialect.value]["sha256"]:
+                raise RunnerError(f"fine evaluation hash mismatches the worker link: {case['run_id']}/{dialect.value}")
+        convergence_path = auxiliary_root / case["refined_run_id"] / "eval_convergence_rs274.json"
+        if convergence.discretization["settings"]["max_step_mm"] != 0.25:
+            raise RunnerError("convergence evidence must be RS274 at 0.25 mm")
+        reported[case["run_id"]] = {
             "condition": expected.method, "seed": expected.seed,
-            "safety_pass": conservative["safety_pass"],
-            "geometry_pass": conservative["geometry_pass"],
-            "completion_pass": conservative["completion_pass"],
-            "efficiency_eligible": conservative["efficiency_eligible"],
-            "efficiency_excluded": conservative["excluded_from_efficiency"],
-            "refinement_disagreement": conservative["refinement_disagreement"],
-            "disagreement_fields": conservative["disagreement_fields"],
-            "refined_max_step_mm": 0.125,
-            "refined_evaluation_path": f"{case['refined_run_id']}/eval_posted_rs274_refined.json",
+            "outcomes": {dialect.value: _evaluation_outcome(evaluation, task)
+                         for dialect, evaluation in verdict.items()},
+            "screen_disagreement_fields": fields,
+            "verdict_step_mm": 0.125, "screen_step_mm": 1.0,
+            "convergence_step_mm": 0.25,
+            "verdict_evaluation_paths": paths,
+            "convergence_evaluation_path": f"{case['refined_run_id']}/eval_convergence_rs274.json",
             "auxiliary_record_path": f"{case['refined_run_id']}/run.json",
             "auxiliary_link_path": os.path.relpath(case["auxiliary_link_path"], auxiliary_root),
         }
-        disagreement_counts[expected.method] = (
-            disagreement_counts.get(expected.method, 0)
-            + int(conservative["refinement_disagreement"]))
+        resources[case["run_id"]] = case["resources"]
     manifest = audit.Manifest(tasks=tasks, runs=runs, comparisons=tuple(comparisons))
     manifest_path = auxiliary_root / "manifest.json"
     if manifest_path.exists():
         if audit.load_manifest(manifest_path) != manifest:
-            raise RunnerError("refinement auxiliary manifest differs; refusing mixed audit roots")
+            raise RunnerError("fidelity auxiliary manifest differs; refusing mixed audit roots")
     else:
         _atomic(manifest_path, {
             "schema_version": 1,
@@ -1722,29 +2039,32 @@ def _audit_refinement_root(outcomes, auxiliary_root):
                 {"name": comparison.name, "method": comparison.method,
                  "baseline": comparison.baseline, "dialect": comparison.dialect.value,
                  "metrics": list(comparison.metrics)} for comparison in comparisons],
-            "runner": {"schema": "diffcam-refinement-check/1",
-                       "policy": "baseline copied unchanged; refined RS274 is a named auxiliary method",
+            "runner": {"schema": "diffcam-posted-fidelity/4",
+                       "verdict_source": "both posted dialects at 0.125 mm; screen is diagnostic only",
                        "source_commit": R.source_metadata(REPOSITORY)["source_commit"],
                        "physical_machining_certificate": False},
         })
     reports, audit_result = audit.audit_runs(auxiliary_root, manifest)
     if not audit_result["summary"]["auditor_passed"]:
-        raise RunnerError(f"auxiliary refinement audit failed: {audit_result['summary']}")
+        raise RunnerError(f"auxiliary fidelity audit failed: {audit_result['summary']}")
     aggregate_rows, statistics = audit.aggregate_evaluations(
         manifest, audit_result["_audits_by_id"], bootstrap_replicates=100)
     document = {
+        "schema": "diffcam-fidelity-audit/4",
         "manifest": audit_result["summary"], "records": reports,
         "reporting_policy": {
-            "primary_files": "immutable; auxiliary root holds refinement artifacts and hash links",
-            "efficiency_comparison": "disagreement cases are excluded; conservative outcomes remain visible",
-            "disagreement_audit_namespace": "<condition>-refinement-disagreement, isolated from comparison aggregates",
-            "quantity_comparison": "residual_volume_mm3, gouge_volume_mm3, max_surface_error_mm; cycle time is not silently changed",
+            "primary_files": "immutable; auxiliary root holds fine verdict, screen and convergence evidence",
+            "verdicts": "only both 0.125 mm posted evaluations; never combined with 1.0 mm screen",
+            "efficiency_eligibility": "computed only from the fine typed evaluation of each dialect",
+            "quantity_comparison": "residual_volume_mm3, gouge_volume_mm3, max_surface_error_mm",
+            "convergence": "0.25 mm RS274 point; not a monotonicity/error-bound claim",
         },
-        "reported_outcomes": report_flags,
-        "refinement_disagreement_by_condition": {
-            condition: {"count": count, "refinement_disagreement": count > 0}
-            for condition, count in disagreement_counts.items()
+        "reported_outcomes": reported,
+        "screen_disagreement_by_condition": {
+            condition: {"count": count, "screen_disagreement": count > 0}
+            for condition, count in diagnostic_counts.items()
         },
+        "resources_by_run_id": resources,
         "comparisons": aggregate_rows, "statistics": statistics,
         "case_count": len(outcomes), "baseline_and_refined_records": len(reports),
         "audited_result_paths": [str(case["auxiliary_directory"]) for case in outcomes],
@@ -1753,201 +2073,241 @@ def _audit_refinement_root(outcomes, auxiliary_root):
     return document
 
 
-def _verified_refinement_for_report(root, run_id, auxiliary_root, policy):
-    """Recompute reported outcomes from actual typed evidence and verify every link."""
+def _validate_resource_record(resources, config, expected_nc_hashes, auxiliary_root, *, phase=None,
+                              allow_test_override=False):
+    policy = _refinement_policy(config)
+    if not isinstance(resources, Mapping) or not isinstance(resources.get("processes"), list):
+        raise RunnerError("fidelity record lacks independent process/resource observations")
+    expected_policy = dict(policy, total_posted_rss_ceiling_bytes=(
+        policy["parallel_jobs"] * policy["max_rss_bytes_per_job"]))
+    if resources.get("job_policy") != expected_policy:
+        raise RunnerError("fidelity process policy differs from frozen memory/parallelism limits")
+    _finite_seconds(resources.get("phase_wall_seconds"), "fidelity phase")
+    if phase is None:
+        required = {("verdict", "rs274"), ("verdict", "haas"), ("convergence", "rs274")}
+    else:
+        if phase not in {"screen", "verdict", "convergence"}:
+            raise RunnerError(f"unknown posted resource phase: {phase}")
+        required = {(phase, dialect.value) for dialect in
+                    ((C.Dialect.RS274,) if phase == "convergence" else tuple(C.Dialect))}
+    jobs = resources["processes"]
+    observed = {(item.get("role"), item.get("dialect")) for item in jobs}
+    if len(jobs) != len(required) or observed != required:
+        raise RunnerError("fidelity resources do not cover every required role/dialect job")
+    for item in jobs:
+        role, dialect = item["role"], item["dialect"]
+        if item.get("max_step_mm") != policy[f"{role}_step_mm"]:
+            raise RunnerError("resource record's sampling step differs from the declared role")
+        if item.get("expected_nc_hash") != expected_nc_hashes[dialect]:
+            raise RunnerError("resource record does not bind the actual dialect NC bytes")
+        state = item.get("status")
+        if state == "test_override":
+            if not allow_test_override:
+                raise RunnerError("unmarked in-process override is not subprocess evidence")
+            source = Path(item.get("source", ""))
+            if not source.is_file() or C.sha256_bytes(source.read_bytes()) != item.get("evaluation_sha256"):
+                raise RunnerError("test override result linkage does not match its source hash")
+        elif state == "complete":
+            _positive_int(item.get("worker_pid"), "posted worker PID")
+            peak = _positive_int(item.get("worker_peak_rss_kib"), "posted worker peak RSS")
+            if peak * 1024 > policy["max_rss_bytes_per_job"]:
+                raise RunnerError("recorded posted-worker RSS exceeds its declared cap")
+            evaluator_seconds = _finite_seconds(item.get("evaluator_wall_seconds"), "posted evaluation")
+            process_seconds = _finite_seconds(item.get("process_wall_seconds"), "posted subprocess")
+            if process_seconds + 1e-9 < evaluator_seconds:
+                raise RunnerError("whole posted-process time is shorter than its evaluator call")
+            path = Path(item.get("evaluation_path", "")).resolve()
+            if not path.is_relative_to(auxiliary_root) or not path.is_file():
+                raise RunnerError("posted evaluation path escapes its auxiliary root")
+            if C.sha256_bytes(path.read_bytes()) != item.get("evaluation_sha256"):
+                raise RunnerError("resource result hash differs from the actual posted evaluation")
+        elif state == "reused_typed_evaluation":
+            if item.get("worker_peak_rss_kib") is not None or item.get("worker_pid") is not None:
+                raise RunnerError("reused typed evidence cannot claim a new measured worker/PID")
+            if item.get("evaluator_wall_seconds") is not None or item.get("process_wall_seconds") is not None:
+                raise RunnerError("reused typed evidence cannot supply fresh evaluator or process durations")
+            source = Path(item.get("source", ""))
+            if not source.is_file() or C.sha256_bytes(source.read_bytes()) != item.get("evaluation_sha256"):
+                raise RunnerError("reused typed result linkage does not match its source hash")
+        else:
+            raise RunnerError(f"unknown posted worker status: {state}")
+
+
+def _verified_refinement_for_report(root, run_id, auxiliary_root, config):
+    """Verify schema-4 typed files, both fine verdicts, and convergence evidence."""
     directory, _, _, task, primary, _ = _load_refinement_case(root, run_id)
-    refined_run_id = f"{run_id}-refined"
-    refined_directory = auxiliary_root / refined_run_id
-    refined = _compare_existing_refinement(refined_directory, task,
-                                           directory, (directory / "rs274.nc").read_bytes())
-    refined = _verified_refinement_result(primary, refined, policy)
-    payload = R.record_bytes(refined)
-    refined_path = refined_directory / "eval_posted_rs274_refined.json"
-    if refined_path.read_bytes() != payload:
-        raise RunnerError("named refinement evaluation differs from its typed auxiliary record")
-    comparison = _refinement_comparison(primary, refined)
-    conservative, comparison = _conservative_outcome(primary, refined, comparison, task)
+    auxiliary_id = f"{run_id}-verdict"
+    auxiliary_dir = auxiliary_root / auxiliary_id
+    screen = _read_phase(task, directory, config, "screen", evaluated_dir=auxiliary_dir,
+                         screen_copy=True, primary=primary)
+    verdict = _read_phase(task, directory, config, "verdict", evaluated_dir=auxiliary_dir, primary=primary)
+    convergence = _read_phase(task, directory, config, "convergence", evaluated_dir=auxiliary_dir)[C.Dialect.RS274]
+    screen_delta = _fidelity_deltas(screen[C.Dialect.RS274], verdict[C.Dialect.RS274], task)
+    convergence_delta = _fidelity_deltas(convergence, verdict[C.Dialect.RS274], task)
+    history = _json(auxiliary_dir / "history.json")
+    if not isinstance(history, Mapping) or history.get("stage") != "fine-verdict-and-convergence-posted-evaluations":
+        raise RunnerError("verdict history does not describe the independent fine/convergence phase")
+    resources = history.get("resources")
+    nc_hashes = {dialect.value: C.nc_hash((directory / C.DIALECT_ARTIFACTS[dialect][0]).read_bytes())
+                 for dialect in C.Dialect}
+    _validate_resource_record(resources, config, nc_hashes, auxiliary_root)
+    roles = {}
+    for role, values in (("screen", screen), ("verdict", verdict), ("convergence", {C.Dialect.RS274: convergence})):
+        roles[role] = {
+            "max_step_mm": config["refinement_check"][f"{role}_step_mm"],
+            "evaluations": {
+                dialect.value: {
+                    "evaluator_revision": evaluation.evaluator_revision,
+                    "path": f"{auxiliary_id}/{'screen_' if role == 'screen' else ''}{C.DIALECT_ARTIFACTS[dialect][1] if role != 'convergence' else 'eval_convergence_rs274.json'}",
+                    "sha256": C.sha256_bytes(R.record_bytes(evaluation)),
+                } for dialect, evaluation in values.items()
+            },
+        }
     comparison_document = {
-        "primary_run_id": run_id, "refined_run_id": refined_run_id,
-        "comparison": comparison, "conservative_outcome": conservative,
+        "schema": "diffcam-fidelity-comparison/1", "primary_run_id": run_id,
+        "verdict_run_id": auxiliary_id, "screen_to_verdict_rs274": screen_delta,
+        "convergence_to_verdict_rs274": convergence_delta,
+        "role": "diagnostics only; 0.125 mm posted evaluations in both dialects are the sole verdict source",
     }
     comparison_payload = R.json_bytes(comparison_document)
-    if (refined_directory / "comparison.json").read_bytes() != comparison_payload:
-        raise RunnerError("refinement comparison bytes differ from recomputed typed evidence")
-    link_path = auxiliary_root / f"{run_id}-refinement-link.json"
-    link = _json(link_path)
-    if not isinstance(link, Mapping) or link.get("schema") != "diffcam-refinement-link/3":
-        raise RunnerError(f"refinement link must use schema /3 for conservative completion: {run_id}")
+    if (auxiliary_dir / "comparison.json").read_bytes() != comparison_payload:
+        raise RunnerError("fidelity comparison differs from the actual typed evaluations")
     expected_link = {
-        "schema": "diffcam-refinement-link/3",
-        "primary_run_id": run_id,
+        "schema": "diffcam-refinement-link/4", "primary_run_id": run_id,
         "primary_run_path": str(directory.relative_to(root)),
         "primary_metrics_sha256": C.sha256_bytes((directory / "metrics.json").read_bytes()),
-        "primary_rs274_evaluation_sha256": C.sha256_bytes(
-            (directory / "eval_posted_rs274.json").read_bytes()),
-        "primary_haas_evaluation_sha256": C.sha256_bytes(
-            (directory / "eval_posted_haas.json").read_bytes()),
+        "primary_rs274_evaluation_sha256": C.sha256_bytes((directory / "eval_posted_rs274.json").read_bytes()),
+        "primary_haas_evaluation_sha256": C.sha256_bytes((directory / "eval_posted_haas.json").read_bytes()),
         "primary_run_json_sha256": C.sha256_bytes((directory / "run.json").read_bytes()),
-        "refined_run_id": refined_run_id,
-        "refined_artifact_path": str(refined_path.relative_to(auxiliary_root)),
-        "refined_evaluation_sha256": C.sha256_bytes(payload),
-        "auxiliary_record": {
-            "path": f"{refined_run_id}/run.json",
-            "sha256": C.sha256_bytes((refined_directory / "run.json").read_bytes()),
-        },
-        "comparison_path": f"{refined_run_id}/comparison.json",
+        "verdict_run_id": auxiliary_id,
+        "auxiliary_record": {"path": f"{auxiliary_id}/run.json",
+                             "sha256": C.sha256_bytes((auxiliary_dir / "run.json").read_bytes())},
+        "comparison_path": f"{auxiliary_id}/comparison.json",
         "comparison_sha256": C.sha256_bytes(comparison_payload),
-        "conservative_outcome": conservative,
-        "comparison": comparison,
+        "screen_disagreement_fields": screen_delta["changed_outcome_fields"], "roles": roles,
+        "rule": "only 0.125 mm evaluations in both dialects determine pilot verdicts; screen is diagnostic",
+        "resources": resources,
     }
+    link_path = auxiliary_root / f"{run_id}-refinement-link.json"
+    link = _json(link_path)
+    if not isinstance(link, Mapping) or link.get("schema") != "diffcam-refinement-link/4":
+        raise RunnerError(f"verdict links must use schema /4: {run_id}")
     if link != expected_link:
-        raise RunnerError(f"refinement link does not match actual evidence for {run_id}")
-    return conservative, {
+        raise RunnerError(f"fine verdict link does not match its actual typed evidence: {run_id}")
+    return verdict, screen_delta["changed_outcome_fields"], task, {
         "path": os.path.relpath(link_path, root),
         "sha256": C.sha256_bytes(link_path.read_bytes()),
-    }, task
+    }, resources
 
 
 def _pilot_report(config, root, auxiliary_root, *, bootstrap_replicates=2000):
-    """Produce the pilot table with conservative refinement outcomes, not primary-only ranks."""
+    """Publish pilot verdicts only from fine posted evaluations in both dialects."""
     root = Path(root).resolve()
+    precision = _requested_precision(config, pilot=config.get("task_source", "pilot_pocket") == "pilot_pocket")
     try:
         manifest = audit.load_manifest(root / "manifest.json")
     except (OSError, ValueError) as error:
         raise RunnerError(f"cannot load primary pilot manifest: {error}") from error
     if not _refinement_policy(config)["enabled"]:
+        if config.get("task_source", "pilot_pocket") == "pilot_pocket":
+            raise RunnerError("pilot verdicts require enabled fine refinement; never substitute the primary screen")
         report, _ = audit.generate_report(
-            root, manifest, bootstrap_replicates=bootstrap_replicates)
+            root, manifest, bootstrap_replicates=bootstrap_replicates,
+            required_precision=precision)
         return report
     if auxiliary_root is None:
-        raise RunnerError("enabled refinement requires an auxiliary report root")
+        raise RunnerError("fine verdict evaluation requires an auxiliary root")
     _, auxiliary_root = _safe_refinement_directory(root, Path(auxiliary_root))
-    policy = _refinement_policy(config)
     report_path = auxiliary_root / "refinement-audit.json"
     auxiliary_report = _json(report_path)
     try:
         auxiliary_manifest = audit.load_manifest(auxiliary_root / "manifest.json")
     except (OSError, ValueError) as error:
-        raise RunnerError(f"cannot load auxiliary refinement manifest: {error}") from error
+        raise RunnerError(f"cannot load auxiliary verdict manifest: {error}") from error
     _, auxiliary_audit = audit.audit_runs(auxiliary_root, auxiliary_manifest)
     if not (auxiliary_audit["summary"]["auditor_passed"]
             and auxiliary_audit["summary"]["all_runs_completed"]):
-        raise RunnerError("refinement auxiliary audit is incomplete or invalid")
+        raise RunnerError("fine/screen/convergence auxiliary audit is incomplete or invalid")
     reported = auxiliary_report.get("reported_outcomes") if isinstance(auxiliary_report, Mapping) else None
-    if not isinstance(reported, Mapping) or not reported:
-        raise RunnerError("enabled refinement has no reported conservative outcomes")
+    if auxiliary_report.get("schema") != "diffcam-fidelity-audit/4" or not isinstance(reported, Mapping):
+        raise RunnerError("auxiliary report must contain schema-4 verdicts for both dialects")
     primary_ids = set(reported)
-    required_aux_ids = primary_ids | {f"{run_id}-refined" for run_id in primary_ids}
+    required_aux_ids = primary_ids | {f"{run_id}-verdict" for run_id in primary_ids}
     if (set(auxiliary_manifest.runs) != required_aux_ids
             or auxiliary_report.get("case_count") != len(primary_ids)
             or auxiliary_report.get("baseline_and_refined_records") != 2 * len(primary_ids)
             or auxiliary_report.get("manifest") != auxiliary_audit["summary"]):
-        raise RunnerError("auxiliary refinement report does not reconcile with its actual audit")
+        raise RunnerError("auxiliary verdict report does not reconcile with its actual audit")
     missing = sorted(set(manifest.runs) - primary_ids)
     if missing:
-        raise RunnerError(f"enabled refinement lacks links/reported outcomes for primary runs: {missing}")
-    outcomes = {}
-    links = {}
+        raise RunnerError(f"primary runs have no fine verdict link/report: {missing}")
+    verdicts, diagnostics, links = {}, {}, {}
+    resources = {}
     report_tasks = dict(manifest.tasks)
     completion_sources = {}
     for run_id in sorted(primary_ids):
-        # Additional records in a shared auxiliary root are checked against the
-        # immutable copied baselines, never used to substitute another primary root.
         source_root = root if run_id in manifest.runs else auxiliary_root
         expected = manifest.runs.get(run_id, auxiliary_manifest.runs[run_id])
-        conservative, link, task = _verified_refinement_for_report(
-            source_root, run_id, auxiliary_root, policy)
-        condition = expected.method.removesuffix("-refinement-disagreement")
+        evaluated, fields, task, link, resource = _verified_refinement_for_report(
+            source_root, run_id, auxiliary_root, config)
         expected_reported = {
-            "condition": condition,
-            "seed": expected.seed,
-            "safety_pass": conservative["safety_pass"],
-            "geometry_pass": conservative["geometry_pass"],
-            "completion_pass": conservative["completion_pass"],
-            "efficiency_eligible": conservative["efficiency_eligible"],
-            "efficiency_excluded": conservative["excluded_from_efficiency"],
-            "refinement_disagreement": conservative["refinement_disagreement"],
-            "disagreement_fields": conservative["disagreement_fields"],
-            "refined_max_step_mm": policy["max_step_mm"],
-            "refined_evaluation_path": f"{run_id}-refined/eval_posted_rs274_refined.json",
-            "auxiliary_record_path": f"{run_id}-refined/run.json",
+            "condition": expected.method, "seed": expected.seed,
+            "outcomes": {dialect: _evaluation_outcome(evaluation, task)
+                         for dialect, evaluation in evaluated.items()},
+            "screen_disagreement_fields": fields,
+            "verdict_step_mm": 0.125, "screen_step_mm": 1.0,
+            "convergence_step_mm": 0.25,
+            "verdict_evaluation_paths": {
+                dialect: f"{run_id}-verdict/{C.DIALECT_ARTIFACTS[C.Dialect(dialect)][1]}"
+                for dialect in evaluated},
+            "convergence_evaluation_path": f"{run_id}-verdict/eval_convergence_rs274.json",
+            "auxiliary_record_path": f"{run_id}-verdict/run.json",
             "auxiliary_link_path": f"{run_id}-refinement-link.json",
         }
         if reported[run_id] != expected_reported:
-            raise RunnerError(f"auxiliary reported outcome is not backed by typed evidence: {run_id}")
+            raise RunnerError(f"auxiliary reported verdict is not backed by typed evidence: {run_id}")
         if run_id not in manifest.runs:
             continue
         task_info = report_tasks[expected.task_id]
         if task_info.task_hash != task.task_hash:
-            raise RunnerError(f"primary/refinement task identity mismatch: {run_id}")
-        if task_info.completion_residual_mm3 is None:
-            task_info = dataclasses.replace(
-                task_info,
-                completion_residual_mm3=task.tolerances.completion_residual_mm3)
-            completion_sources[expected.task_id] = "TaskSpec.tolerances.completion_residual_mm3"
-            report_tasks[expected.task_id] = task_info
-        else:
-            completion_sources[expected.task_id] = "primary manifest"
-        outcomes[run_id] = audit.ConservativeOutcome(
-            safety_pass=conservative["safety_pass"],
-            geometry_pass=conservative["geometry_pass"],
-            completion_pass=conservative["completion_pass"],
-            efficiency_eligible=conservative["efficiency_eligible"],
-            refinement_disagreement=conservative["refinement_disagreement"],
-            disagreement_fields=tuple(conservative["disagreement_fields"]),
-        )
+            raise RunnerError(f"primary/fine-verdict task identity mismatch: {run_id}")
+        if task_info.completion_residual_mm3 is not None and task_info.completion_residual_mm3 != task.tolerances.completion_residual_mm3:
+            raise RunnerError(f"primary manifest completion threshold differs from the typed task: {run_id}")
+        report_tasks[expected.task_id] = dataclasses.replace(
+            task_info, completion_residual_mm3=task.tolerances.completion_residual_mm3)
+        completion_sources[expected.task_id] = "TaskSpec.tolerances.completion_residual_mm3"
+        verdicts[run_id] = evaluated
+        diagnostics[run_id] = fields
         links[run_id] = link
-    if set(outcomes) != set(manifest.runs):
-        raise RunnerError("refinement outcomes did not cover every expected primary run")
+        resources[run_id] = resource
+    if set(verdicts) != set(manifest.runs):
+        raise RunnerError("fine typed verdicts did not cover every expected primary run")
     report_manifest = dataclasses.replace(manifest, tasks=report_tasks)
     report, _ = audit.generate_report(
         root, report_manifest, bootstrap_replicates=bootstrap_replicates,
-        reported_outcomes=outcomes)
+        verdict_evaluations=verdicts, screen_disagreements=diagnostics,
+        required_precision=precision)
     report["refinement"]["auxiliary_audit_sha256"] = C.sha256_bytes(report_path.read_bytes())
     report["refinement"]["links_by_run_id"] = links
+    report["refinement"]["resources_by_run_id"] = resources
     report["refinement"]["completion_thresholds_mm3"] = {
-        task_id: task_info.completion_residual_mm3
-        for task_id, task_info in report_tasks.items()
-    }
+        task_id: task_info.completion_residual_mm3 for task_id, task_info in report_tasks.items()}
     report["refinement"]["completion_threshold_sources"] = completion_sources
     return report
 
 
 def _refine_process(config_path, source_root, run_id, auxiliary_root, timeout):
-    """Own exactly one exact-PID refinement worker; no process-pattern kills."""
-    auxiliary_log = Path(auxiliary_root) / "logs"
-    auxiliary_log.mkdir(parents=True, exist_ok=True)
-    log_path = auxiliary_log / f"{run_id}.{time.time_ns()}.log"
-    env = dict(os.environ)
-    env["DIFFCAM_RUNNER_SIMULATOR"] = "0"
-    command = [sys.executable, str(Path(__file__).resolve()), "--config", str(config_path),
-               "--output-dir", str(source_root), "--split", "dev", "--experiment", "pilot",
-               "--only", run_id, "--aux-root", str(auxiliary_root), "--refinement-worker-run"]
+    """Coordinate one case while posted children each own their PID and memory."""
+    config = _normalized_config(config_path)
+    config["experiment"] = "pilot"
+    if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+            or timeout != _refinement_policy(config)["timeout_s"]):
+        raise RunnerError("program-level timeout may only be the frozen posted-job timeout")
     started = time.perf_counter()
-    with log_path.open("x") as stream:
-        process = subprocess.Popen(command, cwd=REPOSITORY, env=env, stdout=stream, stderr=subprocess.STDOUT)
-        try:
-            code = process.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            process.terminate()
-            try:
-                code = process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                code = process.wait()
-    if code:
-        return {"run_id": run_id, "source_root": source_root, "status": "failed",
-                "returncode": code, "log": str(log_path),
-                "elapsed_seconds": time.perf_counter() - started}
-    text = log_path.read_text(encoding="utf-8")
-    for line in reversed(text.splitlines()):
-        if line.startswith("REFINEMENT_RESULT="):
-            result = json.loads(line[len("REFINEMENT_RESULT="):])
-            result.update({"elapsed_seconds": time.perf_counter() - started, "log": str(log_path)})
-            return result
-    return {"run_id": run_id, "source_root": source_root, "status": "failed",
-            "reason": "refinement worker returned no typed result", "returncode": code,
-            "log": str(log_path), "elapsed_seconds": time.perf_counter() - started}
+    result = _refinement_worker(config, source_root, run_id, auxiliary_root)
+    result.update(elapsed_seconds=time.perf_counter() - started,
+                  log=str(result["auxiliary_directory"] / "history.json"))
+    return result
 
 
 def _refinement_driver(config, config_path, primary_roots, only, auxiliary_root):
@@ -1988,7 +2348,7 @@ def _refinement_driver(config, config_path, primary_roots, only, auxiliary_root)
     for item in executable:
         _safe_refinement_directory(item["root"], item["auxiliary_root"])
     completed = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=policy["parallel_jobs"]) as pool:
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         pending = {
             pool.submit(_refine_process, config_path, item["root"], item["run_id"],
                         item["auxiliary_root"], policy["timeout_s"]): item
@@ -2006,6 +2366,7 @@ def _refinement_driver(config, config_path, primary_roots, only, auxiliary_root)
             if str(item["auxiliary_root"]) != str(planned["auxiliary_root"]):
                 raise RunnerError("refinement children must use one declared auxiliary root")
             item["manifest"] = planned["manifest"]
+            item["source_config"] = config
         for item in scheduled:
             if Path(item["auxiliary_directory"]).resolve() != aux_root / item["refined_run_id"]:
                 raise RunnerError("refinement result points outside the declared audit root")
@@ -2023,12 +2384,14 @@ def _refinement_driver(config, config_path, primary_roots, only, auxiliary_root)
                 row[key] = str(row[key])
         reporting_items.append(_refinement_jsonable(row))
     output = {
-        "schema": "diffcam-refinement-check/1", "policy": policy,
+        "schema": "diffcam-posted-fidelity/4", "policy": policy,
         "required_primary_programs": len(work), "scheduled_worker_count": len(executable),
+        "program_level_parallel_jobs": 1,
+        "posted_job_parallel_jobs": policy["parallel_jobs"],
         "status_counts": dict(Counter(item["status"] for item in [*completed, *remaining])),
         "results": reporting_items, "audit": audited,
         "auxiliary_root": str(aux_root),
-        "process_policy": "independent subprocesses, at most two; exact child PID timeout handling",
+        "process_policy": "one program coordinator; at most two independent posted children, exact IDs, timeout and peak-RSS limits",
         "thread_environment": {
             key: os.environ.get(key)
             for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TAICHI_NUM_THREADS")
@@ -2173,6 +2536,7 @@ def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path)
                 raise RunnerError("real pilot dry-run needs actual timing evidence")
             if timing.get("task_hash") != task.task_hash:
                 raise RunnerError("timing evidence task identity differs from the actual pilot task")
+            _validate_production_timing_evidence(config, timing, task)
         costs = _pecent(dict(config, timing_evidence=timing) if timing is not None else config, entries)
         refinement = _refinement_projection(config, entries, timing, root)
         costs_with_total = {"planned_run_count": len(entries), "costs": costs,
@@ -2339,7 +2703,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return _run_parent(config, args, root)
     except KeyboardInterrupt:
         raise
-    except (RunnerError, B.BlackBoxError) as error:
+    except (RunnerError, B.BlackBoxError, audit.AuditInputError) as error:
         print(f"benchmark runner failed: {error}", file=sys.stderr)
         return 2
     except subprocess.TimeoutExpired as error:

@@ -77,9 +77,61 @@ def parameterization_metadata(parameterization: Any) -> Dict[str, Any]:
     return result
 
 
+def simulator_array(simulator: Any, values: Any) -> np.ndarray:
+    """Convert tool-motion inputs to the simulator's declared NumPy float dtype."""
+    precision = getattr(simulator, "precision", None)
+    if precision not in ("f32", "f64"):
+        raise ValueError("tool-motion input requires declared simulator precision f32 or f64")
+    return np.asarray(values, dtype=np.float64 if precision == "f64" else np.float32)
+
+
+def simulator_precision_metadata(simulator: Any, *, requested_precision: str | None = None) -> Optional[Dict[str, Any]]:
+    """Validate the complete runtime precision identity, without inventing it for test doubles.
+
+    ``requested_precision`` makes the real metadata API mandatory. The optional legacy path
+    leaves a missing API explicit as ``None`` for non-simulator mathematical fixtures.
+    """
+    if requested_precision not in (None, "f32", "f64"):
+        raise ValueError("requested simulator precision must be 'f32' or 'f64'")
+    producer = getattr(simulator, "precision_metadata", None)
+    if not callable(producer):
+        if requested_precision is not None:
+            raise ValueError("requested simulator precision requires the real precision_metadata API")
+        return None
+    metadata = producer()
+    if not isinstance(metadata, Mapping):
+        raise ValueError("simulator precision_metadata must return a JSON-safe mapping")
+    payload = json.loads(json.dumps(dict(metadata), allow_nan=False))
+    policy = payload.get("policy")
+    schema = "simulator-precision-identity/1"
+    if payload.get("schema_version") != schema or not isinstance(policy, dict):
+        raise ValueError("unrecognized simulator precision identity")
+    requested = payload.get("requested_precision")
+    actual = payload.get("runtime_default_fp")
+    if requested not in ("f32", "f64"):
+        raise ValueError("simulator requested precision must be f32 or f64")
+    if requested_precision is not None and requested != requested_precision:
+        raise ValueError(f"simulator precision mismatch: requested {requested_precision}, metadata requested {requested}")
+    if getattr(simulator, "precision", None) != requested or actual != requested:
+        raise ValueError("simulator precision mismatch: requested, runtime and declared precision differ")
+    if policy.get("default_fp") != requested or payload.get("declared_default_fp") != requested:
+        raise ValueError("simulator precision policy/default_fp mismatch")
+    if payload.get("backend_arch") is None or not isinstance(payload.get("backend_arch"), str):
+        raise ValueError("simulator precision identity requires the actual runtime backend")
+    if (policy.get("field_scope") != "all_float_fields"
+            or policy.get("kernel_scope") != "all_float_kernels_and_adjoints"):
+        raise ValueError("simulator precision must cover all float fields, kernels and adjoints")
+    identity = payload.pop("precision_identity_sha256", None)
+    expected = C.content_hash(payload)
+    if not isinstance(identity, str) or identity != expected:
+        raise ValueError("simulator precision identity hash mismatch")
+    payload["precision_identity_sha256"] = identity
+    return payload
+
+
 def build_run_config(run_id: str, task: C.TaskSpec, motion: C.MotionPlan, *, seed: int,
                      parameterization: Any, objective: Any, budgets: Mapping[str, Any],
-                     repository: str | Path) -> Dict[str, Any]:
+                     repository: str | Path, simulator: Any = None) -> Dict[str, Any]:
     """Required configuration evidence; no runtime-only random hidden state."""
     if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
         raise ValueError("seed must be a non-negative integer")
@@ -92,6 +144,11 @@ def build_run_config(run_id: str, task: C.TaskSpec, motion: C.MotionPlan, *, see
         "seed": seed, "parameterization": parameterization_metadata(parameterization),
         "objective": objective, "budgets": dict(budgets),
     }
+    if simulator is not None:
+        precision = simulator_precision_metadata(simulator)
+        if precision is None:
+            raise ValueError("run configuration requires the simulator precision_metadata API")
+        config["simulator"] = precision
     config.update(source_metadata(repository))
     json_bytes(config)  # finite/serializable boundary before artifacts are committed.
     return config

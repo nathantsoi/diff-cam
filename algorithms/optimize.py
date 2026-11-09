@@ -31,18 +31,20 @@ def optimize(args):
         raise FileExistsError(f"Choose a new output directory: {args.output}")
     rng = np.random.default_rng(args.seed)
     if args.initial is not None:
-        path = np.load(args.initial).astype(np.float32)
+        path = R.simulator_array(args, np.load(args.initial))
         if path.ndim != 2 or path.shape[1] != 3 or len(path) < 3 or not np.isfinite(path).all():
             raise ValueError("initial must contain finite (N >= 3, 3) positions")
         start, deltas = path[0], np.diff(path, axis=0)
     else:
         # Small random moves are a wiring demo, not a CAM initialization.
-        start = np.array([0.15, 0.15, 0.85], dtype=np.float32)
-        deltas = rng.normal(0, 0.025, (args.steps, 3)).astype(np.float32)
-    ti.init(arch=ti.cpu if args.cpu else ti.gpu, offline_cache=False)
+        start = R.simulator_array(args, [0.15, 0.15, 0.85])
+        deltas = R.simulator_array(args, rng.normal(0, 0.025, (args.steps, 3)))
+    ti.init(arch=ti.cpu if args.cpu else ti.gpu, offline_cache=False,
+            default_fp=ti.f64 if args.precision == "f64" else ti.f32)
     sim = CSGSimulatorDelta(resolution=args.resolution, max_steps=len(deltas),
                             stock_size_in=(1, 1, 1), target_shape=args.target,
-                            tool_start=tuple(start), dt=args.dt, init_taichi=False)
+                            tool_start=tuple(start), dt=args.dt, init_taichi=False,
+                            precision=args.precision)
     sim.tool_radius[None] = 3.175
     sim.tool_height[None] = 25.0
     sim.set_target_params(radius_mm=9.0, height_mm=18.0, half_size_mm=9.0)
@@ -54,7 +56,7 @@ def optimize(args):
     for iteration in range(args.iters + 1):
         k = args.k_start + (args.k_end - args.k_start) * iteration / args.iters
         sim.k[None] = k
-        sim.tool_delta.from_numpy(deltas)
+        sim.tool_delta.from_numpy(R.simulator_array(sim, deltas))
         with ti.ad.Tape(loss=sim.loss):
             sim.forward(len(deltas) + 1)
         loss = float(sim.loss[None])
@@ -89,7 +91,8 @@ def optimize(args):
     (args.output/'history.json').write_text(json.dumps(history, indent=2)+'\n')
     config = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
     config.update(stock_size_in=[1, 1, 1], tool_radius_mm=3.175, tool_height_mm=25.0,
-                  target_radius_mm=9.0, target_height_mm=18.0, target_half_size_mm=9.0)
+                  target_radius_mm=9.0, target_height_mm=18.0, target_half_size_mm=9.0,
+                  simulator=R.simulator_precision_metadata(sim))
     (args.output/'args.json').write_text(json.dumps(config, indent=2)+'\n')
     for post in ('rs274', 'haas'):
         (args.output/f'{post}.nc').write_text(trajectory_to_gcode(best[2], MachineConfig(stock_size_in=(1,1,1)), post=post))
@@ -102,6 +105,7 @@ def main():
     p.add_argument('--initial', type=Path, help='CAM seed trajectory (.npy); otherwise random smoke initialization')
     p.add_argument('--target', choices=['sphere', 'cylinder', 'box', 'pyramid', 'sphere_hole', 'sphere_bowl'], default='sphere')
     p.add_argument('--steps', type=int, default=16)
+    p.add_argument('--precision', choices=['f32', 'f64'], default='f64')
     p.add_argument('--iters', type=int, default=20)
     p.add_argument('--resolution', type=int, default=16)
     p.add_argument('--seed', type=int, default=1)
@@ -277,6 +281,7 @@ def _write_adam_checkpoint(path: Path, state: _AdamState, evaluator: Any) -> str
         "schema": "diffcam-adam-checkpoint/1", "contract_schema": C.SCHEMA_VERSION,
         "run_id": state.run_id, "seed": state.seed, "optimizer_config": dataclasses.asdict(state.config),
         "optimizer_config_hash": state.config_hash, "task_setup_hash": B._setup_signature(evaluator, "smooth"),
+        "simulator_precision": R.simulator_precision_metadata(getattr(evaluator, "sim", None)),
         "budget": dataclasses.asdict(state.budget),
         "theta": state.theta.tolist(), "moments": state.moments.tolist(), "velocities": state.velocities.tolist(),
         "initial_theta": state.initial_theta.tolist(),
@@ -307,6 +312,8 @@ def _read_adam_checkpoint(path: Path, evaluator: Any) -> Mapping[str, Any]:
     expected_hash = payload.pop("payload_hash")
     if expected_hash != C.content_hash(payload):
         raise B.BlackBoxError("Adam checkpoint checksum mismatch")
+    if document.get("simulator_precision") != R.simulator_precision_metadata(getattr(evaluator, "sim", None)):
+        raise B.BlackBoxError("Adam checkpoint simulator-precision identity differs")
     if document["task_setup_hash"] != B._setup_signature(evaluator, "smooth"):
         raise B.BlackBoxError("Adam checkpoint task/setup identity differs")
     if document.get("seed") is None or not isinstance(document["seed"], int):
@@ -519,6 +526,7 @@ def emit_adam_artifacts(result: AdamResult, evaluator: Any, run_dir: str | Path,
     posting = R.post_motion(task, motion)
     config = R.build_run_config(result.run_id, task, motion, seed=result.seed,
                                 parameterization=evaluator.parameterization, objective=evaluator.spec,
+                                simulator=evaluator.sim,
                                 budgets={
                                     "limits": dataclasses.asdict(result.budget),
                                     "spent": {"candidate_evaluations": result.evaluations,

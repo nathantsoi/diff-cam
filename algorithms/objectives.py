@@ -18,7 +18,7 @@ import numpy as np
 import taichi as ti
 
 from benchmarks import contracts as C
-from .run_artifacts import ComputeLedger
+from .run_artifacts import ComputeLedger, simulator_array, simulator_precision_metadata
 
 
 @dataclass(frozen=True)
@@ -93,7 +93,8 @@ class CandidateEvaluator:
 
     def __init__(self, task: C.TaskSpec, motion: C.MotionPlan, parameterization: Any,
                  simulator: Any, *, spec: Optional[ObjectiveSpec] = None,
-                 ledger: Optional[ComputeLedger] = None, seed: int = 0) -> None:
+                 ledger: Optional[ComputeLedger] = None, seed: int = 0,
+                 requested_precision: Optional[str] = None) -> None:
         if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
             raise ValueError("seed must be a non-negative integer")
         motion.validate_for_task(task)
@@ -102,6 +103,7 @@ class CandidateEvaluator:
             raise ValueError("prototype requires machine-frame exact-stop typed motion")
         self.parameterization = parameterization
         self.sim = simulator
+        self.simulator_precision = simulator_precision_metadata(simulator, requested_precision=requested_precision)
         self.spec = spec or ObjectiveSpec()
         self._evaluation_k_override: Optional[float] = None
         # Optional, per-run signed field offset in INTERNAL VOXEL SDF units.
@@ -271,7 +273,7 @@ class CandidateEvaluator:
             # Official reset preserves configured fields. Apply this explicitly
             # once more for any alternative reset implementation, not ti.init.
             self.sim.loss_shift[None] = self._loss_shift_voxels()
-            self.sim.tool_delta.from_numpy(normalized.astype(np.float32))
+            self.sim.tool_delta.from_numpy(simulator_array(self.sim, normalized))
             forward_calls = 1
             if objective_kind == "smooth":
                 if with_gradient:

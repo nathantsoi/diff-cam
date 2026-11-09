@@ -14,6 +14,7 @@
   "exclusion_tolerance_mm3": 0.0,
   "require_grid_exclusion_tolerance": true,
   "arch": "cpu",
+  "precision": "f64",
   "notes": "T4.1b real full-pocket pilot. Coordinator approves and launches the seven-run campaign. Use --dry-run for measured 0.25mm timings; not a physical machining certificate.",
   "seeds": [0, 1],
   "candidate_evaluations": 4,

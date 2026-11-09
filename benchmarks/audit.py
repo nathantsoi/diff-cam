@@ -1232,6 +1232,56 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _campaign_precision(manifest, audits, required_precision):
+    """Verify the per-run simulator identity before a precision cohort is compared."""
+    found, issues = {}, []
+    for run_id in manifest.runs:
+        audited = audits.get(run_id)
+        if (audited is None or audited.record is None
+                or "config.json" not in audited.record.artifacts):
+            issues.append(_issue("missing_simulator_precision_artifact",
+                                 f"{run_id}: required config.json is absent or invalid"))
+            continue
+        path = _artifact_path(Path(audited.run_dir), "config.json")
+        try:
+            config = _json_load(path)
+            metadata = config.get("simulator") if isinstance(config, Mapping) else None
+            if not isinstance(metadata, Mapping) or metadata.get("schema_version") != "simulator-precision-identity/1":
+                raise AuditInputError("config.simulator must use simulator-precision-identity/1")
+            metadata = dict(metadata)
+            signature = metadata.pop("precision_identity_sha256", None)
+            if not _valid_hash(signature) or signature != C.content_hash(metadata):
+                raise AuditInputError("precision_identity_sha256 does not match the recorded identity")
+            precision = metadata.get("requested_precision")
+            if precision not in ("f32", "f64"):
+                raise AuditInputError("requested_precision must be f32 or f64")
+            if (metadata.get("declared_default_fp") != precision
+                    or metadata.get("runtime_default_fp") != precision):
+                raise AuditInputError("requested and actual runtime precision differ")
+            policy = metadata.get("policy")
+            if not isinstance(policy, Mapping) or policy.get("default_fp") != precision:
+                raise AuditInputError("precision policy/default_fp mismatch")
+            if (policy.get("field_scope") != "all_float_fields"
+                    or policy.get("kernel_scope") != "all_float_kernels_and_adjoints"):
+                raise AuditInputError("precision does not cover all float fields, kernels and adjoints")
+            if not isinstance(metadata.get("backend_arch"), str) or not metadata["backend_arch"]:
+                raise AuditInputError("actual runtime backend is missing")
+            if precision != required_precision:
+                raise AuditInputError(
+                    f"precision {precision!r} differs from the required campaign {required_precision!r}")
+            metadata["precision_identity_sha256"] = signature
+            found[run_id] = metadata
+        except (OSError, ValueError, TypeError, AuditInputError) as error:
+            issues.append(_issue("invalid_simulator_precision", f"{run_id}: {error}", str(path)))
+    return {
+        "required_precision": required_precision,
+        "declaration_source": "required config.json['simulator'] in every expected run",
+        "metadata_by_run_id": found,
+        "issues": issues,
+        "evidence_complete": not issues and len(found) == len(manifest.runs),
+    }
+
+
 def generate_report(
     runs_root: str | Path,
     manifest_value: Mapping[str, Any] | str | Path | Manifest,
@@ -1241,8 +1291,11 @@ def generate_report(
     confidence: float = 0.95,
     verdict_evaluations=None,
     screen_disagreements=None,
+    required_precision=None,
 ) -> tuple[dict[str, Any], Manifest]:
     manifest = manifest_value if isinstance(manifest_value, Manifest) else load_manifest(manifest_value)
+    if required_precision not in (None, "f32", "f64"):
+        raise AuditInputError("required campaign precision must be f32 or f64")
     fine = _validate_verdict_evaluations(verdict_evaluations, manifest)
     diagnostics = {}
     if fine is not None:
@@ -1263,6 +1316,12 @@ def generate_report(
             row["verdict_evaluations"] = {}
             for dialect, evaluation in fine[row["run_id"]].items():
                 task_info = manifest.tasks[expected.task_id]
+                primary_evaluation = audit["_audits_by_id"][row["run_id"]].dialects[dialect].evaluation
+                if (not isinstance(primary_evaluation, C.EvaluationResult)
+                        or primary_evaluation.nc_hash != evaluation.nc_hash):
+                    raise AuditInputError(f"run {run_id}, {dialect}: fine exact-NC identity differs from the primary")
+                if primary_evaluation.tool_setup_hash != evaluation.tool_setup_hash:
+                    raise AuditInputError(f"run {run_id}, {dialect}: fine tool setup identity differs from the primary")
                 row["verdict_evaluations"][dialect] = {
                     "evaluator_revision": evaluation.evaluator_revision,
                     "nc_hash": evaluation.nc_hash,
@@ -1273,8 +1332,15 @@ def generate_report(
                     "efficiency_eligible": _outcome_value(evaluation, task_info, "efficiency_eligible"),
                     "max_step_mm": evaluation.discretization["settings"]["max_step_mm"],
                 }
+    precision_evidence = None
+    audits_by_id = audit.pop("_audits_by_id")
+    if required_precision is not None:
+        precision_evidence = _campaign_precision(manifest, audits_by_id, required_precision)
+        if not precision_evidence["evidence_complete"]:
+            reasons = "; ".join(issue["message"] for issue in precision_evidence["issues"])
+            raise AuditInputError(f"campaign precision evidence is incomplete; no verdict report is published: {reasons}")
     comparisons, policy = aggregate_evaluations(
-        manifest, audit.pop("_audits_by_id"),
+        manifest, audits_by_id,
         bootstrap_seed=bootstrap_seed, bootstrap_replicates=bootstrap_replicates,
         confidence=confidence, verdict_evaluations=fine,
     )
@@ -1286,6 +1352,11 @@ def generate_report(
         "all_runs_completed": audit["summary"]["all_runs_completed"],
         "policy": policy, "runs": run_reports, "comparisons": comparisons,
     }
+    if precision_evidence is not None:
+        report["precision"] = precision_evidence
+        report["summary"]["precision_evidence_complete"] = precision_evidence["evidence_complete"]
+        report["evidence_complete"] = bool(report["evidence_complete"] and precision_evidence["evidence_complete"])
+        report["summary"]["evidence_complete"] = report["evidence_complete"]
     if fine is not None:
         counts = Counter({manifest.runs[run_id].method: 0 for run_id in fine})
         for run_id, fields in diagnostics.items():
