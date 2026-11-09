@@ -59,11 +59,11 @@
    "note": "merged; parse_motion_plan/post_motion_plan typed APIs; G54/G53/G43/arcs(3 planes, R, turns)/units/G91; G28/G30, G64, comp, canned cycles rejected; 57 focused tests; coordinator independently re-verified canonical machine coords + both-dialect round trip. Legacy parse_gcode kept for old callers (not an evaluation entry point)."
   },
   "T1.3": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T1.3a-camotics-metrics",
    "blocker": null,
-   "next": null,
+   "next": "T1.3a (CAMotics adapter + metrics) now; T1.3b production posted evaluator after T1.2",
    "note": "CAMotics camsim 1.2.0 runs headless in Docker (docker/camotics); slot smoke converges with resolution (+594 -> +78 mm3 at 0.25 -> 0.1 mm), padding bias to be quantified in T1.3."
   },
   "T2.0": {
@@ -152,12 +152,12 @@
    "next": null
   },
   "T5.0": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-3",
    "branch": "task/T5.0-external-compat",
    "blocker": null,
    "next": null,
-   "note": "early warnings (worker-3): CNC-Net ba0652f has no NC/waypoint export, no tracked checkpoints/LICENSE -> executable comparison likely an incompatible/adapted subset; native reconstruction viable. Titan-M1.step is inch AP214, no license/setup record; no STEP backend in env. CNCGEN payload verified; reference paths not predictions. | Read-only recon complete 2026-11-08 (reply file); Titan parts are local parts/Titan-M*.step with no source/license record; STEP backend unavailable. | CNC-Net pinned stack BLOCKED: torch 1.12.1+cu113 lacks sm_120 (RTX 5070 Ti); pytorch3d missing. Coordinator allowed one time-boxed disclosed 'modernized stack' attempt (unchanged model code)."
+   "note": "merged: matrix + json. CNC-Net original stack BLOCKED (sm_120); 'CNC-Net @ba0652f on modernized stack' one-step smoke PASSED (IoU 0.424, 22.5s) \u2014 not faithful reproduction; executable NC mapping unsupported natively. Titan BLOCKED (no STEP backend, no provenance/license). CNCGEN preview descriptive only."
   },
   "T5.1": {
    "status": "planned",
@@ -222,6 +222,14 @@
    "blocker": null,
    "next": null,
    "note": "merged; certification needs evaluator band (sqrt3*v/2 + temporal) < rapid_penetration_mm \u2014 T1.3 must pick resolution accordingly (coordinator check: retract certifies at tol 0.5, unknown at 0.25 with v=0.25)"
+  },
+  "T5.0b": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T5.0b-cncnet-env",
+   "blocker": null,
+   "next": null,
+   "note": "persist modernized CNC-Net recipe (was /tmp only)"
   }
  }
 }
