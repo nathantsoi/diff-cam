@@ -339,6 +339,14 @@
    "blocker": null,
    "next": null,
    "note": "shift via sim per-voxel field, field-gap calibration in voxel SDF units, leak tests, C2"
+  },
+  "T3.3b": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T3.3b-adfd",
+   "blocker": null,
+   "next": null,
+   "note": "SYSTEMATIC AD/FD mismatch: idx2 AD -0.4785 vs FD -0.4990 (4.1%, eps-independent), idx35 sign flip; per-component bisect (sigmoid clamp, ti.max carve, stop-gradients, f32 backward). Affects Adam/T3.4 step quality."
   }
  }
 }
