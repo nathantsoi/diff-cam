@@ -52,6 +52,18 @@ def _named(root, run_id):
     return C.loads((root / run_id / "run.json").read_text())
 
 
+def test_frozen_config_selects_real_grid_and_declared_zero_tolerance():
+    config = json.loads(CONFIG.read_text())
+    assert config["task_source"] == "pilot_pocket"
+    assert config["grid_pitch_mm"] == 0.25
+    assert config["exclusion_tolerance_mm3"] == 0.0
+    assert config["require_grid_exclusion_tolerance"] is True
+    assert config["arch"] == "cpu"
+    assert "estimated_seconds_per_candidate" not in config
+    assert isinstance(config["timeout_s"], (int, float)) and config["timeout_s"] > 0
+    assert isinstance(config["timing_timeout_s"], (int, float)) and config["timing_timeout_s"] > 0
+
+
 def test_condition_ids_are_deterministic_and_manifest_nominal_once(tmp_path):
     config = _base()
     config["experiment"] = "pilot"
