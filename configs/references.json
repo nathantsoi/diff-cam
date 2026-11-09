@@ -1,0 +1,219 @@
+{
+  "schema_version": 1,
+  "retrieval_date": "2026-11-08",
+  "notes": [
+    "Source pins are immutable. Reacquisition fetches a missing exact commit, never a moving branch or HEAD.",
+    "Optional references are discovery entries only. Pin and review their licenses and payload hashes before selecting them.",
+    "No checkpoint or bulk dataset download is performed by the initial source-only subset. Payloads already tracked in a source checkout are separately hashed. Empty artifacts arrays are explicit, not a claim that upstream provides no data."
+  ],
+  "references": [
+    {
+      "name": "pycma",
+      "url": "https://github.com/CMA-ES/pycma.git",
+      "revision": "48a821b166eceef544847a0b9b66113ac26f1530",
+      "source_ref": "refs/tags/r4.5.0 (peeled commit; tag object fb48e983f6f244fb84aff473d78765df2959f152)",
+      "checkout": "external/pycma",
+      "optional": false,
+      "status": "acquired",
+      "retrieval_date": "2026-11-08",
+      "license": {
+        "path": "LICENSE",
+        "additional_paths": [
+          "cma/LICENSE"
+        ],
+        "spdx": "BSD-3-Clause"
+      },
+      "artifacts": [],
+      "reproduction": {
+        "status": "smoke-passed",
+        "details": "Locked core optim extra imported cma 4.5.0 and minimized a two-dimensional quadratic to f=3.89226423686e-13 with seed 7 (402 evaluations). The smoke used the locked wheel, not an import from the source checkout; T3.1 adapter validation remains unattempted."
+      }
+    },
+    {
+      "name": "cnc-net",
+      "url": "https://github.com/myavartanoo/CNC-Net_PyTorch.git",
+      "revision": "ba0652f9941686058c07c98617b9748e72f5f019",
+      "source_ref": "refs/heads/main at resolution time",
+      "checkout": "external/cnc-net",
+      "optional": false,
+      "status": "acquired",
+      "retrieval_date": "2026-11-08",
+      "license": {
+        "path": null,
+        "spdx": "missing/unclear",
+        "details": "No LICENSE, COPYING, or NOTICE file is present at the pinned revision; public source availability is not a redistribution license."
+      },
+      "artifacts": [
+        {
+          "name": "cnc-net-sample-0-off",
+          "kind": "sample-dataset",
+          "path": "external/cnc-net/samples/0.off",
+          "url": "https://raw.githubusercontent.com/myavartanoo/CNC-Net_PyTorch/ba0652f9941686058c07c98617b9748e72f5f019/samples/0.off",
+          "status": "acquired-from-source-checkout",
+          "retrieval_date": "2026-11-08",
+          "sha256": "8e80d539b1c593501a55bd9f7b3c6b9099ce57fdb556e298b0bd3b744f690b7c",
+          "size_bytes": 1020767
+        }
+      ],
+      "reproduction": {
+        "status": "blocked",
+        "details": "Native run not attempted: the README requires Python 3.8.18, PyTorch 1.12.1, Open3D, PyTorch3D, pysdf, and CUDA; no isolated CNC-Net environment exists. Only samples/0.off is supplied; no pretrained checkpoint or dataset-download URL is present at this revision. T5.0 must establish the native dependency and data path."
+      }
+    },
+    {
+      "name": "camotics",
+      "url": "https://github.com/CauldronDevelopmentLLC/CAMotics.git",
+      "revision": "e84665f2fa9d1151f03282ac7e01320bc65e015b",
+      "source_ref": "refs/heads/master at resolution time",
+      "checkout": "external/camotics",
+      "optional": false,
+      "status": "acquired",
+      "retrieval_date": "2026-11-08",
+      "license": {
+        "path": "LICENSE",
+        "additional_paths": [
+          "COPYING"
+        ],
+        "spdx": "GPL-2.0-or-later"
+      },
+      "artifacts": [],
+      "reproduction": {
+        "status": "blocked",
+        "details": "No camotics binary is on PATH and no build was attempted. The README requires C!/cbang, Qt5, SCons, and V8. This box has no scons or qmake on PATH, pkg-config cannot find Qt5Core/Qt5WebSockets/Qt5OpenGL, CBANG_HOME is unset, and the checkout has no cbang tree. A qualified external build/install is required for T1.3; no apt installation was performed."
+      }
+    },
+    {
+      "name": "deepms-datagen",
+      "url": "https://github.com/jaimemaqueda/DeepMS-DataGen.git",
+      "revision": null,
+      "source_ref": null,
+      "checkout": "external/deepms-datagen",
+      "optional": true,
+      "status": "not-acquired",
+      "retrieval_date": null,
+      "license": {
+        "path": null,
+        "spdx": "missing/unclear"
+      },
+      "artifacts": [],
+      "reproduction": {
+        "status": "not-attempted",
+        "details": "Optional later subset for T5.2; no source or generated dataset acquired."
+      }
+    },
+    {
+      "name": "deepms",
+      "url": "https://github.com/jaimemaqueda/DeepMS.git",
+      "revision": null,
+      "source_ref": null,
+      "checkout": "external/deepms",
+      "optional": true,
+      "status": "not-acquired",
+      "retrieval_date": null,
+      "license": {
+        "path": null,
+        "spdx": "missing/unclear"
+      },
+      "artifacts": [],
+      "reproduction": {
+        "status": "not-attempted",
+        "details": "Optional later subset; no source, checkpoint, or generated sequence acquired."
+      }
+    },
+    {
+      "name": "aagnet",
+      "url": "https://github.com/whjdark/AAGNet.git",
+      "revision": null,
+      "source_ref": null,
+      "checkout": "external/aagnet",
+      "optional": true,
+      "status": "not-acquired",
+      "retrieval_date": null,
+      "license": {
+        "path": null,
+        "spdx": "missing/unclear"
+      },
+      "artifacts": [],
+      "reproduction": {
+        "status": "not-attempted",
+        "details": "Optional later source/dataset-resource index. MFCAD, MFCAD++, and MFInstSeg payload redistribution rights and hashes are not yet established."
+      }
+    },
+    {
+      "name": "opencamlib",
+      "url": "https://github.com/aewallin/opencamlib.git",
+      "revision": null,
+      "source_ref": null,
+      "checkout": "external/opencamlib",
+      "optional": true,
+      "status": "not-acquired",
+      "retrieval_date": null,
+      "license": {
+        "path": null,
+        "spdx": "missing/unclear"
+      },
+      "artifacts": [],
+      "reproduction": {
+        "status": "not-attempted",
+        "details": "Optional later geometry reference; not required by the initial subset."
+      }
+    },
+    {
+      "name": "fusioncut",
+      "url": "https://github.com/bankh/FusionCut.git",
+      "revision": null,
+      "source_ref": null,
+      "checkout": "external/fusioncut",
+      "optional": true,
+      "status": "not-acquired",
+      "retrieval_date": null,
+      "license": {
+        "path": null,
+        "spdx": "missing/unclear"
+      },
+      "artifacts": [],
+      "reproduction": {
+        "status": "not-attempted",
+        "details": "Optional secondary NC evaluator; no source or payload acquired."
+      }
+    },
+    {
+      "name": "cncgen-preview",
+      "url": "https://huggingface.co/datasets/jimmy-zhou/CNCGEN",
+      "revision": null,
+      "source_ref": null,
+      "checkout": "external/cncgen-preview",
+      "optional": true,
+      "status": "not-acquired",
+      "retrieval_date": null,
+      "license": {
+        "path": null,
+        "spdx": "missing/unclear"
+      },
+      "artifacts": [],
+      "reproduction": {
+        "status": "not-attempted",
+        "details": "Optional 20-example preview only, not the full benchmark. Acquire immutable HuggingFace source and payload revisions plus hashes before use."
+      }
+    },
+    {
+      "name": "shac-diffrl",
+      "url": "https://github.com/NVlabs/DiffRL.git",
+      "revision": null,
+      "source_ref": null,
+      "checkout": "external/shac-diffrl",
+      "optional": true,
+      "status": "not-acquired",
+      "retrieval_date": null,
+      "license": {
+        "path": null,
+        "spdx": "missing/unclear"
+      },
+      "artifacts": [],
+      "reproduction": {
+        "status": "not-attempted",
+        "details": "Optional policy-learning reference for T7.1; no source or checkpoint acquired."
+      }
+    }
+  ]
+}
