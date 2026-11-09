@@ -153,7 +153,8 @@
    "owner": "diffcam-worker-3",
    "branch": "task/T3.3-gradient-mechanics",
    "blocker": null,
-   "next": "real study after T4.1b pilot"
+   "next": "real study after pilot; first characterize index-35 AD/FD sign difference",
+   "note": "tooling merged c955b60 (antithetic estimator w/ exact 2N accounting + uncertainty; AD/FD same-objective tooling; cost probe 0.25 mm: 39 fwd/1 bwd/21 hard in 93 s, 1.94 GB). OPEN DIAGNOSTIC: AD vs FD on 4 axes cosine 0.9999996 but L2 discrepancy 0.0205 and index 35 sign flip \u2014 must be characterized (component magnitude vs FD noise floor across eps) before any gradient-mechanics claim."
   },
   "T3.5": {
    "status": "planned",
