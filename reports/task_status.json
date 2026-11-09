@@ -145,7 +145,8 @@
    "owner": "diffcam-worker-1",
    "branch": "task/T3.4-continuation",
    "blocker": null,
-   "next": "dev ablations after T4.1b pilot"
+   "next": "dev ablations after pilot",
+   "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot."
   },
   "T3.3": {
    "status": "in_progress",
