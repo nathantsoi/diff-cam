@@ -60,8 +60,9 @@
    "status": "planned",
    "owner": null,
    "branch": null,
-   "blocker": "CAMotics executable unavailable; decide: Docker build of pinned e84665f vs other independent verifier",
-   "next": null
+   "blocker": null,
+   "next": null,
+   "note": "CAMotics camsim 1.2.0 runs headless in Docker (docker/camotics); slot smoke converges with resolution (+594 -> +78 mm3 at 0.25 -> 0.1 mm), padding bias to be quantified in T1.3."
   },
   "T2.0": {
    "status": "planned",
