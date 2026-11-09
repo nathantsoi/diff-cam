@@ -312,7 +312,8 @@ def test_pilot_post_factory_is_task_bound_and_settings_are_frozen(tmp_path, monk
             calls.append((kind, False))
             return SimpleNamespace(valid=True, objective=1.0, invalid_reason=None)
 
-        def evaluate_candidate_with_gradient(self, theta):
+        def evaluate_candidate_with_gradient(self, theta, candidate_id):
+            assert candidate_id == "timing-smooth_gradient"
             calls.append(("smooth", True))
             return SimpleNamespace(result=SimpleNamespace(valid=True, objective=1.0, invalid_reason=None),
                                    gradient_theta=np.zeros(parameterization.num_params))

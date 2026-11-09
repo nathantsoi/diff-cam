@@ -281,6 +281,15 @@ def _pilot_evaluator(task, motion, parameterization, config, seed):
     sim.tool_cut_height[None] = task.tool.flute_length_mm
     sim.holder_radius[None] = task.tool.holder_radius_mm
     sim.holder_height[None] = task.tool.holder_height_mm
+    # Sampled fields are installed by __init__, but the reusable target grid is
+    # explicitly baked as in the T2.0 examples. Hard CandidateEvaluator reads
+    # this grid, not the raw source array used by source_fields/pointwise loss.
+    sim.bake_target_grid()
+    sim.set_target_volume()
+    with open(target_work.path, "rb") as stream:
+        raw_target = np.load(stream, allow_pickle=False)
+    if not np.array_equal(sim.target.to_numpy() < 0.0, raw_target < 0.0):
+        raise RunnerError("simulator's baked target material mask differs from operation target T")
     return PilotCandidateEvaluator(task, sampled_task, motion, parameterization, sim, config, seed, sources)
 
 
@@ -500,7 +509,7 @@ def _pecent(config: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]) -> 
             other = max(other, 0.0)
             extra["other_worker_seconds"] = other
             estimate = setup + extra["candidate_seconds"] + extra["validation_seconds"] + measured_post + other
-            note = "single real-task child per evaluation mode; workload estimate, not a guarantee"
+            note = "one measured point per evaluation type in one child; workload estimate, not a timing interval or launch permission"
         elif raw is not None:
             estimate = raw * (candidates + validations)
             note = "caller-supplied per-candidate estimate"
@@ -543,7 +552,7 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None):
     ):
         started = time.perf_counter()
         if gradient:
-            evaluated = evaluator.evaluate_candidate_with_gradient(zero)
+            evaluated = evaluator.evaluate_candidate_with_gradient(zero, f"timing-{name}")
             result, gradient_theta = evaluated.result, evaluated.gradient_theta
             if gradient_theta is None or not np.isfinite(gradient_theta).all():
                 raise RunnerError("timing gradient is missing or non-finite")
@@ -774,7 +783,14 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
         "metrics.json": R.json_bytes({"best_candidate": B._candidate_dict(outcome.best),
                                       "termination_reason": outcome.termination_reason,
                                       "invalid_candidates": outcome.invalid_candidates,
-                                      "execution": {"subprocess": os.getpid(), "simulators_in_worker": 1}}),
+                                      "execution": {"subprocess": os.getpid(), "simulators_in_worker": 1,
+                                                    "simulator_tool_start_normalized": (
+                                                        evaluator.sim.tool_start[None].to_list()),
+                                                    "target_grid_material_mask_verified": isinstance(evaluator, PilotCandidateEvaluator),
+                                                    "simulator_geometry_sources": {
+                                                        name: json.loads(C.canonical_json(source))
+                                                        for name, source in getattr(evaluator, "geometry_sources", {}).items()
+                                                    }}}),
         "motion_plan.json": R.record_bytes(motion),
         "initial_trajectory.npy": R.numpy_bytes(initial),
         "trajectory.npy": R.numpy_bytes(best),
