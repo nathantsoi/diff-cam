@@ -93,11 +93,12 @@
    "note": "T2.2 + T2.2b merged. Pilot pocket: T = P \u222a four r=2 mm corner fillets; excluded 18.0 mm\u00b3 grid-exact (continuous 20.60 diagnostic); 0.25 mm pitch. Nominal (line-only seed): production safety+geometry True, residual/gouge/surface 0 (coordinator re-verified rs274). Retained: runs/retained/pilot-pocket-20261109-t22b-exact-exclusion. COST: one posted evaluation \u2248 1085 s on CPU at 0.25 mm -> pilot budget concern."
   },
   "T2.3": {
-   "status": "ready",
+   "status": "in_progress",
    "owner": "diffcam-worker-1",
    "branch": null,
    "blocker": null,
-   "next": "after T2.2b; generator now, counts after pilot"
+   "next": "set counts after T4.1b pilot",
+   "note": "Bootstrap merged d5e320b: 3 families (facing/asymmetric stock, pocket-island contour, variable width/depth) x 1 dev + 1 test; T \u2287 P only finite-radius corner fillets, grid-exact exclusion tol 0; all 12 production evals safety+geometry True; audit clean. Seed generator gained a generic cap-clearing pass after a qualification failure (task unchanged, failure retained). Suite COUNTS pending pilot cost (target 3 dev / 10 test per family)."
   },
   "T3.0": {
    "status": "complete",
