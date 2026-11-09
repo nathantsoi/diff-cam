@@ -245,12 +245,12 @@
    "note": "merged; failures counted as known 0, drop counts, complete_data flag, relative tie tol, pooled CI for singleton strata, Holm dedupe; verified with reviewer repros"
   },
   "T1.0c": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-2",
    "branch": "task/T1.0c-reference-safety",
    "blocker": null,
    "next": null,
-   "note": "discriminator: zero-length segments skip holder screen; rapid penetration bound not an upper bound under grid phase (both reproduced, false safety pass)"
+   "note": "merged; whole-cell stock bounds for safety, zero-length screen unified, conservative lower-bound clearance metrics; T1.3 must inherit whole-cell semantics"
   },
   "T1.4b": {
    "status": "in_progress",
