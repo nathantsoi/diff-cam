@@ -554,6 +554,7 @@ def test_failed_constructors_do_not_consume_instance_lifecycle_budget():
         """
         import taichi as ti
         from simulator.csg_simulator import CSGSimulatorDelta
+        from simulator.csg_simulator import _TAICHI_MAX_CSG_INSTANCES_PER_RUNTIME as BUDGET
 
         ti.init(arch=ti.cpu, offline_cache=False)
         for _ in range(20):
@@ -566,12 +567,12 @@ def test_failed_constructors_do_not_consume_instance_lifecycle_budget():
                 pass
             else:
                 raise AssertionError("intentionally anisotropic grid unexpectedly accepted")
-        for _ in range(12):
+        for _ in range(BUDGET):
             CSGSimulatorDelta(
                 resolution=6, stock_size_in=(1, 1, 1), max_steps=1,
                 target_shape="sphere", enforce_speed_limits=False, init_taichi=False,
             )
-        print("VALID_CONSTRUCTED_AFTER_FAILED=12")
+        print(f"VALID_CONSTRUCTED_AFTER_FAILED={BUDGET}")
         try:
             CSGSimulatorDelta(
                 resolution=6, stock_size_in=(1, 1, 1), max_steps=1,
@@ -581,7 +582,7 @@ def test_failed_constructors_do_not_consume_instance_lifecycle_budget():
             assert "simulator instance lifecycle budget" in str(error)
             print("BUDGET_GUARD_INTACT")
         else:
-            raise AssertionError("13th valid constructor should still hit the lifecycle guard")
+            raise AssertionError("configured lifecycle budget exceeded without guard")
         """
     )
     result = subprocess.run(
@@ -589,7 +590,7 @@ def test_failed_constructors_do_not_consume_instance_lifecycle_budget():
         check=False, timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert "VALID_CONSTRUCTED_AFTER_FAILED=12" in result.stdout
+    assert "VALID_CONSTRUCTED_AFTER_FAILED=11" in result.stdout
     assert "BUDGET_GUARD_INTACT" in result.stdout
 
 

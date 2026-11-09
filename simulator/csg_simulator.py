@@ -2,6 +2,10 @@ import numpy as np
 import random
 import warnings
 import taichi as ti
+from pathlib import Path
+from typing import Mapping
+
+from benchmarks.contracts import Frame, GeometrySource, sha256_bytes
 from simulator.simulator_utils import *
 from cam.units import inch_to_mm, ipm_to_mm_per_s
 
@@ -13,7 +17,10 @@ from cam.units import inch_to_mm, ipm_to_mm_per_s
 # an instance-lifetime guard, NOT a claimed portable kernel-count limit or a
 # dense-stock memory bound. A new ti.init() runtime resets the count because it
 # invalidates all prior fields; no reset is performed on the user's behalf.
-_TAICHI_MAX_CSG_INSTANCES_PER_RUNTIME = 12
+# Keep a conservative configured process-local lifetime budget. The observed
+# fatal constructor can move EARLIER when additional sampled/config fields exist;
+# reuse one simulator or isolate additional instances rather than tune at edge.
+_TAICHI_MAX_CSG_INSTANCES_PER_RUNTIME = 11
 _TAICHI_RUNTIME_CSG_STATE = {"identity": None, "instances": 0}
 
 
@@ -34,12 +41,13 @@ def _guard_taichi_instance_lifecycle() -> None:
     if state["instances"] >= _TAICHI_MAX_CSG_INSTANCES_PER_RUNTIME:
         backend = taichi_impl.current_cfg().arch
         raise RuntimeError(
-            f"Taichi simulator instance lifecycle budget: 12 instances on {backend}. "
-            "The 13th repeated CSG allocation reproducibly segfaults in "
-            "from_numpy on Taichi 1.7.4/x64, independent of stock-grid size. "
+            f"Taichi simulator instance lifecycle budget: {state['instances']} / "
+            f"{_TAICHI_MAX_CSG_INSTANCES_PER_RUNTIME} instances on {backend}. "
+            "Repeated CSG allocation can segfault in from_numpy on Taichi 1.7.4/x64, "
+            "with the failing constructor depending on configured field complexity. "
             "Reuse existing fields with reset_candidate_state(), or isolate "
             "additional instances in a fresh process with init_taichi=True. "
-            "This guard does not claim dense-stock RAM is consumed and does not "
+            "This is an observed lifecycle guard, not a stock-memory bound. "
             "call ti.init(), which would invalidate existing fields."
         )
     # Registration is deliberately separate: an exception during validation,
@@ -96,6 +104,9 @@ class CSGSimulatorDelta:
         feed_ipm=10.0,
         safe_distance_in=0.1,
         enforce_speed_limits=True,
+        target_geometry=None,
+        stock_geometry=None,
+        stock_box_origin_mm=None,
     ):
         """Differentiable CSG simulator over a small STOCK box placed inside a
         larger machine work volume.
@@ -122,6 +133,17 @@ class CSGSimulatorDelta:
         stock_origin_in: work origin (G54) = the stock's TOP-CENTRE in machine
                         coords (inches). Used for export/validation only.
         workspace_in / workspace_mm : back-compat aliases for the work volume.
+        target_geometry / stock_geometry: optional contracts GeometrySource
+                        objects with kind="sampled". Their path+sha256 payload
+                        is a finite real SDF in physical millimetres on a work-
+                        frame GridSpec. Trilinear/nearest-centre-clamped lookup
+                        consumes physical units, never LFS pointers/pickled data.
+        stock_box_origin_mm: physical world-coordinate minimum of the allocated
+                        normalized stock box (default (0,0,0)). It maps legacy
+                        normalized tool positions to sampled fields' physical
+                        coordinates. With a custom stock it must match the source
+                        grid origin; an omitted custom-stock size uses its GridSpec
+                        extents instead of the otherwise required stock_size_*.
         """
         # ti.init() RESETS the whole Taichi runtime, invalidating every field
         # allocated by any previously-created simulator. That is fine when each
@@ -130,6 +152,7 @@ class CSGSimulatorDelta:
         # that must co-exist in one process. Pass init_taichi=False to allocate
         # this simulator's fields on the *already-running* runtime instead of
         # resetting it -- Taichi supports adding fields after materialization.
+        self._initialization_complete = False
         if init_taichi:
             try:
                 if ti._lib.core.with_cuda():
@@ -177,10 +200,16 @@ class CSGSimulatorDelta:
                 sx, sy, sz = (float(c) for c in stock_size_mm)
         elif stock_size_in is not None:
             sx, sy, sz = (float(inch_to_mm(c)) for c in stock_size_in)
+        elif stock_geometry is not None:
+            source = self._coerce_geometry_source(stock_geometry)
+            sx, sy, sz = source.grid.extent_mm
+            if stock_box_origin_mm is None:
+                stock_box_origin_mm = source.grid.origin_mm
         else:
             raise ValueError(
-                "stock_size_in (or stock_size_mm) is required; the normalized "
-                "cube [0,1]^3 is the stock bounding box, not the work volume"
+                "stock_size_in (or stock_size_mm) is required unless a sampled "
+                "stock_geometry supplies its extents; the normalized cube "
+                "[0,1]^3 is the stock bounding box, not the work volume"
             )
         if not np.all(np.isfinite((sx, sy, sz))) or min(sx, sy, sz) <= 0.0:
             raise ValueError("stock size components must be finite and positive")
@@ -641,8 +670,12 @@ class CSGSimulatorDelta:
         # ---- Loss ----
         self.loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
 
+        self._init_sampled_geometry(
+            target_geometry, stock_geometry, stock_box_origin_mm
+        )
         ti.root.lazy_grad()
         _record_taichi_instance_success()
+        self._initialization_complete = True
 
     def _validate_fits(self, stock_size_mm):
         """Warn if the stock box can't fit inside the machine work volume.
@@ -670,6 +703,153 @@ class CSGSimulatorDelta:
                     f"(box {lo.tolist()}..{hi.tolist()})",
                     stacklevel=3,
                 )
+
+    @staticmethod
+    def _coerce_geometry_source(source):
+        if isinstance(source, Mapping):
+            source = GeometrySource(**source)
+        if not isinstance(source, GeometrySource):
+            raise TypeError("expected a contracts.GeometrySource or mapping")
+        if source.kind != "sampled":
+            raise ValueError("custom geometry requires GeometrySource(kind='sampled')")
+        if source.frame != Frame.WORK or source.grid.frame != Frame.WORK:
+            raise ValueError("sampled geometry and its grid must use the work frame")
+        return source
+
+    @classmethod
+    def _source_payload(cls, source):
+        """Validate and return (shape, origin, voxel, float32 payload, metadata)."""
+        source = cls._coerce_geometry_source(source)
+        path = Path(source.path)
+        if not path.is_file():
+            raise FileNotFoundError(f"sampled geometry payload is missing: {path}")
+        actual_hash = sha256_bytes(path.read_bytes())
+        if actual_hash != source.sha256:
+            raise ValueError(
+                f"sampled geometry checksum mismatch for {path}: "
+                f"declared {source.sha256}, actual {actual_hash}"
+            )
+        values = np.load(path, allow_pickle=False)
+        if values.dtype.kind not in "fiu":
+            raise ValueError("sampled geometry requires a real numeric array")
+        if values.shape != tuple(source.grid.shape):
+            raise ValueError(
+                f"sampled geometry shape {values.shape} != GridSpec {source.grid.shape}"
+            )
+        values = np.ascontiguousarray(values, dtype=np.float32)
+        if not np.all(np.isfinite(values)):
+            raise ValueError("sampled geometry includes NaN/Inf or float32 overflow")
+        origin = tuple(float(value) for value in source.grid.origin_mm)
+        voxel = float(source.grid.voxel_mm)
+        metadata = {
+            "path": str(path), "sha256": actual_hash,
+            "shape": tuple(source.grid.shape), "origin_mm": origin,
+            "extent_mm": tuple(source.grid.extent_mm), "voxel_mm": voxel,
+            "sign_convention": source.grid.sign_convention,
+        }
+        return values.shape, origin, voxel, values, metadata
+
+    def _configure_sample(self, which, source, payload=None):
+        if getattr(self, "_initialization_complete", False):
+            raise RuntimeError(
+                f"{which} sampled geometry must be declared during __init__; "
+                "adding or replacing sampled fields after Taichi field "
+                "materialization is unsafe. Create a fresh simulator instead."
+            )
+        if payload is None:
+            payload = self._source_payload(source)
+        shape, origin, voxel, values, metadata = payload
+        flag_name = f"use_sampled_{which}"
+        shape_name = f"{which}_source_shape"
+        previous_shape = getattr(self, shape_name)
+        if previous_shape is not None and previous_shape != shape:
+            raise ValueError(
+                f"{which} source shape is fixed at {previous_shape}. Field buffers "
+                "are allocated during __init__; later setters may only bind data "
+                "of that same shape, never reallocate a new GridSpec."
+            )
+        was_unconfigured = getattr(self, f"{which}_source_metadata") is None
+        if was_unconfigured and previous_shape is None:
+            # Allocation is legal only during __init__, never after lazy_grad().
+            # Creating a different sampled configuration requires a new simulator.
+            setattr(
+                self, f"{which}_samples",
+                ti.field(dtype=ti.f32, shape=shape),
+            )
+        if which == "stock":
+            expected_size = np.asarray((self.Lx, self.Ly, self.Lz), dtype=np.float64)
+            actual_size = np.asarray(metadata["extent_mm"], dtype=np.float64)
+            if not np.allclose(actual_size, expected_size, rtol=2e-6, atol=1e-8):
+                raise ValueError(
+                    "custom stock bounds mismatch: sampled GridSpec extent "
+                    f"{actual_size.tolist()} != simulator stock {expected_size.tolist()}"
+                )
+            box_origin = tuple(self.stock_box_origin.to_numpy().tolist())
+            if not np.allclose(box_origin, origin, rtol=0.0, atol=1e-9):
+                raise ValueError(
+                    f"custom stock origin {origin} != simulator stock_box_origin_mm "
+                    f"{box_origin}. Bounds/coordinates are never silently stretched."
+                )
+
+        getattr(self, f"{which}_samples").from_numpy(values)
+        getattr(self, f"{which}_sample_origin")[None] = ti.Vector(origin)
+        getattr(self, f"{which}_sample_voxel")[None] = voxel
+        setattr(self, shape_name, shape)
+        setattr(self, f"{which}_source_metadata", metadata)
+        getattr(self, flag_name)[None] = 1
+        return metadata
+
+    def set_custom_target(self, source):
+        """Install an immutable checked sampled target (see constructor docs).
+
+        Construction must declare sampled geometry. Later addition/replacement
+        of sampled fields after Taichi materialization is explicitly forbidden,
+        even when a trivial shape appears compatible with an unused placeholder.
+        """
+        metadata = self._configure_sample("target", source)
+        # Switching back to analytic remains an explicit target_params call.
+        # Remember which primitive shape produced the current parameters/default.
+        if self.target_shape != "sampled":
+            self._analytic_shape_before_target_sample = self.target_shape
+        self.target_shape = "sampled"
+        return metadata
+
+    def set_custom_stock(self, source):
+        """Install custom stock with matching physical stock bounds/origin."""
+        return self._configure_sample("stock", source)
+
+    def _init_sampled_geometry(self, target_geometry, stock_geometry, stock_box_origin_mm):
+        self.use_sampled_target = ti.field(dtype=ti.i32, shape=())
+        self.use_sampled_target[None] = 0
+        self.use_sampled_stock = ti.field(dtype=ti.i32, shape=())
+        self.use_sampled_stock[None] = 0
+        self.target_source_shape = None if target_geometry is not None else (1, 1, 1)
+        self.stock_source_shape = None if stock_geometry is not None else (1, 1, 1)
+        self.target_source_metadata = None
+        self.stock_source_metadata = None
+        self._analytic_shape_before_target_sample = self.target_shape
+        if target_geometry is None:
+            self.target_samples = ti.field(dtype=ti.f32, shape=(1, 1, 1))
+        if stock_geometry is None:
+            self.stock_samples = ti.field(dtype=ti.f32, shape=(1, 1, 1))
+        self.target_sample_origin = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self.stock_sample_origin = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self.target_sample_voxel = ti.field(dtype=ti.f32, shape=())
+        self.stock_sample_voxel = ti.field(dtype=ti.f32, shape=())
+        self.stock_box_origin = ti.Vector.field(3, dtype=ti.f32, shape=())
+        if stock_box_origin_mm is None:
+            stock_box_origin_mm = (0.0, 0.0, 0.0)
+        if len(stock_box_origin_mm) != 3:
+            raise ValueError("stock_box_origin_mm must have three physical-mm components")
+        origin = ti.Vector([float(value) for value in stock_box_origin_mm])
+        if not np.all(np.isfinite(np.asarray(list(stock_box_origin_mm), dtype=np.float64))):
+            raise ValueError("stock_box_origin_mm must be finite")
+        self.stock_box_origin[None] = origin
+
+        if target_geometry is not None:
+            self.set_custom_target(target_geometry)
+        if stock_geometry is not None:
+            self.set_custom_stock(stock_geometry)
 
     def _init_target_fields(self):
         if self.target_shape == "box":
@@ -715,6 +895,9 @@ class CSGSimulatorDelta:
         don't pass it still get the spec'd 0.75 in sub-primitive.
         """
         tp = self.target_params
+        if self.use_sampled_target[None]:
+            self.use_sampled_target[None] = 0
+            self.target_shape = self._analytic_shape_before_target_sample
         if "radius" in tp and radius_mm is not None:
             tp["radius"][None] = float(radius_mm)
         if "height" in tp and height_mm is not None:
@@ -946,6 +1129,78 @@ class CSGSimulatorDelta:
         return outside + inside
 
     @ti.func
+    def _sample_physical_point(self, p):
+        """Legacy normalized stock coordinate -> physical world mm."""
+        p_world = ti.Vector([p.x * self.Lx, p.y * self.Ly, p.z * self.Lz])
+        return p_world + self.stock_box_origin[None]
+
+    @ti.func
+    def _sample_trilinear(self, field, shape, origin, point_mm, voxel_mm):
+        """Bounded trilinear SDF in mm on a cell-centred GridSpec.
+
+        Index-center coordinate is (x-origin)/voxel - .5. Coordinates outside
+        the declared grid clamp to the nearest sample-centre plane; there is no
+        unconstrained extrapolation and no implied infinite negative stock.
+        Indices and weights clamp inside the sampled array, so edge corners are
+        repeated rather than indexing one cell beyond an axis.
+        """
+        u = ti.Vector([
+            (point_mm.x - origin[0]) / voxel_mm - 0.5,
+            (point_mm.y - origin[1]) / voxel_mm - 0.5,
+            (point_mm.z - origin[2]) / voxel_mm - 0.5,
+        ])
+        i0 = ti.Vector([0, 0, 0], dt=ti.i32)
+        i1 = ti.Vector([0, 0, 0], dt=ti.i32)
+        weight = ti.Vector([0.0, 0.0, 0.0])
+        for axis in ti.static(range(3)):
+            coord = ti.max(0.0, ti.min(float(shape[axis] - 1), u[axis]))
+            low = ti.max(0, ti.min(shape[axis] - 2, ti.cast(ti.floor(coord), ti.i32)))
+            i0[axis] = low
+            i1[axis] = low + 1
+            weight[axis] = coord - low
+
+        c000 = field[i0[0], i0[1], i0[2]]
+        c100 = field[i1[0], i0[1], i0[2]]
+        c010 = field[i0[0], i1[1], i0[2]]
+        c110 = field[i1[0], i1[1], i0[2]]
+        c001 = field[i0[0], i0[1], i1[2]]
+        c101 = field[i1[0], i0[1], i1[2]]
+        c011 = field[i0[0], i1[1], i1[2]]
+        c111 = field[i1[0], i1[1], i1[2]]
+        x, y, z = weight.x, weight.y, weight.z
+        c00 = c000 * (1 - x) + c100 * x
+        c10 = c010 * (1 - x) + c110 * x
+        c01 = c001 * (1 - x) + c101 * x
+        c11 = c011 * (1 - x) + c111 * x
+        c0 = c00 * (1 - y) + c10 * y
+        c1 = c01 * (1 - y) + c11 * y
+        return c0 * (1 - z) + c1 * z
+
+    @ti.func
+    def _sample_physical_target(self, p):
+        physical = self._sample_physical_point(p)
+        value_mm = self._sample_trilinear(
+            self.target_samples,
+            self.target_samples.shape,
+            self.target_sample_origin[None],
+            physical,
+            self.target_sample_voxel[None],
+        )
+        return value_mm / self.v
+
+    @ti.func
+    def _sample_physical_stock(self, p):
+        physical = self._sample_physical_point(p)
+        value_mm = self._sample_trilinear(
+            self.stock_samples,
+            self.stock_samples.shape,
+            self.stock_sample_origin[None],
+            physical,
+            self.stock_sample_voxel[None],
+        )
+        return value_mm / self.v
+
+    @ti.func
     def target_sdf(self, p):
         """Target shape SDF (voxels) — branches resolved at compile time.
 
@@ -954,7 +1209,9 @@ class CSGSimulatorDelta:
         d = 0.0
         pv = self._vox(p)
 
-        if ti.static(self.target_shape == "sphere"):
+        if self.use_sampled_target[None]:
+            d = self._sample_physical_target(p)
+        elif ti.static(self.target_shape == "sphere"):
             d = sphere_sdf(
                 pv,
                 self._vox(self.target_params["center"][None]),
@@ -1014,7 +1271,9 @@ class CSGSimulatorDelta:
         d = 0.0
         pv = ti.Vector([p.x * self.Nx, p.y * self.Ny, p.z * self.Nz])
         cv = ti.Vector([self.tcx[None] * self.Nx, self.tcy[None] * self.Ny, self.tcz[None] * self.Nz])
-        if ti.static(self.target_shape == "sphere"):
+        if self.use_sampled_target[None]:
+            d = self._sample_physical_target(p)
+        elif ti.static(self.target_shape == "sphere"):
             d = (pv - cv).norm() - self.tr_vox[None]
         elif ti.static(self.target_shape == "box"):
             dd = ti.abs(pv - cv) - ti.Vector([self.thx_vox[None], self.thy_vox[None], self.thz_vox[None]])
@@ -1072,6 +1331,11 @@ class CSGSimulatorDelta:
             if self.use_saved_init[None]:
                 # Staged training: start from a saved mid-cut SDF.
                 self.stock[0, i, j, k] = self.saved_stock[i, j, k]
+            elif self.use_sampled_stock[None]:
+                p = ti.Vector(
+                    [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+                )
+                self.stock[0, i, j, k] = self._sample_physical_stock(p)
             else:
                 p = ti.Vector(
                     [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
@@ -1535,9 +1799,9 @@ class CSGSimulatorDelta:
         trajectory shape. Differentiable in tool_pos/tool_delta (via the
         midpoint and target_sdf). Gated by w_traj_prox (0 -> disabled).
         """
-        for t in range(t_start, T - 1):
+        for t in range(t_start, T):
             w = self.w_traj_prox[None]
-            n = ti.max(1, T - 1 - t_start)
+            n = ti.max(1, T - t_start)
             r_vox = self.tool_radius[None] / self.v
             # Component-wise midpoint (avoids a Taichi autodiff load-forwarding
             # issue with Vector-field arithmetic feeding target_sdf).
@@ -1570,9 +1834,9 @@ class CSGSimulatorDelta:
         hard carve. Differentiable in tool_pos/tool_delta via the midpoint and
         ``target_sdf_scalar``. Gated by ``w_tool_gouge`` (0 -> disabled).
         """
-        for t in range(t_start, T - 1):
+        for t in range(t_start, T):
             w = self.w_tool_gouge[None]
-            n = ti.max(1, T - 1 - t_start)
+            n = ti.max(1, T - t_start)
             r_vox = self.tool_radius[None] / self.v
             # Margin inflates the no-penetration radius so the tool center must
             # stay `margin` voxels beyond mere tangency (see tool_gouge_margin).
@@ -2019,8 +2283,8 @@ class CSGSimulatorDelta:
         # Trajectory contour-hug (tool-center distance from target surface) +
         # tool-position gouge (tool center penetrating target + r_tool). Both
         # read the same segment midpoint + target_sdf, so they share this loop.
-        ntp = ti.max(1, T - 1)
-        for t in range(T - 1):
+        ntp = ti.max(1, T)
+        for t in range(T):
             mx = 0.5 * (self.tool_pos[t].x + self.tool_pos[t + 1].x)
             my = 0.5 * (self.tool_pos[t].y + self.tool_pos[t + 1].y)
             mz = 0.5 * (self.tool_pos[t].z + self.tool_pos[t + 1].z)
