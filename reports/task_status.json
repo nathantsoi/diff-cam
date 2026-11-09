@@ -89,7 +89,8 @@
    "owner": "diffcam-worker-1",
    "branch": "task/T2.2-pilot-pocket",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "code merged (seed, pilot task, zero-residual pipeline; retained run at runs/retained/pilot-pocket-20261108-t22-retained). OPEN T2.2b: op-target inset excludes 4554 mm3 (~half pocket) by fixed corridor -> derive reachable target from accessibility and re-run nominal. geometry_pass null pending T1.3."
   },
   "T2.3": {
    "status": "planned",
