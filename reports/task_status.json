@@ -138,15 +138,15 @@
    "branch": "task/T4.1-runner",
    "blocker": "T2.2, T1.3",
    "next": null,
-   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts. | DECISION 2026-11-09: pilot launches as an infrastructure/cost pilot once w2 gates are green; fixed/annealed-Adam (gradient) rows are PROVISIONAL until T3.3b characterizes the systematic AD/FD mismatch; if T3.3b finds a real backward bug, Adam rows are rerun after the fix."
+   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts. | DECISION 2026-11-09: pilot launches as an infrastructure/cost pilot once w2 gates are green; fixed/annealed-Adam (gradient) rows are PROVISIONAL until T3.3b characterizes the systematic AD/FD mismatch; if T3.3b finds a real backward bug, Adam rows are rerun after the fix. | D-2026-11-09-04 (reports/decisions.md): pilot verdicts from 0.125 mm posted eval (both dialects); 1.0 mm = screen/diagnostic only; 0.25 mm RS274 convergence point recorded."
   },
   "T3.4": {
    "status": "in_progress",
    "owner": "diffcam-worker-1",
    "branch": "task/T3.4-continuation",
-   "blocker": "T3.4b (K1/K2) + T3.3b AD/FD characterization before dev ablations",
+   "blocker": "T3.3b AD/FD characterization before dev ablations",
    "next": "dev ablations after pilot",
-   "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot."
+   "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot. | Reviewer verified T3.4b (K1/K2 closed). Ablation-driver requirement: catch empty-band ValueError and record an inconclusive calibration step (don't abort)."
   },
   "T3.3": {
    "status": "in_progress",
@@ -333,12 +333,12 @@
    "note": "independent Titan bore raster 68/68; merged bb552e8"
   },
   "T3.4b": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-1",
    "branch": "task/T3.4b-shift",
    "blocker": null,
    "next": null,
-   "note": "shift via sim per-voxel field, field-gap calibration in voxel SDF units, leak tests, C2"
+   "note": "merged 2424699: shift via sim per-voxel stock field; phi_hard = hard stock_d[T]; two-sided band predicate; leak tests; C2. Coordinator real-sim gaps small and shrinking with k (k=20: +0.06/+0.17/+0.00 vox)."
   },
   "T3.3b": {
    "status": "in_progress",

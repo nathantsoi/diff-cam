@@ -115,72 +115,212 @@ def assert_same_state(left, right):
     assert left.optimizer_step == right.optimizer_step
 
 
-def test_signed_ema_clip_and_median_precede_clipping():
-    calibration = M.SignedLossCalibrator(eta=0.25, delta_max=0.1, disagreement_floor=1e-6)
-    band = M.PhysicalBand("gouge_fraction", 0.0, 1.0, "explicit synthetic overcut band")
-    overcut = calibration.update([pair(soft=0.5, hard=0.2)], band, 0.2)
-    assert overcut.median_delta == pytest.approx(-0.3)
-    assert overcut.shift == pytest.approx(0.2 * 0.75 - 0.1 * 0.25)
-    assert overcut.shift < 0.2
-    clipped = calibration.update([pair(soft=0.2, hard=0.8)], band, 0.0)
-    assert clipped.median_delta == pytest.approx(0.6)
-    assert clipped.clipped_delta == pytest.approx(0.1)
-    assert clipped.shift == pytest.approx(0.025)
-    differing = [pair(soft=100.0, hard=0.0), pair(soft=2.0, hard=3.0),
-                 pair(soft=1.0, hard=201.0)]
-    median = calibration.update(differing, band, 0.0)
-    assert median.median_delta == pytest.approx(1.0)
-    assert median.shift == pytest.approx(0.025)
+_FIELD_SOURCE = None
 
 
-def test_declared_physical_band_selection_and_empty_or_unknown_band():
-    calibration = M.SignedLossCalibrator(0.5, 1.0, 1e-6)
-    observations = [pair(soft=0.1, hard=0.5, gouge=0.0),
-                    pair(soft=0.2, hard=0.8, gouge=0.1),
-                    pair(soft=0.6, hard=1.4, gouge=0.2),
-                    pair(soft=0.0, hard=100.0, gouge=0.3)]
-    band = M.PhysicalBand("gouge_fraction", 0.1, 0.2,
-                          "inclusive known near-overcut fixture band 0.1 to 0.2")
-    result = calibration.update(observations, band, 0.1)
-    assert result.selected_count == 2 and result.source_count == 4
-    assert result.median_delta == pytest.approx((0.6 + 0.8) / 2)
-    assert result.shift == pytest.approx(0.1 * 0.5 + 0.7 * 0.5)
-    empty = calibration.update(observations,
-                               M.PhysicalBand("residual_fraction", 1.0, 1.0,
-                                              "declared residual near-completion band"),
-                               0.3)
-    assert not empty.updated and empty.shift == 0.3
-    assert empty.reason == "empty_declared_physical_band"
+def field_source():
+    """One actual hard-forward field, shared as immutable unit fixture data."""
+    global _FIELD_SOURCE
+    if _FIELD_SOURCE is None:
+        evaluator = prototype()
+        theta = unit_theta()
+        result = evaluator.evaluate_candidate(theta, "field-source-hard", "hard")
+        assert result.valid
+        grid = evaluator.task.grid
+        _FIELD_SOURCE = {
+            "grid": grid,
+            "hard": evaluator.sim.stock.to_numpy()[
+                evaluator.parameterization.num_steps
+            ].copy(),
+            "target": evaluator.sim.target.to_numpy().copy(),
+            "path": evaluator.sim.tool_pos.to_numpy().copy(),
+            "value_hash": result.theta_hash,
+            "context": M.EvaluationContext(
+                grid, 20.0, 0.0, "prototype-hard-stock-d-field/1",
+                {"actual_source": "forward_hard.stock_d[T]", "theta_hash": result.theta_hash},
+            ),
+        }
+    return _FIELD_SOURCE
 
 
-def test_calibration_never_treats_equal_theta_as_identical_motion_or_grid():
-    calibration = M.SignedLossCalibrator(0.25, 1.0, 1e-6)
-    band = M.PhysicalBand("gouge_fraction", 0.0, 1.0, "physical diagnostic band")
-    different = pair(path=np.zeros((3, 3)))
-    changed = M.PairedObservation(
-        different.soft,
-        dataclasses.replace(different.hard, path=np.ones((3, 3))),
+def stock_field_fixture(*, epoch=None, offset=0.0, soft=None, target=None, hard=None):
+    """Actual hard stock_d, with only the declared nonmask field offset."""
+    source = field_source()
+    epoch = source["context"] if epoch is None else epoch
+    raw_hard = source["hard"] if hard is None else hard
+    selected_soft = source["hard"] + offset if soft is None else soft
+    target_sdf = source["target"] if target is None else target
+    return M.StockFieldPair(
+        epoch, raw_hard, selected_soft, target_sdf,
+        source["path"], source["path"],
     )
-    unequal = calibration.update([changed], band, 0.5)
-    assert not unequal.updated and unequal.shift == 0.5
-    without_path = M.PairedObservation(
-        dataclasses.replace(different.soft, path=None), different.hard
+
+
+def band(region="stock", lo=0.0, hi=2.0):
+    return M.SurfaceBand(region, lo, hi,
+                         "explicit near-surface millimetre band on the declared test grid")
+
+
+def test_true_distance_field_recovers_uniform_quarter_voxel_offset():
+    field = stock_field_fixture(offset=0.25)
+    assert np.unique(field.hard_phi_voxels).size > 2  # not a +/-1 occupancy indicator
+    calibration = M.SignedFieldCalibrator(1.0, 0.5, 1e-6)
+    result = calibration.update([field], band("stock"), 0.0)
+    assert result.median_delta == pytest.approx(-0.25, abs=1e-12)
+    assert result.clipped_delta == pytest.approx(-0.25, abs=1e-12)
+    assert result.shift == pytest.approx(-0.25, abs=1e-12)
+    assert result.delta_mm == pytest.approx(-0.25 * field.context.grid.voxel_mm)
+    assert result.shift_mm == pytest.approx(-0.25 * field.context.grid.voxel_mm)
+    assert result.band["maximum_voxels"] == pytest.approx(2.0 / field.context.grid.voxel_mm)
+    assert result.hard_distance_definition.startswith("forward_hard.stock_d")
+    with pytest.raises(ValueError, match="0.5 voxel"):
+        M.SignedFieldCalibrator(0.25, 0.6, 1e-6)
+    overcut = calibration.update([stock_field_fixture(offset=0.8)], band("stock"), 0.2)
+    assert overcut.clipped_delta == -0.5
+    assert overcut.shift == pytest.approx(-0.5)
+
+
+def test_over_erosion_sign_is_negative_in_both_gouge_and_residual_bands():
+    field = stock_field_fixture(offset=0.25)
+    calibration = M.SignedFieldCalibrator(1.0, 0.5, 1e-6)
+    for region in ("gouge", "residual"):
+        selected = band(region, 0.0, 2.0)
+        assert np.any(field.selection(selected))
+        measured = calibration.update([field], selected, 0.0)
+        assert measured.updated
+        assert measured.shift < 0
+        assert measured.median_delta == pytest.approx(-0.25)
+        assert measured.selected_observations == 1
+        assert measured.selected_count == int(field.selection(selected).sum())
+
+
+def test_target_sign_regions_and_both_sided_aliases_match_exact_band_predicate():
+    field = stock_field_fixture()
+    pitch = field.context.grid.voxel_mm
+    lo, hi = 0.0 / pitch, 3.0 / pitch
+    common = (
+        (np.abs(field.target_sdf) >= lo)
+        & (np.abs(field.target_sdf) <= hi)
+        & (np.abs(field.hard_phi_voxels) <= hi)
     )
-    missing = calibration.update([without_path], band, 0.5)
-    assert missing.reason == "identical_executed_path_unavailable_or_mismatch"
-    other_grid = C.GridSpec((4, 4, 4), (-1.0, -2.0, -2.0), 1.0)
-    other_context = M.EvaluationContext(other_grid, 20.0, 0.0, "synthetic-hard-revision/1")
+    signs = {"gouge": field.target_sdf < 0, "residual": field.target_sdf > 0}
+    for region, sign in signs.items():
+        expected = common & sign
+        np.testing.assert_array_equal(field.selection(band(region, 0.0, 3.0)), expected)
+    either = common & ((field.target_sdf < 0) | (field.target_sdf > 0))
+    for region in ("stock", "both", "surface"):
+        np.testing.assert_array_equal(field.selection(band(region, 0.0, 3.0)), either)
+    assert np.any(either & (field.hard_phi_voxels < 0))
+    assert np.any(either & (field.hard_phi_voxels > 0))
+    assert np.any(signs["gouge"] & common)
+    assert np.any(signs["residual"] & common)
+
+
+def test_physical_surface_band_uses_mm_distances_and_rejects_empty_regions():
+    field = stock_field_fixture(offset=0.15)
+    selected_band = band("stock", 0.5, 1.0)
+    selected = field.selection(selected_band)
+    assert selected.any()
+    assert np.all(field.surface_distance_mm[selected] >= 0.5)
+    assert np.all(field.surface_distance_mm[selected] <= 1.0)
+    calibration = M.SignedFieldCalibrator(0.5, 0.5, 1e-6)
+    updated = calibration.update([field], selected_band, 0.0)
+    assert updated.updated
+    assert updated.selected_count == int(selected.sum())
+    assert updated.median_delta == pytest.approx(-0.15)
+    assert updated.shift < 0
+    between = np.indices(field.context.grid.shape, dtype=float)[2] - 0.5
+    narrow_field = stock_field_fixture(target=between)
+    with pytest.raises(ValueError, match="empty selected surface band"):
+        calibration.update([narrow_field], band("stock", 0.0, 0.49), 0.4)
+    with pytest.raises(ValueError, match="surface band region"):
+        M.SurfaceBand("signed_dice_gap", 0.0, 0.0, "not a physical region")
+
+
+def test_field_types_reject_indicators_and_mismatched_coordinates():
+    with pytest.raises(TypeError, match="forward_hard stock_d"):
+        stock_field_fixture(hard=np.ones(GRID.shape, dtype=bool))
+    with pytest.raises(TypeError, match="soft phi"):
+        stock_field_fixture(soft=np.ones(GRID.shape, dtype=bool))
+    with pytest.raises(TypeError, match="target phi"):
+        stock_field_fixture(target=np.zeros(GRID.shape, dtype=bool))
+    with pytest.raises(ValueError, match="shape"):
+        stock_field_fixture(hard=np.ones((1, 1, 1), dtype=float))
+    with pytest.raises(ValueError, match="material and removal"):
+        stock_field_fixture(target=np.zeros(field_source()["grid"].shape, dtype=float))
+    ordinary = stock_field_fixture()
+    with pytest.raises(ValueError, match="not identical"):
+        dataclasses.replace(ordinary, hard_path=np.ones((3, 3)))
+    with pytest.raises(TypeError, match="scalar losses are not phi"):
+        M.SignedFieldCalibrator(0.5, 0.5, 1e-8).update([pair()], band(), 0.0)
+    origin = ordinary.context.grid.origin_mm
+    other_grid = dataclasses.replace(
+        ordinary.context.grid, origin_mm=(origin[0] + 1.0, origin[1], origin[2]),
+    )
+    other_context = dataclasses.replace(ordinary.context, grid=other_grid)
     with pytest.raises(ValueError, match="identical k/shift/grid/validator"):
-        calibration.update([pair(path=None), pair(epoch=other_context, path=None)], band, 0.5)
-    with pytest.raises(ValueError, match="explicit gouge/residual fraction"):
-        M.PhysicalBand("signed_dice_gap", 0.0, 0.0, "reject a nonphysical Dice-gap selector")
+        M.SignedFieldCalibrator(0.5, 0.5, 1e-8).update(
+            [ordinary, stock_field_fixture(epoch=other_context)], band(), 0.0,
+        )
 
 
-def test_zero_gap_and_bounded_disagreement_without_zero_dice_denominator():
-    calibration = M.SignedLossCalibrator(0.5, 0.2, 1e-8)
-    band = M.PhysicalBand("gouge_fraction", 0.0, 0.0, "known zero-overcut band")
-    result = calibration.update([pair(soft=0.5, hard=0.5)] * 10, band, 0.0)
-    assert result.shift == 0.0 and result.median_delta == 0.0
+def test_nonzero_normalized_disagreement_uses_median_fields_not_mean_gap_over_zero():
+    field = stock_field_fixture(offset=0.6)
+    calibration = M.SignedFieldCalibrator(1.0, 0.5, 1e-6)
+    selected_band = band("stock")
+    selected = field.selection(selected_band)
+    hard_median = float(np.median(field.hard_phi_voxels[selected]))
+    soft_median = float(np.median(field.soft_phi_voxels[selected]))
+    result = calibration.update([field], selected_band, 0.0)
+    assert result.median_hard_voxels == pytest.approx(hard_median)
+    assert result.median_soft_voxels == pytest.approx(soft_median)
+    assert result.median_delta == pytest.approx(-0.6)
+    assert result.clipped_delta == -0.5
+    expected = (
+        (hard_median - soft_median)
+        / (abs(hard_median) + abs(soft_median) + 1e-6)
+    )
+    assert result.disagreement["bounded_gap"] == pytest.approx(expected)
+    assert result.disagreement["raw_gap"] == pytest.approx(hard_median - soft_median)
+    assert abs(expected) < 1.0
+    assert M.bounded_disagreement(-1.0, -0.4, 1e-6)["bounded_gap"] == pytest.approx(-3.0 / 7.0)
+
+
+def test_large_k_near_equality_does_not_bind_clip():
+    evaluator = prototype()
+    evaluator.set_evaluation_k(256.0)
+    theta = unit_theta()
+    soft = evaluator.evaluate_candidate_with_gradient(theta, "t3.4b:large-k-soft")
+    soft_path = evaluator.sim.tool_pos.to_numpy().copy()
+    soft_field = evaluator.sim.stock.to_numpy()[evaluator.parameterization.num_steps].copy()
+    hard = evaluator.evaluate_candidate(theta, "t3.4b:large-k-hard", "hard")
+    hard_path = evaluator.sim.tool_pos.to_numpy().copy()
+    hard_field = evaluator.sim.stock.to_numpy()[evaluator.parameterization.num_steps].copy()
+    assert soft.result.valid and hard.valid
+    np.testing.assert_array_equal(soft_path, hard_path)
+    epoch = M.EvaluationContext(evaluator.task.grid, 256.0, 0.0, "large-k-matching-stock-fields/1")
+    field = M.StockFieldPair(
+        epoch, hard_field, soft_field, evaluator.sim.target.to_numpy(), hard_path, soft_path,
+    )
+    selected = band("stock", 0.0, 3.0)
+    reconcile = M.SignedFieldCalibrator(1.0, 0.5, 1e-8).update([field], selected, 0.0)
+    assert reconcile.updated and reconcile.selected_count > 0
+    actual_gap = float(np.median(
+        field.hard_phi_voxels[field.selection(selected)]
+        - field.soft_phi_voxels[field.selection(selected)]
+    ))
+    assert reconcile.median_delta == pytest.approx(actual_gap, abs=1e-6)
+    assert abs(actual_gap) < 0.15
+    assert abs(reconcile.clipped_delta) < 0.5
+    assert reconcile.shift == pytest.approx(actual_gap, abs=1e-6)
+    evaluator.clear_evaluation_loss_shift()
+    evaluator.clear_evaluation_k()
+
+
+def test_zero_loss_gap_and_bounded_disagreement_avoid_zero_dice_denominator():
+    field = stock_field_fixture(offset=0.0)
+    result = M.SignedFieldCalibrator(0.5, 0.2, 1e-8).update([field], band(), 0.0)
+    assert result.median_delta == 0.0 and result.shift == 0.0
     assert result.disagreement["bounded_gap"] == 0.0
     assert M.bounded_disagreement(0.0, 0.0, 1e-8)["absolute_bounded_gap"] == 0.0
     assert M.bounded_disagreement(10.0, 4.0, 1e-8)["bounded_gap"] == pytest.approx(6.0 / 14.0)
@@ -189,6 +329,8 @@ def test_zero_gap_and_bounded_disagreement_without_zero_dice_denominator():
     assert np.isfinite(extreme["bounded_gap"]) and extreme["bounded_gap"] == pytest.approx(1.0)
     with pytest.raises(ValueError, match="positive"):
         M.bounded_disagreement(1.0, 0.0, 0.0)
+    with pytest.raises(ValueError, match="finite"):
+        M.EvaluationContext(GRID, 20.0, 0.75, "x")
 
 
 def test_unknown_hard_state_is_not_known_infeasible_or_safety_pass():
@@ -243,8 +385,8 @@ def test_backtracking_shrinks_bounded_learning_rate_and_keeps_accepted_config():
     events = {0.0: {"soft": 0.16, "hard": 0.8, "gouge_fraction": 0.0,
                     "residual_fraction": 0.0, "local_surface_error_mm": 0.0,
                     "holder_overlap_fraction": 0.0, "safety_pass": True}}
-    events[0.005] = dict(events[0.0], soft=0.25)    # first trial: worse
-    events[0.0025] = dict(events[0.0], soft=0.0225)  # retry: better, smaller step
+    events[0.005] = dict(events[0.0], soft=0.25, hard=0.8)  # worse raw hard score
+    events[0.0025] = dict(events[0.0], soft=0.0225, hard=0.4)  # better raw hard score
     mechanism, start, _ = make_controller(events=events, max_retries=2)
     rates = []
 
@@ -396,14 +538,18 @@ def test_learning_rate_floor_stops_before_an_unbudgeted_extra_trial():
 
 def test_calibration_is_separate_from_k_and_does_not_charge_a_second_evaluation():
     mechanism, start, seen = make_controller()
-    measurement = mechanism._observe(np.array([0.25]), start.context, False)
+    # One scalar observation is explicitly billed by the controller. The field
+    # inputs supplied below are separate known calibration fixtures; their
+    # construction is independent of the pure arithmetic calibration delta.
+    _ = mechanism._observe(np.array([0.25]), start.context, False)
     before = mechanism.budget_snapshot()
-    band = M.PhysicalBand("gouge_fraction", 0.0, 1.0,
-                          "whole explicit known diagnostic domain")
-    result = mechanism.calibrate([measurement, pair(soft=0.5, hard=0.5)], band, 0.0)
+    band = M.SurfaceBand("stock", 0.0, 2.0, "whole declared near-surface fixture domain")
+    field_a = stock_field_fixture(offset=0.25)
+    field_b = stock_field_fixture()
+    result = mechanism.calibrate([field_a, field_b], band, 0.0)
     assert result.updated
-    assert result.median_delta == pytest.approx((0.25 + 0.0) / 2)
-    assert result.shift == pytest.approx(0.03125)
+    assert result.median_delta == pytest.approx((-0.25 + 0.0) / 2)
+    assert result.shift == pytest.approx(-0.03125)
     assert mechanism.budget_snapshot() == before
     assert start.context.k == 20.0 and start.context.loss_shift == 0.0
     assert mechanism.config.k_min == 1.0
@@ -444,6 +590,31 @@ def test_zero_candidate_budget_blocks_initial_measurement():
     assert not result.accepted and result.snapshot.observation is None
 
 
+def test_acceptance_rank_uses_raw_hard_objective_not_scalar_additions_of_shift():
+    mechanism, start, _ = make_controller()
+    original_soft = mechanism.soft_evaluator
+
+    def field_configured_soft(theta, received, require_gradient):
+        observed = original_soft(theta, received, require_gradient)
+        # Deliberately vary a scalar diagnostic: it must not become the hard
+        # acceptance objective or reintroduce the old constant-shift artefact.
+        return dataclasses.replace(
+            observed, raw_phi_soft=observed.raw_phi_soft + received.loss_shift
+        )
+
+    mechanism.soft_evaluator = field_configured_soft
+    rolled_back = mechanism.step(start, advance(1.0))
+    assert not rolled_back.accepted
+    assert rolled_back.history[-1]["incumbent_rank"][-1] == pytest.approx(0.75)
+    assert rolled_back.history[-1]["candidate_rank"][-1] == pytest.approx(0.75)
+    shifted = dataclasses.replace(start.context, loss_shift=0.4)
+    also_rolled_back = mechanism.step(start, advance(1.0), context=shifted)
+    assert not also_rolled_back.accepted
+    assert also_rolled_back.history[-1]["incumbent_rank"][-1] == pytest.approx(0.75)
+    assert also_rolled_back.history[-1]["candidate_rank"][-1] == pytest.approx(0.75)
+    assert_same_state(also_rolled_back.snapshot, start)
+
+
 def test_dev_ablation_is_a_plan_only_with_paired_settings():
     plan = M.dev_ablation_plan()
     assert plan["status"] == "planned_only_not_executed"
@@ -481,52 +652,189 @@ def test_bounded_sharpness_schedule_is_separate_from_signed_shift():
         schedule.at(-1)
 
 
-def test_merged_objective_raw_pair_uses_exact_executed_path_and_preserves_unknown_constraints():
+def prototype():
     helper = runpy.run_path(str(Path(__file__).with_name("objectives_test.py")))
-    evaluator = helper["_prototype"](seed=111)
-    theta = np.array([0.001, -0.002, 0.003, -0.004, 0.002, 0.001])
+    return helper["_prototype"](seed=111)
+
+
+def unit_theta():
+    return np.array([0.001, -0.002, 0.003, -0.004, 0.002, 0.001])
+
+
+def test_merged_stock_fields_and_raw_hard_are_actual_measurements():
+    evaluator = prototype()
     evaluator.set_evaluation_k(20.0)
     epoch = M.EvaluationContext(
         evaluator.task.grid, 20.0, 0.0, "algorithms.objectives.forward_hard/merged",
         {"spec": dataclasses.asdict(evaluator.spec), "evaluator_seed": evaluator.seed},
     )
-    soft_result = evaluator.evaluate_candidate_with_gradient(theta, "t3.4:raw-soft")
+    theta = unit_theta()
+    soft_result = evaluator.evaluate_candidate_with_gradient(theta, "t3.4b:raw-soft")
     soft_path = evaluator.sim.tool_pos.to_numpy().copy()
-    soft = M.from_merged_soft(soft_result, epoch, path=soft_path)
-    assert soft_result.result.valid and soft_result.gradient_theta.shape == theta.shape
-    hard_result = evaluator.evaluate_candidate(theta, "t3.4:raw-hard", "hard")
+    soft_stock = evaluator.sim.stock.to_numpy()[evaluator.parameterization.num_steps].copy()
+    hard_result = evaluator.evaluate_candidate(theta, "t3.4b:raw-hard", "hard")
     hard_path = evaluator.sim.tool_pos.to_numpy().copy()
-    hard = M.from_merged_hard(hard_result, epoch, path=hard_path)
-    measurement = M.PairedObservation(soft, hard)
-    assert measurement.identical_executed_path is True
+    hard_stock = evaluator.sim.stock.to_numpy()[evaluator.parameterization.num_steps].copy()
+    field = M.StockFieldPair(
+        epoch, hard_stock, soft_stock, evaluator.sim.target.to_numpy(),
+        hard_path, soft_path,
+    )
+    assert field.identical_executed_path
+    assert np.unique(field.hard_phi_voxels).size > 2
+    assert np.all(np.isfinite(field.hard_phi_voxels))
     normalized_expected = (
         evaluator.parameterization.positions(theta) - evaluator.task.grid.origin_mm
     ) / evaluator.task.grid.extent_mm
-    # Taichi field storage is f32; this is conversion precision, not an exact
-    # equality assertion between machine doubles and the simulator field.
     np.testing.assert_allclose(soft_path, normalized_expected, atol=1e-5, rtol=0.0)
-    assert soft.raw_phi_soft == pytest.approx(soft_result.result.objective)
+    np.testing.assert_allclose(hard_path, normalized_expected, atol=1e-5, rtol=0.0)
+    selected_band = M.SurfaceBand("stock", 0.0, 3.0,
+                                  "within 3 mm of the declared target boundary")
+    assert np.any(field.selection(selected_band))
+    result = M.SignedFieldCalibrator(0.25, 0.5, 1e-6).update(
+        [field], selected_band, 0.0
+    )
+    assert result.updated
+    assert result.voxel_mm == evaluator.task.grid.voxel_mm
+    selected = field.selection(selected_band)
+    expected_delta = float(np.median(
+        field.hard_phi_voxels[selected] - field.soft_phi_voxels[selected]
+    ))
+    assert result.median_delta == pytest.approx(expected_delta, abs=1e-6)
+    assert result.shift == pytest.approx(0.25 * np.clip(expected_delta, -0.5, 0.5), abs=1e-6)
+    assert result.shift_mm == pytest.approx(result.shift * evaluator.task.grid.voxel_mm)
+    assert result.disagreement["raw_gap"] == pytest.approx(
+        result.median_hard_voxels - result.median_soft_voxels, abs=1e-6
+    )
+    hard = M.from_merged_hard(hard_result, epoch, path=hard_path)
     assert hard.raw_phi_hard == pytest.approx(hard_result.objective)
-    assert np.all(np.isfinite(M.bounded_disagreement(hard.raw_phi_hard,
-                                                      soft.raw_phi_soft, 1e-6)["bounded_gap"]))
     assessment = M.assess_constraints(hard, M.ConstraintPolicy())
     assert assessment.status is M.Feasibility.UNKNOWN
     assert "coverage_incomplete" in assessment.missing
     assert "local_surface_error_mm_unavailable" in assessment.missing
     assert "safety_pass_unavailable" in assessment.missing
-    band = M.PhysicalBand("gouge_fraction", 0.0, 1.0,
-                          "entire known prototype fraction domain for a raw diagnostic")
-    result = M.SignedLossCalibrator(0.25, 1e6, 1e-6).update([measurement], band, 0.0)
-    assert result.updated and result.selected_count == 1
-    expected_delta = hard_result.objective - soft_result.result.objective
-    assert result.median_delta == pytest.approx(expected_delta, abs=1e-6)
-    assert result.shift == pytest.approx(0.25 * expected_delta, abs=1e-6)
+
+
+def test_shift_changes_gradient_not_hard_and_neutral_reset_restores_baseline():
+    evaluator = prototype()
+    evaluator.set_evaluation_k(20.0)
+    theta = unit_theta()
+    baseline = evaluator.evaluate_candidate_with_gradient(theta, "t3.4b:neutral")
+    baseline_path = evaluator.sim.tool_pos.to_numpy().copy()
+    assert baseline.result.valid and baseline.gradient_theta.shape == theta.shape
+    assert np.all(np.isfinite(baseline.gradient_theta))
+    evaluator.set_evaluation_loss_shift(0.4)
+    shifted = evaluator.evaluate_candidate_with_gradient(theta, "t3.4b:shifted")
+    assert shifted.result.valid
+    delta = shifted.gradient_theta - baseline.gradient_theta
+    assert np.linalg.norm(delta) > 1e-7
+    assert shifted.result.components["loss_shift_voxels"] == pytest.approx(0.4)
+    assert shifted.result.components["loss_shift_mm"] == pytest.approx(0.4 * evaluator.sim.v)
+    assert np.array_equal(shifted.diagnostics["final_stock"], baseline.diagnostics["final_stock"])
+    shifted_repeat = evaluator.evaluate_candidate_with_gradient(theta, "t3.4b:shifted-repeat")
+    evaluator.clear_evaluation_loss_shift()
+    restored = evaluator.evaluate_candidate_with_gradient(theta, "t3.4b:neutral-restored")
+    # Eight repeated neutral CPU forwards measured 1.1e-9--4.0e-9 maximum
+    # elementwise replay variation; the shifted/cleanup return was 1.9e-9.
+    # Retain a tight float32 replay tolerance, not a claim of bitwise gradients.
+    np.testing.assert_allclose(restored.gradient_theta, baseline.gradient_theta,
+                               rtol=2e-5, atol=1e-8)
+    assert np.linalg.norm(restored.gradient_theta - baseline.gradient_theta) < 1e-7
+    hard_neutral = evaluator.evaluate_candidate(theta, "t3.4b:hard-neutral", "hard")
+    evaluator.set_evaluation_loss_shift(0.4)
+    hard_shifted = evaluator.evaluate_candidate(theta, "t3.4b:hard-shifted", "hard")
+    assert hard_shifted.objective == hard_neutral.objective
+    shifted_path = evaluator.sim.tool_pos.to_numpy().copy()
+    np.testing.assert_array_equal(shifted_path, baseline_path)
+    for name in ("gouge_fraction", "residual_fraction", "holder_overlap_fraction"):
+        assert hard_shifted.components[name] == hard_neutral.components[name]
+    assert M.from_merged_hard(hard_shifted, M.EvaluationContext(
+        evaluator.task.grid, 20.0, 0.4, "algorithms.objectives.forward_hard/merged"
+    )).raw_phi_hard == hard_neutral.objective
+    shifted_hard_path = evaluator.sim.tool_pos.to_numpy().copy()
+    np.testing.assert_array_equal(shifted_hard_path, baseline_path)
+    epoch = M.EvaluationContext(evaluator.task.grid, 20.0, 0.0, "neutral-scalar-check")
+    with pytest.raises(ValueError, match="neutral zero shift"):
+        M.from_merged_soft(baseline, dataclasses.replace(epoch, loss_shift=0.25))
+    with pytest.raises(ValueError, match="scalar subtraction"):
+        M.from_merged_soft(baseline, epoch, applied_shift=0.25)
+    for invalid in (float("nan"), float("inf"), 0.51, -0.51, True):
+        with pytest.raises(ValueError):
+            evaluator.set_evaluation_loss_shift(invalid)
+    evaluator.set_evaluation_loss_shift(None)
+    assert evaluator.evaluation_loss_shift is None
+    assert evaluator.sim.loss_shift[None] == 0.0
     evaluator.clear_evaluation_k()
-    shifted_context = dataclasses.replace(epoch, loss_shift=0.25)
-    with pytest.raises(ValueError, match="applied_shift"):
-        M.from_merged_soft(soft_result, shifted_context, path=soft_path)
-    shifted_result = dataclasses.replace(soft_result.result,
-                                         objective=soft_result.result.objective + 0.25)
-    converted = M.from_merged_soft(shifted_result, shifted_context, path=soft_path,
-                                   applied_shift=0.25)
-    assert converted.raw_phi_soft == pytest.approx(soft_result.result.objective)
+
+
+def test_cma_start_and_adam_entry_exit_are_shift_neutral(tmp_path):
+    from algorithms import blackbox as B
+    from algorithms import optimize as adam
+
+    budget = OptimizationBudget(candidate_evaluations=4, population_size=2)
+    ev = prototype()
+    neutral_hash = B._setup_signature(ev, "smooth")
+    ev.set_evaluation_loss_shift(0.4)
+    shifted_hash = B._setup_signature(ev, "smooth")
+    assert shifted_hash != neutral_hash
+    ev.clear_evaluation_loss_shift()
+    assert B._setup_signature(ev, "smooth") == neutral_hash
+
+    ev.set_evaluation_loss_shift(0.4)
+    continued = B.solve_cma_es(ev, budget, seed=17, objective_kind="smooth",
+                               run_id="t3.4b:continued-environment")
+    assert continued.best.valid
+    assert ev.evaluation_loss_shift is None
+    for entry in ev.ledger.snapshot()["entries"]:
+        assert entry["loss_shift_voxels"] == 0.0
+
+    fresh = prototype()
+    fresh_run = B.solve_cma_es(fresh, budget, seed=17, objective_kind="smooth",
+                               run_id="t3.4b:fresh-reference")
+    assert fresh_run.best.valid
+    # Determinism of neutral baselines, not an optimizer benefit assertion.
+    np.testing.assert_allclose(continued.best_theta, fresh_run.best_theta,
+                               rtol=0.0, atol=2e-6)
+    assert continued.best.objective == pytest.approx(fresh_run.best.objective, abs=2e-6)
+
+    adam_budget = OptimizationBudget(candidate_evaluations=2)
+    adam_config = adam.AdamConfig(mode="fixed", learning_rate=0.005,
+                                  k_start=20.0, k_end=20.0)
+    ev = prototype()
+    ev.set_evaluation_loss_shift(0.4)
+    continued_adam = adam.solve_adam(ev, adam_budget, adam_config, seed=17,
+                                     run_id="t3.4b:continued-adam")
+    assert ev.evaluation_loss_shift is None
+    assert ev.ledger.snapshot()["entries"][0]["loss_shift_voxels"] == 0.0
+
+    fresh_adam_evaluator = prototype()
+    fresh_adam = adam.solve_adam(fresh_adam_evaluator, adam_budget, adam_config,
+                                 seed=17, run_id="t3.4b:fresh-adam")
+    np.testing.assert_allclose(continued_adam.current_theta, fresh_adam.current_theta,
+                               rtol=0.0, atol=2e-6)
+    assert len(continued_adam.history) == len(fresh_adam.history)
+    for left, right in zip(continued_adam.history, fresh_adam.history):
+        assert left["k"] == right["k"]
+        assert left["soft_objective"] == pytest.approx(right["soft_objective"], abs=2e-6)
+
+    # Neutral-checkpoint restoration accepts a matching clean setup, while a
+    # stale positive ambient field shift cannot alter restoration identity.
+    checkpoint_dir = tmp_path / "adam-checkpoints"
+    checkpoint_evaluator = prototype()
+    adam.solve_adam(checkpoint_evaluator, adam_budget, adam_config, seed=17,
+                    run_id="t3.4b:checkpoint", checkpoint_dir=checkpoint_dir)
+    checkpoints = sorted(checkpoint_dir.glob("ckpt-*.json"))
+    assert checkpoints
+    checkpoint = checkpoints[-1]
+    restored_evaluator = prototype()
+    restored_evaluator.set_evaluation_loss_shift(0.4)
+    with pytest.raises(B.BlackBoxError, match="identity differs"):
+        adam.resume_adam(checkpoint, restored_evaluator)
+    restored_evaluator.clear_evaluation_loss_shift()
+    resumed = adam.resume_adam(
+        checkpoint, restored_evaluator,
+        budget=OptimizationBudget(candidate_evaluations=3),
+    )
+    assert resumed is not None
+    assert restored_evaluator.evaluation_loss_shift is None
+    resumed_evaluator_current = B._setup_signature(restored_evaluator, "smooth")
+    assert resumed_evaluator_current == neutral_hash

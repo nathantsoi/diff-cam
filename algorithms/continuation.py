@@ -3,17 +3,22 @@
 This module is deliberately not a trust-region method: no trust-region radius or
 local quadratic model is implemented. It separates two mechanisms:
 
-* ``SignedLossCalibrator`` measures raw ``phi_hard - phi_soft`` on an identical
-  executed path and declared grid, in a declared physical metric band, and
-  applies a signed bounded EMA update to a loss shift.
+* ``SignedLossCalibrator`` measures the median per-voxel signed-stock-field
+  difference ``phi_hard - phi_soft`` in VOXEL SDF units on an identical
+  executed path/grid, in a physical band around the operation-target surface.
+  ``phi_hard`` and ``phi_soft`` are the matching hard and differentiable
+  forward ``stock_d[T]`` fields, with phi soft before the occupancy-only
+  shift; there is no EDT reconstruction. Scalar loss components are never
+  substituted for these signed spatial fields. The resulting signed bounded
+  EMA shifts the smooth iso-level, not scalar objectives.
 * ``BacktrackingMechanism`` evaluates a proposed optimizer state against its
   incumbent under identical k, shift, grid and hard-validator identity. It
   enforces explicit constraints, retries with bounded learning rates, and
-  restores theta/moments/config on rejection. Evaluation budgets are not undone.
+  restores theta/moments/config on rejection. Its score term is raw, unshifted
+  HARD validation objective: no scalar loss_shift is added or compared.
 
-It is an adapter contract, not an edit to the shared optimizer. Raw soft loss is
-``phi_soft BEFORE adding loss_shift``. The executor must expose its actual
-executed path for calibration: equal theta values alone are not evidence of
+It is an adapter contract. The executor must expose actual executed paths and
+stock fields for calibration: equal theta values alone are not evidence of
 identical executed motion. Hard coverage, geometry and safety availability are
 kept distinct from a known infeasible result. Unknown constraint state cannot
 win an acceptance comparison.
@@ -109,8 +114,8 @@ class EvaluationContext:
     def __post_init__(self):
         if not math.isfinite(self.k) or self.k <= 0:
             raise ValueError("k must be finite and positive")
-        if not math.isfinite(self.loss_shift):
-            raise ValueError("loss_shift must be finite")
+        if not math.isfinite(self.loss_shift) or abs(self.loss_shift) > 0.5:
+            raise ValueError("loss_shift must be finite in voxel units with |shift| <= 0.5 voxel")
         if not isinstance(self.validator_id, str) or not self.validator_id.strip():
             raise ValueError("hard-validator implementation/revision id is required")
         if not isinstance(self.grid, C.GridSpec):
@@ -173,7 +178,7 @@ class SharpnessSchedule:
 
 @dataclass(frozen=True)
 class SoftObservation:
-    """Raw unshifted value of phi_soft for one actual scored candidate."""
+    """Scalar loss diagnostic, not a stock-distance field for calibration."""
     context: EvaluationContext
     raw_phi_soft: Optional[float]
     path: Optional[np.ndarray] = None
@@ -257,22 +262,126 @@ class PairedObservation:
 
 
 @dataclass(frozen=True)
-class PhysicalBand:
-    """An inclusive band on a physically named, unitless fraction metric."""
-    metric: str
-    minimum: float
-    maximum: float
+class SurfaceBand:
+    """A physical near-surface band in declared millimetres/target-voxel pitch.
+
+    ``gouge`` means target SDF < 0 (inside retained target T), ``residual``
+    means target SDF > 0 (the removal region), and ``stock``/``surface``/
+    ``both`` include either sign. Selection additionally requires the stacked
+    magnitudes of target SDF and executed hard stock_d to be in the bands.
+    Remaining-stock Boolean gates do not remove the opposite side of that
+    executed surface. The distances remain grid-sampled fields, not an exact
+    continuous CAD Hausdorff guarantee.
+
+    Band resolution matters: at a 1 mm pitch, a maximum distance of 1 mm may
+    select only exact on-surface cells or no cells at all, depending on grid
+    phase. Empty selections are rejected rather than automatically widened.
+    If off-surface samples are needed, declare a physically justified band at
+    least wide enough to contain the grid's sampled surface-crossing cells.
+    """
+    region: str
+    minimum_mm: float
+    maximum_mm: float
     rationale: str
 
     def __post_init__(self):
-        if self.metric not in ("gouge_fraction", "residual_fraction"):
-            raise ValueError("band metric must be an explicit gouge/residual fraction")
+        if self.region not in ("gouge", "residual", "stock", "both", "surface"):
+            raise ValueError("surface band region must be gouge, residual, stock, both or surface")
         if not self.rationale.strip():
-            raise ValueError("physical band rationale must be declared before selection")
-        if not math.isfinite(self.minimum) or not math.isfinite(self.maximum):
-            raise ValueError("physical band endpoints must be finite")
-        if not 0 <= self.minimum <= self.maximum <= 1:
-            raise ValueError("physical fraction band requires 0 <= minimum <= maximum <= 1")
+            raise ValueError("physical surface-band rationale is required")
+        for name in ("minimum_mm", "maximum_mm"):
+            if not math.isfinite(getattr(self, name)) or getattr(self, name) < 0:
+                raise ValueError(f"{name} must be finite and non-negative")
+        if self.minimum_mm > self.maximum_mm:
+            raise ValueError("surface-band millimetre bounds must be ordered")
+
+
+@dataclass(frozen=True)
+class StockFieldPair:
+    """Matching simulator stock fields and actual executed tool coordinates.
+
+    Phi hard is copied directly from forward_hard's own ``stock_d[T]``; phi
+    soft is the differentiable forward ``stock_d[T]`` before terminal occupancy
+    shifts. Distance values may be truncated by the underlying geometry, but
+    they share the simulator's voxel definition. A Boolean-mask EDT is NOT
+    substituted: it uses a different boundary convention and introduces bias.
+    ``target_sdf`` is the baked operation-target field on the same grid.
+    """
+    context: EvaluationContext
+    hard_stock_sdf: np.ndarray
+    soft_stock_sdf: np.ndarray
+    target_sdf: np.ndarray
+    hard_path: np.ndarray
+    soft_path: np.ndarray
+    hard_phi_voxels: np.ndarray = field(init=False)
+    soft_phi_voxels: np.ndarray = field(init=False)
+    surface_distance_mm: np.ndarray = field(init=False)
+    hard_distance_definition: str = field(init=False)
+    soft_field_definition: str = field(init=False)
+    identical_executed_path: bool = field(init=False)
+
+    def __post_init__(self):
+        if not isinstance(self.context, EvaluationContext):
+            raise TypeError("field calibration requires physical evaluation context")
+        grid = self.context.grid
+        if grid.sign_convention != "negative_inside":
+            raise ValueError("stock-field calibration expects negative_inside stock convention")
+        if np.asarray(self.hard_stock_sdf).dtype == np.dtype(bool):
+            raise TypeError("hard phi must be forward_hard stock_d, not a Boolean mask")
+        if np.asarray(self.soft_stock_sdf).dtype == np.dtype(bool):
+            raise TypeError("soft phi must be pre-shift differentiable stock_d, not a Boolean mask")
+        if np.asarray(self.target_sdf).dtype == np.dtype(bool):
+            raise TypeError("target phi must be the signed target field, not a Boolean occupancy indicator")
+        hard_path = _frozen_array(self.hard_path, "executed hard path", ndim=2)
+        soft_path = _frozen_array(self.soft_path, "executed soft path", ndim=2)
+        if hard_path.shape != soft_path.shape or hard_path.shape[1] != 3:
+            raise _ContextMismatch("hard/soft executed path dimensions differ")
+        if not np.array_equal(hard_path, soft_path):
+            raise _ContextMismatch("hard/soft executed paths are not identical")
+        hard = _frozen_array(self.hard_stock_sdf, "forward hard stock signed field")
+        soft = _frozen_array(self.soft_stock_sdf, "forward soft stock signed field")
+        target = _frozen_array(self.target_sdf, "operation-target signed field")
+        for name, field in (("hard stock", hard), ("soft stock", soft), ("target", target)):
+            if field.shape != grid.shape:
+                raise ValueError(f"{name} shape does not match declared grid {grid.shape}")
+        if not (np.any(target < 0) and np.any(target > 0)):
+            raise ValueError("operation-target band needs both material and removal regions on the grid")
+        surface_distance = np.abs(target) * grid.voxel_mm
+        if not np.all(np.isfinite(surface_distance)):
+            raise ValueError("non-finite target-surface distances on declared representation")
+        for array in (hard, soft, target, surface_distance):
+            array.flags.writeable = False
+        object.__setattr__(self, "hard_stock_sdf", hard)
+        object.__setattr__(self, "target_sdf", target)
+        object.__setattr__(self, "soft_stock_sdf", soft)
+        object.__setattr__(self, "hard_path", hard_path)
+        object.__setattr__(self, "soft_path", soft_path)
+        object.__setattr__(self, "hard_phi_voxels", hard)
+        object.__setattr__(self, "soft_phi_voxels", soft)
+        object.__setattr__(self, "surface_distance_mm", surface_distance)
+        object.__setattr__(self, "hard_distance_definition",
+                           "forward_hard.stock_d[T] in voxel SDF units (possibly truncated by execution geometry)")
+        object.__setattr__(self, "soft_field_definition",
+                           "differentiable forward stock_d[T], pre-occupancy-shift, voxel SDF units")
+        object.__setattr__(self, "identical_executed_path", True)
+
+    def selection(self, band: SurfaceBand) -> np.ndarray:
+        if band.region == "gouge":
+            region = self.target_sdf < 0
+        elif band.region == "residual":
+            region = self.target_sdf > 0
+        elif band.region in ("stock", "both", "surface"):
+            region = np.ones(self.target_sdf.shape, dtype=bool)
+        else:
+            raise ValueError("unknown physical band region")
+        pitch = self.context.grid.voxel_mm
+        return (
+            region
+            & (np.abs(self.target_sdf) >= band.minimum_mm / pitch)
+            & (np.abs(self.target_sdf) <= band.maximum_mm / pitch)
+            # Both sides of the executed surface, not only remaining stock.
+            & (np.abs(self.hard_phi_voxels) <= band.maximum_mm / pitch)
+        )
 
 
 @dataclass(frozen=True)
@@ -347,17 +456,29 @@ class CalibrationResult:
     shift: float
     updated: bool
     reason: str
+    # selected_count is the number of selected VOXELS across all measurements;
+    # selected_observations records actual paired path/field measurements.
     selected_count: int = 0
+    selected_observations: int = 0
     source_count: int = 0
     median_delta: Optional[float] = None
     clipped_delta: Optional[float] = None
+    median_hard_voxels: Optional[float] = None
+    median_soft_voxels: Optional[float] = None
+    delta_mm: Optional[float] = None
+    clipped_delta_mm: Optional[float] = None
+    shift_mm: Optional[float] = None
     disagreement: Mapping[str, Any] = field(default_factory=dict)
+    band: Mapping[str, Any] = field(default_factory=dict)
+    hard_distance_definition: str = ""
+    soft_field_definition: str = ""
+    voxel_mm: Optional[float] = None
 
 
 def bounded_disagreement(hard_phi: float, soft_phi: float, scale_floor: float) -> dict[str, Any]:
     """Return a signed gap bounded to [-1,1], with a non-geometric floor.
 
-    The denominator is |hard|+|soft| plus an explicitly positive *loss-unit*
+    The denominator is |hard|+|soft| plus an explicitly positive *voxel-unit*
     floor. It is not an IoU/Dice denominator, a signed Dice gap, or a zero mask
     denominator. |hard-soft| <= |hard|+|soft| also bounds nonzero gap ratios at
     nonzero losses. Scaling by the largest magnitude avoids overflow in this
@@ -367,7 +488,7 @@ def bounded_disagreement(hard_phi: float, soft_phi: float, scale_floor: float) -
     soft = _optional_number(soft_phi, "soft_phi")
     scale_floor = _optional_number(scale_floor, "scale_floor", nonnegative=True)
     if scale_floor <= 0:
-        raise ValueError("scale_floor must be a positive loss-unit floor, not zero")
+        raise ValueError("scale_floor must be a positive voxel-SDF-unit floor, not zero")
     scale = max(abs(hard), abs(soft), scale_floor)
     gap = hard - soft
     bounded = (hard / scale - soft / scale) / (
@@ -379,20 +500,28 @@ def bounded_disagreement(hard_phi: float, soft_phi: float, scale_floor: float) -
         "bounded_gap": bounded,
         "absolute_bounded_gap": abs(bounded),
         "scale_floor": scale_floor,
-        "normalizer": "abs(hard_phi) + abs(soft_phi) + explicit_positive_loss_unit_scale_floor",
+        "normalizer": "abs(hard_phi) + abs(soft_phi) + explicit_positive_voxel_sdf_unit_scale_floor",
     }
 
 
+FieldObservation = StockFieldPair
+PhysicalBand = SurfaceBand
+
+
 class SignedLossCalibrator:
-    """Pure, signed raw-loss EMA; it does not propose or accept optimizer steps."""
+    """Calibrate stock SDF offsets in voxel units, never scalar loss offsets.
+
+    This keeps the historical class name for adapters, but phi_hard/soft are
+    spatial signed fields. The name ``SignedFieldCalibrator`` is preferred.
+    """
 
     def __init__(self, eta: float, delta_max: float, disagreement_floor: float):
         if not math.isfinite(eta) or not 0 < eta <= 1:
             raise ValueError("eta must be in (0,1]")
-        if not math.isfinite(delta_max) or delta_max <= 0:
-            raise ValueError("delta_max must be finite and positive")
+        if not math.isfinite(delta_max) or not 0 < delta_max <= 0.5:
+            raise ValueError("delta_max must be finite, positive and <= 0.5 voxel")
         if not math.isfinite(disagreement_floor) or disagreement_floor <= 0:
-            raise ValueError("disagreement_floor must be finite and positive")
+            raise ValueError("disagreement_floor must be finite and positive in voxel units")
         self.eta, self.delta_max, self.floor = eta, delta_max, disagreement_floor
 
     def _unchanged(self, current_shift: float, reason: str, count: int) -> CalibrationResult:
@@ -400,47 +529,68 @@ class SignedLossCalibrator:
             raise ValueError("current shift must be finite")
         return CalibrationResult(current_shift, False, reason, source_count=count)
 
-    def update(self, observations: Sequence[PairedObservation], band: PhysicalBand,
-               current_shift: float):
+    def update(self, observations: Sequence[StockFieldPair], band: SurfaceBand,
+               current_shift: float) -> CalibrationResult:
         observations = tuple(observations)
         if not observations:
             return self._unchanged(current_shift, "no_measurements", 0)
+        if any(not isinstance(item, StockFieldPair) for item in observations):
+            raise TypeError("field calibration requires StockFieldPair records; scalar losses are not phi")
+        if not isinstance(band, SurfaceBand):
+            raise TypeError("field calibration requires a physical SurfaceBand")
         contexts = [item.context for item in observations]
-        if any(context != contexts[0] for context in contexts[1:]):
+        first = contexts[0]
+        if any(context != first for context in contexts[1:]):
             raise ValueError("calibration band requires identical k/shift/grid/validator context")
-        if any(item.identical_executed_path is not True for item in observations):
-            # Missing paths are unknown and unequal paths are an actual mismatch;
-            # neither may be replaced with a theta-only comparison.
-            return self._unchanged(current_shift, "identical_executed_path_unavailable_or_mismatch",
-                                   len(observations))
-        indices = []
-        for index, item in enumerate(observations):
-            value = getattr(item.hard, band.metric)
-            if value is None:
-                return self._unchanged(current_shift, f"band_metric_unavailable:{band.metric}",
-                                       len(observations))
-            if band.minimum <= value <= band.maximum:
-                indices.append(index)
-        if not indices:
-            return self._unchanged(current_shift, "empty_declared_physical_band", len(observations))
-        selected = [observations[index] for index in indices]
-        if any(not item.scalar_disagreement_known for item in selected):
-            return self._unchanged(current_shift, "raw_phi_unavailable_in_selected_band",
-                                   len(observations))
-        differences = [item.hard.raw_phi_hard - item.soft.raw_phi_soft for item in selected]
-        if not all(math.isfinite(delta) for delta in differences):
-            return self._unchanged(current_shift, "nonfinite_raw_loss_difference", len(observations))
+        if not math.isfinite(current_shift):
+            raise ValueError("current shift must be finite in voxel units")
+
+        masks = [item.selection(band) for item in observations]
+        if any(not np.any(mask) for mask in masks):
+            raise ValueError(
+                "empty selected surface band on declared grid: "
+                f"region={band.region}, min_mm={band.minimum_mm}, max_mm={band.maximum_mm}"
+            )
+        hard_parts = [item.hard_phi_voxels[mask] for item, mask in zip(observations, masks)]
+        soft_parts = [item.soft_phi_voxels[mask] for item, mask in zip(observations, masks)]
+        hard_values = np.concatenate(hard_parts)
+        soft_values = np.concatenate(soft_parts)
+        differences = hard_values - soft_values
+        if not (np.all(np.isfinite(differences)) and np.all(np.isfinite(hard_values))
+                and np.all(np.isfinite(soft_values))):
+            return self._unchanged(current_shift, "nonfinite_signed_field_difference", len(observations))
         median = float(np.median(differences))
+        median_hard = float(np.median(hard_values))
+        median_soft = float(np.median(soft_values))
         clipped = float(np.clip(median, -self.delta_max, self.delta_max))
         new_shift = (1.0 - self.eta) * current_shift + self.eta * clipped
         if not math.isfinite(new_shift):
             raise ValueError("EMA shift update became non-finite")
+        pitch = first.grid.voxel_mm
+        selected_cells = sum(int(np.count_nonzero(mask)) for mask in masks)
         return CalibrationResult(
-            shift=new_shift, updated=True, reason="raw_loss_band_calibration",
-            selected_count=len(indices), source_count=len(observations),
+            shift=new_shift, updated=True, reason="signed_stock_field_surface_band_calibration",
+            selected_count=selected_cells,
+            selected_observations=len(observations), source_count=len(observations),
             median_delta=median, clipped_delta=clipped,
-            disagreement=bounded_disagreement(float(np.mean(differences)), 0.0, self.floor),
+            median_hard_voxels=median_hard, median_soft_voxels=median_soft,
+            delta_mm=median * pitch, clipped_delta_mm=clipped * pitch,
+            shift_mm=new_shift * pitch,
+            disagreement=bounded_disagreement(median_hard, median_soft, self.floor),
+            band={
+                "region": band.region, "minimum_mm": band.minimum_mm,
+                "maximum_mm": band.maximum_mm,
+                "minimum_voxels": band.minimum_mm / pitch,
+                "maximum_voxels": band.maximum_mm / pitch,
+                "rationale": band.rationale,
+            },
+            hard_distance_definition=observations[0].hard_distance_definition,
+            soft_field_definition=observations[0].soft_field_definition,
+            voxel_mm=pitch,
         )
+
+
+SignedFieldCalibrator = SignedLossCalibrator
 
 
 @dataclass(frozen=True)
@@ -560,8 +710,10 @@ class BacktrackingConfig:
         if isinstance(self.max_retries_per_step, bool) or not isinstance(self.max_retries_per_step, int) \
                 or not 0 <= self.max_retries_per_step <= 16:
             raise ValueError("max_retries_per_step must be an integer in [0,16]")
-        if not 0 < self.eta <= 1 or self.delta_max <= 0 or self.disagreement_floor <= 0:
-            raise ValueError("EMA rate and positive bounds must be ordered")
+        if not 0 < self.eta <= 1 or not 0 < self.delta_max <= 0.5 or self.disagreement_floor <= 0:
+            raise ValueError("EMA rate must be in (0,1]; delta_max must be positive and <= 0.5 voxel")
+        if self.disagreement_floor <= 0:
+            raise ValueError("disagreement_floor must be positive in voxel units")
 
 
 class _BudgetExhausted(RuntimeError):
@@ -751,8 +903,8 @@ class BacktrackingMechanism:
                 return StepOutcome(base, "rolled_back" if not isinstance(error, _ContextMismatch) else "blocked",
                                    str(error), attempts=attempt + 1, retries=attempt,
                                    history=tuple(history), spent=delta())
-            if candidate.soft.raw_phi_soft is None or incumbent.soft.raw_phi_soft is None:
-                return StepOutcome(base, "blocked", "soft_phi_unavailable",
+            if candidate.hard.raw_phi_hard is None or incumbent.hard.raw_phi_hard is None:
+                return StepOutcome(base, "blocked", "raw_hard_validation_objective_unavailable",
                                    attempts=attempt + 1, retries=attempt,
                                    history=tuple(history), spent=delta())
             candidate_assessment = assess_constraints(candidate.hard, self.constraints)
@@ -763,8 +915,12 @@ class BacktrackingMechanism:
                 return StepOutcome(base, "blocked", "candidate_hard_validation_unknown",
                                    attempts=attempt + 1, retries=attempt,
                                    history=tuple(history), spent=delta())
-            incumbent_loss = incumbent.soft.raw_phi_soft + context.loss_shift
-            candidate_loss = candidate.soft.raw_phi_soft + context.loss_shift
+            # Score and tolerance use raw hard validation objectives. A signed
+            # stock-field shift shapes the smooth surrogate only; it is not a
+            # scalar addition to either side of a comparison (and cannot alter
+            # a relative-tolerance outcome through a fake scalar offset).
+            incumbent_loss = incumbent.hard.raw_phi_hard
+            candidate_loss = candidate.hard.raw_phi_hard
             incumbent_rank = self._rank(initial_assessment, incumbent.hard.residual_fraction,
                                         incumbent_loss)
             candidate_rank = self._rank(candidate_assessment, candidate.hard.residual_fraction,
@@ -802,7 +958,7 @@ class BacktrackingMechanism:
                            retries=self.config.max_retries_per_step,
                            history=tuple(history), spent=delta())
 
-    def calibrate(self, observations: Sequence[PairedObservation], band: PhysicalBand,
+    def calibrate(self, observations: Sequence[StockFieldPair], band: SurfaceBand,
                   current_shift: float) -> CalibrationResult:
         # Pure arithmetic here; backend observations and their already-accounted
         # costs are supplied by the caller. No k schedule, moments or theta edits.
@@ -812,27 +968,23 @@ class BacktrackingMechanism:
 def from_merged_soft(evaluation: Any, context: EvaluationContext, *,
                      path: Optional[np.ndarray] = None,
                      applied_shift: Optional[float] = None) -> SoftObservation:
-    """Adapt existing CandidateEvaluation/Result without assuming raw-loss scope.
+    """Adapt the SCALAR result at the neutral zero field shift.
 
-    For nonzero shift, pass exactly the ``applied_shift`` already incorporated by
-    an executor returning ``phi_soft + applied_shift`` so this helper can remove
-    it once. A callback already returning raw/unshifted loss should construct
-    ``SoftObservation`` directly. This helper never guesses a shift or subtracts
-    it twice. A zero-shift merged result needs no subtraction.
+    This helper cannot convert a shifted scalar loss into an unshifted stock
+    field. ``phi_soft + voxel_shift`` is NOT how occupancy shifts work; use the
+    raw ``stock_d`` array in StockFieldPair for signed-field calibration.
     """
+    if applied_shift is not None:
+        raise ValueError("a stock-field shift cannot be removed by scalar subtraction; use raw stock_d")
+    if context.loss_shift != 0.0:
+        raise ValueError("merged scalar adapter requires the neutral zero shift")
     result = evaluation.result if hasattr(evaluation, "result") else evaluation
     if result.objective_kind != "smooth":
         raise ValueError("from_merged_soft requires the smooth objective result")
-    if applied_shift is None and context.loss_shift != 0:
-        raise ValueError("cannot infer raw soft loss at nonzero shift without its applied_shift")
     value = result.objective
     raw_phi = None
     if result.valid and value is not None:
-        value = float(value)
-        if applied_shift is not None:
-            applied_shift = _optional_number(applied_shift, "applied_shift")
-            value -= applied_shift
-        raw_phi = _optional_number(value, "merged soft objective")
+        raw_phi = _optional_number(value, "merged soft objective at zero field shift")
     gradient = getattr(evaluation, "gradient_theta", None)
     return SoftObservation(context, raw_phi, path=path, gradient=gradient,
                            theta_hash=result.theta_hash)
@@ -898,17 +1050,20 @@ def dev_ablation_plan() -> dict[str, Any]:
              "schedule": "same bounded pilot-selected annealed k schedule for both",
              "configuration_sha256": shared_hash},
         ],
-        "shift_policy": "candidate-only bounded signed EMA from identical executed-path raw phi_hard - phi_soft in its declared physical band",
+        "shift_policy": "candidate-only signed EMA over median(forward_hard stock_d - raw differentiable stock_d) on the identical executed path/grid in a declared millimetre target-SDF-sign and absolute-distance surface band; in_stock_d voxels with <=0.5_voxel clip and recorded mm equivalent",
+        "hard_acceptance": "raw hard-validation objectives, without scalar shift addition or changed-k comparison",
         "outcomes": ["retain", "no_useful_advantage_omit", "inconclusive_unknown_coverage", "implementation_reject"],
         "actual_execution": None,
     }
 
 
 __all__ = [
-    "PhysicalBand", "ConstraintPolicy", "Feasibility", "EvaluationContext", "SharpnessSchedule",
+    "PhysicalBand", "SurfaceBand", "StockFieldPair", "FieldObservation",
+    "ConstraintPolicy", "Feasibility", "EvaluationContext", "SharpnessSchedule",
     "SoftObservation", "HardObservation", "PairedObservation",
     "ConstraintAssessment", "assess_constraints", "bounded_disagreement",
-    "SignedLossCalibrator", "CalibrationResult", "OptimizerSnapshot", "Proposal",
+    "SignedLossCalibrator", "SignedFieldCalibrator", "CalibrationResult",
+    "OptimizerSnapshot", "Proposal",
     "BacktrackingConfig", "StepOutcome", "BacktrackingMechanism",
     "from_merged_soft", "from_merged_hard", "parameter_hash", "grid_signature",
     "dev_ablation_plan",

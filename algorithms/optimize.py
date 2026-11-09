@@ -456,11 +456,22 @@ def _run_adam(state: _AdamState, evaluator: Any, checkpoint_dir: Optional[Path])
         else:
             # Keep the shared evaluator's specification for the next method.
             evaluator.sim.k[None] = evaluator.spec.k if hasattr(evaluator.spec, "k") else evaluator.sim.k[None]
+        # Mirror CMA's neutral per-run override cleanup. A continuation may set
+        # this explicitly before its run, but baselines never inherit it.
+        clear_loss_shift = getattr(evaluator, "clear_evaluation_loss_shift", None)
+        if clear_loss_shift is not None:
+            clear_loss_shift()
 
 
 def solve_adam(evaluator: Any, budget: B.OptimizationBudget, config: AdamConfig, *, seed: int = 0,
                x0: Any = None, run_id: Optional[str] = None, checkpoint_dir: Optional[str | Path] = None) -> AdamResult:
     _required_budget(budget)
+    # Plain Adam is a neutral field-shift baseline. An intentionally continued
+    # optimizer must re-establish its explicit state rather than rely on leaked
+    # ambient shift; checkpoint hashes include the active evaluation shift.
+    clear_loss_shift = getattr(evaluator, "clear_evaluation_loss_shift", None)
+    if clear_loss_shift is not None:
+        clear_loss_shift()
     run_id = run_id or f"adam-{config.mode}-deterministic"
     state = _initial_state(evaluator, budget, config, seed, x0, run_id)
     return _run_adam(state, evaluator, Path(checkpoint_dir) if checkpoint_dir is not None else None)
