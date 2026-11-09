@@ -107,11 +107,14 @@ def build_pilot_task(voxel_mm: float = GRID_PITCH) -> C.TaskSpec:
         original_part=original_part,
         operation_target=C.OperationTarget(
             geometry=operation_part,
-            excluded_volume_mm3=operation_part.params["continuous_excluded_volume_mm3"],
+            excluded_volume_mm3=operation_part.params["grid_excluded_volume_mm3"],
             exclusion_reason=(
                 "Only four corner fillets unreachable by a 2 mm-radius flat cutter "
-                "are excluded. At Z=-6 mm, holder/shank bottoms are 4 mm above "
-                "stock top, with positive cell-clearance margin. No wall corridor inset."
+                "are excluded. The declared volume is the exact grid-cell exclusion; "
+                f"{operation_part.params['continuous_excluded_volume_mm3']} mm^3 is the "
+                "continuous geometric diagnostic, not the grid declaration. At Z=-6 mm, "
+                "holder/shank bottoms are 4 mm above stock with positive cell-clearance "
+                "margin. No wall corridor inset."
             ),
         ),
         grid=grid,
@@ -236,9 +239,11 @@ def derive_reachable_target(stock, original_part, tool, grid, clearance_mm):
     complements in the original square pocket corners. Non-cutting shank and
     holder must actually clear the stock top there, including cell/qualification
     margin; no holder radius is used to manufacture a wall-wide exclusion.
-    Grid and continuous exclusion measurements are fixed before trajectory
-    execution. Sampling tolerance is their explicit absolute difference, not
-    a performance- or outcome-dependent allowance.
+    The original analytic field gives continuous corner-fillet area as a
+    diagnostic, while this function declares the grid-resolved exclusion in
+    the same units the evaluator scores. Grid and continuous quantities are
+    fixed before trajectory execution. There is no sampling tolerance: a
+    wrong corner mask must fail the evaluator's exact exclusion comparison.
     """
     if original_part.params.get("primitive") != SCHEMA_NAME:
         raise ValueError("derivation requires the unchanged box-minus-pocket original part")
@@ -256,17 +261,16 @@ def derive_reachable_target(stock, original_part, tool, grid, clearance_mm):
     hi = original_part.params["pocket_max_mm"]
     depth = hi[2] - lo[2]
     continuous_volume = 4.0 * (1.0 - math.pi / 4.0) * radius ** 2 * depth
-    sampling_tolerance = abs(grid_volume - continuous_volume)
     params = dict(original_part.params)
     params.update({
         CORNER_RADIUS_PARAM: radius,
         "continuous_excluded_volume_mm3": continuous_volume,
         "grid_excluded_voxels": excluded_cells,
         "grid_excluded_volume_mm3": grid_volume,
-        "grid_exclusion_tolerance_mm3": sampling_tolerance,
+        "grid_exclusion_tolerance_mm3": 0.0,
         "grid_exclusion_tolerance_policy": (
-            "absolute difference between exact physical corner-fillet volume "
-            "and the predeclared grid-centre exclusion mask; fixed before motion"
+            "exact grid-resolved declaration, independently checked analytic mask; "
+            "zero tolerance. Continuous volume is diagnostic only"
         ),
         "holder_clearance": holder,
         "accessibility": (
@@ -311,9 +315,10 @@ def evaluate_sampled_geometry(task, sources, initial_mask, remaining_mask):
     """Shared T1.3a grid metrics for actual sampled simulation stock.
 
     Target and original-part masks deliberately include zero-distance surface
-    cells, matching the production analytic evaluator. The declared constant
-    physical exclusion is compared with the fixed grid mask using only the
-    independently derived sampling policy recorded before nominal execution.
+    cells, matching the production analytic evaluator. The operation target's
+    declared exclusion is its exact grid-resolved value. The independently
+    computed production-style mask must match it with **zero** tolerance;
+    the continuous fillet volume is retained only as a diagnostic.
     """
     initial = np.asarray(initial_mask)
     remaining = np.asarray(remaining_mask)
@@ -350,8 +355,9 @@ def evaluate_sampled_geometry(task, sources, initial_mask, remaining_mask):
         "original_part_mask": original,
         "excluded_grid_volume_mm3": metrics["excluded_volume_mm3"].value,
         "declared_continuous_excluded_volume_mm3": (
-            task.operation_target.excluded_volume_mm3
+            task.operation_target.geometry.params["continuous_excluded_volume_mm3"]
         ),
+        "declared_grid_excluded_volume_mm3": task.operation_target.excluded_volume_mm3,
         "grid_exclusion_tolerance_mm3": (
             task.operation_target.geometry.params["grid_exclusion_tolerance_mm3"]
         ),
@@ -645,7 +651,10 @@ def evaluate_nominal(task, motion, parameterization, theta, source_paths,
             for name, metric in sampled_evaluation["metrics"].items()
         },
         "sampled_exclusion": {
-            "continuous_volume_mm3": task.operation_target.excluded_volume_mm3,
+            "continuous_volume_mm3": task.operation_target.geometry.params[
+            "continuous_excluded_volume_mm3"
+        ],
+        "declared_grid_volume_mm3": task.operation_target.excluded_volume_mm3,
             "grid_volume_mm3": sampled_evaluation["excluded_grid_volume_mm3"],
             "sampling_tolerance_mm3": sampled_evaluation["grid_exclusion_tolerance_mm3"],
         },

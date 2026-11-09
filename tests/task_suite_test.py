@@ -33,7 +33,6 @@ from benchmarks.pilot_task import (
     build_pilot_task,
     compare_motion,
     contact_boundary_diagnostics,
-    evaluate_sampled_geometry,
     expected_positions_from_motion,
     fit_parameterization,
     original_part_field,
@@ -43,8 +42,10 @@ from benchmarks.pilot_task import (
     write_artifacts,
 )
 from cam.gcode_parser import parse_motion_plan
+from cam.posted_evaluator import PostedEvaluator
 from cam.posts import post_motion_plan
 from cam.seeds import IslandSeedSpec, pocket_with_island_seed, seed_deltas_mm
+from verification import fixtures as F
 from verification.reference_carve import run_reference
 
 
@@ -132,7 +133,7 @@ def test_declared_pocket_is_full_except_finite_cutter_corners():
     depth = POCKET_MAX[2] - POCKET_MIN[2]
     assert radius == task.tool.cutter_radius_mm == 2.0
     exact_volume = 4 * (1 - math.pi / 4) * radius**2 * depth
-    assert task.operation_target.excluded_volume_mm3 == exact_volume
+    assert task.operation_target.excluded_volume_mm3 == target["grid_excluded_volume_mm3"]
     assert exact_volume == pytest.approx(20.601776313844965)
     assert exact_volume < 0.01 * (
         (POCKET_MAX[0] - POCKET_MIN[0])
@@ -140,9 +141,7 @@ def test_declared_pocket_is_full_except_finite_cutter_corners():
     )
     assert "No wall corridor inset" in task.operation_target.exclusion_reason
     assert target["continuous_excluded_volume_mm3"] == exact_volume
-    assert target["grid_exclusion_tolerance_mm3"] == abs(
-        target["grid_excluded_volume_mm3"] - exact_volume
-    )
+    assert target["grid_exclusion_tolerance_mm3"] == 0.0
     assert target["grid_excluded_voxels"] == int(round(
         target["grid_excluded_volume_mm3"] / task.grid.voxel_mm ** 3
     ))
@@ -189,7 +188,8 @@ def test_analytic_source_fields_match_declared_target_not_original_part():
     excluded = (part <= 0) & (original > 0)
     measured = int(excluded.sum())
     assert measured == params["grid_excluded_voxels"]
-    assert measured * task.grid.voxel_mm ** 3 == params["grid_excluded_volume_mm3"]
+    assert measured * task.grid.voxel_mm ** 3 == task.operation_target.excluded_volume_mm3
+    assert task.operation_target.excluded_volume_mm3 == 18.0
     assert measured < int(np.count_nonzero(required) / 100)
     # Independently count one positive corner using its physical coordinates,
     # not the target-construction helper. All four corners are symmetric.
@@ -213,6 +213,65 @@ def test_analytic_source_fields_match_declared_target_not_original_part():
         source_fields(replace(task, stock=inverted_stock))
     with pytest.raises(ValueError, match="fillet radius"):
         source_fields(replace(task, tool=replace(task.tool, cutter_radius_mm=1.0)))
+
+
+def test_wrong_pilot_corner_radius_is_rejected_by_exclusion_check():
+    # Two actual physical pocket corners at the right wall, at the pilot's
+    # 0.25 mm grid. Each has twelve unreachable cells per Z station at the
+    # correct cutter radius. Each 2x2 mm corner box spans six mm vertically.
+    fixture = F.make_fixture(
+        "wrong-corner-radius", (), F.flat_tool(2.0, 10.0),
+        0.0, "negative exclusion-mask check",
+        stock_lo=(22.0, -16.0, -6.0), stock_hi=(24.0, 16.0, 0.0),
+        voxel=0.25, initial=(0.0, 0.0, 10.0),
+    )
+    params = {
+        "primitive": "box_minus_pocket",
+        "box_min_mm": [22.0, -16.0, -6.0],
+        "box_max_mm": [24.0, 16.0, 0.0],
+        "pocket_min_mm": [-24.0, -16.0, -6.0],
+        "pocket_max_mm": [24.0, 16.0, 0.0],
+        # The island is above the small stock fixture and adds no material.
+        "island_min_mm": [22.0, 14.0, 1.0],
+        "island_max_mm": [24.0, 16.0, 2.0],
+    }
+    original = C.GeometrySource(kind="analytic", params=params, frame=C.Frame.WORK)
+    task = replace(
+        fixture.task,
+        original_part=original,
+        operation_target=C.OperationTarget(
+            geometry=replace(original, params={**params, CORNER_RADIUS_PARAM: 2.0}),
+            excluded_volume_mm3=9.0,
+            exclusion_reason="two independently counted corner quadrants",
+        ),
+    )
+    correct = PostedEvaluator().evaluate_candidate(
+        task, fixture.motion, {"exclusion_tolerance_mm3": 0.0}
+    )
+    assert correct.coverage == C.Coverage.COMPLETE
+    assert correct.metrics["excluded_volume_mm3"].value == 9.0
+    assert correct.geometry_pass is False  # this query deliberately executes no cut
+    # Continuous closed-form diagnostic for two quadrants, independently of
+    # the target mask: 2 * (1 - pi/4) * 2^2 * 6 mm^3.
+    continuous = 2 * (1 - math.pi / 4) * 2.0 ** 2 * 6.0
+    assert continuous == pytest.approx(10.300888156922482)
+    assert correct.metrics["excluded_volume_mm3"].value == 9.0
+
+    wrong_geometry = replace(
+        task.operation_target.geometry,
+        params={**params, CORNER_RADIUS_PARAM: 1.5},
+    )
+    wrong_task = replace(
+        task,
+        operation_target=replace(task.operation_target, geometry=wrong_geometry),
+    )
+    rejected = PostedEvaluator().evaluate_candidate(
+        wrong_task, fixture.motion, {"exclusion_tolerance_mm3": 0.0}
+    )
+    assert rejected.coverage == C.Coverage.UNSUPPORTED
+    assert rejected.geometry_pass is None
+    assert not rejected.efficiency_eligible
+    assert any("excluded volume mismatch" in reason for reason in rejected.coverage_reasons)
 
 
 def test_seed_is_typed_line_only_and_avoids_below_stock_cross_disc_transfers():
