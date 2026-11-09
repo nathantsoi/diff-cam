@@ -289,10 +289,9 @@ _STRICT_WORD_RE = re.compile(r"([A-Za-z])\s*([-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]
 
 def _strict_line_words(raw: str, line: int) -> list[tuple[str, float]]:
     """Tokenise one complete block, retaining no unexamined trailing text."""
-    text = raw.split(";", 1)[0]
     chars: list[str] = []
     depth = 0
-    for char in text:
+    for char in raw:
         if char == "(":
             if depth:
                 raise _nc_error(line, "nested parenthesised comments are unsupported", True)
@@ -301,6 +300,8 @@ def _strict_line_words(raw: str, line: int) -> list[tuple[str, float]]:
             if not depth:
                 raise _nc_error(line, "unmatched closing comment delimiter")
             depth = 0
+        elif char == ";" and not depth:
+            break  # start-of-line or trailing executable comment, not inside ( ... )
         elif not depth:
             chars.append(char)
     if depth:

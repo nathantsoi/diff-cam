@@ -143,6 +143,28 @@ def test_legacy_parser_does_not_silently_drop_nonfinite_motion(bad):
         parse_gcode(text, _cfg())
 
 
+def test_semicolons_inside_parenthesised_comments_are_not_executable_tokens():
+    # Both parser routes must ignore the '; note, then )' substring correctly;
+    # the strict pathology path must still read the closing parenthesis.
+    text = "G21 G90 (note; this is only a comment) G0 X0 Y0 Z10\nM2\n"
+    assert parse_gcode(text, _cfg()) == []
+    from benchmarks import contracts as C
+    from cam.gcode_parser import parse_motion_plan
+    plan = parse_motion_plan(text, C.example_pocket_task())
+    assert len(plan.segments) == 1
+    assert plan.segments[0].end_mm == (100.0, 80.0, -140.0)
+    assert plan.segments[0].duration_s == 0.0
+
+
+def test_semicolon_outside_parentheses_still_starts_a_comment():
+    from benchmarks import contracts as C
+    from cam.gcode_parser import parse_motion_plan
+    text = "G21 G90 (intro) G0 X0 Y0 Z10 ; G1 Z-100 F1 (unmatched comment text\nM2\n"
+    plan = parse_motion_plan(text, C.example_pocket_task())
+    assert len(plan.segments) == 1
+    assert plan.segments[0].end_mm == (100.0, 80.0, -140.0)
+
+
 # ---------------------------------------------------------------------------
 # 2. Parser round-trip (waypoint recovery)
 # ---------------------------------------------------------------------------
