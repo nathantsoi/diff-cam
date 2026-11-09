@@ -227,7 +227,35 @@ def _analytic_mask(geometry, points):
         outside = _box_distance(points, p["box_min_mm"], p["box_max_mm"])
         pocket = _box_distance(points, p["pocket_min_mm"], p["pocket_max_mm"])
         island = _box_distance(points, p["island_min_mm"], p["island_max_mm"])
-        return np.maximum(outside, -np.maximum(pocket, -island)) <= 0
+        sharp = np.maximum(outside, -np.maximum(pocket, -island)) <= 0
+        try:
+            radius = float(p.get("pocket_unreached_corner_radius_mm", 0.0))
+        except (TypeError, ValueError) as error:
+            raise ValueError("pocket_unreached_corner_radius_mm must be finite and nonnegative") from error
+        if not math.isfinite(radius) or radius < 0:
+            raise ValueError("pocket_unreached_corner_radius_mm must be finite and nonnegative")
+        if radius == 0.0:
+            return sharp
+        pocket_min, pocket_max = p["pocket_min_mm"], p["pocket_max_mm"]
+        if any(pocket_max[axis] - pocket_min[axis] < 2 * radius for axis in (0, 1)):
+            raise ValueError("unreached-corner radius is too large for this pocket; model the complete uncut pocket explicitly")
+        unreachable = np.zeros(sharp.shape, dtype=bool)
+        for x_side in (0, 1):
+            for y_side in (0, 1):
+                cx = pocket_min[0] + radius if x_side == 0 else pocket_max[0] - radius
+                cy = pocket_min[1] + radius if y_side == 0 else pocket_max[1] - radius
+                xlo = pocket_min[0] if x_side == 0 else pocket_max[0] - radius
+                xhi = pocket_min[0] + radius if x_side == 0 else pocket_max[0]
+                ylo = pocket_min[1] if y_side == 0 else pocket_max[1] - radius
+                yhi = pocket_min[1] + radius if y_side == 0 else pocket_max[1]
+                in_corner = ((points[0] >= xlo) & (points[0] <= xhi)
+                             & (points[1] >= ylo) & (points[1] <= yhi)
+                             & (points[2] >= pocket_min[2]) & (points[2] <= pocket_max[2]))
+                unreachable |= in_corner & (
+                    (points[0] - cx) ** 2 + (points[1] - cy) ** 2 >= radius ** 2)
+        # Only concave pocket corners change. The original outer stock and
+        # convex island are retained exactly as they are in the sharp source.
+        return sharp | unreachable
     raise ValueError(f"unsupported analytic geometry primitive {p.get('primitive')!r}")
 
 

@@ -14,7 +14,7 @@ import pytest
 
 from benchmarks import contracts as C
 from cam.gcode_parser import parse_motion_plan
-from cam.posted_evaluator import PostedEvaluator
+from cam.posted_evaluator import PostedEvaluator, _analytic_mask, _centres
 from cam.posts import post_motion_plan
 from verification import fixtures as F
 from verification.reference_carve import run_reference
@@ -322,6 +322,101 @@ def test_coarse_quarter_arc_bracket_includes_displaced_midpoint_removal():
     refined = PostedEvaluator().evaluate_candidate(task, fixture.motion, {"subdivisions": 2})
     assert metric(refined, "removed_volume_mm3") > 0
     assert refined.discretization["volume_bound"]["lower_mm3"] <= midpoint_volume <= refined.discretization["volume_bound"]["upper_mm3"]
+
+
+def _corner_geometry(pitch):
+    # Pocket corners are each a 2x2 quadrant. In particular x=2 is never a
+    # cell centre for dyadic pitch, so the tiny convex island is unresolved,
+    # not accidentally rounded or erased by the new unreachable-corner code.
+    side = 4.0
+    small_island = [1.99, 1.99, 0.0]
+    params = {
+        "primitive": "box_minus_pocket",
+        "box_min_mm": [0, 0, 0], "box_max_mm": [side, side, pitch],
+        "pocket_min_mm": [0, 0, 0], "pocket_max_mm": [side, side, pitch],
+        "island_min_mm": small_island, "island_max_mm": [2.01, 2.01, pitch],
+        "pocket_unreached_corner_radius_mm": 2.0,
+    }
+    shape = (int(side / pitch), int(side / pitch), 1)
+    grid = C.GridSpec(shape, (0, 0, 0), pitch, C.Frame.WORK)
+    return C.GeometrySource(kind="analytic", params=params, frame=C.Frame.WORK), grid
+
+
+def test_pocket_reachable_corner_volume_converges_to_quarter_disc_complement():
+    expected_volume = 4 * (1 - math.pi / 4) * 2 ** 2 * 6
+    # The coordinator's reported 20.601522612 differs by 0.00025370 mm3 from
+    # this explicit closed form. Never fabricate agreement by changing pi or
+    # using a percentage criterion across unrelated radii/grid sizes.
+    assert expected_volume == pytest.approx(20.601522612, abs=0.001)
+    history = []
+    for pitch in (0.125, 0.0625, 0.03125):
+        source, grid = _corner_geometry(pitch)
+        points = _centres(grid)
+        actual = _analytic_mask(source, points)
+        assert actual.any()
+        without_corner = replace(source, params=dict(source.params,
+                                                       pocket_unreached_corner_radius_mm=0.0))
+        assert not _analytic_mask(without_corner, points).any()  # hidden tiny island only
+        # Every sampled Z point is within the full vertical corner window. Each
+        # cell occupies height pitch; normalized to six mm retained corner depth.
+        volume = float(actual.sum()) * pitch ** 3 * (6 / pitch)
+        history.append((pitch, volume, abs(volume - expected_volume)))
+    print("Fillets by pitch:", history)
+    assert history[0][2] > history[1][2]
+    assert history[-1][2] < 0.15
+    assert history[-1][2] < history[0][2]
+
+
+def test_pocket_corner_radius_zero_is_byte_identical_to_old_mask():
+    fixture = C.example_pocket_task()
+    source, grid = fixture.operation_target.geometry, fixture.grid
+    points = _centres(grid)
+    zero = replace(source, params=dict(source.params, pocket_unreached_corner_radius_mm=0.0))
+    expected = _analytic_mask(source, points)
+    np.testing.assert_array_equal(_analytic_mask(zero, points), expected)
+    # Absence is the same code path, not a newly defaulted physical fillet.
+    assert "pocket_unreached_corner_radius_mm" not in source.params
+    bad = replace(source, params=dict(source.params, pocket_unreached_corner_radius_mm=-1.0))
+    with pytest.raises(ValueError, match="nonnegative"):
+        _analytic_mask(bad, points)
+    substantial_island = np.logical_and.reduce([
+        (points[axis] >= source.params["island_min_mm"][axis])
+        & (points[axis] <= source.params["island_max_mm"][axis]) for axis in range(3)])
+    assert substantial_island.any()
+    rounded = replace(source, params=dict(source.params, pocket_unreached_corner_radius_mm=0.75))
+    np.testing.assert_array_equal(_analytic_mask(rounded, points)[substantial_island],
+                                  expected[substantial_island])
+
+
+def test_pocket_fillets_are_excluded_from_original_part_and_checked_at_quarter_mm():
+    pitch = 0.25
+    # A real six-mm-deep pocket at the requester's pitch; the tiny central island
+    # is unchanged but unresolved at this lattice. Outer stock equals pocket bounds.
+    fixture = F.make_fixture("corner-consistency", [], F.flat_tool(1, 20), 0.0, "corner exclusion",
+                             stock_lo=(0, 0, 0), stock_hi=(4, 4, 6), voxel=pitch, initial=(2, 2, 8))
+    rounded, _ = _corner_geometry(pitch)
+    depth6 = replace(rounded, params=dict(rounded.params, box_max_mm=[4, 4, 6],
+                                         pocket_max_mm=[4, 4, 6], island_max_mm=[2.01, 2.01, 6]))
+    sharp = replace(depth6, params=dict(depth6.params, pocket_unreached_corner_radius_mm=0.0))
+    task = replace(fixture.task, original_part=sharp,
+                   operation_target=C.OperationTarget(
+                       geometry=depth6,
+                       excluded_volume_mm3=20.601522612,
+                       exclusion_reason="continuous pocket-corner reachability exclusion; explicit pitch tolerance supplied"))
+    # Independent single-corner count in physical mm: 12 cells in one 2x2 corner.
+    coordinates = [0.125 + 0.25 * i for i in range(8)]
+    count = sum((2 - x) ** 2 + (2 - y) ** 2 >= 2 ** 2 for x in coordinates for y in coordinates)
+    assert count == 12
+    expected_excluded = 4 * count * 6 * pitch ** 2
+    assert expected_excluded == 18.0
+    motion = C.MotionPlan(C.Frame.WORK, task.initial_state, (), C.TimingRule.EXACT_STOP_CONSTANT_SPEED)
+    result = PostedEvaluator().evaluate_candidate(task, motion, {"exclusion_tolerance_mm3": 2.65})
+    assert result.coverage == C.Coverage.COMPLETE
+    # No cuts were executed; this is an explicit metric/exclusion test, not pass physics.
+    assert result.geometry_pass is False
+    assert metric(result, "excluded_volume_mm3") == expected_excluded
+    assert result.discretization["settings"]["exclusion_tolerance_mm3"] == 2.65
+    assert abs(task.operation_target.excluded_volume_mm3 - expected_excluded) <= 2.65
 
 
 def test_major_arc_nearest_station_bound_does_not_vanish_near_full_circle():
