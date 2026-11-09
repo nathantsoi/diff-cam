@@ -7,7 +7,7 @@
       "expected_safety": true,
       "first_events": {},
       "fixture_id": "cutter_leading_holder_safe",
-      "motion_hash": "sha256:a3a594e0d7caf8de2f63e62288f213aff828270d262d717c08bb3104285460fc",
+      "motion_hash": "sha256:22b0d7716c199af5555dd85f2609216143f1565fe83f047a90af2b7ef0e9dd45",
       "rows": [
         {
           "collision_sample_count": 1.0,
@@ -82,7 +82,7 @@
           "voxel_mm": 1.0
         }
       ],
-      "task_hash": "sha256:7b09898ef15dfbaf0a4ffadc4f9d1d1258ad8b4280db8e41c9173863e919cd05"
+      "task_hash": "sha256:eca93f3b47fb01c68d756abbe857b5a6daccf55db7a8d4fdf748a3f488387cf8"
     },
     {
       "analytic_removed_mm3": 791.6813487046279,
@@ -96,7 +96,7 @@
         ]
       },
       "fixture_id": "genuine_holder_collision",
-      "motion_hash": "sha256:3ab43285cf218b32040d4240faf7d5130b94269af7dc324d79a9f0ef8d7787db",
+      "motion_hash": "sha256:da96d006a1f0910619ad1c74427c1ebae2a58e2b6675b8f5a2f4a610e0fbf040",
       "rows": [
         {
           "collision_sample_count": 1.0,
@@ -171,13 +171,13 @@
           "voxel_mm": 2.0
         }
       ],
-      "task_hash": "sha256:fafa7fc227bc42decec24ff9c59816a94a3914b643edeb5baafc0caa43a005c7"
+      "task_hash": "sha256:faefb731f369382dc25b08a35ff26d0a63b4524f95365e753209ba544813c910"
     }
   ],
   "continuous_volume_cases": [
     {
-      "base_motion_hash": "sha256:4c5f91803be7548f34bcd3728cab1c5bfe1e387b17bf0061791e1cee4cc6b154",
-      "base_task_hash": "sha256:d660b9acd32053ad72f8a7fc2ba9a791c8810fac72c12fdddf30c64975684435",
+      "base_motion_hash": "sha256:6458c2c15b51b8608e3e02988ec83292fab5b9d96c3ecadae1435013c3942040",
+      "base_task_hash": "sha256:b10c9580328a6caaf39c18da2eafabde0fb4931b8de1e468ccefe0d18758db70",
       "derivation": "pi*r^2*4: start above stock and include stock intersection only",
       "fixture_id": "plunge_above",
       "rows": [
@@ -192,13 +192,17 @@
             "upper_mm3": 1536.0,
             "width_mm3": 1536.0
           },
-          "motion_hash": "sha256:4c5f91803be7548f34bcd3728cab1c5bfe1e387b17bf0061791e1cee4cc6b154",
+          "min_clearance_mm": 18.30444394342476,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:6458c2c15b51b8608e3e02988ec83292fab5b9d96c3ecadae1435013c3942040",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": true,
           "sampled_removed_mm3": 256.0,
           "settings": {
             "max_step_mm": 2.0
           },
-          "task_hash": "sha256:802af147c13e7955586ac3b1011ebafaab41e5c99ddaa3781adaf03f252daea6",
+          "task_hash": "sha256:2932f9a4d6e2366acdb8af4e049ed815525133bd0445afe12898bfdc063b1e11",
           "time_integrated_overlap_mm3_s": 0.0,
           "unique_contacted_mm3": 0.0,
           "voxel_mm": 4.0
@@ -214,13 +218,17 @@
             "upper_mm3": 384.0,
             "width_mm3": 384.0
           },
-          "motion_hash": "sha256:4c5f91803be7548f34bcd3728cab1c5bfe1e387b17bf0061791e1cee4cc6b154",
+          "min_clearance_mm": 17.000774512915278,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:6458c2c15b51b8608e3e02988ec83292fab5b9d96c3ecadae1435013c3942040",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": true,
           "sampled_removed_mm3": 64.0,
           "settings": {
             "max_step_mm": 1.0
           },
-          "task_hash": "sha256:d660b9acd32053ad72f8a7fc2ba9a791c8810fac72c12fdddf30c64975684435",
+          "task_hash": "sha256:b10c9580328a6caaf39c18da2eafabde0fb4931b8de1e468ccefe0d18758db70",
           "time_integrated_overlap_mm3_s": 0.0,
           "unique_contacted_mm3": 0.0,
           "voxel_mm": 2.0
@@ -236,13 +244,17 @@
             "upper_mm3": 260.0,
             "width_mm3": 228.0
           },
-          "motion_hash": "sha256:4c5f91803be7548f34bcd3728cab1c5bfe1e387b17bf0061791e1cee4cc6b154",
+          "min_clearance_mm": 16.50868851739603,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:6458c2c15b51b8608e3e02988ec83292fab5b9d96c3ecadae1435013c3942040",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": true,
           "sampled_removed_mm3": 128.0,
           "settings": {
             "max_step_mm": 0.5
           },
-          "task_hash": "sha256:f2a1f7a7ce766347557362bd7c456eb53b3abb197cfe340a7d4e692d3feaaeae",
+          "task_hash": "sha256:0bcf5c20c9f39b7bc9c9cee678c4a0cafcf0ac1c026ef6f9c7fc3c00fe02b1a3",
           "time_integrated_overlap_mm3_s": 0.0,
           "unique_contacted_mm3": 0.0,
           "voxel_mm": 1.0
@@ -250,8 +262,8 @@
       ]
     },
     {
-      "base_motion_hash": "sha256:9744e4a72735c9c6eb065c105c4603e28e8385719bae76002b46037124a45b38",
-      "base_task_hash": "sha256:273e4151ef6b5c309bfadcf84656dc78d46dc83500da4323229798768830a055",
+      "base_motion_hash": "sha256:05c5f94e781e38ed31120632184ec5a2d5bebb4afbbaa22b45c18b9e8a323234",
+      "base_task_hash": "sha256:9981e0272ea03fac227a686dcdd3c154f29f83692d7ad083fa71838445f35586",
       "derivation": "12*(2*r*24 + pi*r^2): full-depth swept capsule incl. both end disks",
       "fixture_id": "horizontal_slot",
       "rows": [
@@ -266,13 +278,17 @@
             "upper_mm3": 6912.0,
             "width_mm3": 6912.0
           },
-          "motion_hash": "sha256:9744e4a72735c9c6eb065c105c4603e28e8385719bae76002b46037124a45b38",
+          "min_clearance_mm": 10.002031158104911,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:05c5f94e781e38ed31120632184ec5a2d5bebb4afbbaa22b45c18b9e8a323234",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": true,
           "sampled_removed_mm3": 2688.0,
           "settings": {
             "max_step_mm": 2.0
           },
-          "task_hash": "sha256:c3b2d46f8313893ff241100e09937675fe34f8b82554db2e0365153c33abee26",
+          "task_hash": "sha256:0305c7cd30aadb2091b16202fbcfc59df74675e2b6e6cc236fe01576cc7f7c4d",
           "time_integrated_overlap_mm3_s": 0.0,
           "unique_contacted_mm3": 0.0,
           "voxel_mm": 4.0
@@ -288,13 +304,17 @@
             "upper_mm3": 4608.0,
             "width_mm3": 3840.0
           },
-          "motion_hash": "sha256:9744e4a72735c9c6eb065c105c4603e28e8385719bae76002b46037124a45b38",
+          "min_clearance_mm": 9.00000600732086,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:05c5f94e781e38ed31120632184ec5a2d5bebb4afbbaa22b45c18b9e8a323234",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": true,
           "sampled_removed_mm3": 1728.0,
           "settings": {
             "max_step_mm": 1.0
           },
-          "task_hash": "sha256:273e4151ef6b5c309bfadcf84656dc78d46dc83500da4323229798768830a055",
+          "task_hash": "sha256:9981e0272ea03fac227a686dcdd3c154f29f83692d7ad083fa71838445f35586",
           "time_integrated_overlap_mm3_s": 0.0,
           "unique_contacted_mm3": 0.0,
           "voxel_mm": 2.0
@@ -310,13 +330,17 @@
             "upper_mm3": 2928.0,
             "width_mm3": 1808.0
           },
-          "motion_hash": "sha256:9744e4a72735c9c6eb065c105c4603e28e8385719bae76002b46037124a45b38",
+          "min_clearance_mm": 8.50003206266472,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:05c5f94e781e38ed31120632184ec5a2d5bebb4afbbaa22b45c18b9e8a323234",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": true,
           "sampled_removed_mm3": 2112.0,
           "settings": {
             "max_step_mm": 0.5
           },
-          "task_hash": "sha256:d881c0c94eed85efdcec17ba9a5a01089e66a54a5f491eb2cd3a2de0a4c6c216",
+          "task_hash": "sha256:f4d21934f24d30860d9ee9f07d03518609850e6aea1c19ce59691480da3d890a",
           "time_integrated_overlap_mm3_s": 0.0,
           "unique_contacted_mm3": 0.0,
           "voxel_mm": 1.0
@@ -324,8 +348,8 @@
       ]
     },
     {
-      "base_motion_hash": "sha256:139a8cf751bba52f1098ba9ca59f9b0aa5274172593f6d22b30a05f7b74d0390",
-      "base_task_hash": "sha256:061a4fad8f84e2cfcbb52b701aeb66ea94c706f44f380cd59323b10847f878c8",
+      "base_motion_hash": "sha256:44f517b9564cbf76c5a36f8eb95218d89e6fb90554ed4e70e90f192cfb84f467",
+      "base_task_hash": "sha256:8973637866e7c45ddd5c532c1eba1ea2c5f6b273e7815f62eabe643ae53a1904",
       "derivation": "pi*r^2*12 + 2*r*24*(26/3): integrate the temporal cross-section interval",
       "fixture_id": "sloped_ramp",
       "rows": [
@@ -340,13 +364,17 @@
             "upper_mm3": 4992.0,
             "width_mm3": 4992.0
           },
-          "motion_hash": "sha256:139a8cf751bba52f1098ba9ca59f9b0aa5274172593f6d22b30a05f7b74d0390",
+          "min_clearance_mm": 0.06155281280883029,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:44f517b9564cbf76c5a36f8eb95218d89e6fb90554ed4e70e90f192cfb84f467",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": null,
           "sampled_removed_mm3": 640.0,
           "settings": {
             "max_step_mm": 2.0
           },
-          "task_hash": "sha256:d55cd58b67918345e668acdf1351e47250806d4984ed2f016bc6a37c871fb8f5",
+          "task_hash": "sha256:a77261c5cbaa577db7ba86ee9496a93355a71c396ed6b342685cd662280a6305",
           "time_integrated_overlap_mm3_s": 0.0,
           "unique_contacted_mm3": 0.0,
           "voxel_mm": 4.0
@@ -362,13 +390,17 @@
             "upper_mm3": 2432.0,
             "width_mm3": 2432.0
           },
-          "motion_hash": "sha256:139a8cf751bba52f1098ba9ca59f9b0aa5274172593f6d22b30a05f7b74d0390",
+          "min_clearance_mm": -1.0,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:44f517b9564cbf76c5a36f8eb95218d89e6fb90554ed4e70e90f192cfb84f467",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": false,
           "sampled_removed_mm3": 1024.0,
           "settings": {
             "max_step_mm": 1.0
           },
-          "task_hash": "sha256:061a4fad8f84e2cfcbb52b701aeb66ea94c706f44f380cd59323b10847f878c8",
+          "task_hash": "sha256:8973637866e7c45ddd5c532c1eba1ea2c5f6b273e7815f62eabe643ae53a1904",
           "time_integrated_overlap_mm3_s": 12.745587471748802,
           "unique_contacted_mm3": 64.0,
           "voxel_mm": 2.0
@@ -384,13 +416,17 @@
             "upper_mm3": 1704.0,
             "width_mm3": 1344.0
           },
-          "motion_hash": "sha256:139a8cf751bba52f1098ba9ca59f9b0aa5274172593f6d22b30a05f7b74d0390",
+          "min_clearance_mm": -1.5,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:44f517b9564cbf76c5a36f8eb95218d89e6fb90554ed4e70e90f192cfb84f467",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": false,
           "sampled_removed_mm3": 976.0,
           "settings": {
             "max_step_mm": 0.5
           },
-          "task_hash": "sha256:7dfb2ee9291c5d1599f5885e085ccbd826873b7e77a0e93ac68ffbef4735617a",
+          "task_hash": "sha256:db986b2424d419ca6143b28c79042133f57e562a08a18059b6cbb4aa49d50926",
           "time_integrated_overlap_mm3_s": 15.303090221014187,
           "unique_contacted_mm3": 64.0,
           "voxel_mm": 1.0
@@ -398,8 +434,8 @@
       ]
     },
     {
-      "base_motion_hash": "sha256:2ee1527e1bddd80a455c5024f6e55945f590ff7c07f567ca32b73a9ad4a12584",
-      "base_task_hash": "sha256:e5882197fddcdd69e5e90ecd46b95279d8b1dfe6118f3597f758f977cdcb01af",
+      "base_motion_hash": "sha256:a5e2cca41fb9dd227dd77dd50edee3a06de0b39f15c002d50fd2ebb5e47f26aa",
+      "base_task_hash": "sha256:f2b11c9a2322f046dcdd41091e240d71c27edda8a70279493547a55f0d126332",
       "derivation": "12*pi*r^2 + 2*r*sqrt(.73)*3: q=1/4 throughout stock Z",
       "fixture_id": "near_vertical",
       "rows": [
@@ -414,13 +450,17 @@
             "upper_mm3": 2304.0,
             "width_mm3": 2304.0
           },
-          "motion_hash": "sha256:2ee1527e1bddd80a455c5024f6e55945f590ff7c07f567ca32b73a9ad4a12584",
+          "min_clearance_mm": 0.14811451507088647,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:a5e2cca41fb9dd227dd77dd50edee3a06de0b39f15c002d50fd2ebb5e47f26aa",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": null,
           "sampled_removed_mm3": 384.0,
           "settings": {
             "max_step_mm": 2.0
           },
-          "task_hash": "sha256:6e7641705d6d8bb54fc653ba91617a3aeba0a03d0cfd150f08675fc7631c98dc",
+          "task_hash": "sha256:9ce0552d57049978ce5a3d85a4935c8ecf264e3798cb4ac6cc6142c945204d76",
           "time_integrated_overlap_mm3_s": 0.0,
           "unique_contacted_mm3": 0.0,
           "voxel_mm": 4.0
@@ -436,13 +476,17 @@
             "upper_mm3": 968.0,
             "width_mm3": 936.0
           },
-          "motion_hash": "sha256:2ee1527e1bddd80a455c5024f6e55945f590ff7c07f567ca32b73a9ad4a12584",
+          "min_clearance_mm": 0.20106526763454857,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:a5e2cca41fb9dd227dd77dd50edee3a06de0b39f15c002d50fd2ebb5e47f26aa",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": null,
           "sampled_removed_mm3": 336.0,
           "settings": {
             "max_step_mm": 1.0
           },
-          "task_hash": "sha256:e5882197fddcdd69e5e90ecd46b95279d8b1dfe6118f3597f758f977cdcb01af",
+          "task_hash": "sha256:f2b11c9a2322f046dcdd41091e240d71c27edda8a70279493547a55f0d126332",
           "time_integrated_overlap_mm3_s": 0.0,
           "unique_contacted_mm3": 0.0,
           "voxel_mm": 2.0
@@ -458,13 +502,17 @@
             "upper_mm3": 637.0,
             "width_mm3": 480.0
           },
-          "motion_hash": "sha256:2ee1527e1bddd80a455c5024f6e55945f590ff7c07f567ca32b73a9ad4a12584",
+          "min_clearance_mm": -0.183974431934256,
+          "min_rapid_cutter_clearance_mm": null,
+          "motion_hash": "sha256:a5e2cca41fb9dd227dd77dd50edee3a06de0b39f15c002d50fd2ebb5e47f26aa",
+          "rapid_cutter_penetration_upper_bound_mm": null,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": false,
           "sampled_removed_mm3": 357.0,
           "settings": {
             "max_step_mm": 0.5
           },
-          "task_hash": "sha256:fbf39697411cb36ee4c476fe92a3c8a22832569bfa3acc445d42c9a9b70edde2",
+          "task_hash": "sha256:3823a864257cba3c3c29cced53a70848c1879cdd2be5063fc116f824de0e2328",
           "time_integrated_overlap_mm3_s": 4.125940908314885,
           "unique_contacted_mm3": 12.0,
           "voxel_mm": 1.0
@@ -472,8 +520,8 @@
       ]
     },
     {
-      "base_motion_hash": "sha256:0bffd7ccdcd14dd7a61551764036fb322da7deda2f3f2cacd9afd98dc38662c5",
-      "base_task_hash": "sha256:57782180df5496c518826bbb065bd2d880694145131acd8ba0b02947b8db0e88",
+      "base_motion_hash": "sha256:4b926a7c00c5b4255854a93395a03d4b4c3bcc56827af4e7fe9378d5822af9db",
+      "base_task_hash": "sha256:efd70c7833fa078960d1eae05145feacf74b007e6130566c6ca70127e61d468f",
       "derivation": "rapid removes zero; unique assembly contact = 60*6*6, cutter-only contact = 60*6*4",
       "fixture_id": "rapid_through_solid",
       "rows": [
@@ -488,13 +536,17 @@
             "upper_mm3": 0.0,
             "width_mm3": 0.0
           },
-          "motion_hash": "sha256:0bffd7ccdcd14dd7a61551764036fb322da7deda2f3f2cacd9afd98dc38662c5",
+          "min_clearance_mm": 0.0,
+          "min_rapid_cutter_clearance_mm": 0.0,
+          "motion_hash": "sha256:4b926a7c00c5b4255854a93395a03d4b4c3bcc56827af4e7fe9378d5822af9db",
+          "rapid_cutter_penetration_upper_bound_mm": 4.089101615137754,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": null,
           "sampled_removed_mm3": 0.0,
           "settings": {
             "max_step_mm": 2.0
           },
-          "task_hash": "sha256:3a0dd1e5afd8f9aaa4e73b2379420c27f3f92d426b78fe4c3c4836c5c82d9ecd",
+          "task_hash": "sha256:43bea5d47ac87e6fc4368e2dd488541a0d3d80c65d45d977e99c9c029d8dfe98",
           "time_integrated_overlap_mm3_s": 0.0,
           "unique_contacted_mm3": 0.0,
           "voxel_mm": 4.0
@@ -510,13 +562,17 @@
             "upper_mm3": 0.0,
             "width_mm3": 0.0
           },
-          "motion_hash": "sha256:0bffd7ccdcd14dd7a61551764036fb322da7deda2f3f2cacd9afd98dc38662c5",
+          "min_clearance_mm": -1.0,
+          "min_rapid_cutter_clearance_mm": -1.0,
+          "motion_hash": "sha256:4b926a7c00c5b4255854a93395a03d4b4c3bcc56827af4e7fe9378d5822af9db",
+          "rapid_cutter_penetration_upper_bound_mm": 3.044550807568877,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": false,
           "sampled_removed_mm3": 0.0,
           "settings": {
             "max_step_mm": 1.0
           },
-          "task_hash": "sha256:57782180df5496c518826bbb065bd2d880694145131acd8ba0b02947b8db0e88",
+          "task_hash": "sha256:efd70c7833fa078960d1eae05145feacf74b007e6130566c6ca70127e61d468f",
           "time_integrated_overlap_mm3_s": 810.0,
           "unique_contacted_mm3": 1440.0,
           "voxel_mm": 2.0
@@ -532,13 +588,17 @@
             "upper_mm3": 0.0,
             "width_mm3": 0.0
           },
-          "motion_hash": "sha256:0bffd7ccdcd14dd7a61551764036fb322da7deda2f3f2cacd9afd98dc38662c5",
+          "min_clearance_mm": -1.5,
+          "min_rapid_cutter_clearance_mm": -1.5,
+          "motion_hash": "sha256:4b926a7c00c5b4255854a93395a03d4b4c3bcc56827af4e7fe9378d5822af9db",
+          "rapid_cutter_penetration_upper_bound_mm": 2.5222754037844384,
+          "rapid_penetration_mm": 0.0,
           "safety_pass": false,
           "sampled_removed_mm3": 0.0,
           "settings": {
             "max_step_mm": 0.5
           },
-          "task_hash": "sha256:6f0b6df7d1963088e110015b388307eb5f441b4a70add5dd463e3ad2ec5b922a",
+          "task_hash": "sha256:3b9bf84aba245713125e5ae0921eb3703902da72bb9cf8dadafc4b5f356ecc41",
           "time_integrated_overlap_mm3_s": 1039.5,
           "unique_contacted_mm3": 2160.0,
           "voxel_mm": 1.0
@@ -546,11 +606,86 @@
       ]
     }
   ],
-  "evaluator_revision": "reference_carve/1+sha256:30adc7d1be654779870526033f933915330d29edb462b7158d892a7ec43f26c1",
+  "contracts_schema": "diffcam-contracts/1.1",
+  "evaluator_revision": "reference_carve/1+sha256:27ecab210e0de35beef0484ce08455ccb7cc9fa19f58b1d4373988dfe852725b",
   "notes": [
     "Analytic continuous volumes are independent of sampled voxel volumes.",
     "lower/station_upper/upper brackets concern removed stock, not collision contact volumes.",
     "collision_sample_count changes with stations; unique contact and time integral are distinct diagnostics."
   ],
-  "schema": "diffcam-reference-convergence/1"
+  "rapid_tolerance_cases": [
+    {
+      "case": "retract_zero",
+      "collision_sample_count": 0.0,
+      "min_clearance_mm": 17.000774512915278,
+      "min_rapid_cutter_clearance_mm": 0.16227766016837952,
+      "motion_hash": "sha256:149228fde4664979e2470179cc9270724d1969af7976525d0b95ba9fe4ed47a5",
+      "penetration_upper_bound_mm": 1.8197731474004977,
+      "rapid_penetration_mm": 0.0,
+      "removed_mm3": 64.0,
+      "safety_pass": null,
+      "task_hash": "sha256:770a7c19bb5e297acb6b22267b8103b71fa417eba9892d57b1f13ceeabcfc993"
+    },
+    {
+      "case": "retract_at_own_upper_bound",
+      "collision_sample_count": 0.0,
+      "min_clearance_mm": 17.000774512915278,
+      "min_rapid_cutter_clearance_mm": 0.16227766016837952,
+      "motion_hash": "sha256:149228fde4664979e2470179cc9270724d1969af7976525d0b95ba9fe4ed47a5",
+      "penetration_upper_bound_mm": 1.8197731474004977,
+      "rapid_penetration_mm": 1.8197731474004977,
+      "removed_mm3": 64.0,
+      "safety_pass": true,
+      "task_hash": "sha256:81be5dbf7cbbaa1bf8338d232b82d76136e5162e47efe9c29765c335b650f37c"
+    },
+    {
+      "case": "retract_band_phase_0",
+      "collision_sample_count": 0.0,
+      "min_clearance_mm": 17.000774512915278,
+      "min_rapid_cutter_clearance_mm": 0.16227766016837952,
+      "motion_hash": "sha256:149228fde4664979e2470179cc9270724d1969af7976525d0b95ba9fe4ed47a5",
+      "penetration_upper_bound_mm": 1.8197731474004977,
+      "rapid_penetration_mm": 1.9820508075688772,
+      "removed_mm3": 64.0,
+      "safety_pass": true,
+      "task_hash": "sha256:bedab419b1be56b784f254a533e49380be282303860462b329361fdf7a944694"
+    },
+    {
+      "case": "retract_zero_phase_fractional",
+      "collision_sample_count": 0.0,
+      "min_clearance_mm": 17.740748002415092,
+      "min_rapid_cutter_clearance_mm": 0.16291005246750334,
+      "motion_hash": "sha256:9d25c8594ebec7f0c295cb6955691300abc16f8d2da84b0c9bf22213821603d3",
+      "penetration_upper_bound_mm": 1.8191407551013739,
+      "rapid_penetration_mm": 0.0,
+      "removed_mm3": 112.0,
+      "safety_pass": null,
+      "task_hash": "sha256:ca5f14e27f24cc6ab39a99ade60812f1766c7516f818c80f65f8e494ae077d37"
+    },
+    {
+      "case": "retract_band_phase_fractional",
+      "collision_sample_count": 0.0,
+      "min_clearance_mm": 17.740748002415092,
+      "min_rapid_cutter_clearance_mm": 0.16291005246750334,
+      "motion_hash": "sha256:9d25c8594ebec7f0c295cb6955691300abc16f8d2da84b0c9bf22213821603d3",
+      "penetration_upper_bound_mm": 1.8191407551013739,
+      "rapid_penetration_mm": 1.9820508075688772,
+      "removed_mm3": 112.0,
+      "safety_pass": true,
+      "task_hash": "sha256:f11c24edbaf98091fca7e1f1e635c01597f1314284eaaf7712047ab3c8667f80"
+    },
+    {
+      "case": "rapid_through_solid_at_retract_upper_bound",
+      "collision_sample_count": 101.0,
+      "min_clearance_mm": -1.0,
+      "min_rapid_cutter_clearance_mm": -1.0,
+      "motion_hash": "sha256:4b926a7c00c5b4255854a93395a03d4b4c3bcc56827af4e7fe9378d5822af9db",
+      "penetration_upper_bound_mm": 3.044550807568877,
+      "rapid_penetration_mm": 1.8197731474004977,
+      "removed_mm3": 0.0,
+      "safety_pass": false,
+      "task_hash": "sha256:d3017fb3a15fa314b64a9e0d5e528c4926fe969c6d23d27e13cb811ae189783d"
+    }
+  ],
+  "schema": "diffcam-reference-convergence/1.1"
 }

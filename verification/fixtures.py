@@ -75,7 +75,8 @@ def _grid(lo: Point, hi: Point, voxel: float) -> C.GridSpec:
 def make_fixture(fixture_id: str, segments: Sequence[C.Segment], tool: C.ToolAssembly,
                  removed: float, derivation: str, *, stock_lo: Point = B_MIN,
                  stock_hi: Point = B_MAX, voxel: float = 2.0,
-                 initial: Optional[Point] = None, **expected) -> Fixture:
+                 initial: Optional[Point] = None, rapid_penetration_mm: float = 0.0,
+                 **expected) -> Fixture:
     geometry = _geometry(stock_lo, stock_hi)
     if initial is None:
         if not segments:
@@ -92,7 +93,8 @@ def make_fixture(fixture_id: str, segments: Sequence[C.Segment], tool: C.ToolAss
         limits=C.MachineLimits(max_feed_mm_s=100.0, rapid_mm_s=RAPID_MM_S, max_accel_mm_s2=1000.0,
                                envelope_min_mm=(-100, -100, -100), envelope_max_mm=(200, 200, 200)),
         tolerances=C.Tolerances(completion_residual_mm3=0.0, gouge_volume_mm3=0.0,
-                                local_surface_error_mm=0.0, clearance_mm=0.0),
+                                local_surface_error_mm=0.0, clearance_mm=0.0,
+                                rapid_penetration_mm=rapid_penetration_mm),
     )
     motion = C.MotionPlan(frame=C.Frame.WORK, initial_state=state, segments=tuple(segments),
                           timing_rule=C.TimingRule.EXACT_STOP_CONSTANT_SPEED,
@@ -213,6 +215,17 @@ def rapid_through_solid() -> Fixture:
     )
 
 
+def retract_from_own_slot() -> Fixture:
+    """A rapid withdraws through exactly the feed carve's reversed station poses."""
+    top, bottom = (20, 20, 16), (20, 20, 8)
+    return make_fixture(
+        "retract_from_own_slot", [feed("plunge", top, bottom), rapid("retract", bottom, top)],
+        flat_tool(3, 20), 36 * math.pi,
+        "feed removes pi*3^2*4; rapid retract adds no stock removal",
+        safety_pass=None, unique_contacted_volume_mm3=0.0, time_integrated_overlap_mm3_s=0.0,
+    )
+
+
 def zero_length_rapid() -> Fixture:
     return make_fixture("zero_length_rapid", [rapid("zero_rapid", (20, 20, 4), (20, 20, 4))],
                         flat_tool(3, 6), 0.0, "stationary rapid inside stock collides but never carves",
@@ -223,7 +236,8 @@ def zero_length_rapid() -> Fixture:
 _FACTORIES = (
     empty_preengaged, plunge_above, plunge_preengaged, horizontal_slot, sloped_ramp,
     near_vertical, reversal, repeated_plunge, through_hole, zero_length_feed,
-    cutter_leading_holder_safe, genuine_holder_collision, rapid_through_solid, zero_length_rapid,
+    cutter_leading_holder_safe, genuine_holder_collision, rapid_through_solid,
+    retract_from_own_slot, zero_length_rapid,
 )
 
 
@@ -241,6 +255,11 @@ def fixture_by_id(fixture_id: str) -> Fixture:
 def with_voxel(fixture: Fixture, voxel: float) -> Fixture:
     grid = _grid(fixture.task.stock.params["min_mm"], fixture.task.stock.params["max_mm"], voxel)
     return dataclasses.replace(fixture, task=dataclasses.replace(fixture.task, grid=grid))
+
+
+def with_rapid_tolerance(fixture: Fixture, tolerance_mm: float) -> Fixture:
+    tolerances = dataclasses.replace(fixture.task.tolerances, rapid_penetration_mm=tolerance_mm)
+    return dataclasses.replace(fixture, task=dataclasses.replace(fixture.task, tolerances=tolerances))
 
 
 def with_joint_phase(fixture: Fixture, phase: Point) -> Fixture:
@@ -291,6 +310,10 @@ def generate_convergence_report() -> Dict[str, object]:
                 "analytic_removed_mm3": refined.removed_volume_mm3,
                 "analytic_inside_bounds": trace.bounds.lower_mm3 - 1e-8 <= refined.removed_volume_mm3 <= trace.bounds.upper_mm3 + 1e-8,
                 "safety_pass": trace.result.safety_pass,
+                "min_clearance_mm": trace.result.metrics["min_clearance_mm"].value,
+                "min_rapid_cutter_clearance_mm": trace.result.metrics["min_rapid_cutter_clearance_mm"].value,
+                "rapid_cutter_penetration_upper_bound_mm": trace.result.metrics["rapid_cutter_penetration_upper_bound_mm"].value,
+                "rapid_penetration_mm": refined.task.tolerances.rapid_penetration_mm,
                 "unique_contacted_mm3": trace.result.metrics["unique_contacted_volume_mm3"].value,
                 "time_integrated_overlap_mm3_s": trace.result.metrics["time_integrated_overlap_mm3_s"].value,
             })
@@ -321,9 +344,42 @@ def generate_convergence_report() -> Dict[str, object]:
             "first_events": dict(fixture.first_events),
             "rows": rows,
         })
+    retract = retract_from_own_slot()
+    baseline = run_reference(retract.task, retract.motion)
+    upper = baseline.result.metrics["rapid_cutter_penetration_upper_bound_mm"].value
+    assert upper is not None
+    band = baseline.result.discretization["cell_half_diagonal_mm"] + max(
+        record["temporal_hausdorff_mm"] for record in baseline.result.discretization["segments"]
+        if record["kind"] == "rapid")
+    phased_retract = with_joint_phase(retract, (0.26, 0.58, 0.74))
+
+    def rapid_tolerance_row(label, fixture, tolerance):
+        adjusted = with_rapid_tolerance(fixture, tolerance)
+        trace = run_reference(adjusted.task, adjusted.motion)
+        return {
+            "case": label, "rapid_penetration_mm": tolerance,
+            "task_hash": adjusted.task.task_hash, "motion_hash": adjusted.motion.motion_hash,
+            "safety_pass": trace.result.safety_pass,
+            "removed_mm3": trace.result.metrics["removed_volume_mm3"].value,
+            "collision_sample_count": trace.result.metrics["collision_sample_count"].value,
+            "min_clearance_mm": trace.result.metrics["min_clearance_mm"].value,
+            "min_rapid_cutter_clearance_mm": trace.result.metrics["min_rapid_cutter_clearance_mm"].value,
+            "penetration_upper_bound_mm": trace.result.metrics["rapid_cutter_penetration_upper_bound_mm"].value,
+        }
+
+    rapid_tolerance_cases = [
+        rapid_tolerance_row("retract_zero", retract, 0.0),
+        rapid_tolerance_row("retract_at_own_upper_bound", retract, upper),
+        rapid_tolerance_row("retract_band_phase_0", retract, band),
+        rapid_tolerance_row("retract_zero_phase_fractional", phased_retract, 0.0),
+        rapid_tolerance_row("retract_band_phase_fractional", phased_retract, band),
+        rapid_tolerance_row("rapid_through_solid_at_retract_upper_bound", rapid_through_solid(), upper),
+    ]
     return {
-        "schema": "diffcam-reference-convergence/1", "evaluator_revision": EVALUATOR_REVISION,
+        "schema": "diffcam-reference-convergence/1.1", "contracts_schema": C.SCHEMA_VERSION,
+        "evaluator_revision": EVALUATOR_REVISION,
         "continuous_volume_cases": records, "chronology_cases": chronology,
+        "rapid_tolerance_cases": rapid_tolerance_cases,
         "notes": [
             "Analytic continuous volumes are independent of sampled voxel volumes.",
             "lower/station_upper/upper brackets concern removed stock, not collision contact volumes.",

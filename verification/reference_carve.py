@@ -111,6 +111,8 @@ def _unsupported(task: C.TaskSpec, motion: C.MotionPlan,
         "gouge_volume_mm3": unknown("mm^3"),
         "max_surface_error_mm": unknown("mm"),
         "min_clearance_mm": unknown("mm"),
+        "min_rapid_cutter_clearance_mm": unknown("mm"),
+        "rapid_cutter_penetration_upper_bound_mm": unknown("mm"),
         "unique_contacted_volume_mm3": unknown("mm^3"),
         "collision_sample_count": unknown("count"),
         "time_integrated_overlap_mm3_s": unknown("mm^3*s"),
@@ -242,6 +244,10 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
     collision_sample_count = 0
     integrated_overlap = 0.0
     min_clearance = math.inf
+    min_rapid_cutter_clearance = math.inf
+    rapid_penetration_upper = 0.0
+    rapid_seen = False
+    rapid_tolerance = task.tolerances.rapid_penetration_mm
     safety_uncertain = False
     uncertainty_segments = []
     segment_records = []
@@ -285,18 +291,36 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
             else:
                 checked = ("cutter", "shank", "holder")
 
+            material = remaining & stock_interior
             any_contact = np.zeros(shape, dtype=bool)
-            assembly_min = None
+            noncutting_min = None
             for name in checked:
                 distance = current_fields[name]
                 if distance is None:
                     continue
-                assembly_min = distance.copy() if assembly_min is None else np.minimum(assembly_min, distance)
-                contact = remaining & stock_interior & (distance < 0.0)
+                rapid_cutter = segment.kind == C.SegmentKind.RAPID and name == "cutter"
+                if rapid_cutter:
+                    rapid_seen = True
+                    if material.any():
+                        min_rapid_cutter_clearance = min(
+                            min_rapid_cutter_clearance, float(distance[material].min()))
+                else:
+                    noncutting_min = (distance.copy() if noncutting_min is None
+                                      else np.minimum(noncutting_min, distance))
+                # Contracts 1.1: tolerated rapid-cutter grazing is not a collision.
+                threshold = -rapid_tolerance if rapid_cutter else 0.0
+                contact = material & (distance < threshold)
+                if rapid_cutter and config.safety_screen and zero_length and material.any():
+                    upper = max(0.0, float(rho - distance[material].min()))
+                    rapid_penetration_upper = max(rapid_penetration_upper, upper)
+                    if upper > rapid_tolerance:
+                        safety_uncertain = True
+                        if segment.id not in uncertainty_segments:
+                            uncertainty_segments.append(segment.id)
                 if not contact.any():
                     continue
                 any_contact |= contact
-                if segment.kind == C.SegmentKind.RAPID and name == "cutter":
+                if rapid_cutter:
                     component = "rapid_cutter"
                     event_kind = "rapid_collision"
                 else:
@@ -307,7 +331,7 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
                     first_event_kinds.add(event_kind)
                     events.append(C.SegmentEvent(
                         segment_id=segment.id, kind=event_kind, s=s,
-                        detail="first sampled positive interior overlap at voxel centres; see temporal uncertainty",
+                        detail="first sampled penetration beyond the applicable tolerance at voxel centres; see temporal uncertainty",
                     ))
 
             if any_contact.any():
@@ -315,10 +339,8 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
                 weight = 0.0 if zero_length else segment.duration_s * (0.5 if j in (0, m) else 1.0) / m
                 integrated_overlap += weight * float(any_contact.sum()) * voxel_volume
 
-            if assembly_min is not None:
-                material = remaining & stock_interior
-                if material.any():
-                    min_clearance = min(min_clearance, float(assembly_min[material].min()))
+            if noncutting_min is not None and material.any():
+                min_clearance = min(min_clearance, float(noncutting_min[material].min()))
 
             if config.safety_screen and not zero_length and j < m:
                 next_s = (j + 1) / m
@@ -332,9 +354,16 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
                     assert next_d is not None
                     # Every pose in [s_j,s_{j+1}] lies within delta_t of one endpoint.
                     near = np.minimum(now_d, next_d)
-                    if (remaining & stock_interior & (near <= rho + delta_t)).any():
+                    if segment.kind == C.SegmentKind.RAPID and name == "cutter":
+                        upper = 0.0
+                        if material.any():
+                            upper = max(0.0, float((rho + delta_t - near[material]).max()))
+                        rapid_penetration_upper = max(rapid_penetration_upper, upper)
+                        if upper > rapid_tolerance:
+                            possible_here = True
+                    elif (material & (near <= rho + delta_t)).any():
+                        # Non-cutting assembly still uses strict-interior safety.
                         possible_here = True
-                        break
                 if possible_here:
                     safety_uncertain = True
                     if segment.id not in uncertainty_segments:
@@ -368,9 +397,17 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
     metrics = _null_target_metrics()
     metrics.update({
         "removed_volume_mm3": C.Metric(float(removed.sum()) * voxel_volume, "mm^3"),
-        "min_clearance_mm": (C.Metric(min_clearance, "mm", denominator="sampled remaining-stock voxel centres")
+        "min_clearance_mm": (C.Metric(min_clearance, "mm", denominator="sampled non-cutting assembly vs remaining-stock voxel centres")
                               if math.isfinite(min_clearance) else
-                              C.Metric(None, "mm", null_reason="no motion station with remaining stock")),
+                              C.Metric(None, "mm", null_reason="no non-cutting assembly station with remaining stock")),
+        "min_rapid_cutter_clearance_mm": (C.Metric(
+            min_rapid_cutter_clearance, "mm", denominator="sampled rapid cutter vs remaining-stock voxel centres")
+            if math.isfinite(min_rapid_cutter_clearance) else
+            C.Metric(None, "mm", null_reason="no rapid station with remaining stock")),
+        "rapid_cutter_penetration_upper_bound_mm": (C.Metric(
+            rapid_penetration_upper, "mm", denominator="maximum over remaining strict-stock centres and rapid intervals")
+            if rapid_seen and config.safety_screen else
+            C.Metric(None, "mm", null_reason="no rapid segments" if not rapid_seen else "safety_screen=false")),
         "unique_contacted_volume_mm3": C.Metric(float(unique.sum()) * voxel_volume, "mm^3"),
         "collision_sample_count": C.Metric(float(collision_sample_count), "count"),
         "time_integrated_overlap_mm3_s": C.Metric(integrated_overlap, "mm^3*s"),
@@ -387,7 +424,13 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
         "grid_shape": list(task.grid.shape),
         "grid_origin_mm": list(task.grid.origin_mm),
         "cell_half_diagonal_mm": rho,
-        "membership": {"removal": "closed", "collision": "strict_interior"},
+        "membership": {"removal": "closed", "noncutting_collision": "strict_interior",
+                       "rapid_cutter_collision": "signed_distance < -rapid_penetration_mm"},
+        "tolerances": {
+            "rapid_penetration_mm": rapid_tolerance,
+            "noncutting_clearance_qualification_mm": task.tolerances.clearance_mm,
+            "clearance_mm_role": "reported qualification threshold only; safety_pass uses strict noncutting intersections",
+        },
         "segments": segment_records,
         "unique_by_component_mm3": by_component,
         "collision_samples_are_per_station": True,
