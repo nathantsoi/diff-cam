@@ -320,6 +320,99 @@ def test_delta_ledger_is_numeric_and_mono_budget():
     assert "entries" not in delta and "memory_scope" not in delta
 
 
+def test_terminal_geometry_numpy_derivative_matches_central_differences():
+    from scripts.run_gradient_mechanics import terminal_geometry_loss_numpy
+
+    stock = np.array([-8.0, -3.0, -1.0, 0.0, 0.5, 1.0, 4.0, 9.0])
+    target = np.array([0.0, 1.0, -1.0, 0.5, -0.6, 1.5, -2.0, 2.0])
+    args = {"gouge_weight": 2.0, "residual_weight": 0.75, "loss_shift": 0.125}
+    exact = terminal_geometry_loss_numpy(stock, target, **args)
+    eps = 1e-5
+    for index in range(stock.size):
+        plus, minus = stock.copy(), stock.copy()
+        plus[index] += eps
+        minus[index] -= eps
+        central = (terminal_geometry_loss_numpy(plus, target, **args)["loss"]
+                   - terminal_geometry_loss_numpy(minus, target, **args)["loss"]) / (2 * eps)
+        assert exact["gradient"][index] == pytest.approx(central, rel=2e-8, abs=1e-10)
+    split = terminal_geometry_loss_numpy(stock, target, gouge_weight=1, residual_weight=0)
+    assert split["loss"] == pytest.approx(split["gouge"])
+    assert split["residual"] == 0
+
+
+def test_terminal_geometry_numpy_handles_clamps_and_bad_inputs():
+    from scripts.run_gradient_mechanics import terminal_geometry_loss_numpy
+
+    result = terminal_geometry_loss_numpy([-60.0, 60.0, 0.0], [-1.0, 1.0, 2.0],
+                                          gouge_weight=2, residual_weight=1)
+    assert result["gradient"][:2].tolist() == [0.0, 0.0]
+    assert not result["interior_to_clamp"][:2].any()
+    with pytest.raises(ValueError, match="finite"):
+        terminal_geometry_loss_numpy([np.nan], [0.0], gouge_weight=1, residual_weight=1)
+    with pytest.raises(ValueError, match="nonnegative"):
+        terminal_geometry_loss_numpy([0.0], [0.0], gouge_weight=-1, residual_weight=1)
+
+
+def test_ad_same_theta_after_other_theta_matches_fresh_process(tmp_path):
+    """The real AD tape must not leak same/different-theta evaluation state.
+
+    Both contexts create the public evaluator in isolated child processes.
+    The 2 mm coarse grid is sampled independently by the shared factory; it
+    catches state-order regressions without spending the full pilot's cost.
+    It does not assert AD==FD or resolve the larger reverse-precision issue.
+    """
+    code = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[3])
+from scripts.run_gradient_mechanics import ad_order_regression
+ad_order_regression(Path(sys.argv[1]), voxel_mm=2.0, ordered=sys.argv[2] == 'ordered')
+"""
+    environment = dict(os.environ)
+    environment["TI_OFFLINE_CACHE_FILE_PATH"] = str(tmp_path / "ti-cache")
+    environment["UV_CACHE_DIR"] = "/tmp/diffcam-uv-diffcam-worker-3"
+
+    def run_child(name, ordered):
+        output = tmp_path / name
+        run = subprocess.run(
+            [sys.executable, "-I", "-c", code, str(output), "ordered" if ordered else "fresh",
+             str(Path(__file__).resolve().parents[1])],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            env=environment, capture_output=True, text=True, timeout=180,
+        )
+        assert run.returncode == 0, f"stdout:\n{run.stdout}\nstderr:\n{run.stderr}"
+        import json
+        return json.loads((output / "ad_order.json").read_text(encoding="utf-8"))
+
+    fresh = run_child("fresh", False)
+    ordered = run_child("ordered", True)
+    assert fresh["ledger"]["candidate_evaluations"] == 1
+    assert fresh["ledger"]["backward_calls"] == 1
+    assert ordered["ledger"]["candidate_evaluations"] == 4
+    assert ordered["ledger"]["backward_calls"] == 3
+    assert ordered["candidate_order"] == [
+        "order-initial", "order-repeat-same", "order-different-theta",
+        "order-after-different",
+    ]
+    assert ordered["different_theta_index"] == 35
+    assert ordered["different_theta_delta"] == 0.025
+    assert ordered["grid"]["shape"] == [30, 20, 6]
+    assert ordered["grid"]["independently_sampled"] is True
+    assert ordered["nonzero_gradient"] and fresh["nonzero_gradient"]
+    reference = np.asarray(fresh["records"]["initial"]["gradient"])
+    assert reference.shape == (36,)
+    assert (ordered["records"]["initial"]["theta_hash"]
+            == fresh["records"]["initial"]["theta_hash"])
+    # Absolute tolerance is larger than one f32 ulp because parallel atomic
+    # reverse accumulations are scheduling-sensitive. The measured full-grid
+    # eight-repeat all-coordinate range was 8.778511393206512e-06. Never use
+    # bitwise identity here or pretend the 4.1% index-2 AD/FD error is noise.
+    for key in ("initial", "repeat_same", "after_other"):
+        actual = np.asarray(ordered["records"][key]["gradient"])
+        np.testing.assert_allclose(actual, reference, atol=1.6e-5, rtol=1e-5)
+        assert ordered["records"][key]["actual_path"]["same_within_tolerance"]
+
+
 @pytest.mark.skipif(os.environ.get("DIFFCAM_REAL_PILOT_GRADIENT") != "1",
                     reason="real Taichi pocket smoke is opt-in with DIFFCAM_REAL_PILOT_GRADIENT=1")
 def test_real_taichi_reduced_pilot_smoke(tmp_path):
