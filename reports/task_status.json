@@ -176,11 +176,12 @@
    "next": null
   },
   "T5.2": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T5.2-external-titan",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "Titan provenance/license pending user; local use only"
   },
   "T4.2": {
    "status": "planned",
