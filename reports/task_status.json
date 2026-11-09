@@ -69,11 +69,12 @@
    "note": "T1.3a resumed (worker-3): CAMotics adapter + metrics + bias; camsim STL non-manifold issue open; must inherit T1.0c whole-cell semantics"
   },
   "T2.0": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-1",
    "branch": "task/T2.0-custom-geometry",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "merged; sampled stock/target via contracts GeometrySource, trilinear cell-centre interp + clamp, all target consumers rerouted, position penalties full range, reset preserves sources. Baked target in runtime voxel units. No shank model."
   },
   "T2.1": {
    "status": "complete",
