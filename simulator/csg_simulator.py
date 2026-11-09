@@ -249,6 +249,7 @@ class CSGSimulatorDelta:
         )
 
         self.tool_start = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self._configured_tool_start = tuple(float(value) for value in tool_start)
         self.tool_start[None] = ti.Vector(list(tool_start))
 
         self.tool_radius = ti.field(dtype=ti.f32, shape=())
@@ -2293,6 +2294,19 @@ class CSGSimulatorDelta:
         self.stock.from_numpy(stock_np)
         self.tool_pos.from_numpy(pos_np)
 
+    def set_tool_start(self, point):
+        """Configure a stable fresh-candidate start (normalized stock frame).
+
+        Use this instead of assigning tool_start directly when changing the
+        baseline. load_saved_init may subsequently choose a mid-cut start for
+        staged training; reset_candidate_state restores this saved baseline.
+        """
+        values = tuple(float(value) for value in point)
+        if len(values) != 3 or not np.all(np.isfinite(values)):
+            raise ValueError("tool_start must contain three finite normalized coordinates")
+        self._configured_tool_start = values
+        self.tool_start[None] = ti.Vector(list(values))
+
     def load_saved_init(self, stock_sdf, tool_pos):
         """Configure staged-training: start each ``init_stock`` from a saved
         mid-cut SDF (the carved stock left by a previous trajectory) and set
@@ -2305,6 +2319,8 @@ class CSGSimulatorDelta:
         """
         self.saved_stock.from_numpy(np.asarray(stock_sdf, dtype=np.float32))
         self.use_saved_init[None] = 1
+        # Prefix-only start; keep _configured_tool_start untouched so reset
+        # cannot leak a staged, mid-cut candidate into a fresh evaluation.
         self.tool_start[None] = ti.Vector(
             [float(tool_pos[0]), float(tool_pos[1]), float(tool_pos[2])]
         )
@@ -2314,7 +2330,8 @@ class CSGSimulatorDelta:
         """Clear all per-candidate mutable evaluation state (T3.0 hook).
 
         Preserves configured target/tool/holder geometry, k, speeds/limits,
-        target grids, tool_start, and allocated Taichi fields. Clears stock
+        target grids, and allocated Taichi fields. Restores the saved
+        configured tool_start (not a load_saved_init prefix). Clears stock
         history/prefixes and their grads, positions/deltas/grads, loss/grad,
         seg_* values+grads, acc_psum+grad, diagnostic accumulators/scratch, and
         saved_stock/use_saved_init. Does NOT call ti.init or change parameters.
@@ -2325,6 +2342,7 @@ class CSGSimulatorDelta:
         """
         self.loss[None] = 0.0
         self.loss.grad[None] = 0.0
+        self.tool_start[None] = ti.Vector(self._configured_tool_start)
         self.acc_psum[None] = 0.0
         self.acc_psum.grad[None] = 0.0
         self._clearance_buf[None] = 0.0

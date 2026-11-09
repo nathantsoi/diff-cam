@@ -599,3 +599,36 @@ def test_zero_max_steps_fails_clearly_before_taichi_allocation():
             resolution=1, stock_size_mm=1.0, max_steps=0,
             target_shape="sphere", init_taichi=False,
         )
+
+
+def test_saved_prefix_cannot_change_next_candidate_start_or_state():
+    sim = CSGSimulatorDelta(
+        resolution=10, max_steps=1, stock_size_in=(1, 1, 1),
+        target_shape="sphere", tool_start=(0.2, 0.25, 0.5),
+        enforce_speed_limits=False, init_taichi=False, k_init=40,
+    )
+    sim.set_target_params(radius_mm=9.0)
+    sim.set_tool_start((0.2, 0.25, 0.5))
+
+    def evaluate():
+        sim.tool_delta.from_numpy(np.array([[0.03, 0.02, 0.0]], dtype=np.float32))
+        with ti.ad.Tape(loss=sim.loss):
+            sim.forward(2)
+        return (
+            sim.stock.to_numpy()[:2].copy(),
+            float(sim.loss[None]),
+            sim.tool_delta.grad.to_numpy().copy(),
+            sim.tool_pos.to_numpy()[:2].copy(),
+        )
+
+    fresh = evaluate()
+    sim.load_saved_init(np.ones_like(sim.saved_stock.to_numpy()), (0.9, 0.9, 0.9))
+    np.testing.assert_allclose(sim.tool_start.to_numpy(), (0.9, 0.9, 0.9))
+    sim.reset_candidate_state()
+    np.testing.assert_allclose(sim.tool_start.to_numpy(), (0.2, 0.25, 0.5))
+    assert sim.use_saved_init[None] == 0
+    again = evaluate()
+    np.testing.assert_allclose(fresh[0], again[0], rtol=2e-6, atol=2e-7)
+    assert fresh[1] == pytest.approx(again[1], rel=2e-6, abs=2e-7)
+    np.testing.assert_allclose(fresh[2], again[2], rtol=2e-6, atol=2e-7)
+    np.testing.assert_allclose(fresh[3], again[3], rtol=0.0, atol=0.0)
