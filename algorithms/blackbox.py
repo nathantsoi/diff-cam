@@ -246,7 +246,16 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
         if stopped:
             reason = "converged"
             break
+        expected_size = (state.budget.population_size if state.budget.population_size is not None
+                         else int(state.es.sp.popsize))
+        if state.budget.candidate_evaluations - state.evaluations < expected_size:
+            # Check remaining evaluations BEFORE ask(): even discarded draws mutate RNG,
+            # which would make final.json diverge from its last completed generation.
+            reason = "budget_exhausted"
+            break
         candidates = state.es.ask()
+        if len(candidates) != expected_size:
+            raise BlackBoxError("CMA returned an unexpected population size")
         if state.evaluations + len(candidates) > state.budget.candidate_evaluations:
             # Never truncate a population silently to change the update dynamics.
             reason = "budget_exhausted"
