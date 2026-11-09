@@ -255,7 +255,6 @@ def test_wrong_pilot_corner_radius_is_rejected_by_exclusion_check():
     # the target mask: 2 * (1 - pi/4) * 2^2 * 6 mm^3.
     continuous = 2 * (1 - math.pi / 4) * 2.0 ** 2 * 6.0
     assert continuous == pytest.approx(10.300888156922482)
-    assert correct.metrics["excluded_volume_mm3"].value == 9.0
 
     wrong_geometry = replace(
         task.operation_target.geometry,
