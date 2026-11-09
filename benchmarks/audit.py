@@ -33,57 +33,34 @@ class AuditInputError(ValueError):
     """A malformed manifest, run directory, or aggregation request."""
 
 
-@dataclass(frozen=True)
-class ConservativeOutcome:
-    """Verified primary/refinement outcomes joined to one primary run ID."""
-
-    safety_pass: Optional[bool]
-    geometry_pass: Optional[bool]
-    completion_pass: Optional[bool]
-    efficiency_eligible: Optional[bool]
-    refinement_disagreement: bool
-    disagreement_fields: tuple[str, ...] = ()
-
-    def __post_init__(self):
-        for name in ("safety_pass", "geometry_pass", "completion_pass", "efficiency_eligible"):
-            value = getattr(self, name)
-            if value is not None and not isinstance(value, bool):
-                raise AuditInputError(f"conservative {name} must be bool or None")
-        if not isinstance(self.refinement_disagreement, bool):
-            raise AuditInputError("refinement_disagreement must be boolean")
-        allowed = {"safety_pass", "geometry_pass", "completion_pass", "coverage"}
-        if (not isinstance(self.disagreement_fields, tuple)
-                or len(set(self.disagreement_fields)) != len(self.disagreement_fields)
-                or not set(self.disagreement_fields) <= allowed):
-            raise AuditInputError("disagreement_fields must be unique safety/geometry/coverage names")
-        if self.refinement_disagreement != bool(self.disagreement_fields):
-            raise AuditInputError("disagreement fields and verdict must agree")
-        if self.refinement_disagreement and self.efficiency_eligible is not False:
-            raise AuditInputError("a refinement disagreement must be a known efficiency false")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "safety_pass": self.safety_pass,
-            "geometry_pass": self.geometry_pass,
-            "completion_pass": self.completion_pass,
-            "efficiency_eligible": self.efficiency_eligible,
-            "refinement_disagreement": self.refinement_disagreement,
-            "disagreement_fields": list(self.disagreement_fields),
-        }
-
-
-def _validate_conservative_outcomes(values, manifest):
+def _validate_verdict_evaluations(values, manifest):
+    """Validate the fine typed evaluations that alone supply pilot verdicts."""
     if values is None:
-        return {}
+        return None
     if not isinstance(values, Mapping):
-        raise AuditInputError("conservative outcomes must be a mapping by run ID")
+        raise AuditInputError("verdict evaluations must be a mapping by run ID")
     unknown = set(values) - set(manifest.runs)
     if unknown:
-        raise AuditInputError(f"conservative outcomes for unknown run IDs: {sorted(map(str, unknown))}")
-    for run_id, value in values.items():
-        if not isinstance(value, ConservativeOutcome):
-            raise AuditInputError(f"conservative outcome for {run_id!r} is not typed")
-    return dict(values)
+        raise AuditInputError(f"verdict evaluations for unknown run IDs: {sorted(map(str, unknown))}")
+    if set(values) != set(manifest.runs):
+        raise AuditInputError("every expected primary run needs both fine dialect evaluations")
+    result = {}
+    for run_id, dialects in values.items():
+        if not isinstance(dialects, Mapping) or set(dialects) != {item.value for item in C.Dialect}:
+            raise AuditInputError(f"run {run_id}: verdict evaluations require both rs274 and haas")
+        task_id = manifest.runs[run_id].task_id
+        task_hash = manifest.tasks[task_id].task_hash
+        result[run_id] = {}
+        for dialect, evaluation in dialects.items():
+            if not isinstance(evaluation, C.EvaluationResult) or evaluation.dialect is not C.Dialect(dialect):
+                raise AuditInputError(f"run {run_id}, {dialect}: verdict evaluation is not the same typed dialect")
+            if evaluation.task_hash != task_hash:
+                raise AuditInputError(f"run {run_id}, {dialect}: verdict task hash differs from the primary task")
+            settings = evaluation.discretization.get("settings")
+            if not isinstance(settings, Mapping) or settings.get("max_step_mm") != 0.125:
+                raise AuditInputError(f"run {run_id}, {dialect}: verdict source must explicitly use max_step_mm=0.125")
+            result[run_id][dialect] = evaluation
+    return result
 
 
 @dataclass(frozen=True)
@@ -624,7 +601,12 @@ def _observation(
     expected: ExpectedRun,
     audits: Mapping[str, RunAudit],
     dialect: C.Dialect,
+    verdict_evaluations=None,
 ) -> Optional[C.EvaluationResult]:
+    if verdict_evaluations is not None:
+        if expected.run_id not in verdict_evaluations or dialect.value not in verdict_evaluations[expected.run_id]:
+            raise AuditInputError(f"missing fine verdict evaluation: {expected.run_id}/{dialect.value}")
+        return verdict_evaluations[expected.run_id][dialect.value]
     run = audits.get(expected.run_id)
     if run is None or not run.complete_and_audited:
         return None
@@ -654,20 +636,9 @@ def _outcome_value(
     evaluation: C.EvaluationResult,
     task: TaskInfo,
     outcome: str,
-    reported: Optional[ConservativeOutcome] = None,
 ) -> Optional[bool]:
-    if reported is not None and not isinstance(reported, ConservativeOutcome):
-        raise AuditInputError("reported outcome must be a typed ConservativeOutcome")
-    if reported is not None and outcome in ("safety_pass", "geometry_pass", "completion_pass"):
-        return getattr(reported, outcome)
     if outcome == "efficiency_eligible":
-        if reported is not None:
-            if reported.efficiency_eligible is not True:
-                return reported.efficiency_eligible
-            # A conservative override can never erase an ineligible primary.
-            if not evaluation.efficiency_eligible:
-                return False
-        elif not evaluation.efficiency_eligible:
+        if not evaluation.efficiency_eligible:
             return False
         completion = _completion_value(evaluation, task)
         # A no-cut removal task cannot supply efficiency evidence even if a malformed
@@ -703,34 +674,23 @@ def _outcome_by_task(
     dialect: C.Dialect,
     outcome: str,
     tasks: Mapping[str, TaskInfo],
-    reported_outcomes: Optional[Mapping[str, ConservativeOutcome]] = None,
+    verdict_evaluations=None,
 ) -> dict[str, dict[str, Any]]:
     collapsed: dict[str, dict[str, Any]] = {}
     for expected in expected_runs:
-        evaluation = _observation(expected, audits, dialect)
-        reported = reported_outcomes.get(expected.run_id) if reported_outcomes else None
+        evaluation = _observation(expected, audits, dialect, verdict_evaluations)
         entry = collapsed.setdefault(
             expected.task_id,
             {"known": [], "unknown_or_missing_observations": 0},
         )
-        disagreement_excluded = False
         if evaluation is None:
             recorded_failure = _recorded_noncomplete(expected, audits)
             value = (False if recorded_failure and outcome in
                      ("safety_pass", "completion_pass", "efficiency_eligible") else None)
-        elif (reported is not None and outcome == "efficiency_eligible"
-              and reported.refinement_disagreement):
-            # The eligibility RATE records the known conservative failure.
-            # Only continuous efficiency METRICS exclude the affected run.
-            value = reported.efficiency_eligible
-            disagreement_excluded = True
-            name = "refinement_disagreement_exclusions"
-            entry[name] = entry.get(name, 0) + 1
         else:
-            value = _outcome_value(evaluation, tasks[expected.task_id], outcome, reported)
+            value = _outcome_value(evaluation, tasks[expected.task_id], outcome)
         if value is None:
-            if not disagreement_excluded:
-                entry["unknown_or_missing_observations"] += 1
+            entry["unknown_or_missing_observations"] += 1
         else:
             entry["known"].append(float(bool(value)))
     for entry in collapsed.values():
@@ -746,7 +706,7 @@ def _metric_by_task(
     dialect: C.Dialect,
     metric_name: str,
     tasks: Mapping[str, TaskInfo],
-    reported_outcomes: Optional[Mapping[str, ConservativeOutcome]] = None,
+    verdict_evaluations=None,
 ) -> dict[str, dict[str, Any]]:
     grouped: dict[str, list[ExpectedRun]] = defaultdict(list)
     for expected in expected_runs:
@@ -756,10 +716,7 @@ def _metric_by_task(
         values: list[float] = []
         reasons: Counter[str] = Counter()
         for expected in runs:
-            evaluation = _observation(expected, audits, dialect)
-            reported = reported_outcomes.get(expected.run_id) if reported_outcomes else None
-            if reported is not None and not isinstance(reported, ConservativeOutcome):
-                raise AuditInputError("reported outcome must be a typed ConservativeOutcome")
+            evaluation = _observation(expected, audits, dialect, verdict_evaluations)
             if evaluation is None:
                 reason = "recorded_noncomplete" if _recorded_noncomplete(expected, audits) else "missing_or_invalid_evidence"
                 reasons[reason] += 1
@@ -772,11 +729,7 @@ def _metric_by_task(
                 reasons["missing_or_null_metric"] += 1
                 continue
             if metric_name in EFFICIENCY_METRICS:
-                if reported is not None and reported.refinement_disagreement:
-                    reasons["refinement_disagreement"] += 1
-                    continue
-                eligible = _outcome_value(
-                    evaluation, tasks[expected.task_id], "efficiency_eligible", reported)
+                eligible = _outcome_value(evaluation, tasks[expected.task_id], "efficiency_eligible")
                 if eligible is not True:
                     reasons["not_efficiency_eligible" if eligible is False else "efficiency_eligibility_unknown"] += 1
                     continue
@@ -981,10 +934,6 @@ def _rate_summary(
             collapsed.get(task_id, {}).get("unknown_or_missing_observations", 0)
             for task_id in task_ids
         ),
-        "refinement_disagreement_exclusions": sum(
-            collapsed.get(task_id, {}).get("refinement_disagreement_exclusions", 0)
-            for task_id in task_ids
-        ),
         "task_mean_rate": point,
         "successes": int(round(sum(values))) if single_binary else None,
         "interval": interval,
@@ -1006,7 +955,6 @@ def _metric_drop_counts(task_ids: Sequence[str], method_values, baseline_values)
     failed_or_ineligible_reasons = {
         "recorded_noncomplete", "incomplete_or_unsupported_coverage",
         "not_efficiency_eligible", "efficiency_eligibility_unknown",
-        "refinement_disagreement",
     }
     exclusions_by_side = {}
     failed_total = 0
@@ -1034,7 +982,7 @@ def _comparison_rows(
     seed: int,
     replicates: int,
     confidence: float,
-    reported_outcomes: Optional[Mapping[str, ConservativeOutcome]] = None,
+    verdict_evaluations=None,
 ) -> dict[str, Any]:
     allowed_runs = [
         run for run in manifest.runs.values()
@@ -1064,9 +1012,9 @@ def _comparison_rows(
     key_prefix = f"{spec.name}|{family or 'overall'}|{spec.dialect.value}"
     for metric_name in spec.metrics:
         method_values = _metric_by_task(
-            method_runs, audits, spec.dialect, metric_name, manifest.tasks, reported_outcomes)
+            method_runs, audits, spec.dialect, metric_name, manifest.tasks, verdict_evaluations)
         baseline_values = _metric_by_task(
-            baseline_runs, audits, spec.dialect, metric_name, manifest.tasks, reported_outcomes)
+            baseline_runs, audits, spec.dialect, metric_name, manifest.tasks, verdict_evaluations)
         methods: list[float] = []
         baselines: list[float] = []
         families: list[str] = []
@@ -1094,10 +1042,10 @@ def _comparison_rows(
 
     for outcome in OUTCOMES:
         method_outcomes = _outcome_by_task(
-            method_runs, audits, spec.dialect, outcome, manifest.tasks, reported_outcomes
+            method_runs, audits, spec.dialect, outcome, manifest.tasks, verdict_evaluations
         )
         baseline_outcomes = _outcome_by_task(
-            baseline_runs, audits, spec.dialect, outcome, manifest.tasks, reported_outcomes
+            baseline_runs, audits, spec.dialect, outcome, manifest.tasks, verdict_evaluations
         )
         methods: list[float] = []
         baselines: list[float] = []
@@ -1135,7 +1083,7 @@ def aggregate_evaluations(
     bootstrap_seed: int = 20261108,
     bootstrap_replicates: int = 2000,
     confidence: float = 0.95,
-    reported_outcomes: Optional[Mapping[str, ConservativeOutcome]] = None,
+    verdict_evaluations=None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if isinstance(bootstrap_seed, bool) or not isinstance(bootstrap_seed, int):
         raise AuditInputError("bootstrap_seed must be an integer")
@@ -1143,7 +1091,7 @@ def aggregate_evaluations(
         raise AuditInputError("bootstrap_replicates must be an integer >= 100")
     if not 0.0 < confidence < 1.0:
         raise AuditInputError("confidence must be between 0 and 1")
-    validated_outcomes = _validate_conservative_outcomes(reported_outcomes, manifest)
+    validated_outcomes = _validate_verdict_evaluations(verdict_evaluations, manifest)
     rows: list[dict[str, Any]] = []
     p_value_rows: list[dict[str, Any]] = []
     for spec in manifest.comparisons:
@@ -1291,56 +1239,68 @@ def generate_report(
     bootstrap_seed: int = 20261108,
     bootstrap_replicates: int = 2000,
     confidence: float = 0.95,
-    reported_outcomes: Optional[Mapping[str, ConservativeOutcome]] = None,
+    verdict_evaluations=None,
+    screen_disagreements=None,
 ) -> tuple[dict[str, Any], Manifest]:
     manifest = manifest_value if isinstance(manifest_value, Manifest) else load_manifest(manifest_value)
-    validated_outcomes = _validate_conservative_outcomes(reported_outcomes, manifest)
+    fine = _validate_verdict_evaluations(verdict_evaluations, manifest)
+    diagnostics = {}
+    if fine is not None:
+        allowed = {"safety_pass", "geometry_pass", "completion_pass", "efficiency_eligible", "coverage"}
+        if not isinstance(screen_disagreements, Mapping) or set(screen_disagreements) != set(fine):
+            raise AuditInputError("fine verdict evidence requires screen diagnostics for every run")
+        for run_id, fields in screen_disagreements.items():
+            if (not isinstance(fields, (list, tuple, set)) or isinstance(fields, (str, bytes))
+                    or len(set(fields)) != len(fields) or not set(fields) <= allowed):
+                raise AuditInputError(f"invalid screen diagnostic fields for {run_id}")
+            diagnostics[run_id] = sorted(fields)
     run_reports, audit = audit_runs(runs_root, manifest)
-    if validated_outcomes and not audit["summary"]["auditor_passed"]:
-        raise AuditInputError("conservative reporting requires a clean primary audit")
+    if fine and not audit["summary"]["auditor_passed"]:
+        raise AuditInputError("fine verdict reporting requires a clean primary screen audit")
     for row in run_reports:
-        reported = validated_outcomes.get(row["run_id"])
-        if reported is not None:
-            row["reported_outcomes"] = reported.to_dict()
+        if fine is not None:
+            expected = manifest.runs[row["run_id"]]
+            row["verdict_evaluations"] = {}
+            for dialect, evaluation in fine[row["run_id"]].items():
+                task_info = manifest.tasks[expected.task_id]
+                row["verdict_evaluations"][dialect] = {
+                    "evaluator_revision": evaluation.evaluator_revision,
+                    "nc_hash": evaluation.nc_hash,
+                    "coverage": evaluation.coverage.value,
+                    "safety_pass": evaluation.safety_pass,
+                    "geometry_pass": evaluation.geometry_pass,
+                    "completion_pass": _completion_value(evaluation, task_info),
+                    "efficiency_eligible": _outcome_value(evaluation, task_info, "efficiency_eligible"),
+                    "max_step_mm": evaluation.discretization["settings"]["max_step_mm"],
+                }
     comparisons, policy = aggregate_evaluations(
-        manifest,
-        audit.pop("_audits_by_id"),
-        bootstrap_seed=bootstrap_seed,
-        bootstrap_replicates=bootstrap_replicates,
-        confidence=confidence,
-        reported_outcomes=validated_outcomes,
+        manifest, audit.pop("_audits_by_id"),
+        bootstrap_seed=bootstrap_seed, bootstrap_replicates=bootstrap_replicates,
+        confidence=confidence, verdict_evaluations=fine,
     )
     report = {
-        "schema_version": REPORT_SCHEMA,
-        "runs_root": str(runs_root),
-        "task_count": len(manifest.tasks),
-        "expected_run_count": len(manifest.runs),
-        "expected_vs_observed": audit["reconciliation"],
-        "summary": audit["summary"],
+        "schema_version": REPORT_SCHEMA, "runs_root": str(runs_root),
+        "task_count": len(manifest.tasks), "expected_run_count": len(manifest.runs),
+        "expected_vs_observed": audit["reconciliation"], "summary": audit["summary"],
         "evidence_complete": audit["summary"]["evidence_complete"],
         "all_runs_completed": audit["summary"]["all_runs_completed"],
-        "policy": policy,
-        "runs": run_reports,
-        "comparisons": comparisons,
+        "policy": policy, "runs": run_reports, "comparisons": comparisons,
     }
-    if reported_outcomes is not None:
-        counts = Counter({manifest.runs[run_id].method: 0 for run_id in validated_outcomes})
-        for run_id, value in validated_outcomes.items():
-            if value.refinement_disagreement:
+    if fine is not None:
+        counts = Counter({manifest.runs[run_id].method: 0 for run_id in fine})
+        for run_id, fields in diagnostics.items():
+            if fields:
                 counts[manifest.runs[run_id].method] += 1
         report["refinement"] = {
-            "producer": "primary audit joined with verified refinement reported_outcomes by run_id",
-            "outcome_fields": ["safety_pass", "geometry_pass", "completion_pass", "efficiency_eligible"],
-            "efficiency_exclusion": "efficiency metrics exclude disagreement runs and count them; the eligibility rate retains their known False",
-            "applied_run_ids": sorted(validated_outcomes),
-            "disagreement_run_ids": sorted(
-                run_id for run_id, value in validated_outcomes.items()
-                if value.refinement_disagreement),
-            "disagreement_by_condition": {
-                method: {"count": count}
-                for method, count in sorted(counts.items())
-            },
+            "producer": "both 0.125 mm posted evaluations joined to the primary screen audit by run ID",
+            "verdict_source": {"max_step_mm": 0.125, "dialects": [item.value for item in C.Dialect]},
+            "screen_role": "1.0 mm fidelity diagnostic only; never ANDed into pilot verdicts",
+            "convergence_point": {"max_step_mm": 0.25, "dialect": C.Dialect.RS274.value,
+                                  "role": "evidence only; no monotonicity/error-bound or verdict claim"},
+            "screen_disagreements_by_run_id": diagnostics,
+            "screen_disagreement_by_condition": {
+                method: {"count": count} for method, count in sorted(counts.items())},
+            "applied_run_ids": sorted(fine),
         }
-    # Disallow NaN at the serialization boundary even if a future statistic is changed.
     json.dumps(report, allow_nan=False)
     return report, manifest

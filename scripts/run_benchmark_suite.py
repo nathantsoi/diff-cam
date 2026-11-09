@@ -340,25 +340,287 @@ def _pilot_refinement_settings(task, config):
 
 
 def _refinement_policy(config):
-    """Secondary RS274 refinement-check policy; never hidden overrides."""
+    """Fidelity roles and independent posted-worker resource limits (D-04)."""
     if config.get("task_source", "pilot_pocket") != "pilot_pocket":
         return {"enabled": False}
-    fields = {"enabled", "max_step_mm", "parallel_jobs", "timeout_s"}
+    fields = {
+        "enabled", "verdict_step_mm", "screen_step_mm", "convergence_step_mm",
+        "parallel_jobs", "max_rss_bytes_per_job", "poll_interval_s", "timeout_s",
+    }
     policy = config.get("refinement_check")
     if not isinstance(policy, Mapping) or set(policy) != fields:
         raise RunnerError(f"refinement_check must declare exactly {sorted(fields)}")
     if not isinstance(policy["enabled"], bool):
         raise RunnerError("refinement_check.enabled must be boolean")
-    step = policy["max_step_mm"]
-    if isinstance(step, bool) or not isinstance(step, (int, float)) or step != 0.125:
-        raise RunnerError("refinement_check.max_step_mm must be the coordinator-declared 0.125")
+    for name, required in (("verdict_step_mm", 0.125), ("screen_step_mm", 1.0),
+                           ("convergence_step_mm", 0.25)):
+        value = policy[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value != required:
+            raise RunnerError(f"refinement_check.{name} must be the declared {required} mm")
     jobs = _positive_int(policy["parallel_jobs"], "refinement_check.parallel_jobs")
     if jobs > 2:
-        raise RunnerError("refinement_check parallel_jobs must be bounded at 2")
-    timeout = policy["timeout_s"]
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
-        raise RunnerError("refinement_check.timeout_s must be finite and positive")
-    return dict(policy)
+        raise RunnerError("posted evaluation parallel_jobs must be bounded at 2")
+    limit = _positive_int(policy["max_rss_bytes_per_job"], "refinement_check.max_rss_bytes_per_job")
+    if limit > 2 * 1024 ** 3:
+        raise RunnerError("posted evaluation memory ceiling may not exceed 2 GiB per job")
+    for name in ("poll_interval_s", "timeout_s"):
+        value = policy[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+            raise RunnerError(f"refinement_check.{name} must be finite and positive")
+    if policy["poll_interval_s"] > 30.0:
+        raise RunnerError("refinement_check.poll_interval_s must not exceed 30 seconds")
+    return dict(policy, max_step_mm=policy["verdict_step_mm"])
+
+
+def _phase_settings(task, config, dialect, nc_bytes, role, *, primary=None, controls=None):
+    """Freeze production controls, changing only the declared role's step."""
+    policy = _refinement_policy(config)
+    if not policy["enabled"]:
+        raise RunnerError("posted job phases require the declared real-pilot fidelity policy")
+    steps = {"screen": policy["screen_step_mm"], "verdict": policy["verdict_step_mm"],
+             "convergence": policy["convergence_step_mm"]}
+    if role not in steps:
+        raise RunnerError(f"unknown posted-evaluation role: {role}")
+    if controls is not None and primary is not None:
+        raise RunnerError("posted job controls and primary evaluation are mutually exclusive")
+    if controls is not None:
+        settings = dict(controls)
+    else:
+        settings = dict(primary.discretization["settings"] if primary is not None
+                        else _pilot_refinement_settings(task, config))
+    if settings.get("compute_bounds") is not True or settings.get("safety_screen") is not True:
+        raise RunnerError("posted jobs may not disable production bounds or safety screening")
+    nc_hash = C.nc_hash(nc_bytes)
+    if settings.get("expected_nc_hash") not in (None, nc_hash):
+        raise RunnerError("posted job source has a different exact-NC hash")
+    settings.update(max_step_mm=steps[role], expected_nc_hash=nc_hash)
+    try:
+        return dataclasses.asdict(RefinementSettings.from_mapping(settings))
+    except ValueError as error:
+        raise RunnerError(f"invalid {role} posted settings: {error}") from error
+
+
+def _validate_posted_result(task, nc_bytes, dialect, settings, result):
+    if not isinstance(result, C.EvaluationResult):
+        raise RunnerError("posted worker did not return a typed EvaluationResult")
+    if result.dialect is not dialect or result.nc_hash != C.nc_hash(nc_bytes):
+        raise RunnerError("posted result has the wrong dialect or exact NC hash")
+    if result.task_hash != task.task_hash or result.tool_setup_hash != task.tool_setup_hash:
+        raise RunnerError("posted result has a different task/tool identity")
+    if result.discretization.get("settings") != dict(settings):
+        raise RunnerError("posted result settings differ from the frozen immutable job")
+    return result
+
+
+@dataclass(frozen=True)
+class PostedJob:
+    role: str
+    dialect: C.Dialect
+    nc_bytes: bytes
+    settings: Mapping[str, Any]
+    workspace: Path
+    reused_source: Optional[Path] = None
+
+
+def _prepare_posted_job(task, job):
+    nc_name, _ = C.DIALECT_ARTIFACTS[job.dialect]
+    settings_bytes = R.json_bytes({
+        "schema": "diffcam-post-job/1", "role": job.role,
+        "dialect": job.dialect.value, "task": task.to_dict(), "task_hash": task.task_hash,
+        "nc_hash": C.nc_hash(job.nc_bytes), "settings": dict(job.settings),
+    })
+    settings_path = job.workspace / "job.json"
+    if settings_path.exists() and settings_path.read_bytes() != settings_bytes:
+        raise RunnerError(f"posted job identity differs; refusing to mix files in {job.workspace}")
+    nc_path = job.workspace / nc_name
+    if nc_path.exists() and nc_path.read_bytes() != job.nc_bytes:
+        raise RunnerError(f"posted job NC bytes differ; refusing to reuse {nc_path}")
+    R.ArtifactWriter._replace_bytes(settings_path, settings_bytes)
+    R.ArtifactWriter._replace_bytes(nc_path, job.nc_bytes)
+
+
+def _posted_job_main(workspace: Path):
+    """A single posted evaluation in an independent, memory-monitored process."""
+    import resource
+
+    spec = json.loads((workspace / "job.json").read_text(encoding="utf-8"))
+    task = C.TaskSpec.from_dict(spec["task"])
+    dialect = C.Dialect(spec["dialect"])
+    nc_path = workspace / C.DIALECT_ARTIFACTS[dialect][0]
+    nc_bytes = nc_path.read_bytes()
+    if task.task_hash != spec["task_hash"] or C.nc_hash(nc_bytes) != spec["nc_hash"]:
+        raise RunnerError("posted worker task/NC identity differs from its job record")
+    settings = spec["settings"]
+    if settings.get("expected_nc_hash") != spec["nc_hash"]:
+        raise RunnerError("posted worker's expected NC hash is not bound to exact bytes")
+    started = time.perf_counter()
+    result = PostedEvaluator().evaluate_posted_gcode(task, nc_bytes, dialect, settings)
+    elapsed = time.perf_counter() - started
+    job = PostedJob(spec["role"], dialect, nc_bytes, MappingProxyType(settings), workspace)
+    result = _validate_posted_result(task, nc_bytes, dialect, settings, result)
+    evaluation_path = workspace / "evaluation.json"
+    payload = R.record_bytes(result)
+    if evaluation_path.exists() and evaluation_path.read_bytes() != payload:
+        raise RunnerError("posted evaluation already exists with different bytes")
+    if not evaluation_path.exists():
+        R.ArtifactWriter._replace_bytes(evaluation_path, payload)
+    record = {
+        "schema": "diffcam-post-job-result/1", "status": "complete",
+        "role": job.role, "dialect": dialect.value, "task_hash": task.task_hash,
+        "nc_hash": C.nc_hash(nc_bytes), "settings": settings,
+        "evaluation_path": str(evaluation_path),
+        "evaluation_sha256": C.sha256_bytes(payload),
+        "wall_seconds": elapsed, "worker_peak_rss_kib": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
+        "worker_pid": os.getpid(),
+        "thread_environment": {key: os.environ.get(key)
+                               for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TAICHI_NUM_THREADS")},
+    }
+    R.ArtifactWriter._replace_bytes(workspace / "worker-result.json", R.json_bytes(record))
+    print("POST_JOB_RESULT=" + json.dumps(record, sort_keys=True))
+
+
+def _process_rss_bytes(pid):
+    if not sys.platform.startswith("linux"):
+        raise RunnerError("posted-job peak-RSS monitoring is currently Linux-only")
+    try:
+        for line in Path(f"/proc/{pid}/status").read_text(encoding="ascii").splitlines():
+            if line.startswith("VmHWM:"):
+                return int(line.split()[1]) * 1024
+    except FileNotFoundError:
+        return None
+    return None
+
+
+def _posted_job_process(task, job, config):
+    if job.reused_source is not None:
+        source = job.reused_source.read_bytes()
+        result = C.loads(source.decode("utf-8"))
+        if R.record_bytes(result) != source:
+            raise RunnerError("cached typed refinement is not canonical production evidence")
+        return result, {
+            "status": "reused_typed_evaluation", "role": job.role,
+            "dialect": job.dialect.value, "evaluation_sha256": C.sha256_bytes(source),
+            "source": str(job.reused_source), "worker_peak_rss_kib": None,
+            "wall_seconds": None, "worker_pid": None,
+            "timings_note": "reused existing typed result; no new evaluation or timing claim",
+        }
+    if job.workspace.exists():
+        raise RunnerError(f"posted job directory must be new: {job.workspace}")
+    job.workspace.mkdir(parents=True)
+    env = dict(os.environ, DIFFCAM_RUNNER_SIMULATOR="0")
+    _prepare_posted_job(task, job)
+    evaluation_path = job.workspace / "evaluation.json"
+    record_path = job.workspace / "worker-result.json"
+    command = [sys.executable, str(Path(__file__).resolve()), "--config", str(job.workspace / "job.json"),
+               "--output-dir", str(job.workspace), "--split", "dev", "--experiment", "pilot",
+               "--posted-job-dir", str(job.workspace)]
+    policy = _refinement_policy(config)
+    started = time.perf_counter()
+    log_path = job.workspace / f"worker.{time.time_ns()}.log"
+    with log_path.open("x", encoding="utf-8") as stream:
+        process = subprocess.Popen(command, cwd=REPOSITORY, env=env, stdout=stream, stderr=subprocess.STDOUT)
+        timed_out_or_memory = None
+        try:
+            deadline = started + policy["timeout_s"]
+            while True:
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    timed_out_or_memory = "timeout"
+                    break
+                try:
+                    code = process.wait(timeout=min(policy["poll_interval_s"], remaining))
+                    break
+                except subprocess.TimeoutExpired:
+                    observed = _process_rss_bytes(process.pid)
+                    if observed is not None and observed > policy["max_rss_bytes_per_job"]:
+                        timed_out_or_memory = "memory_limit"
+                        break
+        except BaseException:
+            timed_out_or_memory = timed_out_or_memory or "interrupted"
+            raise
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+        code = process.wait()
+        if code:
+            raise RunnerError(f"posted worker failed ({timed_out_or_memory or 'exit'}): {log_path}")
+        if timed_out_or_memory == "memory_limit":
+            raise RunnerError(f"posted worker exceeded its declared memory ceiling: {log_path}")
+    text = log_path.read_text(encoding="utf-8")
+    results = [line.removeprefix("POST_JOB_RESULT=") for line in text.splitlines()
+               if line.startswith("POST_JOB_RESULT=")]
+    if len(results) != 1 or not record_path.is_file() or not evaluation_path.is_file():
+        raise RunnerError(f"posted worker produced no unique typed result: {log_path}")
+    record = json.loads(results[-1])
+    if record != json.loads(record_path.read_text()):
+        raise RunnerError("posted worker result and file metadata disagree")
+    if record.get("worker_pid") != process.pid:
+        raise RunnerError("posted worker returned a different child PID")
+    if record["role"] != job.role or record["dialect"] != job.dialect.value:
+        raise RunnerError("posted worker returned a different role/dialect")
+    if record["nc_hash"] != C.nc_hash(job.nc_bytes) or record["task_hash"] != task.task_hash:
+        raise RunnerError("posted worker returned mismatched identities")
+    if record["settings"] != dict(job.settings):
+        raise RunnerError("posted worker returned different sampling settings")
+    peak = _positive_int(record.get("worker_peak_rss_kib"), "posted peak RSS KiB") * 1024
+    if peak > policy["max_rss_bytes_per_job"]:
+        raise RunnerError(f"posted worker exceeded its memory ceiling: {peak} bytes")
+    record["memory_policy_result"] = "within_declared_peak_rss_ceiling"
+    record["elapsed_seconds"] = time.perf_counter() - started
+    record["process_wall_seconds"] = record["elapsed_seconds"]
+    record["evaluation_path"] = str(evaluation_path)
+    if record["evaluation_sha256"] != C.sha256_bytes(evaluation_path.read_bytes()):
+        raise RunnerError("posted worker evaluation hash differs from the retained typed file")
+    record["evaluation_sha256"] = C.sha256_bytes(evaluation_path.read_bytes())
+    record["log"] = str(log_path)
+    return C.loads(evaluation_path.read_text(encoding="utf-8")), record
+
+
+def _post_jobs(task, jobs, config):
+    """Execute an ordered set of independent posted child processes."""
+    policy = _refinement_policy(config)
+    workspace_roots = [job.workspace.resolve() for job in jobs]
+    if len(set(workspace_roots)) != len(jobs):
+        raise RunnerError("posted job directories must be unique per role and dialect")
+    started = time.perf_counter()
+    results = {}
+    with concurrent.futures.ThreadPoolExecutor(max_workers=policy["parallel_jobs"]) as pool:
+        pending = {pool.submit(_posted_job_process, task, job, config): index
+                   for index, job in enumerate(jobs)}
+        for future in concurrent.futures.as_completed(pending):
+            index = pending[future]
+            results[index] = future.result()
+    ordered = [results[index] for index in range(len(jobs))]
+    return {
+        "job_policy": dict(policy,
+                         total_posted_rss_ceiling_bytes=policy["parallel_jobs"] * policy["max_rss_bytes_per_job"]),
+        "phase_wall_seconds": time.perf_counter() - started,
+        "processes": [
+            {
+                "role": job.role,
+                "dialect": job.dialect.value,
+                "evaluator_wall_seconds": metadata.get("wall_seconds"),
+                "process_wall_seconds": metadata.get("elapsed_seconds"),
+                "worker_pid": metadata.get("worker_pid"),
+                "worker_peak_rss_kib": metadata.get("worker_peak_rss_kib"),
+                "status": metadata["status"],
+                "log": metadata.get("log"),
+                "thread_environment": metadata.get("thread_environment"),
+                "max_step_mm": job.settings["max_step_mm"],
+                "expected_nc_hash": job.settings["expected_nc_hash"],
+                "evaluation_path": metadata.get("evaluation_path"),
+                "evaluation_sha256": metadata["evaluation_sha256"],
+                "memory_note": "per-child process peak RSS; shared parent and all other system work excluded",
+            }
+            for (_, metadata), job in zip(ordered, jobs)
+        ],
+        "results": ordered,
+    }
 
 
 class PilotPostedEvaluator(PostedEvaluator):
@@ -367,24 +629,62 @@ class PilotPostedEvaluator(PostedEvaluator):
     def __init__(self, task, config):
         super().__init__()
         self.task_hash = task.task_hash
+        self._config = dict(config)
         self.settings = MappingProxyType(_pilot_refinement_settings(task, config))
+        self.phase_records = []
         self.timings = []
+
+    def _jobs_for_posting(self, task, posting, workspace, role, *, single_dialect=False):
+        dialects = [post.dialect for post in posting.posted]
+        if len(dialects) != len(set(dialects)):
+            raise RunnerError("posted batch has duplicate dialects")
+        if role == "convergence" and dialects != [C.Dialect.RS274]:
+            raise RunnerError("the 0.25 mm convergence point requires exactly one RS274 program")
+        if role in ("screen", "verdict") and not single_dialect and set(dialects) != set(C.Dialect):
+            raise RunnerError("screen and verdict phases require both RS274 and Haas")
+        jobs = []
+        for post in posting.posted:
+            if post.status != C.PostStatus.SUPPORTED:
+                raise RunnerError(f"posted evaluation is unsupported for {post.dialect.value}: {post.reason}")
+            nc_name = C.DIALECT_ARTIFACTS[post.dialect][0]
+            nc_bytes = posting.files[nc_name]
+            if post.nc_hash != C.nc_hash(nc_bytes):
+                raise RunnerError("posting's declared hash differs from its actual NC bytes")
+            settings = _phase_settings(task, self._config, post.dialect, nc_bytes, role,
+                                       controls=self.settings)
+            jobs.append(PostedJob(role, post.dialect, nc_bytes, MappingProxyType(settings),
+                                  workspace / post.dialect.value))
+        return jobs
+
+    def evaluate_posting(self, task, posting, workspace, *, role="screen", single_dialect=False):
+        workspace = Path(workspace).resolve() / f"{role}-step-{time.time_ns()}"
+        batch = _post_jobs(task, self._jobs_for_posting(
+            task, posting, workspace, role, single_dialect=single_dialect), self._config)
+        self.phase_records.append({key: value for key, value in batch.items() if key != "results"})
+        self.timings = []
+        results = {}
+        for dialect, (evaluation, metadata) in zip((post.dialect for post in posting.posted), batch["results"]):
+            results[dialect] = evaluation
+            self.timings.append({"dialect": dialect.value, "nc_hash": evaluation.nc_hash,
+                                 "wall_seconds": metadata.get("wall_seconds"),
+                                 "worker_peak_rss_kib": metadata.get("worker_peak_rss_kib"),
+                                 "worker_pid": metadata.get("worker_pid")})
+        return results
 
     def evaluate_posted_gcode(self, task, nc_bytes, dialect, settings):
         if task.task_hash != self.task_hash:
             raise RunnerError("pilot posted evaluator received a different task")
-        merged = dict(self.settings)
         raw = {} if settings is None else dict(settings)
         if raw:
             raise RunnerError("pilot posted settings are fixed by the declared task; per-call overrides are unsupported")
-        merged["expected_nc_hash"] = C.nc_hash(nc_bytes)
-        before = time.perf_counter()
-        event = {"dialect": C.Dialect(dialect).value, "nc_hash": merged["expected_nc_hash"]}
-        try:
-            return super().evaluate_posted_gcode(task, nc_bytes, dialect, merged)
-        finally:
-            event["wall_seconds"] = round(time.perf_counter() - before, 9)
-            self.timings.append(event)
+        dialect = C.Dialect(dialect)
+        posted = C.PostedProgram(dialect, C.PostStatus.SUPPORTED, C.nc_hash(nc_bytes))
+        nc_name = C.DIALECT_ARTIFACTS[dialect][0]
+        namespace = (REPOSITORY / "external" / "pilot-posted-jobs" / self.task_hash[7:19]
+                     / posted.nc_hash[7:19] / "screen")
+        return self.evaluate_posting(
+            task, R.PostingResult(files={nc_name: nc_bytes}, posted=(posted,)),
+            namespace, single_dialect=True)[dialect]
 
 
 
@@ -975,15 +1275,26 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
     evaluated = {}
     if posted_factory is not None:
         evaluator_for_posts = posted_factory(task, config)
-        for post in posting.posted:
-            if post.status != C.PostStatus.SUPPORTED:
-                raise RunnerError(f"cannot complete run: no supported {post.dialect.value} post: {post.reason}")
-            nc_name, eval_name = C.DIALECT_ARTIFACTS[post.dialect]
-            actual = evaluator_for_posts.evaluate_posted_gcode(task, files[nc_name], post.dialect, {})
-            if actual.dialect != post.dialect or actual.nc_hash != post.nc_hash or actual.task_hash != task.task_hash:
-                raise RunnerError("posted evaluator returned a mismatched dialect/task/NC hash")
-            evaluated[post.dialect] = actual
-            files[eval_name] = R.record_bytes(actual)
+        if isinstance(evaluator_for_posts, PilotPostedEvaluator):
+            evaluations = evaluator_for_posts.evaluate_posting(
+                task, posting, root / "posted-jobs" / entry["run_id"] / "screen")
+            for post in posting.posted:
+                nc_name, eval_name = C.DIALECT_ARTIFACTS[post.dialect]
+                actual = evaluations[post.dialect]
+                if actual.dialect != post.dialect or actual.nc_hash != post.nc_hash or actual.task_hash != task.task_hash:
+                    raise RunnerError("posted evaluator returned a mismatched dialect/task/NC hash")
+                evaluated[post.dialect] = actual
+                files[eval_name] = R.record_bytes(actual)
+        else:
+            for post in posting.posted:
+                if post.status != C.PostStatus.SUPPORTED:
+                    raise RunnerError(f"cannot complete run: no supported {post.dialect.value} post: {post.reason}")
+                nc_name, eval_name = C.DIALECT_ARTIFACTS[post.dialect]
+                actual = evaluator_for_posts.evaluate_posted_gcode(task, files[nc_name], post.dialect, {})
+                if actual.dialect != post.dialect or actual.nc_hash != post.nc_hash or actual.task_hash != task.task_hash:
+                    raise RunnerError("posted evaluator returned a mismatched dialect/task/NC hash")
+                evaluated[post.dialect] = actual
+                files[eval_name] = R.record_bytes(actual)
     complete = posted_factory is not None and set(evaluated) == set(C.Dialect)
     legacy_incomplete = posted_factory is None
     if not complete and not legacy_incomplete:
@@ -993,6 +1304,8 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
     if complete and getattr(evaluator_for_posts, "timings", None):
         details = json.loads(files["metrics.json"])
         details["execution"]["posted_evaluation_timings"] = evaluator_for_posts.timings
+        if getattr(evaluator_for_posts, "phase_records", None):
+            details["execution"]["posted_evaluation_phases"] = evaluator_for_posts.phase_records
         details["execution"]["posted_sha256_pairs"] = {
             key: {"nc_hash": value.nc_hash, "evaluation_sha256": C.sha256_bytes(C.dumps(value).encode("utf-8"))}
             for key, value in evaluated.items()
@@ -1975,14 +2288,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--refinement-check", action="store_true",
                         help="evaluate final primary RS274 programs at 0.125 mm")
     parser.add_argument("--refinement-worker-run", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--posted-job-dir", help=argparse.SUPPRESS)
     parser.add_argument("--aux-root", help="sibling audit root for refinement evidence")
     parser.add_argument("--primary-root", action="append", help="additional completed primary root")
     args = parser.parse_args(argv)
     root = Path(args.output_dir).resolve()
     if (not args.resume and not args.worker_run and not args.timing_worker_run
-            and not args.refinement_check and not args.refinement_worker_run and root.exists()):
+            and not args.refinement_check and not args.refinement_worker_run
+            and not args.posted_job_dir and root.exists()):
         parser.error("output-dir must be new unless --resume is set")
     try:
+        if args.posted_job_dir:
+            if (args.split != "dev" or args.experiment != "pilot" or args.dry_run
+                    or args.worker_run or args.timing_worker_run
+                    or args.refinement_check or args.refinement_worker_run or args.primary_root):
+                raise RunnerError("posted-job-dir accepts only its own single posted-job protocol")
+            return _posted_job_main(root)
         config = _normalized_config(args.config)
         config["experiment"] = args.experiment
         if config["experiment"] not in EXPERIMENTS:
