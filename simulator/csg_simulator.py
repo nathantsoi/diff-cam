@@ -683,36 +683,80 @@ class CSGSimulatorDelta:
         return ti.Vector([q.x * self.Nx, q.y * self.Ny, q.z * self.Nz])
 
     @ti.func
-    def tool_sdf(self, p, t):
-        """Smoothed swept-cylinder SDF (voxel units): tool sweeps tool_pos[t]->[t+1].
+    def _tool_sweep_terms(self, p, t, height_vox: ti.f32, smooth_norm: ti.template()):
+        """Signed horizontal/vertical terms for a swept upright cylinder.
 
-        With the delta parametrization, tool_pos[t+1] == tool_pos[t] + tool_delta[t],
-        so the swept segment for cut t is exactly the displacement tool_delta[t].
-        Radius/height are millimetres, converted to voxels via ``v``.
+        For query height z, vertically feasible segment parameters form one
+        interval. Restricting the XY closest-point projection to that interval
+        makes the HARD sign ``max(horizontal, vertical)`` exact for membership
+        in the continuous sweep. This includes both endpoint cylinders.
+
+        These two terms are NOT a closed-form Euclidean distance to the swept
+        solid: capping the vertical interval is intentionally a conservative
+        membership certificate, not a proof of Euclidean distance. All values
+        are voxel units. Projection/interval boundaries are nonsmooth gates.
         """
-        r = self.tool_radius[None] / self.v          # voxels
-        h = self.tool_height[None] / self.v          # voxels
-        kv = self.k[None] / self.k_ref               # smoothness in voxel space
-
+        r = self.tool_radius[None] / self.v
+        h = height_vox
         pv = self._vox(p)
         a = self._vox(self.tool_pos[t])
         b = self._vox(self.tool_pos[t + 1])
+        dz = b.z - a.z
 
-        # --- Distance in XY to the swept segment (a capsule axis) ---
-        pa_xy = ti.Vector([pv.x - a.x, pv.y - a.y])
-        ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
-        ba_len2 = ba_xy.dot(ba_xy) + 1e-12
-        h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
-        closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
-        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
+        # b(lambda) <= z <= b(lambda)+h intersected with lambda in [0,1].
+        lo = 0.0
+        hi = 1.0
+        if ti.abs(dz) > 1e-12:
+            at_base = (pv.z - a.z) / dz
+            at_top = (pv.z - h - a.z) / dz
+            lo = ti.max(0.0, ti.min(at_base, at_top))
+            hi = ti.min(1.0, ti.max(at_base, at_top))
+        else:
+            if pv.z < a.z or pv.z > a.z + h:
+                lo = 1.0
+                hi = 0.0  # empty vertical interval
 
-        # --- Z extent: tool z at the closest point along the segment ---
-        # Linearly interpolate the tool's base z between a and b.
-        z_base = a.z + (b.z - a.z) * h_param
-        z_center = z_base + 0.5 * h
-        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * h
+        # A signed gap to the union of all cutter Z spans. It is positive
+        # outside that union and negative inside it (zero only at its caps).
+        z_low = ti.min(a.z, b.z)
+        z_high = ti.max(a.z, b.z) + h
+        vertical = ti.max(z_low - pv.z, pv.z - z_high)
 
-        # --- Combine (same smooth-CSG combination as before) ---
+        pa = ti.Vector([pv.x - a.x, pv.y - a.y])
+        dxy = ti.Vector([b.x - a.x, b.y - a.y])
+        dxy_len2 = dxy.dot(dxy)
+        projection = 0.0
+        if dxy_len2 > 1e-20:
+            projection = pa.dot(dxy) / dxy_len2
+        if lo <= hi:
+            # Restricted nearest centre is exact for fixed-height membership.
+            projection = ti.max(lo, ti.min(hi, projection))
+        else:
+            # No pose covers this height. Vertical is positive and dominates
+            # the hard max, so use the unrestricted capsule term outside.
+            projection = ti.max(0.0, ti.min(1.0, projection))
+        offset = pa - dxy * projection
+        radial_squared = offset.dot(offset)
+        if smooth_norm:
+            # Smooth-only derivative regularization at the cylinder axis;
+            # hard closed-membership must not inherit this radial bias.
+            radial_squared += 1e-8
+        horizontal = ti.sqrt(radial_squared) - r
+        return horizontal, vertical
+
+    @ti.func
+    def tool_sdf(self, p, t):
+        """SEPARATE differentiable surrogate for the swept flat cutter.
+
+        The hard sign certificate lives in ``tool_sdf_sharp``. This method uses
+        its horizontal/vertical terms but smooth-CSG combinations for training;
+        it is not the hard Euclidean SDF and need not preserve its sign/value
+        near boundaries. Interval clamps/endpoints remain nonsmooth even though
+        the CSG composition is smoothed. Gradient tests therefore stay away
+        from those gates. Radius/height in mm become isotropic voxel units.
+        """
+        kv = self.k[None] / self.k_ref
+        d_xy, d_z = self._tool_sweep_terms(p, t, self.tool_height[None] / self.v, True)
         d_xy_pos = smooth_max(d_xy, 0.0, kv)
         d_z_pos = smooth_max(d_z, 0.0, kv)
         outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
@@ -738,24 +782,8 @@ class CSGSimulatorDelta:
         whether the cutting tip is in material, not how much shank sits in
         already-carved empty space. Differentiable (same form as tool_sdf).
         """
-        r = self.tool_radius[None] / self.v          # voxels
-        cut_h = self._tool_cut_h_vox()               # voxels (tip band)
         kv = self.k[None] / self.k_ref               # smoothness in voxel space
-
-        pv = self._vox(p)
-        a = self._vox(self.tool_pos[t])
-        b = self._vox(self.tool_pos[t + 1])
-
-        pa_xy = ti.Vector([pv.x - a.x, pv.y - a.y])
-        ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
-        ba_len2 = ba_xy.dot(ba_xy) + 1e-12
-        h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
-        closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
-        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
-
-        z_base = a.z + (b.z - a.z) * h_param
-        z_center = z_base + 0.5 * cut_h
-        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * cut_h
+        d_xy, d_z = self._tool_sweep_terms(p, t, self._tool_cut_h_vox(), True)
 
         d_xy_pos = smooth_max(d_xy, 0.0, kv)
         d_z_pos = smooth_max(d_z, 0.0, kv)
@@ -2020,8 +2048,10 @@ class CSGSimulatorDelta:
         """Hard boolean forward pass for evaluation and rendering.
 
         Position advancement follows forward() when clip_speeds is True, but carving
-        uses hard apply_cut_hard (ti.max union with tool_sdf_sharp) instead of
-        smooth_max. Sweep accuracy for vertical/sloped paths is a known limitation.
+        uses hard apply_cut_hard (ti.max union with the interval-restricted
+        tool_sdf_sharp membership score) instead of smooth_max. The score's
+        sign is exact at voxel centres; its outside magnitude is not an
+        exact Euclidean distance to the swept cutter.
         """
         self.reconstruct_positions(0)
         self.init_stock()
@@ -2124,73 +2154,32 @@ class CSGSimulatorDelta:
 
     @ti.func
     def tool_sdf_sharp(self, p, t):
-        """Exact (non-smoothed) capped-cylinder SDF for rendering only.
+        """HARD continuous-sweep membership score (voxel units), <= 0 inside.
 
-        Same geometry as tool_sdf but uses hard ti.max instead of smooth_max,
-        so the rendered cylinder has crisp edges. Not differentiable — never
-        call this from a kernel that runs under ti.ad.Tape.
+        At each query Z, ``_tool_sweep_terms`` intersects the cutter's vertical
+        admissibility interval with [0,1] before computing the XY closest point.
+        ``max(horizontal, vertical) <= 0`` is therefore an exact membership
+        test for the swept upright flat cylinder, including pure Z, simultaneous
+        XYZ, zero-length motion and both endpoint poses. The returned score is
+        NOT an exact Euclidean SDF to the swept solid; do not interpret its
+        outside magnitude as that distance. Not differentiable: use tool_sdf
+        under Taichi Tape. Float32 boundaries use the tolerances in the tests.
         """
-
-        r = self.tool_radius[None] / self.v          # voxels
-        h = self.tool_height[None] / self.v          # voxels
-
-        pv = self._vox(p)
-        a = self._vox(self.tool_pos[t])
-        b = self._vox(self.tool_pos[t + 1])
-
-        # --- Distance in XY to the swept segment (a capsule axis) ---
-        pa_xy = ti.Vector([pv.x - a.x, pv.y - a.y])
-        ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
-        ba_len2 = ba_xy.dot(ba_xy) + 1e-12
-        h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
-        closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
-        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
-
-        # --- Z extent: tool z at the closest point along the segment ---
-        # Linearly interpolate the tool's base z between a and b.
-        z_base = a.z + (b.z - a.z) * h_param
-        z_center = z_base + 0.5 * h
-        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * h
-
-        # --- Combine (hard max for crisp edges) ---
-        d_xy_pos = ti.max(d_xy, 0.0)
-        d_z_pos = ti.max(d_z, 0.0)
-        outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
-        inside = -ti.max(-ti.max(d_xy, d_z), 0.0)
-        return outside + inside
+        d_xy, d_z = self._tool_sweep_terms(p, t, self.tool_height[None] / self.v, False)
+        return ti.max(d_xy, d_z)
 
     @ti.func
     def tool_sdf_sharp_tip(self, p, t):
-        """Exact (non-smoothed) capped-cylinder SDF over the CUTTING TIP band.
+        """HARD continuous-sweep membership score for the CUTTING TIP band.
 
-        Hard-max twin of ``tool_sdf_tip`` (height = tool_cut_height, z anchored
-        to the tool base). Used by ``compute_traj_diagnostics_hard`` so the
-        reported air_time_frac reflects cutting-tip contact, not shank exposure.
+        Same signed membership test as ``tool_sdf_sharp`` with height equal to
+        ``_tool_cut_h_vox`` and the band anchored to the tool base. Used by
+        ``compute_traj_diagnostics_hard`` so air-time reflects cutting-tip
+        contact rather than shank exposure. This is not a Euclidean swept SDF.
         Not differentiable -- never call under ti.ad.Tape.
         """
-        r = self.tool_radius[None] / self.v          # voxels
-        cut_h = self._tool_cut_h_vox()               # voxels (tip band)
-
-        pv = self._vox(p)
-        a = self._vox(self.tool_pos[t])
-        b = self._vox(self.tool_pos[t + 1])
-
-        pa_xy = ti.Vector([pv.x - a.x, pv.y - a.y])
-        ba_xy = ti.Vector([b.x - a.x, b.y - a.y])
-        ba_len2 = ba_xy.dot(ba_xy) + 1e-12
-        h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
-        closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
-        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
-
-        z_base = a.z + (b.z - a.z) * h_param
-        z_center = z_base + 0.5 * cut_h
-        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - 0.5 * cut_h
-
-        d_xy_pos = ti.max(d_xy, 0.0)
-        d_z_pos = ti.max(d_z, 0.0)
-        outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
-        inside = -ti.max(-ti.max(d_xy, d_z), 0.0)
-        return outside + inside
+        d_xy, d_z = self._tool_sweep_terms(p, t, self._tool_cut_h_vox(), False)
+        return ti.max(d_xy, d_z)
 
     @ti.func
     def holder_sdf_sharp(self, p, t):
