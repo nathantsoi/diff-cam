@@ -32,3 +32,9 @@ DECISION: all optimizer conditions in a matched comparison (CMA hard/smooth, fix
 method sees the same numerical objective; f32 remains an option for exploration only. Implemented by T3.3c (declared `precision` option,
 validated with a per-coordinate relative-error gate on the LONGEST suite path). The pilot declares precision f64 and launches after T3.3c
 merges (avoids rerunning gradient rows); its Adam rows are then no longer provisional for this reason.
+
+## D-2026-11-09-06 — Where run precision is recorded (no contract bump)
+A RunRecord field would require a SCHEMA_VERSION bump, which changes every TaskSpec hash and invalidates retained bundles. DECISION:
+config.json (required run artifact) metadata['simulator'] holds sim.precision_metadata(); benchmarks.audit requires it and fails closed on
+missing or mixed precision within a campaign; the objective setup signature (`simulator_precision`) and Adam/CMA checkpoints carry it too;
+T7.2 refuses reports whose run precision differs from the campaign's.
