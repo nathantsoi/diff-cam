@@ -161,3 +161,32 @@ def test_interrupted_child_is_recorded_not_misfiled_as_complete(tmp_path):
     assert audit["reconciliation"]["exact_id_reconciliation"] is True
     summary = json.loads((output / "execution_summary.json").read_text())
     assert summary["status_counts"] == {"interrupted": 1}
+
+
+# --- coordinator follow-ups from discriminator re-review (Q1, Q4) -------------------------------
+def test_smooth_objective_k_comes_from_config_not_code_default():
+    import json, pathlib
+    from scripts import run_benchmark_suite as S
+    cfg = json.loads(pathlib.Path("configs/pilot.json").read_text())
+    assert "k_smooth" in cfg
+    src = pathlib.Path(S.__file__).read_text()
+    assert 'ObjectiveSpec(k=float(config["k_smooth"]))' in src
+    assert "O.ObjectiveSpec()" not in src
+
+
+def test_config_without_k_smooth_rejected(tmp_path):
+    import json, pathlib, pytest
+    from scripts import run_benchmark_suite as S
+    cfg = json.loads(pathlib.Path("configs/pilot.json").read_text())
+    del cfg["k_smooth"]
+    p = tmp_path / "c.json"; p.write_text(json.dumps(cfg))
+    loader = S._normalized_config
+    with pytest.raises(S.RunnerError, match="k_smooth"):
+        loader(p)
+
+
+def test_cma_budget_smaller_than_population_rejected():
+    import pytest
+    from algorithms import blackbox as B
+    with pytest.raises(ValueError, match="smaller than one CMA population"):
+        B.OptimizationBudget(candidate_evaluations=3, population_size=4, validation_interval=1, max_validation_calls=0)

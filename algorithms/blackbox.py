@@ -58,6 +58,9 @@ class OptimizationBudget:
                 raise ValueError(f"{name} must be a non-negative integer or None")
         if self.population_size is not None and self.population_size < 2:
             raise ValueError("population_size must be at least 2")
+        if self.population_size is not None and 0 < self.candidate_evaluations < self.population_size:
+            raise ValueError("candidate_evaluations is smaller than one CMA population; the run would end "
+                             "with zero generations")
         if self.validation_interval == 0 and self.max_validation_calls > 0:
             raise ValueError("positive validation budget requires a positive validation_interval")
         if self.max_generations == 0:
@@ -274,10 +277,8 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
         candidates = state.es.ask()
         if len(candidates) != expected_size:
             raise BlackBoxError("CMA returned an unexpected population size")
-        if state.evaluations + len(candidates) > state.budget.candidate_evaluations:
-            # Never truncate a population silently to change the update dynamics.
-            reason = "budget_exhausted"
-            break
+        # Unreachable after the pre-ask() check above (review O5/Q4); never truncate a population.
+        assert state.evaluations + len(candidates) <= state.budget.candidate_evaluations
         fitness = []
         best_in_population: Optional[C.CandidateResult] = None
         best_in_population_theta = None

@@ -88,7 +88,9 @@ def _normalized_config(path: str | Path) -> dict[str, Any]:
     for name in ("candidate_evaluations", "population_size", "max_validation_calls"):
         _positive_int(raw.get(name), name, zero=name == "max_validation_calls")
     interval = _positive_int(raw.get("validation_interval"), "validation_interval")
-    for name in ("k_fixed", "k_anneal_start", "k_anneal_end", "learning_rate"):
+    for name in ("k_fixed", "k_smooth", "k_anneal_start", "k_anneal_end", "learning_rate"):
+        if name not in raw:
+            raise RunnerError(f"config must declare {name} explicitly")
         if not isinstance(raw[name], (int, float)) or not math.isfinite(raw[name]) or raw[name] <= 0:
             raise RunnerError(f"{name} must be finite and positive")
     seeds = raw.get("seeds")
@@ -170,7 +172,7 @@ def _prototype_evaluator(task, motion, parameterization, config, seed):
     sim.set_target_params(radius_mm=6.0)
     sim.bake_target_grid()
     return O.CandidateEvaluator(task, motion, parameterization, sim,
-                                spec=O.ObjectiveSpec(), seed=seed)
+                                spec=O.ObjectiveSpec(k=float(config["k_smooth"])), seed=seed)
 
 
 def _budget(config: Mapping[str, Any], method: str) -> B.OptimizationBudget:
@@ -191,7 +193,7 @@ def _identity(task: C.TaskSpec, config: Mapping[str, Any], split: str) -> str:
         "seeds": config["seeds"], "candidate_evaluations": config["candidate_evaluations"],
         "population_size": config["population_size"], "validation_interval": config["validation_interval"],
         "max_validation_calls": config["max_validation_calls"],
-        "learning_rate": config["learning_rate"], "k_fixed": config["k_fixed"],
+        "learning_rate": config["learning_rate"], "k_fixed": config["k_fixed"], "k_smooth": config["k_smooth"],
         "k_anneal_start": config["k_anneal_start"], "k_anneal_end": config["k_anneal_end"],
         "max_generations": config.get("max_generations"),
     }
@@ -279,6 +281,9 @@ def _evaluate_outcome(condition: str, evaluator: Any, config: Mapping[str, Any],
                           k_start=k_start, k_end=k_end)
     result = adam.solve_adam(evaluator, _budget(config, condition), cfg, seed=seed,
                              x0=zeros, run_id=condition)
+    if result.best is None:
+        raise RunnerError(f"{condition}: no valid hard-selected candidate "
+                          f"(termination_reason={result.termination_reason})")
     return Outcome(seed, result.best, result.best_theta, result.initial_theta, result.budget,
                    result.evaluations, result.validation_calls, result.gradient_updates,
                    result.forward_calls, result.backward_calls, result.invalid_evaluations,
