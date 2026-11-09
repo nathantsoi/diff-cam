@@ -184,7 +184,7 @@
    "branch": "task/T5.2-external-titan",
    "blocker": null,
    "next": null,
-   "note": "T5.2 adapters merged (1070c1c): isolated OCP 7.7.2 STEP import of Titan-M1 (inch->mm verified), sampled P/T, bounded native partial-roughing pilot. Production eval UNSUPPORTED for sampled P/T -> T1.3f (worker-3). Excluded-volume convention decided (grid-resolved, tol 0; native 82.20 mm3 diagnostic; grid 139.29 mm3 declared). Titan provenance/license still unknown (local only). | Production evaluation now runs (T1.3f): geometry False / safety null honestly reported; Titan nominal is a partial roughing pilot only."
+   "note": "T5.2 adapters merged (1070c1c): isolated OCP 7.7.2 STEP import of Titan-M1 (inch->mm verified), sampled P/T, bounded native partial-roughing pilot. Production eval UNSUPPORTED for sampled P/T -> T1.3f (worker-3). Excluded-volume convention decided (grid-resolved, tol 0; native 82.20 mm3 diagnostic; grid 139.29 mm3 declared). Titan provenance/license still unknown (local only). | Production evaluation now runs (T1.3f): geometry False / safety null honestly reported; Titan nominal is a partial roughing pilot only. | T5.2b merged: independent analytic bore raster (plug \u2229 nominal source void, native face z-ranges recorded) matches 68/68 cells; negative r=0.875 \u2192 56 mismatches; RESOLUTION LIMIT at 1.27 mm: small bore D=2.057 mm \u22481.6 cells, 1.25\u00d7 radius undetectable (documented). Artifacts data/external/titan-m1-t52b."
   },
   "T4.2": {
    "status": "planned",
