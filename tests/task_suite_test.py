@@ -95,6 +95,7 @@ def _check_hashes(root):
         assert _file_hash(root / name) == digest
     source_index = json.loads((root / "sources.json").read_text())
     for record in source_index.values():
+        assert Path(record["path"]).is_absolute()
         assert Path(record["path"]).is_file()
         assert _file_hash(record["path"]) == record["sha256"]
     return manifest

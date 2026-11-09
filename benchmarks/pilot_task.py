@@ -389,7 +389,7 @@ def run_nominal(output_dir=None):
         run_root.mkdir(exist_ok=True)
         output_dir = Path(tempfile.mkdtemp(prefix="pilot-pocket-", dir=run_root))
     else:
-        output_dir = Path(output_dir)
+        output_dir = Path(output_dir).resolve()
         if output_dir.exists():
             raise FileExistsError(f"choose a NEW nominal output directory: {output_dir}")
         output_dir.mkdir(parents=True)
