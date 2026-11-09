@@ -42,6 +42,20 @@ def _guard_taichi_instance_lifecycle() -> None:
             "This guard does not claim dense-stock RAM is consumed and does not "
             "call ti.init(), which would invalidate existing fields."
         )
+    # Registration is deliberately separate: an exception during validation,
+    # array allocation or parameter initialization is not a live CSG instance.
+
+
+def _record_taichi_instance_success() -> None:
+    from taichi.lang import impl as taichi_impl
+
+    runtime = taichi_impl.get_runtime()
+    if runtime is None:
+        raise RuntimeError("Taichi runtime disappeared during simulator construction")
+    identity = id(runtime)
+    state = _TAICHI_RUNTIME_CSG_STATE
+    if identity != state["identity"]:
+        raise RuntimeError("Taichi runtime changed during simulator construction")
     state["instances"] += 1
 
 
@@ -128,8 +142,12 @@ class CSGSimulatorDelta:
             ti.set_logging_level(ti.WARN)
 
         _guard_taichi_instance_lifecycle()
-        if max_steps < 0:
-            raise ValueError("max_steps must be non-negative")
+        if max_steps <= 0:
+            raise ValueError(
+                "max_steps must be positive (at least one segment); "
+                "Taichi cannot allocate zero-length tool_delta fields. "
+                "Use one zero-length segment for a stationary cut."
+            )
         self.max_steps = max_steps
 
         # ---- Stock box (the normalized cube) & machine work volume -----------
@@ -231,6 +249,7 @@ class CSGSimulatorDelta:
         )
 
         self.tool_start = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self._configured_tool_start = tuple(float(value) for value in tool_start)
         self.tool_start[None] = ti.Vector(list(tool_start))
 
         self.tool_radius = ti.field(dtype=ti.f32, shape=())
@@ -623,6 +642,7 @@ class CSGSimulatorDelta:
         self.loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
 
         ti.root.lazy_grad()
+        _record_taichi_instance_success()
 
     def _validate_fits(self, stock_size_mm):
         """Warn if the stock box can't fit inside the machine work volume.
@@ -2274,6 +2294,19 @@ class CSGSimulatorDelta:
         self.stock.from_numpy(stock_np)
         self.tool_pos.from_numpy(pos_np)
 
+    def set_tool_start(self, point):
+        """Configure a stable fresh-candidate start (normalized stock frame).
+
+        Use this instead of assigning tool_start directly when changing the
+        baseline. load_saved_init may subsequently choose a mid-cut start for
+        staged training; reset_candidate_state restores this saved baseline.
+        """
+        values = tuple(float(value) for value in point)
+        if len(values) != 3 or not np.all(np.isfinite(values)):
+            raise ValueError("tool_start must contain three finite normalized coordinates")
+        self._configured_tool_start = values
+        self.tool_start[None] = ti.Vector(list(values))
+
     def load_saved_init(self, stock_sdf, tool_pos):
         """Configure staged-training: start each ``init_stock`` from a saved
         mid-cut SDF (the carved stock left by a previous trajectory) and set
@@ -2286,6 +2319,8 @@ class CSGSimulatorDelta:
         """
         self.saved_stock.from_numpy(np.asarray(stock_sdf, dtype=np.float32))
         self.use_saved_init[None] = 1
+        # Prefix-only start; keep _configured_tool_start untouched so reset
+        # cannot leak a staged, mid-cut candidate into a fresh evaluation.
         self.tool_start[None] = ti.Vector(
             [float(tool_pos[0]), float(tool_pos[1]), float(tool_pos[2])]
         )
@@ -2295,7 +2330,8 @@ class CSGSimulatorDelta:
         """Clear all per-candidate mutable evaluation state (T3.0 hook).
 
         Preserves configured target/tool/holder geometry, k, speeds/limits,
-        target grids, tool_start, and allocated Taichi fields. Clears stock
+        target grids, and allocated Taichi fields. Restores the saved
+        configured tool_start (not a load_saved_init prefix). Clears stock
         history/prefixes and their grads, positions/deltas/grads, loss/grad,
         seg_* values+grads, acc_psum+grad, diagnostic accumulators/scratch, and
         saved_stock/use_saved_init. Does NOT call ti.init or change parameters.
@@ -2306,6 +2342,7 @@ class CSGSimulatorDelta:
         """
         self.loss[None] = 0.0
         self.loss.grad[None] = 0.0
+        self.tool_start[None] = ti.Vector(self._configured_tool_start)
         self.acc_psum[None] = 0.0
         self.acc_psum.grad[None] = 0.0
         self._clearance_buf[None] = 0.0
@@ -2391,12 +2428,16 @@ class CSGSimulatorDelta:
 
     @ti.func
     def holder_sdf_sharp(self, p, t):
-        """Hard holder-membership score for the conservative pre-cut screen.
+        """Hard cell-inflated holder-membership for the pre-cut screen.
 
-        The whole-segment Z union is conservative, not exact chronological
-        holder motion: a path may clear material with the cutter-leading edge
-        even though the unioned holder overlaps pre-segment stock. Positive
-        overlap is therefore a diagnostic flag, not proof of physical contact.
+        Subtract sqrt(3)/2 voxels (half a cubic-cell diagonal) from the final
+        membership/clearance score. Material occupies cells, not centres only;
+        this mirrors the reference's lower-bound geometry instead of missing a
+        holder that almost fills a cell while its centre is outside it. There
+        is no +1e-8 sqrt bias on this hard path. The separate smooth CSG penalty
+        retains its own derivative regularization and is intentionally not the
+        hard cell-inflated measure. Whole-segment conservatism is not a
+        chronological-safety proof: safe cutter-leading paths can still flag.
         Not differentiable -- never call under ti.ad.Tape.
         """
         r = self.holder_radius[None] / self.v        # voxels
@@ -2412,7 +2453,7 @@ class CSGSimulatorDelta:
         ba_len2 = ba_xy.dot(ba_xy) + 1e-12
         h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
         closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
-        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
+        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2) - r
 
         # Holder Z extent UNIONED over the swept segment. The holder bottom
         # tracks the tool base (z_base + tool_h) from a to b; the body extends
@@ -2431,10 +2472,13 @@ class CSGSimulatorDelta:
         z_high = ti.max(z_bottom_a, z_bottom_b) + h
         z_center = 0.5 * (z_low + z_high)
         z_half = 0.5 * (z_high - z_low)
-        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - z_half
+        d_z = ti.sqrt((pv.z - z_center) ** 2) - z_half
 
         d_xy_pos = ti.max(d_xy, 0.0)
         d_z_pos = ti.max(d_z, 0.0)
-        outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
+        outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos)
         inside = -ti.max(-ti.max(d_xy, d_z), 0.0)
-        return outside + inside
+        raw_score = outside + inside
+        # Cell half-diagonal, not a free user tuning margin. All hard overlap
+        # and clearance consumers use this inflated score, in voxel units.
+        return raw_score - ti.sqrt(3.0) * 0.5
