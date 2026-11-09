@@ -766,6 +766,8 @@ def test_refinement_audit_exposes_baseline_refined_and_verdict_change(tmp_path):
 
 
 def test_refinement_audit_isolates_one_disagreement_in_same_condition(tmp_path):
+    import dataclasses
+
     cases = []
     for seed, geometry_pass in ((0, True), (1, False)):
         root, config, record, _, primary = _pilot_refinement_fixture(
@@ -792,6 +794,76 @@ def test_refinement_audit_isolates_one_disagreement_in_same_condition(tmp_path):
     assert audited.runs[cases[1]["refined_run_id"]].method == "hard-cmaes-refinement-disagreement-refinement"
     assert doc["reported_outcomes"][cases[1]["run_id"]]["efficiency_eligible"] is False
     assert doc["reported_outcomes"][cases[1]["run_id"]]["disagreement_fields"] == ["geometry_pass"]
+    primary_tasks = dict(cases[0]["manifest"].tasks)
+    task_id = next(iter(primary_tasks))
+    primary_tasks[task_id] = dataclasses.replace(
+        primary_tasks[task_id], completion_residual_mm3=cases[0]["completion_residual_mm3"])
+    primary_runs = {}
+    primary_audits = {}
+    conservative = {}
+    for case in cases:
+        primary_runs[case["run_id"]] = case["manifest"].runs[case["run_id"]]
+        primary_audits[case["run_id"]] = A._audit_run(case["root"] / case["run_id"] / "run.json")
+        value = case["conservative_outcome"]
+        conservative[case["run_id"]] = A.ConservativeOutcome(
+            safety_pass=value["safety_pass"], geometry_pass=value["geometry_pass"],
+            completion_pass=value["completion_pass"],
+            efficiency_eligible=value["efficiency_eligible"],
+            refinement_disagreement=value["refinement_disagreement"],
+            disagreement_fields=tuple(value["disagreement_fields"]))
+    collapsed = A._outcome_by_task(
+        list(primary_runs.values()), primary_audits, C.Dialect.RS274,
+        "efficiency_eligible", primary_tasks, conservative)
+    assert collapsed[task_id]["value"] == pytest.approx(0.5)
+    assert collapsed[task_id]["known_observations"] == 2
+    assert collapsed[task_id]["unknown_or_missing_observations"] == 0
+    assert collapsed[task_id]["refinement_disagreement_exclusions"] == 1
+    summary = A._rate_summary(
+        collapsed, [task_id], primary_tasks, "D4-two-seeds", 20261108, 100, 0.95)
+    assert summary["task_mean_rate"] == pytest.approx(0.5)
+    assert summary["refinement_disagreement_exclusions"] == 1
+    effect = A._metric_by_task(
+        list(primary_runs.values()), primary_audits, C.Dialect.RS274,
+        "cycle_time_s", primary_tasks, conservative)
+    assert effect[task_id]["observations_used"] == 1
+    assert effect[task_id]["exclusions"] == {"refinement_disagreement": 1}
+
+
+def test_refinement_completion_flip_updates_primary_pilot_report(tmp_path):
+    import dataclasses
+
+    root, config, record, immutable_run, primary = _pilot_refinement_fixture(
+        tmp_path / "primary", method="fixed-adam", residual_mm3=0.0)
+    auxiliary_root = tmp_path / "auxiliary"
+
+    def evaluate(task, nc, dialect, settings):
+        result = _typed_evaluation(task, nc, geometry_pass=True, step=settings["max_step_mm"])
+        return dataclasses.replace(result, metrics={
+            **result.metrics, "residual_volume_mm3": C.Metric(value=3.0, unit="mm^3")})
+
+    case = runner._refinement_worker(
+        config, root, record.run_id, auxiliary_root, evaluator_override=evaluate)
+    assert case["comparison"]["geometry_pass"]["changed"] is False
+    assert case["comparison"]["safety_pass"]["changed"] is False
+    assert case["comparison"]["completion_pass"]["primary"] is True
+    assert case["comparison"]["completion_pass"]["refined"] is False
+    assert case["conservative_outcome"]["geometry_pass"] is True
+    assert case["conservative_outcome"]["completion_pass"] is False
+    assert case["conservative_outcome"]["disagreement_fields"] == ["completion_pass"]
+    assert case["conservative_outcome"]["efficiency_eligible"] is False
+    case["manifest"] = A.load_manifest(root / "manifest.json")
+    auxiliary = runner._audit_refinement_root([case], auxiliary_root)
+    assert auxiliary["refinement_disagreement_by_condition"]["fixed-adam"]["count"] == 1
+    report = runner._pilot_report(config, root, auxiliary_root, bootstrap_replicates=100)
+    row = next(row for row in report["runs"] if row["run_id"] == record.run_id)
+    assert row["reported_outcomes"]["geometry_pass"] is True
+    assert row["reported_outcomes"]["completion_pass"] is False
+    assert row["reported_outcomes"]["efficiency_eligible"] is False
+    assert row["reported_outcomes"]["refinement_disagreement"] is True
+    assert report["refinement"]["disagreement_run_ids"] == [record.run_id]
+    threshold = primary.metrics["residual_volume_mm3"].value
+    assert threshold <= case["completion_residual_mm3"] < 3.0
+    assert (root / record.run_id / "run.json").read_bytes() == immutable_run
 
 
 def test_primary_pilot_report_uses_conservative_refinement_and_fails_closed(tmp_path):
@@ -858,8 +930,8 @@ def test_primary_pilot_report_uses_conservative_refinement_and_fails_closed(tmp_
     assert efficiency["observations_used"] == 0
     assert efficiency["exclusions"] == {"refinement_disagreement": 1}
     outcome = comparison["outcomes"]["efficiency_eligible"]
-    assert outcome["method"]["known_task_units"] == 0
-    assert outcome["method"]["task_mean_rate"] is None
+    assert outcome["method"]["known_task_units"] == 1
+    assert outcome["method"]["task_mean_rate"] == 0.0
     assert outcome["method"]["refinement_disagreement_exclusions"] == 1
     assert outcome["baseline"]["task_mean_rate"] == 1.0
     assert comparison["outcomes"]["geometry_pass"]["method"]["task_mean_rate"] == 0.0
@@ -989,6 +1061,7 @@ def test_refinement_timing_is_separate_from_primary_and_parallel_forecast(tmp_pa
     assert refinement_settings == [dict(primary_settings, max_step_mm=0.125)]
     assert (tmp_path / evidence["evaluation_artifacts"]["rs274_refined"]["evaluation_path"]).is_file()
     assert evidence["refinement_check_seconds"]["comparison"]["any_outcome_verdict_change"] is True
+    assert evidence["refinement_check_seconds"]["conservative_outcome"]["completion_pass"] is True
     # Explicit unit arithmetic, not a measured benchmark duration:
     for key, value in evidence["candidate_seconds"].items():
         evidence["candidate_seconds"][key] = 0.0
@@ -1023,13 +1096,14 @@ def test_refinement_tri_state_pass_and_disagreement():
     primary = _typed_evaluation(task, nc, geometry_pass=True)
     unknown = _typed_evaluation(task, nc, geometry_pass=None, step=0.125)
     comparison = runner._refinement_comparison(primary, unknown)
-    outcome = runner._conservative_outcome(primary, unknown, comparison)
+    outcome = runner._conservative_outcome(primary, unknown, comparison, task)
     assert outcome["geometry_pass"] is None
+    assert outcome["completion_pass"] is True
     assert outcome["efficiency_eligible"] is False
     assert outcome["refinement_disagreement"] is True
     assert outcome["disagreement_fields"] == ["geometry_pass"]
     both_unknown = runner._conservative_outcome(
-        unknown, unknown, runner._refinement_comparison(unknown, unknown))
+        unknown, unknown, runner._refinement_comparison(unknown, unknown), task)
     assert both_unknown["geometry_pass"] is None
     assert both_unknown["efficiency_eligible"] is False
     assert both_unknown["refinement_disagreement"] is False
@@ -1121,7 +1195,7 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
         (aux_root / f"{run_id}-refinement-link.json").read_bytes())
     row = next(row for row in table["runs"] if row["run_id"] == run_id)
     comparison = json.loads((aux_root / f"{run_id}-refined" / "comparison.json").read_text())
-    for name in ("safety_pass", "geometry_pass", "efficiency_eligible"):
+    for name in ("safety_pass", "geometry_pass", "completion_pass", "efficiency_eligible"):
         assert row["reported_outcomes"][name] == comparison["conservative_outcome"][name]
     expected_disagreement = comparison["conservative_outcome"]["refinement_disagreement"]
     assert table["refinement"]["disagreement_by_condition"][condition]["count"] == int(expected_disagreement)

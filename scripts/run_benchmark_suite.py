@@ -734,11 +734,15 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None,
                 "nc_hash": primary_rs274.nc_hash,
                 "evaluation_path": None, "evaluation_sha256": C.sha256_bytes(payload),
             }
+        refinement_comparison = _refinement_comparison(primary_rs274, refined)
+        refinement_outcome = _conservative_outcome(
+            primary_rs274, refined, refinement_comparison, task)
         refinement = {
             "dialect": "rs274", "wall_seconds": seconds,
             "nc_hash": primary_rs274.nc_hash,
             "settings": refined.discretization["settings"],
-            "comparison": _refinement_comparison(primary_rs274, refined),
+            "comparison": refinement_comparison,
+            "conservative_outcome": refinement_outcome,
         }
     posted_times = list(post_builder.timings)
     expected_events = [(post.dialect.value, post.nc_hash) for post in posting.posted]
@@ -1067,7 +1071,24 @@ def _refinement_comparison(primary, refined):
     return result
 
 
-def _conservative_outcome(primary, refined, comparison):
+def _conservative_outcome(primary, refined, comparison, task):
+    if not isinstance(task, C.TaskSpec):
+        raise RunnerError("conservative completion requires the actual pilot TaskSpec")
+    if primary.task_hash != task.task_hash or refined.task_hash != task.task_hash:
+        raise RunnerError("conservative outcomes require one actual task identity")
+    task_info = audit.TaskInfo(
+        task.task_id, task.task_hash, task.family,
+        completion_residual_mm3=task.tolerances.completion_residual_mm3)
+    primary_completion = audit._completion_value(primary, task_info)
+    refined_completion = audit._completion_value(refined, task_info)
+    comparison["completion_pass"] = {
+        "primary": primary_completion, "refined": refined_completion,
+        "changed": primary_completion != refined_completion,
+    }
+    comparison["any_outcome_verdict_change"] = any(
+        comparison[name]["changed"]
+        for name in ("safety_pass", "geometry_pass", "completion_pass", "coverage", "efficiency_eligible"))
+
     def combined(left, right):
         if left is False or right is False:
             return False
@@ -1077,18 +1098,21 @@ def _conservative_outcome(primary, refined, comparison):
             return True
         raise RunnerError("conservative evaluation outcomes must be bool or None")
 
-    disagreement_names = [name for name in ("safety_pass", "geometry_pass", "coverage")
-                          if comparison[name]["changed"]]
+    disagreement_names = [
+        name for name in ("safety_pass", "geometry_pass", "completion_pass", "coverage")
+        if comparison[name]["changed"]]
+    completion = combined(primary_completion, refined_completion)
     eligible = bool(primary.efficiency_eligible and refined.efficiency_eligible
-                    and not disagreement_names)
+                    and completion is True and not disagreement_names)
     return {
         "safety_pass": combined(primary.safety_pass, refined.safety_pass),
         "geometry_pass": combined(primary.geometry_pass, refined.geometry_pass),
+        "completion_pass": completion,
         "efficiency_eligible": eligible,
         "refinement_disagreement": bool(disagreement_names),
         "disagreement_fields": disagreement_names,
         "excluded_from_efficiency": not eligible,
-        "rule": "primary AND refined; None is never upgraded; any safety/geometry/coverage disagreement excludes efficiency",
+        "rule": "primary AND refined for safety/geometry/completion at the task threshold; None is never upgraded; disagreements exclude efficiency",
     }
 
 
@@ -1189,7 +1213,7 @@ def _refinement_worker(config, root, run_id, auxiliary_root, *, evaluator_overri
         status = "complete"
     refined = _verified_refinement_result(primary, refined, policy)
     comparison = _refinement_comparison(primary, refined)
-    conservative = _conservative_outcome(primary, refined, comparison)
+    conservative = _conservative_outcome(primary, refined, comparison, task)
     payload = R.record_bytes(refined)
 
     auxiliary_config = dict(parent_config)
@@ -1355,6 +1379,7 @@ def _audit_refinement_root(outcomes, auxiliary_root):
             "condition": expected.method, "seed": expected.seed,
             "safety_pass": conservative["safety_pass"],
             "geometry_pass": conservative["geometry_pass"],
+            "completion_pass": conservative["completion_pass"],
             "efficiency_eligible": conservative["efficiency_eligible"],
             "efficiency_excluded": conservative["excluded_from_efficiency"],
             "refinement_disagreement": conservative["refinement_disagreement"],
@@ -1427,7 +1452,7 @@ def _verified_refinement_for_report(root, run_id, auxiliary_root, policy):
     if refined_path.read_bytes() != payload:
         raise RunnerError("named refinement evaluation differs from its typed auxiliary record")
     comparison = _refinement_comparison(primary, refined)
-    conservative = _conservative_outcome(primary, refined, comparison)
+    conservative = _conservative_outcome(primary, refined, comparison, task)
     comparison_document = {
         "primary_run_id": run_id, "refined_run_id": refined_run_id,
         "comparison": comparison, "conservative_outcome": conservative,
@@ -1522,6 +1547,7 @@ def _pilot_report(config, root, auxiliary_root, *, bootstrap_replicates=2000):
             "seed": expected.seed,
             "safety_pass": conservative["safety_pass"],
             "geometry_pass": conservative["geometry_pass"],
+            "completion_pass": conservative["completion_pass"],
             "efficiency_eligible": conservative["efficiency_eligible"],
             "efficiency_excluded": conservative["excluded_from_efficiency"],
             "refinement_disagreement": conservative["refinement_disagreement"],
@@ -1549,6 +1575,7 @@ def _pilot_report(config, root, auxiliary_root, *, bootstrap_replicates=2000):
         outcomes[run_id] = audit.ConservativeOutcome(
             safety_pass=conservative["safety_pass"],
             geometry_pass=conservative["geometry_pass"],
+            completion_pass=conservative["completion_pass"],
             efficiency_eligible=conservative["efficiency_eligible"],
             refinement_disagreement=conservative["refinement_disagreement"],
             disagreement_fields=tuple(conservative["disagreement_fields"]),

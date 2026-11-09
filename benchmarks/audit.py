@@ -39,31 +39,33 @@ class ConservativeOutcome:
 
     safety_pass: Optional[bool]
     geometry_pass: Optional[bool]
+    completion_pass: Optional[bool]
     efficiency_eligible: Optional[bool]
     refinement_disagreement: bool
     disagreement_fields: tuple[str, ...] = ()
 
     def __post_init__(self):
-        for name in ("safety_pass", "geometry_pass", "efficiency_eligible"):
+        for name in ("safety_pass", "geometry_pass", "completion_pass", "efficiency_eligible"):
             value = getattr(self, name)
             if value is not None and not isinstance(value, bool):
                 raise AuditInputError(f"conservative {name} must be bool or None")
         if not isinstance(self.refinement_disagreement, bool):
             raise AuditInputError("refinement_disagreement must be boolean")
-        allowed = {"safety_pass", "geometry_pass", "coverage"}
+        allowed = {"safety_pass", "geometry_pass", "completion_pass", "coverage"}
         if (not isinstance(self.disagreement_fields, tuple)
                 or len(set(self.disagreement_fields)) != len(self.disagreement_fields)
                 or not set(self.disagreement_fields) <= allowed):
             raise AuditInputError("disagreement_fields must be unique safety/geometry/coverage names")
         if self.refinement_disagreement != bool(self.disagreement_fields):
             raise AuditInputError("disagreement fields and verdict must agree")
-        if self.refinement_disagreement and self.efficiency_eligible is True:
-            raise AuditInputError("a refinement disagreement cannot remain efficiency eligible")
+        if self.refinement_disagreement and self.efficiency_eligible is not False:
+            raise AuditInputError("a refinement disagreement must be a known efficiency false")
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "safety_pass": self.safety_pass,
             "geometry_pass": self.geometry_pass,
+            "completion_pass": self.completion_pass,
             "efficiency_eligible": self.efficiency_eligible,
             "refinement_disagreement": self.refinement_disagreement,
             "disagreement_fields": list(self.disagreement_fields),
@@ -656,7 +658,7 @@ def _outcome_value(
 ) -> Optional[bool]:
     if reported is not None and not isinstance(reported, ConservativeOutcome):
         raise AuditInputError("reported outcome must be a typed ConservativeOutcome")
-    if reported is not None and outcome in ("safety_pass", "geometry_pass"):
+    if reported is not None and outcome in ("safety_pass", "geometry_pass", "completion_pass"):
         return getattr(reported, outcome)
     if outcome == "efficiency_eligible":
         if reported is not None:
@@ -718,7 +720,9 @@ def _outcome_by_task(
                      ("safety_pass", "completion_pass", "efficiency_eligible") else None)
         elif (reported is not None and outcome == "efficiency_eligible"
               and reported.refinement_disagreement):
-            value = None
+            # The eligibility RATE records the known conservative failure.
+            # Only continuous efficiency METRICS exclude the affected run.
+            value = reported.efficiency_eligible
             disagreement_excluded = True
             name = "refinement_disagreement_exclusions"
             entry[name] = entry.get(name, 0) + 1
@@ -1326,8 +1330,8 @@ def generate_report(
                 counts[manifest.runs[run_id].method] += 1
         report["refinement"] = {
             "producer": "primary audit joined with verified refinement reported_outcomes by run_id",
-            "outcome_fields": ["safety_pass", "geometry_pass", "efficiency_eligible"],
-            "efficiency_exclusion": "disagreement runs are excluded and explicitly counted",
+            "outcome_fields": ["safety_pass", "geometry_pass", "completion_pass", "efficiency_eligible"],
+            "efficiency_exclusion": "efficiency metrics exclude disagreement runs and count them; the eligibility rate retains their known False",
             "applied_run_ids": sorted(validated_outcomes),
             "disagreement_run_ids": sorted(
                 run_id for run_id, value in validated_outcomes.items()
