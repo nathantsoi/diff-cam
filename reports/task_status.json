@@ -134,7 +134,8 @@
    "owner": "diffcam-worker-2 (runner T4.1a) / coordinator (real pilot T4.1b)",
    "branch": "task/T4.1-runner",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "T4.1a paused for T3.xb"
   },
   "T3.4": {
    "status": "planned",
@@ -276,6 +277,14 @@
    "blocker": null,
    "next": null,
    "note": "merged; H1 hard holder checks inflated by cell half-diagonal (safe-case overlap 100->25->0 mm3 at n=1,2,3), H2 lifecycle charged after init, H3 max_steps>=1, H4 reset restores configured start. Reviewer repros pass."
+  },
+  "T3.xb": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-2",
+   "branch": "task/T3.2-adam",
+   "blocker": null,
+   "next": "resume T4.1a",
+   "note": "discriminator pre-merge review of T3 stack: O1 k leak across methods, O2 invalid best/inf crash, O3 Adam fake seeds, O4 budget-dependent anneal, O5 CMA final.json RNG advance, O6 ledger double count/no restore. O2-O6 reproduced."
   }
  }
 }
