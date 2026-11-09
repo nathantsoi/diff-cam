@@ -1655,3 +1655,53 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
     reports, audit = A.audit_runs(output, manifest)
     assert audit["reconciliation"]["exact_id_reconciliation"] is True
     assert len(reports) == 1 and reports[0]["status"] == "complete"
+
+
+def test_self_peak_rss_excludes_parent_peak_inherited_through_ru_maxrss():
+    """L1: a spawned worker must not report its parent's peak (Linux ru_maxrss is inherited)."""
+    import resource
+    import subprocess
+    import sys
+
+    if not sys.platform.startswith("linux"):
+        pytest.skip("VmHWM measurement is Linux-only")
+    ballast = bytearray(b"\x01") * (1024 ** 3)  # touched pages: >= 1 GiB resident in the parent
+    try:
+        parent_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        assert parent_kib >= 1024 ** 2
+        probe = (
+            "import json, resource, sys; sys.path.insert(0, sys.argv[1]);"
+            "from scripts import run_benchmark_suite as r;"
+            "print(json.dumps([r._self_peak_rss_kib(), resource.getrusage(resource.RUSAGE_SELF).ru_maxrss]))"
+        )
+        out = subprocess.run([sys.executable, "-c", probe, str(Path(__file__).resolve().parent.parent)],
+                             check=True, capture_output=True, text=True).stdout
+        own, inherited = json.loads(out.strip().splitlines()[-1])
+    finally:
+        del ballast
+    assert inherited >= parent_kib * 0.9  # documents the Linux inheritance the fix avoids
+    assert 0 < own < parent_kib // 2
+
+
+def test_posted_children_peak_rss_is_their_own_not_the_parents(tmp_path):
+    """L1 wiring: real posted children spawned by a >= 1 GiB parent record their own VmHWM."""
+    import resource
+
+    from benchmarks import pilot_task
+    from cam.seeds import pocket_with_island_seed
+
+    config = _pilot_config()
+    task = pilot_task.build_pilot_task(voxel_mm=config["grid_pitch_mm"])
+    posting = R.post_motion(task, pocket_with_island_seed(task))
+    evaluator = runner._pilot_post_factory(task, config)
+    ballast = bytearray(b"\x01") * (2 * 1024 ** 3)
+    try:
+        parent_kib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        evaluator.evaluate_posting(task, posting, tmp_path / "children")
+    finally:
+        del ballast
+    for item in evaluator.phase_records[-1]["processes"]:
+        assert 0 < item["worker_peak_rss_kib"] < parent_kib // 2
+        assert item["diagnostic_inherited_ru_maxrss_kib"] >= parent_kib * 0.9
+        polled = item["parent_polled_child_vmhwm_kib"]
+        assert polled is None or polled <= item["worker_peak_rss_kib"]

@@ -483,13 +483,31 @@ def _posted_job_main(workspace: Path):
         "nc_hash": C.nc_hash(nc_bytes), "settings": settings,
         "evaluation_path": str(evaluation_path),
         "evaluation_sha256": C.sha256_bytes(payload),
-        "wall_seconds": elapsed, "worker_peak_rss_kib": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
+        "wall_seconds": elapsed, "worker_peak_rss_kib": _self_peak_rss_kib(),
+        "worker_peak_rss_source": "VmHWM of /proc/self/status (own address space; resets at exec)",
+        # Diagnostic only: Linux ru_maxrss is inherited across fork and kept across
+        # execve, so it reports max(parent peak at spawn, own peak). Never a cap input.
+        "diagnostic_inherited_ru_maxrss_kib": int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss),
         "worker_pid": os.getpid(),
         "thread_environment": {key: os.environ.get(key)
                                for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TAICHI_NUM_THREADS")},
     }
     R.ArtifactWriter._replace_bytes(workspace / "worker-result.json", R.json_bytes(record))
     print("POST_JOB_RESULT=" + json.dumps(record, sort_keys=True))
+
+
+def _self_peak_rss_kib():
+    """This process's own peak RSS (VmHWM), excluding any peak inherited from a parent.
+
+    getrusage(RUSAGE_SELF).ru_maxrss is unsuitable for a spawned worker: Linux carries it
+    across fork and execve, so a child of a large optimizer reports the optimizer's peak.
+    """
+    if not sys.platform.startswith("linux"):
+        raise RunnerError("posted-job peak-RSS measurement is currently Linux-only")
+    for line in Path("/proc/self/status").read_text(encoding="ascii").splitlines():
+        if line.startswith("VmHWM:"):
+            return int(line.split()[1])
+    raise RunnerError("/proc/self/status has no VmHWM line")
 
 
 def _process_rss_bytes(pid):
@@ -534,6 +552,7 @@ def _posted_job_process(task, job, config):
     with log_path.open("x", encoding="utf-8") as stream:
         process = subprocess.Popen(command, cwd=REPOSITORY, env=env, stdout=stream, stderr=subprocess.STDOUT)
         timed_out_or_memory = None
+        observed_child_hwm = None
         try:
             deadline = started + policy["timeout_s"]
             while True:
@@ -546,6 +565,8 @@ def _posted_job_process(task, job, config):
                     break
                 except subprocess.TimeoutExpired:
                     observed = _process_rss_bytes(process.pid)
+                    if observed is not None:
+                        observed_child_hwm = max(observed_child_hwm or 0, observed)
                     if observed is not None and observed > policy["max_rss_bytes_per_job"]:
                         timed_out_or_memory = "memory_limit"
                         break
@@ -584,6 +605,9 @@ def _posted_job_process(task, job, config):
     peak = _positive_int(record.get("worker_peak_rss_kib"), "posted peak RSS KiB") * 1024
     if peak > policy["max_rss_bytes_per_job"]:
         raise RunnerError(f"posted worker exceeded its memory ceiling: {peak} bytes")
+    if observed_child_hwm is not None and observed_child_hwm > peak:
+        raise RunnerError("posted worker under-reported its peak RSS relative to the parent's poll")
+    record["parent_polled_child_vmhwm_kib"] = None if observed_child_hwm is None else observed_child_hwm // 1024
     record["memory_policy_result"] = "within_declared_peak_rss_ceiling"
     record["elapsed_seconds"] = time.perf_counter() - started
     record["process_wall_seconds"] = record["elapsed_seconds"]
@@ -622,6 +646,9 @@ def _post_jobs(task, jobs, config):
                 "process_wall_seconds": metadata.get("elapsed_seconds"),
                 "worker_pid": metadata.get("worker_pid"),
                 "worker_peak_rss_kib": metadata.get("worker_peak_rss_kib"),
+                "worker_peak_rss_source": metadata.get("worker_peak_rss_source"),
+                "parent_polled_child_vmhwm_kib": metadata.get("parent_polled_child_vmhwm_kib"),
+                "diagnostic_inherited_ru_maxrss_kib": metadata.get("diagnostic_inherited_ru_maxrss_kib"),
                 "status": metadata["status"],
                 "log": metadata.get("log"),
                 "thread_environment": metadata.get("thread_environment"),
