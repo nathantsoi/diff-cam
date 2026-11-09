@@ -145,6 +145,8 @@ def _setup_signature(evaluator: Any, objective_kind: str) -> str:
         "reference_positions_mm": positions,
         "initial_position_mm": np.asarray(parameterization.initial_position_mm).tolist()
         if hasattr(parameterization, "initial_position_mm") else None,
+        # Active per-run field shift: None and an explicit zero are both neutral.
+        "evaluation_loss_shift": float(getattr(evaluator, "evaluation_loss_shift", 0.0) or 0.0),
     }
     for name in ("target", "quadratic_target_mm"):
         if hasattr(evaluator, name):
@@ -257,6 +259,9 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
     getter = getattr(evaluator, "clear_evaluation_k", None)
     if getter is not None:
         getter()
+    clear_loss_shift = getattr(evaluator, "clear_evaluation_loss_shift", None)
+    if clear_loss_shift is not None:
+        clear_loss_shift()
     reason = "budget_exhausted" if state.evaluations >= state.budget.candidate_evaluations else None
     checkpoint_path = None
     while state.evaluations < state.budget.candidate_evaluations:
