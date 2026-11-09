@@ -207,14 +207,18 @@ def test_clean_audit_paired_difference_and_markdown(tmp_path):
     assert report["expected_vs_observed"]["exact_id_reconciliation"] is True
     assert report["summary"]["run_status_counts"] == {"complete": 2}
     assert _overall(report)["mean_difference"] == pytest.approx(-2.0)
+    assert report["evidence_complete"] is True
+    assert report["all_runs_completed"] is True
     assert _overall(report)["paired_tasks"] == 1
     assert _overall(report)["bootstrap_p"] == 1.0
     assert _overall(report)["interval"] is None
     assert _overall(report)["interval_null_reason"] == "insufficient independent tasks (need at least 2)"
     row = next(row for row in report["comparisons"] if row["family"] == "overall")
+    assert "bootstrap_stratification" not in row
     assert row["outcomes"]["completion_pass"]["method"]["estimate_method"] == "clopper_pearson_independent_tasks"
     markdown = A.render_markdown(report)
     assert "candidate_vs_cam" in markdown and "-2" in markdown and "NaN" not in markdown
+    assert "resample tasks within family strata; no-cut" not in markdown
     json.dumps(report, allow_nan=False)
 
 
@@ -308,6 +312,8 @@ def test_missing_failed_blocked_and_unexpected_ids_reconcile_without_imputation(
     counts = report["summary"]["run_status_counts"]
     assert counts == {"blocked": 1, "complete": 2, "failed": 1, "missing": 1}
     assert report["summary"]["auditor_passed"] is False
+    assert report["evidence_complete"] is False
+    assert report["all_runs_completed"] is False
 
 
 def test_duplicate_run_ids_are_rejected(tmp_path):
@@ -389,7 +395,7 @@ def test_missing_comparisons_and_null_metrics_render_as_na(tmp_path):
     assert "candidate_vs_cam" in markdown and "NA" in markdown
 
 
-def test_recorded_failures_count_in_outcomes_metric_drops_and_complete_data(tmp_path):
+def test_recorded_failures_count_in_outcomes_metric_drops_and_evidence_flags(tmp_path):
     tasks = _tasks(("a", "pocket"), ("b", "pocket"))
     expected = [
         ("c-a-0", "a", "candidate", 0), ("c-a-1", "a", "candidate", 1),
@@ -417,12 +423,15 @@ def test_recorded_failures_count_in_outcomes_metric_drops_and_complete_data(tmp_
     assert metric["dropped_because_side_failed_or_ineligible"] == 3
     assert metric["dropped_missing_or_null_evidence"] == 0
     assert metric["exclusions_by_side"]["method"] == {"recorded_noncomplete": 3}
-    # Mechanically valid terminal failures do not make the data complete or successful.
+    # Honest terminal failures are evidence, but the runs themselves did not complete.
     assert report["summary"]["auditor_passed"] is True
-    assert report["summary"]["complete_data"] is report["complete_data"] is False
+    assert report["summary"]["evidence_complete"] is report["evidence_complete"] is True
+    assert report["summary"]["all_runs_completed"] is report["all_runs_completed"] is False
+    assert "complete_data" not in report and "complete_data" not in report["summary"]
     markdown = A.render_markdown(report)
     assert "Failed/ineligible drops" in markdown
-    assert "complete_data (expected run/evaluation artifacts complete and clean; coverage limits still reported): False" in markdown
+    assert "evidence_complete (valid expected records present, including recorded failures): True" in markdown
+    assert "all_runs_completed (every expected RunStatus is COMPLETE): False" in markdown
 
 
 def test_exact_sign_flip_ties_match_4000_rational_enumerations():
