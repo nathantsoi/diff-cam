@@ -826,7 +826,7 @@ class CamoticsAdapter:
             # start and end Z are equal (beta<0 rejection + (Bz-Az)=0 fallback), so any constant-Z cutting move
             # yields known-wrong removed geometry. geometry_pass must stay null for such programs.
             constant_z_cuts = [s.id for s in parsed_motion.segments
-                               if s.kind != C.SegmentKind.RAPID and s.chord_length_mm > 0
+                               if s.kind != C.SegmentKind.RAPID and s.path_length_mm > 0  # path, not chord: full circles (review C2)
                                and abs(s.end_mm[2] - s.start_mm[2]) <= 1e-9]
             if constant_z_cuts:
                 reasons = list(reasons) + [

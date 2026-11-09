@@ -557,3 +557,15 @@ def test_constant_z_cut_keeps_geometry_pass_null_even_when_watertight(tmp_path, 
     assert result.discretization["stl_topology"]["inconsistent_direction_edges"] == 0
     assert result.geometry_pass is None
     assert any("ConicSweep endpoint defect" in r for r in result.coverage_reasons)
+
+
+def test_constant_z_full_circle_arc_also_keeps_geometry_pass_null(tmp_path, monkeypatch):
+    """Review C2: a full circle has chord 0 but path > 0; CAMotics linearizes it into constant-Z moves."""
+    adapter = CamoticsAdapter(scratch_root=tmp_path)
+    _install_mock_cube(monkeypatch, adapter)
+    task = _cube_task()
+    source = _cube_source_nc().replace(b"G1 X0 Y0 Z2 F600\n", b"G1 X0 Y0 Z2 F600\nG2 X0 Y0 I0.25 J0 F600\n")
+    result = adapter.evaluate_posted_gcode(task, source, C.Dialect.RS274,
+                                           {"scratch_root": str(tmp_path), "resolution_mm": 0.5})
+    assert result.geometry_pass is None
+    assert any("ConicSweep endpoint defect" in r for r in result.coverage_reasons)
