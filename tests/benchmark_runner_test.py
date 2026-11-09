@@ -1508,6 +1508,14 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
     task = pilot_task.build_pilot_task(config["grid_pitch_mm"])
     assert callable(getattr(pilot_task, "production_settings", None)), "T2.2b is required for this smoke"
     config["exclusion_tolerance_mm3"] = task.operation_target.geometry.params["grid_exclusion_tolerance_mm3"]
+    # Optional bounded-smoke-only reuse of a declared typed result. Ordinary runs
+    # evaluate anew; no cache discovery, inferred precision or invented timing.
+    reused = os.environ.get("DIFFCAM_T41B_REUSE_RS274")
+    if reused is not None:
+        source = Path(reused).resolve()
+        payload = source.read_bytes()
+        config["reuse_typed_evaluations"] = {
+            "verdict/rs274": {"path": str(source), "sha256": C.sha256_bytes(payload)}}
     output = tmp_path / condition
     # Preserve genuinely evaluated artifacts if a harness assertion needed a
     # correction. Resume audits and skips only matching complete evaluations;
