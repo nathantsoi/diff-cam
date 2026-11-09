@@ -390,7 +390,17 @@ def independent_bore_crosscheck(native: Mapping[str, Any], grid: C.GridSpec,
 def build_task(part_source: C.GeometrySource, target_source: C.GeometrySource,
                native_excluded_volume_mm3: Optional[float] = None, *,
               independent_bore_check: Optional[Mapping[str, Any]] = None) -> C.TaskSpec:
-    """Use grid-resolved exclusion; native continuous volume is diagnostic only."""
+    """Use grid-resolved exclusion; native continuous volume is diagnostic only.
+
+    This builder always constructs the registered Titan pilot. Requiring the
+    independent record prevents a caller from accidentally omitting the
+    metadata-driven bore raster by bypassing :func:`run_pilot`.
+    """
+    if independent_bore_check is None:
+        raise ValueError(
+            "registered Titan pilot requires the independent bore cross-check; "
+            "constructing it without that verification is not supported"
+        )
     if part_source.kind != "sampled" or target_source.kind != "sampled":
         raise ValueError("the real Titan pilot must retain its sampled native geometry")
     if part_source.frame != C.Frame.WORK or target_source.frame != C.Frame.WORK:
@@ -441,7 +451,7 @@ def build_task(part_source: C.GeometrySource, target_source: C.GeometrySource,
         "grid_declared_excluded_volume_mm3": excluded_volume_mm3,
         "native_excluded_volume_mm3_diagnostic": native_excluded_volume_mm3,
         "excluded_volume_convention": "initial & T & ~P cell-count at task-grid pitch, tolerance 0",
-        "independent_bore_verification": None if independent_bore_check is None else {
+        "independent_bore_verification": {
             key: independent_bore_check[key]
             for key in (
                 "schema", "definition", "nominal_void_profile", "resolution",

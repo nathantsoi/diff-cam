@@ -41,21 +41,62 @@ def _source(path: Path, values: np.ndarray, grid: C.GridSpec) -> C.GeometrySourc
 
 
 def _synthetic_task(tmp_path: Path) -> C.TaskSpec:
-    """Schema fixture only, explicitly not real Titan geometry evidence."""
+    """Schema fixture only, explicitly not real Titan geometry evidence.
+
+    The profile is an independent, deliberately coarse small-bore raster. It
+    proves the constructor cannot accidentally omit the checker in unit tests;
+    it does not establish an actual Titan/CAD source-common-volume proof.
+    """
     grid = T.pilot_grid()
+    first_layer_z = grid.bounds_mm[0][2] + 1.5 * grid.voxel_mm
+    top_z = grid.bounds_mm[1][2]
+    native = {
+        "operation_geometry": {
+            "source_to_work_mm": [0.0, 0.0, 0.0],
+            "hole_centre_source_xy_mm": list(grid.cell_centre_mm(0, 0, 0)[:2]),
+            "exclusion": {
+                "plug_radius_mm": 0.8,
+                "plug_min_source_z_mm": grid.bounds_mm[0][2],
+                "plug_max_source_z_mm": top_z,
+                "nominal_void_profile": [
+                    {"radius_mm": 0.7, "source_z_min_mm": grid.bounds_mm[0][2],
+                     "source_opening_z_mm": first_layer_z,
+                     "face_z_range_mm": [grid.bounds_mm[0][2], first_layer_z],
+                     "nominal_cylinder_common_with_original_part_mm3": 0.0},
+                    {"radius_mm": 0.6, "source_z_min_mm": first_layer_z,
+                     "source_opening_z_mm": top_z, "face_z_range_mm": [first_layer_z, top_z],
+                     "nominal_cylinder_common_with_original_part_mm3": 0.0},
+                ],
+            },
+        },
+    }
     original = np.full(grid.shape, -0.5, dtype=np.float64)
-    # Retain this original-air cell in T (genuine excluded stock), while a
-    # second cell stays outside both P and T as a nonzero removal target.
-    original[0, 0, 0] = 0.5
-    original[0, 0, 1] = 0.5
+    original[0, 0, :] = 0.5
     operation = original.copy()
-    # Negative-inside: this original-air cell is retained in T as an exclusion.
-    operation[0, 0, 0] = -0.5
+    operation[0, 0, :] = -0.5
+    # A separate, non-bore air cell is a nonzero material-removal target.
+    original[1, 1, 0] = 0.5
+    operation[1, 1, 0] = 0.5
+    bore_check = T.independent_bore_crosscheck(
+        native, grid, T.box_signed_field(grid, *T.stock_bounds()), original, operation)
+    assert bore_check["nominal_mask_match"] is True
+    assert bore_check["expected_cells"] == grid.shape[2]
     return T.build_task(
         _source(tmp_path / "part.npy", original, grid),
         _source(tmp_path / "target.npy", operation, grid),
         native_excluded_volume_mm3=None,
+        independent_bore_check=bore_check,
     )
+
+
+def test_registered_titan_builder_rejects_missing_independent_bore_check(tmp_path):
+    grid = T.pilot_grid()
+    original = np.full(grid.shape, -0.5)
+    target = original.copy()
+    with pytest.raises(ValueError, match="independent bore cross-check"):
+        T.build_task(_source(tmp_path / "missing-check-part.npy", original, grid),
+                     _source(tmp_path / "missing-check-target.npy", target, grid),
+                     independent_bore_check=None)
 
 
 def test_normal_parent_import_never_imports_heavy_cad():
@@ -172,27 +213,32 @@ def test_task_preserves_sampled_sources_and_unrecorded_provenance(tmp_path):
     assert Path(task.original_part.path).is_file()
     assert Path(task.operation_target.geometry.path).is_file()
     assert task.original_part.params.get("primitive") is None
-    assert task.operation_target.excluded_volume_mm3 == pytest.approx(task.grid.voxel_mm ** 3)
+    assert task.operation_target.excluded_volume_mm3 == pytest.approx(15 * task.grid.voxel_mm ** 3)
+    check = task.operation_target.geometry.params["independent_bore_verification"]
+    assert check["nominal_mask_match"] is True
+    assert check["mismatched_cells"] == 0
+    assert check["expected_cells"] == check["actual_cells"] == 15
     assert "1.0287" in task.operation_target.exclusion_reason
     assert "3.175" in task.operation_target.exclusion_reason
     assert "not certified accessible" in task.operation_target.exclusion_reason
 
 
 def test_exclusion_is_grid_resolved_with_native_volume_diagnostic_only(tmp_path):
-    grid = T.pilot_grid()
-    original = np.full(grid.shape, -0.5, dtype=np.float64)
-    original[0, 0, 0] = 0.5
-    original[0, 0, 1] = 0.5
-    target = original.copy()
-    target[0, 0, 0] = -0.5
+    fixture = _synthetic_task(tmp_path)
+    grid = fixture.grid
+    original = np.load(fixture.original_part.path, allow_pickle=False)
+    target = np.load(fixture.operation_target.geometry.path, allow_pickle=False)
     task = T.build_task(
         _source(tmp_path / "grid-original.npy", original, grid),
         _source(tmp_path / "grid-target.npy", target, grid),
         # Deliberately different synthetic diagnostic, not evidence of a native
         # volume measurement. The task declaration must come from the masks.
         native_excluded_volume_mm3=123.456,
+        independent_bore_check=fixture.operation_target.geometry.params[
+            "independent_bore_verification"
+        ],
     )
-    expected = grid.voxel_mm ** 3
+    expected = 15 * grid.voxel_mm ** 3
     assert task.operation_target.excluded_volume_mm3 == pytest.approx(expected)
     geometry = task.operation_target.geometry
     assert geometry.params["grid_declared_excluded_volume_mm3"] == pytest.approx(expected)
@@ -382,7 +428,7 @@ def test_actual_production_evaluator_supports_exact_grid_sampled_geometry(tmp_pa
         assert result.metrics["residual_volume_mm3"].value > 0
         assert result.metrics["gouge_volume_mm3"].value is not None
         assert result.metrics["excluded_volume_mm3"].value == pytest.approx(
-            task.grid.voxel_mm ** 3
+            15 * task.grid.voxel_mm ** 3
         )
         assert result.efficiency_eligible is False
         if dialect == C.Dialect.RS274:
