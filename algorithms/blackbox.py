@@ -251,6 +251,9 @@ def _initial_state(evaluator: Any, budget: OptimizationBudget, seed: int,
 
 
 def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRunResult:
+    getter = getattr(evaluator, "clear_evaluation_k", None)
+    if getter is not None:
+        getter()
     reason = "budget_exhausted" if state.evaluations >= state.budget.candidate_evaluations else None
     checkpoint_path = None
     while state.evaluations < state.budget.candidate_evaluations:
@@ -306,6 +309,7 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
         state.history.append({
             "generation": state.generations, "evaluations": state.evaluations,
             "population_size": len(candidates), "invalid_members": invalid,
+            "fitness": list(fitness),
             "best_fitness": None if best_in_population is None else best_in_population.objective,
             "best_overall": None if state.best is None else state.best.objective,
             "best_theta": None if state.best_theta is None else state.best_theta.tolist(),

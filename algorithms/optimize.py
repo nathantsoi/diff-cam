@@ -447,10 +447,21 @@ def _run_adam_body(state: _AdamState, evaluator: Any, checkpoint_dir: Optional[P
                       state.previous_evaluations)
 
 
+def _run_adam(state: _AdamState, evaluator: Any, checkpoint_dir: Optional[Path]) -> AdamResult:
+    try:
+        return _run_adam_body(state, evaluator, checkpoint_dir)
+    finally:
+        if hasattr(evaluator, "clear_evaluation_k"):
+            evaluator.clear_evaluation_k()
+        else:
+            # Keep the shared evaluator's specification for the next method.
+            evaluator.sim.k[None] = evaluator.spec.k if hasattr(evaluator.spec, "k") else evaluator.sim.k[None]
+
+
 def solve_adam(evaluator: Any, budget: B.OptimizationBudget, config: AdamConfig, *, seed: int = 0,
                x0: Any = None, run_id: Optional[str] = None, checkpoint_dir: Optional[str | Path] = None) -> AdamResult:
     _required_budget(budget)
-    run_id = run_id or f"adam-{config.mode}-seed-{seed}"
+    run_id = run_id or f"adam-{config.mode}-deterministic"
     state = _initial_state(evaluator, budget, config, seed, x0, run_id)
     return _run_adam(state, evaluator, Path(checkpoint_dir) if checkpoint_dir is not None else None)
 

@@ -23,6 +23,7 @@ from .run_artifacts import ComputeLedger
 
 @dataclass(frozen=True)
 class ObjectiveSpec:
+    k: float = 40.0
     gouge_weight: float = 2.0
     residual_weight: float = 1.0
     holder_weight: float = 50.0
@@ -33,7 +34,7 @@ class ObjectiveSpec:
     prototype: str = "analytic_target_until_T2.0_custom_target_and_T1.2_chronology"
 
     def __post_init__(self) -> None:
-        for name in ("gouge_weight", "residual_weight", "holder_weight", "holder_margin_mm"):
+        for name in ("k", "gouge_weight", "residual_weight", "holder_weight", "holder_margin_mm"):
             value = getattr(self, name)
             if not math.isfinite(value) or value < 0:
                 raise ValueError(f"{name} must be finite and non-negative")
@@ -101,6 +102,7 @@ class CandidateEvaluator:
         self.parameterization = parameterization
         self.sim = simulator
         self.spec = spec or ObjectiveSpec()
+        self._evaluation_k_override: Optional[float] = None
         self.seed = seed  # no stochastic objective evaluation in this prototype.
         self.ledger = ledger or ComputeLedger()
         if motion.segments and parameterization.num_steps != len(motion.segments):
@@ -124,8 +126,23 @@ class CandidateEvaluator:
         if not np.allclose(initial_work, parameterization.initial_position_mm, atol=1e-6, rtol=0):
             raise ValueError("parameterization initial position and task tool tip disagree")
 
+    def set_evaluation_k(self, value: Optional[float]) -> None:
+        """Set an explicit per-step smoothing override, or clear it with None.
+
+        This belongs to the executor (e.g. Adam's declared schedule), not the
+        stateless objective specification. Every evaluation applies this choice,
+        so a previous annealed step cannot silently alter a later CMA method.
+        """
+        if value is not None and (not math.isfinite(value) or value <= 0):
+            raise ValueError("evaluation_k must be positive or None")
+        self._evaluation_k_override = value
+
+    def clear_evaluation_k(self) -> None:
+        self._evaluation_k_override = None
+
     def _configure(self) -> None:
         spec, sim = self.spec, self.sim
+        sim.k[None] = spec.k if self._evaluation_k_override is None else self._evaluation_k_override
         sim.w_gouge[None] = spec.gouge_weight
         sim.w_residual[None] = spec.residual_weight
         sim.holder_penalty_weight[None] = spec.holder_weight
