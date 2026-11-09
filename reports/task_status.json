@@ -10,7 +10,7 @@
    "branch": "task/T0.0-contracts",
    "blocker": null,
    "next": null,
-   "note": "FROZEN v1 diffcam-contracts/1 at core ba97d6e semantics; acks: worker-2/T1.0, worker-3/T2.1, worker-1/T1.4 (2026-11-08). Changes now require version bump + handoff."
+   "note": "FROZEN v1 diffcam-contracts/1 at core ba97d6e semantics; acks: worker-2/T1.0, worker-3/T2.1, worker-1/T1.4 (2026-11-08). Changes now require version bump + handoff. | v1.1 (d632e2c): Tolerances.rapid_penetration_mm + clearance metric split, from T1.0 review."
   },
   "T0.1": {
    "status": "complete",
@@ -29,18 +29,19 @@
    "note": "merged 22719af; uv.lock, optim extra (cma 4.5.0); pytest 20 passed + CPU smoke exit 0; GPU backend not validated"
   },
   "T1.0": {
-   "status": "ready",
+   "status": "complete",
    "owner": "diffcam-worker-2",
    "branch": "task/T1.0-reference-fixtures",
    "blocker": null,
-   "next": "implementation dispatched to diffcam-worker-2 after design note"
+   "next": null,
+   "note": "merged; flat/box/linear reference with certified removed-volume brackets, chronology, collision metrics; import isolation tested. Coordinator check: slot volume converges to analytic. Follow-up T1.0b (rapid tolerance) to worker-2."
   },
   "T1.1": {
-   "status": "planned",
+   "status": "in_progress",
    "owner": "diffcam-worker-1",
-   "branch": null,
+   "branch": "task/T1.1-cutter-sweeps",
    "blocker": null,
-   "next": "after T1.0 merges"
+   "next": null
   },
   "T1.2": {
    "status": "planned",
@@ -116,11 +117,11 @@
    "next": null
   },
   "T4.0": {
-   "status": "in_progress",
-   "owner": "diffcam-worker-1",
+   "status": "ready",
+   "owner": "diffcam-worker-2",
    "branch": "task/T4.0-auditor",
    "blocker": null,
-   "next": null
+   "next": "after T1.0b"
   },
   "T4.1": {
    "status": "planned",
@@ -213,6 +214,14 @@
    "branch": null,
    "blocker": null,
    "next": null
+  },
+  "T1.0b": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-2",
+   "branch": "task/T1.0b-rapid-tolerance",
+   "blocker": null,
+   "next": null,
+   "note": "reference adopts contracts 1.1 rapid_penetration_mm"
   }
  }
 }
