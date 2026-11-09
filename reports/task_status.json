@@ -147,11 +147,11 @@
    "next": null
   },
   "T3.3": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T3.3-gradient-mechanics",
    "blocker": null,
-   "next": null
+   "next": "real study after T4.1b pilot"
   },
   "T3.5": {
    "status": "planned",
