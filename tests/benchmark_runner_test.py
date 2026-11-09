@@ -54,14 +54,54 @@ def _named(root, run_id):
 
 def test_frozen_config_selects_real_grid_and_declared_zero_tolerance():
     config = json.loads(CONFIG.read_text())
+    from benchmarks import pilot_task
+    from cam.posted_evaluator import RefinementSettings, _subdivisions
+    from cam.seeds import pocket_with_island_seed
+
     assert config["task_source"] == "pilot_pocket"
     assert config["grid_pitch_mm"] == 0.25
+    refinement = config["posted_refinement"]
+    assert refinement["max_step_mm"] == 1.0
+    assert refinement["subdivisions"] is None
+    assert refinement["compute_bounds"] is True
+    assert refinement["safety_screen"] is True
+    assert refinement["max_samples_per_segment"] == 4096
+    assert refinement["record_stations"] is False
     assert config["exclusion_tolerance_mm3"] == 0.0
     assert config["require_grid_exclusion_tolerance"] is True
     assert config["arch"] == "cpu"
     assert "estimated_seconds_per_candidate" not in config
     assert isinstance(config["timeout_s"], (int, float)) and config["timeout_s"] > 0
     assert isinstance(config["timing_timeout_s"], (int, float)) and config["timing_timeout_s"] > 0
+
+    task = pilot_task.build_pilot_task()
+    motion = pocket_with_island_seed(task)
+    producer = pilot_task.production_settings(task)
+    assert refinement["max_step_mm"] == producer["max_step_mm"]
+    default_refinement = RefinementSettings(exclusion_tolerance_mm3=config["exclusion_tolerance_mm3"])
+    configured_refinement = RefinementSettings.from_mapping(
+        dict(refinement, exclusion_tolerance_mm3=config["exclusion_tolerance_mm3"]))
+    assert default_refinement.max_step_mm is None
+    assert configured_refinement.max_step_mm == 1.0
+    default_effective_step = min(task.grid.voxel_mm / 2, task.tool.cutter_radius_mm / 4,
+                                 task.tool.flute_length_mm / 4)
+    assert default_effective_step == 0.125
+    longest_index = max(range(len(motion.segments)), key=lambda i: motion.segments[i].path_length_mm)
+    default_counts = [_subdivisions(segment, task, default_refinement) for segment in motion.segments]
+    configured_counts = [_subdivisions(segment, task, configured_refinement) for segment in motion.segments]
+    assert all(explicit <= baseline for explicit, baseline in zip(configured_counts, default_counts))
+    assert default_counts[longest_index] == 8 * configured_counts[longest_index]
+    materialized = runner._pilot_refinement_settings(task, config)
+    for name in refinement:
+        assert materialized[name] == getattr(configured_refinement, name)
+
+    for key, bad_value in (("max_step_mm", 0.125), ("max_step_mm", True),
+                           ("subdivisions", 8), ("compute_bounds", False),
+                           ("safety_screen", False), ("record_stations", True)):
+        altered = dict(refinement)
+        altered[key] = bad_value
+        with pytest.raises(runner.RunnerError):
+            runner._pilot_refinement_settings(task, dict(config, posted_refinement=altered))
 
 
 def test_condition_ids_are_deterministic_and_manifest_nominal_once(tmp_path):
@@ -407,6 +447,8 @@ def test_timing_probe_calls_each_kind_and_projects_all_seven(tmp_path, monkeypat
     assert len(report["posted_seconds"]) == 2
     assert report["task_hash"] == task.task_hash
     assert report["constructor_seconds"] >= 0.0
+    assert set(report["thread_environment"]) == {
+        "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TAICHI_NUM_THREADS"}
     assert report["code_sha256"]["runner"] == C.sha256_bytes(Path(runner.__file__).read_bytes())
     assert set(report["code_sha256"]) == {"runner", "posted_evaluator", "strict_parser", "post_writer", "task_builder"}
     assert report["config_sha256"].startswith("sha256:")
@@ -563,7 +605,11 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
     assert callable(getattr(pilot_task, "production_settings", None)), "T2.2b is required for this smoke"
     config["exclusion_tolerance_mm3"] = task.operation_target.geometry.params["grid_exclusion_tolerance_mm3"]
     output = tmp_path / condition
-    _invoke(config, output, extra=("--only", f"{condition}-s0-*"), timeout=10801)
+    # Preserve genuinely evaluated artifacts if a harness assertion needed a
+    # correction. Resume audits and skips only matching complete evaluations;
+    # incomplete/failed artifacts are preserved in resume-backups, never erased.
+    resume = ("--resume",) if (output / "frozen_config.json").is_file() else ()
+    _invoke(config, output, extra=(*resume, "--only", f"{condition}-s0-*"), timeout=10801)
     manifest = A.load_manifest(output / "manifest.json")
     assert len(manifest.runs) == 1
     run_id = next(iter(manifest.runs))
@@ -582,10 +628,9 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
         evaluation = C.loads((output / run_id / eval_name).read_text())
         assert evaluation.nc_hash == C.nc_hash((output / run_id / nc_name).read_bytes())
         assert evaluation.task_hash == task.task_hash
-        payload = json.loads((output / run_id / eval_name).read_text())
-        # Preserve the genuine eligibility outcome; do not turn an ineligible
-        # optimizer result into a simulator crash or falsely certify the method.
-        assert isinstance(payload["efficiency_eligible"], bool)
+        # Eligibility is derived from coverage/safety/geometry by contracts;
+        # it need not be a standalone serialized key. Preserve False outcomes.
+        assert isinstance(evaluation.efficiency_eligible, bool)
     reports, audit = A.audit_runs(output, manifest)
     assert audit["reconciliation"]["exact_id_reconciliation"] is True
     assert len(reports) == 1 and reports[0]["status"] == "complete"

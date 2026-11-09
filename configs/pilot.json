@@ -3,6 +3,14 @@
   "experiment": "pilot",
   "task_source": "pilot_pocket",
   "grid_pitch_mm": 0.25,
+  "posted_refinement": {
+    "max_step_mm": 1.0,
+    "subdivisions": null,
+    "compute_bounds": true,
+    "safety_screen": true,
+    "max_samples_per_segment": 4096,
+    "record_stations": false
+  },
   "exclusion_tolerance_mm3": 0.0,
   "require_grid_exclusion_tolerance": true,
   "arch": "cpu",

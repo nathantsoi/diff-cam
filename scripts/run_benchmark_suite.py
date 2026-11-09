@@ -35,7 +35,7 @@ from algorithms import run_artifacts as R
 from benchmarks import audit as audit
 from benchmarks import contracts as C
 from benchmarks import pilot_task as pilot_io
-from cam.posted_evaluator import PostedEvaluator, _analytic_mask
+from cam.posted_evaluator import PostedEvaluator, RefinementSettings, _analytic_mask
 from cam.posts import post_motion_plan
 from simulator.csg_simulator import CSGSimulatorDelta
 
@@ -307,17 +307,42 @@ def _pilot_post_factory(task, config):
     return PilotPostedEvaluator(task, config)
 
 
+def _pilot_refinement_settings(task, config):
+    """Materialize the explicit frozen refinement, checked against task policy."""
+    names = ("max_step_mm", "subdivisions", "compute_bounds", "safety_screen",
+             "max_samples_per_segment", "record_stations")
+    configured = config.get("posted_refinement")
+    if not isinstance(configured, Mapping) or set(configured) != set(names):
+        raise RunnerError(f"config.posted_refinement must declare exactly {list(names)}")
+    producer = pilot_io.production_settings(task)
+    if not isinstance(producer, Mapping):
+        raise RunnerError("pilot production_settings must return a settings mapping")
+    expected = {name: getattr(RefinementSettings(), name) for name in names}
+    expected.update(producer)
+    if dict(configured) != expected:
+        raise RunnerError(f"posted refinement disagrees with immutable task policy: {expected}")
+    step = configured["max_step_mm"]
+    if step is not None and (
+            isinstance(step, bool) or not isinstance(step, (int, float))
+            or not math.isfinite(step) or step <= 0):
+        raise RunnerError("posted_refinement.max_step_mm must be null or finite and positive")
+    if configured["subdivisions"] is not None:
+        _positive_int(configured["subdivisions"], "posted_refinement.subdivisions")
+    _positive_int(configured["max_samples_per_segment"], "posted_refinement.max_samples_per_segment")
+    # Effective defaults are not silently coarser/finer than this declaration.
+    # The expected NC hash is bound to each actual posted byte stream below.
+    settings = dict(expected, expected_nc_hash=None,
+                    exclusion_tolerance_mm3=_pilot_exclusion_tolerance(task, config))
+    return dataclasses.asdict(RefinementSettings.from_mapping(settings))
+
+
 class PilotPostedEvaluator(PostedEvaluator):
     """Real production posted evaluator with unchanged, bounded refinement."""
 
     def __init__(self, task, config):
         super().__init__()
         self.task_hash = task.task_hash
-        settings = dict(pilot_io.production_settings(task))
-        settings.update(expected_nc_hash=None,
-                        exclusion_tolerance_mm3=_pilot_exclusion_tolerance(task, config),
-                        record_stations=False)
-        self.settings = MappingProxyType(settings)
+        self.settings = MappingProxyType(_pilot_refinement_settings(task, config))
         self.timings = []
 
     def evaluate_posted_gcode(self, task, nc_bytes, dialect, settings):
@@ -606,6 +631,10 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None):
     posted_seconds = [float(record["wall_seconds"]) for record in posted_times]
     return {
         "schema": "diffcam-pilot-timing/1",
+        "thread_environment": {
+            name: os.environ.get(name)
+            for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TAICHI_NUM_THREADS")
+        },
         "task_hash": task.task_hash,
         "tool_setup_hash": task.tool_setup_hash,
         "task_id": task.task_id,
