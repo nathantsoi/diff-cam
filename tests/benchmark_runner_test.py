@@ -696,7 +696,7 @@ def test_refinement_sidecar_metadata_and_audit_report_are_real_files(tmp_path):
     assert not (root / record.run_id / "eval_posted_rs274_refined.json").exists()
     link = json.loads((aux_root / f"{record.run_id}-refinement-link.json").read_text())
     assert link["primary_run_id"] == record.run_id
-    assert link["schema"] == "diffcam-refinement-link/2"
+    assert link["schema"] == "diffcam-refinement-link/3"
     assert link["primary_run_path"] == record.run_id
     assert "primary_run_directory" not in link
     assert link["primary_metrics_sha256"] == C.sha256_bytes(original_metrics)
@@ -947,6 +947,14 @@ def test_primary_pilot_report_uses_conservative_refinement_and_fails_closed(tmp_
     assert (combined_root / nominal.run_id / "run.json").read_bytes() == nominal_bytes
     assert (combined_root / fixed.run_id / "run.json").read_bytes() == fixed_bytes
     assert expected.runs[fixed.run_id].method == "fixed-adam"
+    stale_path = auxiliary_root / f"{fixed.run_id}-refinement-link.json"
+    stale = json.loads(stale_path.read_text())
+    stale["schema"] = "diffcam-refinement-link/2"
+    stale_payload = runner.R.json_bytes(stale)
+    stale_path.write_bytes(stale_payload)
+    with pytest.raises(runner.RunnerError, match="schema /3"):
+        runner._pilot_report(nominal_config, combined_root, auxiliary_root, bootstrap_replicates=100)
+    assert stale_path.read_bytes() == stale_payload
 
 
 def test_refinement_driver_bounds_two_independent_workers(tmp_path, monkeypatch):
@@ -1096,13 +1104,15 @@ def test_refinement_tri_state_pass_and_disagreement():
     primary = _typed_evaluation(task, nc, geometry_pass=True)
     unknown = _typed_evaluation(task, nc, geometry_pass=None, step=0.125)
     comparison = runner._refinement_comparison(primary, unknown)
-    outcome = runner._conservative_outcome(primary, unknown, comparison, task)
+    outcome, completed_comparison = runner._conservative_outcome(primary, unknown, comparison, task)
+    assert "completion_pass" not in comparison
+    assert completed_comparison["completion_pass"]["refined"] is True
     assert outcome["geometry_pass"] is None
     assert outcome["completion_pass"] is True
     assert outcome["efficiency_eligible"] is False
     assert outcome["refinement_disagreement"] is True
     assert outcome["disagreement_fields"] == ["geometry_pass"]
-    both_unknown = runner._conservative_outcome(
+    both_unknown, _ = runner._conservative_outcome(
         unknown, unknown, runner._refinement_comparison(unknown, unknown), task)
     assert both_unknown["geometry_pass"] is None
     assert both_unknown["efficiency_eligible"] is False
@@ -1168,7 +1178,7 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
     assert refined.task_hash == task.task_hash
     assert refined.nc_hash == C.nc_hash((output / run_id / "rs274.nc").read_bytes())
     checks = json.loads((aux_root / f"{run_id}-refinement-link.json").read_text())
-    assert checks["schema"] == "diffcam-refinement-link/2"
+    assert checks["schema"] == "diffcam-refinement-link/3"
     assert checks["primary_run_path"] == run_id
     assert "primary_run_directory" not in checks
     assert checks["refined_evaluation_sha256"] == C.sha256_bytes(refined_file.read_bytes())

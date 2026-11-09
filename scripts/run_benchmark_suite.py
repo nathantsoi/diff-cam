@@ -735,7 +735,7 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None,
                 "evaluation_path": None, "evaluation_sha256": C.sha256_bytes(payload),
             }
         refinement_comparison = _refinement_comparison(primary_rs274, refined)
-        refinement_outcome = _conservative_outcome(
+        refinement_outcome, refinement_comparison = _conservative_outcome(
             primary_rs274, refined, refinement_comparison, task)
         refinement = {
             "dialect": "rs274", "wall_seconds": seconds,
@@ -1072,6 +1072,7 @@ def _refinement_comparison(primary, refined):
 
 
 def _conservative_outcome(primary, refined, comparison, task):
+    comparison = dict(comparison)
     if not isinstance(task, C.TaskSpec):
         raise RunnerError("conservative completion requires the actual pilot TaskSpec")
     if primary.task_hash != task.task_hash or refined.task_hash != task.task_hash:
@@ -1112,8 +1113,8 @@ def _conservative_outcome(primary, refined, comparison, task):
         "refinement_disagreement": bool(disagreement_names),
         "disagreement_fields": disagreement_names,
         "excluded_from_efficiency": not eligible,
-        "rule": "primary AND refined for safety/geometry/completion at the task threshold; None is never upgraded; disagreements exclude efficiency",
-    }
+        "rule": "primary AND refined for safety/geometry/completion at the task threshold; unknown completion => efficiency_eligible false (conservative); None is never upgraded; disagreements exclude efficiency",
+    }, comparison
 
 
 def _refinement_settings_from_primary(primary, policy):
@@ -1213,7 +1214,7 @@ def _refinement_worker(config, root, run_id, auxiliary_root, *, evaluator_overri
         status = "complete"
     refined = _verified_refinement_result(primary, refined, policy)
     comparison = _refinement_comparison(primary, refined)
-    conservative = _conservative_outcome(primary, refined, comparison, task)
+    conservative, comparison = _conservative_outcome(primary, refined, comparison, task)
     payload = R.record_bytes(refined)
 
     auxiliary_config = dict(parent_config)
@@ -1279,7 +1280,7 @@ def _refinement_worker(config, root, run_id, auxiliary_root, *, evaluator_overri
     if not comparison_path.exists():
         R.ArtifactWriter._replace_bytes(comparison_path, comparison_payload)
     link = {
-        "schema": "diffcam-refinement-link/2",
+        "schema": "diffcam-refinement-link/3",
         "primary_run_id": record.run_id,
         "primary_run_path": str(directory.relative_to(root)),
         "primary_metrics_sha256": C.sha256_bytes((directory / "metrics.json").read_bytes()),
@@ -1452,7 +1453,7 @@ def _verified_refinement_for_report(root, run_id, auxiliary_root, policy):
     if refined_path.read_bytes() != payload:
         raise RunnerError("named refinement evaluation differs from its typed auxiliary record")
     comparison = _refinement_comparison(primary, refined)
-    conservative = _conservative_outcome(primary, refined, comparison, task)
+    conservative, comparison = _conservative_outcome(primary, refined, comparison, task)
     comparison_document = {
         "primary_run_id": run_id, "refined_run_id": refined_run_id,
         "comparison": comparison, "conservative_outcome": conservative,
@@ -1462,8 +1463,10 @@ def _verified_refinement_for_report(root, run_id, auxiliary_root, policy):
         raise RunnerError("refinement comparison bytes differ from recomputed typed evidence")
     link_path = auxiliary_root / f"{run_id}-refinement-link.json"
     link = _json(link_path)
+    if not isinstance(link, Mapping) or link.get("schema") != "diffcam-refinement-link/3":
+        raise RunnerError(f"refinement link must use schema /3 for conservative completion: {run_id}")
     expected_link = {
-        "schema": "diffcam-refinement-link/2",
+        "schema": "diffcam-refinement-link/3",
         "primary_run_id": run_id,
         "primary_run_path": str(directory.relative_to(root)),
         "primary_metrics_sha256": C.sha256_bytes((directory / "metrics.json").read_bytes()),
