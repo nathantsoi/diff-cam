@@ -138,13 +138,13 @@
    "branch": "task/T4.1-runner",
    "blocker": "T2.2, T1.3",
    "next": null,
-   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts."
+   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts. | DECISION 2026-11-09: pilot launches as an infrastructure/cost pilot once w2 gates are green; fixed/annealed-Adam (gradient) rows are PROVISIONAL until T3.3b characterizes the systematic AD/FD mismatch; if T3.3b finds a real backward bug, Adam rows are rerun after the fix."
   },
   "T3.4": {
    "status": "in_progress",
    "owner": "diffcam-worker-1",
    "branch": "task/T3.4-continuation",
-   "blocker": null,
+   "blocker": "T3.4b (K1/K2) + T3.3b AD/FD characterization before dev ablations",
    "next": "dev ablations after pilot",
    "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot."
   },
@@ -191,7 +191,7 @@
    "status": "planned",
    "owner": null,
    "branch": null,
-   "blocker": null,
+   "blocker": "T4.1b pilot + T3.3b (gradient validity) + T2.3 counts",
    "next": null,
    "note": "Protocol must state: real-simulator objectives reproduce only to ~1 float32 ulp (Taichi CPU atomics, e.g. holder_overlap_total); same-seed CMA runs are approximately (not bitwise) repeatable since ulp ties can flip rankings; replay agreement uses rel 1e-5. Option to make hard-path reductions deterministic (fixed-order f64) if exact repeatability is required."
   },
@@ -346,7 +346,7 @@
    "branch": "task/T3.3b-adfd",
    "blocker": null,
    "next": null,
-   "note": "SYSTEMATIC AD/FD mismatch: idx2 AD -0.4785 vs FD -0.4990 (4.1%, eps-independent), idx35 sign flip; per-component bisect (sigmoid clamp, ti.max carve, stop-gradients, f32 backward). Affects Adam/T3.4 step quality."
+   "note": "SYSTEMATIC AD/FD mismatch: idx2 AD -0.4785 vs FD -0.4990 (4.1%, eps-independent), idx35 sign flip; per-component bisect (sigmoid clamp, ti.max carve, stop-gradients, f32 backward). Affects Adam/T3.4 step quality. | PRIORITY right after pilot launch; gates T3.4 ablations and any optimizer choice for T4.2."
   }
  }
 }
