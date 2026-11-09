@@ -39,8 +39,10 @@ def tiny(precision="f32"):
 
 
 def test_default_f32_metadata_dtype_and_mismatch_is_rejected_before_fields():
-    ti.init(arch=ti.cpu, offline_cache=False, default_fp=ti.f32)
     from simulator import csg_simulator as module
+    ti.init(arch=ti.cpu, offline_cache=False, default_fp=ti.f32)
+    # Each new Taichi runtime resets the CSG instance guard baseline. Measure
+    # allocations after that reset, not against a previous runtime's history.
     before = module._TAICHI_RUNTIME_CSG_STATE["instances"]
     sim = tiny()
     assert sim.precision == "f32"
