@@ -1255,9 +1255,9 @@ def _refinement_worker(config, root, run_id, auxiliary_root, *, evaluator_overri
     if not comparison_path.exists():
         R.ArtifactWriter._replace_bytes(comparison_path, comparison_payload)
     link = {
-        "schema": "diffcam-refinement-link/1",
+        "schema": "diffcam-refinement-link/2",
         "primary_run_id": record.run_id,
-        "primary_run_directory": str(directory),
+        "primary_run_path": str(directory.relative_to(root)),
         "primary_metrics_sha256": C.sha256_bytes((directory / "metrics.json").read_bytes()),
         "primary_rs274_evaluation_sha256": C.sha256_bytes(
             (directory / "eval_posted_rs274.json").read_bytes()),
@@ -1414,6 +1414,162 @@ def _audit_refinement_root(outcomes, auxiliary_root):
     return document
 
 
+def _verified_refinement_for_report(root, run_id, auxiliary_root, policy):
+    """Recompute reported outcomes from actual typed evidence and verify every link."""
+    directory, _, _, task, primary, _ = _load_refinement_case(root, run_id)
+    refined_run_id = f"{run_id}-refined"
+    refined_directory = auxiliary_root / refined_run_id
+    refined = _compare_existing_refinement(refined_directory, task,
+                                           directory, (directory / "rs274.nc").read_bytes())
+    refined = _verified_refinement_result(primary, refined, policy)
+    payload = R.record_bytes(refined)
+    refined_path = refined_directory / "eval_posted_rs274_refined.json"
+    if refined_path.read_bytes() != payload:
+        raise RunnerError("named refinement evaluation differs from its typed auxiliary record")
+    comparison = _refinement_comparison(primary, refined)
+    conservative = _conservative_outcome(primary, refined, comparison)
+    comparison_document = {
+        "primary_run_id": run_id, "refined_run_id": refined_run_id,
+        "comparison": comparison, "conservative_outcome": conservative,
+    }
+    comparison_payload = R.json_bytes(comparison_document)
+    if (refined_directory / "comparison.json").read_bytes() != comparison_payload:
+        raise RunnerError("refinement comparison bytes differ from recomputed typed evidence")
+    link_path = auxiliary_root / f"{run_id}-refinement-link.json"
+    link = _json(link_path)
+    expected_link = {
+        "schema": "diffcam-refinement-link/2",
+        "primary_run_id": run_id,
+        "primary_run_path": str(directory.relative_to(root)),
+        "primary_metrics_sha256": C.sha256_bytes((directory / "metrics.json").read_bytes()),
+        "primary_rs274_evaluation_sha256": C.sha256_bytes(
+            (directory / "eval_posted_rs274.json").read_bytes()),
+        "primary_haas_evaluation_sha256": C.sha256_bytes(
+            (directory / "eval_posted_haas.json").read_bytes()),
+        "primary_run_json_sha256": C.sha256_bytes((directory / "run.json").read_bytes()),
+        "refined_run_id": refined_run_id,
+        "refined_artifact_path": str(refined_path.relative_to(auxiliary_root)),
+        "refined_evaluation_sha256": C.sha256_bytes(payload),
+        "auxiliary_record": {
+            "path": f"{refined_run_id}/run.json",
+            "sha256": C.sha256_bytes((refined_directory / "run.json").read_bytes()),
+        },
+        "comparison_path": f"{refined_run_id}/comparison.json",
+        "comparison_sha256": C.sha256_bytes(comparison_payload),
+        "conservative_outcome": conservative,
+        "comparison": comparison,
+    }
+    if link != expected_link:
+        raise RunnerError(f"refinement link does not match actual evidence for {run_id}")
+    return conservative, {
+        "path": os.path.relpath(link_path, root),
+        "sha256": C.sha256_bytes(link_path.read_bytes()),
+    }, task
+
+
+def _pilot_report(config, root, auxiliary_root, *, bootstrap_replicates=2000):
+    """Produce the pilot table with conservative refinement outcomes, not primary-only ranks."""
+    root = Path(root).resolve()
+    try:
+        manifest = audit.load_manifest(root / "manifest.json")
+    except (OSError, ValueError) as error:
+        raise RunnerError(f"cannot load primary pilot manifest: {error}") from error
+    if not _refinement_policy(config)["enabled"]:
+        report, _ = audit.generate_report(
+            root, manifest, bootstrap_replicates=bootstrap_replicates)
+        return report
+    if auxiliary_root is None:
+        raise RunnerError("enabled refinement requires an auxiliary report root")
+    _, auxiliary_root = _safe_refinement_directory(root, Path(auxiliary_root))
+    policy = _refinement_policy(config)
+    report_path = auxiliary_root / "refinement-audit.json"
+    auxiliary_report = _json(report_path)
+    try:
+        auxiliary_manifest = audit.load_manifest(auxiliary_root / "manifest.json")
+    except (OSError, ValueError) as error:
+        raise RunnerError(f"cannot load auxiliary refinement manifest: {error}") from error
+    _, auxiliary_audit = audit.audit_runs(auxiliary_root, auxiliary_manifest)
+    if not (auxiliary_audit["summary"]["auditor_passed"]
+            and auxiliary_audit["summary"]["all_runs_completed"]):
+        raise RunnerError("refinement auxiliary audit is incomplete or invalid")
+    reported = auxiliary_report.get("reported_outcomes") if isinstance(auxiliary_report, Mapping) else None
+    if not isinstance(reported, Mapping) or not reported:
+        raise RunnerError("enabled refinement has no reported conservative outcomes")
+    primary_ids = set(reported)
+    required_aux_ids = primary_ids | {f"{run_id}-refined" for run_id in primary_ids}
+    if (set(auxiliary_manifest.runs) != required_aux_ids
+            or auxiliary_report.get("case_count") != len(primary_ids)
+            or auxiliary_report.get("baseline_and_refined_records") != 2 * len(primary_ids)
+            or auxiliary_report.get("manifest") != auxiliary_audit["summary"]):
+        raise RunnerError("auxiliary refinement report does not reconcile with its actual audit")
+    missing = sorted(set(manifest.runs) - primary_ids)
+    if missing:
+        raise RunnerError(f"enabled refinement lacks links/reported outcomes for primary runs: {missing}")
+    outcomes = {}
+    links = {}
+    report_tasks = dict(manifest.tasks)
+    completion_sources = {}
+    for run_id in sorted(primary_ids):
+        # Additional records in a shared auxiliary root are checked against the
+        # immutable copied baselines, never used to substitute another primary root.
+        source_root = root if run_id in manifest.runs else auxiliary_root
+        expected = manifest.runs.get(run_id, auxiliary_manifest.runs[run_id])
+        conservative, link, task = _verified_refinement_for_report(
+            source_root, run_id, auxiliary_root, policy)
+        condition = expected.method.removesuffix("-refinement-disagreement")
+        expected_reported = {
+            "condition": condition,
+            "seed": expected.seed,
+            "safety_pass": conservative["safety_pass"],
+            "geometry_pass": conservative["geometry_pass"],
+            "efficiency_eligible": conservative["efficiency_eligible"],
+            "efficiency_excluded": conservative["excluded_from_efficiency"],
+            "refinement_disagreement": conservative["refinement_disagreement"],
+            "disagreement_fields": conservative["disagreement_fields"],
+            "refined_max_step_mm": policy["max_step_mm"],
+            "refined_evaluation_path": f"{run_id}-refined/eval_posted_rs274_refined.json",
+            "auxiliary_record_path": f"{run_id}-refined/run.json",
+            "auxiliary_link_path": f"{run_id}-refinement-link.json",
+        }
+        if reported[run_id] != expected_reported:
+            raise RunnerError(f"auxiliary reported outcome is not backed by typed evidence: {run_id}")
+        if run_id not in manifest.runs:
+            continue
+        task_info = report_tasks[expected.task_id]
+        if task_info.task_hash != task.task_hash:
+            raise RunnerError(f"primary/refinement task identity mismatch: {run_id}")
+        if task_info.completion_residual_mm3 is None:
+            task_info = dataclasses.replace(
+                task_info,
+                completion_residual_mm3=task.tolerances.completion_residual_mm3)
+            completion_sources[expected.task_id] = "TaskSpec.tolerances.completion_residual_mm3"
+            report_tasks[expected.task_id] = task_info
+        else:
+            completion_sources[expected.task_id] = "primary manifest"
+        outcomes[run_id] = audit.ConservativeOutcome(
+            safety_pass=conservative["safety_pass"],
+            geometry_pass=conservative["geometry_pass"],
+            efficiency_eligible=conservative["efficiency_eligible"],
+            refinement_disagreement=conservative["refinement_disagreement"],
+            disagreement_fields=tuple(conservative["disagreement_fields"]),
+        )
+        links[run_id] = link
+    if set(outcomes) != set(manifest.runs):
+        raise RunnerError("refinement outcomes did not cover every expected primary run")
+    report_manifest = dataclasses.replace(manifest, tasks=report_tasks)
+    report, _ = audit.generate_report(
+        root, report_manifest, bootstrap_replicates=bootstrap_replicates,
+        reported_outcomes=outcomes)
+    report["refinement"]["auxiliary_audit_sha256"] = C.sha256_bytes(report_path.read_bytes())
+    report["refinement"]["links_by_run_id"] = links
+    report["refinement"]["completion_thresholds_mm3"] = {
+        task_id: task_info.completion_residual_mm3
+        for task_id, task_info in report_tasks.items()
+    }
+    report["refinement"]["completion_threshold_sources"] = completion_sources
+    return report
+
+
 def _refine_process(config_path, source_root, run_id, auxiliary_root, timeout):
     """Own exactly one exact-PID refinement worker; no process-pattern kills."""
     auxiliary_log = Path(auxiliary_root) / "logs"
@@ -1555,6 +1711,11 @@ def _refinement_check_main(config, args, root: Path) -> int:
         roots = [Path(item).resolve() for item in args.primary_root]
     auxiliary_root = Path(args.aux_root).resolve() if args.aux_root else _default_auxiliary_root(roots[0])
     result = _refinement_driver(config, args.config, roots, args.only, auxiliary_root)
+    report = _pilot_report(config, roots[0], auxiliary_root)
+    report_path = roots[0] / "pilot_report.json"
+    _atomic(report_path, report)
+    result["pilot_report"] = {"path": report_path.name,
+                              "sha256": C.sha256_bytes(R.json_bytes(report))}
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
@@ -1758,6 +1919,12 @@ def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path)
             config, args.config, [root], args.only,
             Path(args.aux_root).resolve() if args.aux_root else _default_auxiliary_root(root))
         summary["refinement_check"] = refinement
+        report = _pilot_report(
+            config, root,
+            Path(args.aux_root).resolve() if args.aux_root else _default_auxiliary_root(root))
+        _atomic(root / "pilot_report.json", report)
+        summary["pilot_report"] = {
+            "path": "pilot_report.json", "sha256": C.sha256_bytes(R.json_bytes(report))}
         _atomic(root / "execution_summary.json", summary)
     print(json.dumps({"execution_count": len(records),
                       "status_counts": dict(Counter(row["reported_status"] for row in records))}, sort_keys=True))

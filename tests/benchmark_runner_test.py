@@ -605,8 +605,9 @@ def _typed_evaluation(task, nc_bytes, dialect=C.Dialect.RS274, *, geometry_pass=
     )
 
 
-def _pilot_refinement_fixture(root: Path, *, method="fixed-adam", seed=0):
+def _pilot_refinement_fixture(root: Path, *, method="fixed-adam", seed=0, residual_mm3=None):
     """Make real typed task/motion/NC/artifact files with a typed input result."""
+    import dataclasses
     from algorithms import objectives as O
     from algorithms import run_artifacts as R
     from benchmarks import pilot_task
@@ -623,7 +624,14 @@ def _pilot_refinement_fixture(root: Path, *, method="fixed-adam", seed=0):
     posting = R.post_motion(task, motion)
     entry = runner._plan_entries(config, task, "dev", f"{method}-s{seed}-*")[0]
     primary = _typed_evaluation(task, posting.files["rs274.nc"], geometry_pass=True)
+    if residual_mm3 is not None:
+        primary = dataclasses.replace(primary, metrics={
+            **primary.metrics,
+            "residual_volume_mm3": C.Metric(value=residual_mm3, unit="mm^3"),
+        })
     haas = _typed_evaluation(task, posting.files["haas.nc"], dialect=C.Dialect.HAAS)
+    if residual_mm3 is not None:
+        haas = dataclasses.replace(haas, metrics=primary.metrics)
     files = dict(posting.files)
     position = parameterization.positions(np.zeros(parameterization.num_params))
     files.update({
@@ -688,6 +696,9 @@ def test_refinement_sidecar_metadata_and_audit_report_are_real_files(tmp_path):
     assert not (root / record.run_id / "eval_posted_rs274_refined.json").exists()
     link = json.loads((aux_root / f"{record.run_id}-refinement-link.json").read_text())
     assert link["primary_run_id"] == record.run_id
+    assert link["schema"] == "diffcam-refinement-link/2"
+    assert link["primary_run_path"] == record.run_id
+    assert "primary_run_directory" not in link
     assert link["primary_metrics_sha256"] == C.sha256_bytes(original_metrics)
     assert link["primary_rs274_evaluation_sha256"] == C.sha256_bytes(
         (root / record.run_id / "eval_posted_rs274.json").read_bytes())
@@ -783,6 +794,89 @@ def test_refinement_audit_isolates_one_disagreement_in_same_condition(tmp_path):
     assert doc["reported_outcomes"][cases[1]["run_id"]]["disagreement_fields"] == ["geometry_pass"]
 
 
+def test_primary_pilot_report_uses_conservative_refinement_and_fails_closed(tmp_path):
+    import dataclasses
+    import shutil
+
+    nominal_root, nominal_config, nominal, nominal_bytes, _ = _pilot_refinement_fixture(
+        tmp_path / "nominal-source", method="nominal-cam", residual_mm3=0.0)
+    fixed_root, _, fixed, fixed_bytes, _ = _pilot_refinement_fixture(
+        tmp_path / "fixed-source", method="fixed-adam", residual_mm3=0.0)
+    combined_root = tmp_path / "primary"
+    shutil.copytree(nominal_root, combined_root)
+    shutil.copytree(fixed_root / fixed.run_id, combined_root / fixed.run_id)
+    manifest_document = json.loads((combined_root / "manifest.json").read_text())
+    fixed_manifest_document = json.loads((fixed_root / "manifest.json").read_text())
+    manifest_document["expected_runs"].extend(fixed_manifest_document["expected_runs"])
+    manifest_document["comparisons"] = [{
+        "name": "D1 conservative efficiency", "method": "fixed-adam", "baseline": "nominal-cam",
+        "dialect": "rs274", "metrics": ["cycle_time_s"],
+    }]
+    runner._atomic(combined_root / "manifest.json", manifest_document)
+    assert nominal.run_id != fixed.run_id
+
+    def evaluate(task, nc, dialect, settings, geometry_pass):
+        result = _typed_evaluation(task, nc, geometry_pass=geometry_pass, step=settings["max_step_mm"])
+        return dataclasses.replace(result, metrics={
+            **result.metrics,
+            "residual_volume_mm3": C.Metric(value=0.0 if geometry_pass else 0.25, unit="mm^3"),
+        })
+
+    missing_aux = tmp_path / "incomplete-aux"
+    missing_case = runner._refinement_worker(
+        nominal_config, nominal_root, nominal.run_id, missing_aux,
+        evaluator_override=lambda *args: evaluate(*args, geometry_pass=True))
+    missing_case["manifest"] = A.load_manifest(nominal_root / "manifest.json")
+    runner._audit_refinement_root([missing_case], missing_aux)
+    with pytest.raises(runner.RunnerError, match="lacks links/reported outcomes"):
+        runner._pilot_report(nominal_config, combined_root, missing_aux, bootstrap_replicates=100)
+
+    auxiliary_root = tmp_path / "auxiliary"
+    cases = []
+    for root, record, config, geometry_pass in (
+            (nominal_root, nominal, nominal_config, True),
+            (fixed_root, fixed, nominal_config, False)):
+        case = runner._refinement_worker(
+            config, root, record.run_id, auxiliary_root,
+            evaluator_override=lambda *args, passed=geometry_pass:
+            evaluate(*args, geometry_pass=passed))
+        case["manifest"] = A.load_manifest(root / "manifest.json")
+        cases.append(case)
+    runner._audit_refinement_root(cases, auxiliary_root)
+    document = runner._pilot_report(
+        nominal_config, combined_root, auxiliary_root, bootstrap_replicates=100)
+    expected = A.load_manifest(combined_root / "manifest.json")
+    assert document["refinement"]["disagreement_by_condition"] == {
+        "fixed-adam": {"count": 1}, "nominal-cam": {"count": 0}}
+    assert document["refinement"]["disagreement_run_ids"] == [fixed.run_id]
+    assert document["refinement"]["applied_run_ids"] == sorted({nominal.run_id, fixed.run_id})
+    assert len(document["comparisons"]) == 1
+    comparison = document["comparisons"][0]
+    task_id = next(iter(expected.tasks))
+    efficiency = comparison["metrics"]["cycle_time_s"]["method_task_availability"][task_id]
+    assert efficiency["value"] is None
+    assert efficiency["observations_used"] == 0
+    assert efficiency["exclusions"] == {"refinement_disagreement": 1}
+    outcome = comparison["outcomes"]["efficiency_eligible"]
+    assert outcome["method"]["known_task_units"] == 0
+    assert outcome["method"]["task_mean_rate"] is None
+    assert outcome["method"]["refinement_disagreement_exclusions"] == 1
+    assert outcome["baseline"]["task_mean_rate"] == 1.0
+    assert comparison["outcomes"]["geometry_pass"]["method"]["task_mean_rate"] == 0.0
+    rows = {row["run_id"]: row for row in document["runs"]}
+    assert rows[fixed.run_id]["dialects"]["rs274"]["evaluation"]["geometry_pass"] is True
+    assert rows[fixed.run_id]["reported_outcomes"]["geometry_pass"] is False
+    assert rows[fixed.run_id]["reported_outcomes"]["disagreement_fields"] == ["geometry_pass"]
+    assert rows[nominal.run_id]["reported_outcomes"]["geometry_pass"] is True
+    for run_id, link in document["refinement"]["links_by_run_id"].items():
+        assert not Path(link["path"]).is_absolute()
+        assert link["sha256"] == C.sha256_bytes(
+            (auxiliary_root / f"{run_id}-refinement-link.json").read_bytes())
+    assert (combined_root / nominal.run_id / "run.json").read_bytes() == nominal_bytes
+    assert (combined_root / fixed.run_id / "run.json").read_bytes() == fixed_bytes
+    assert expected.runs[fixed.run_id].method == "fixed-adam"
+
+
 def test_refinement_driver_bounds_two_independent_workers(tmp_path, monkeypatch):
     import threading
     left, left_config, left_record, _, _ = _pilot_refinement_fixture(tmp_path / "left", method="fixed-adam")
@@ -839,6 +933,10 @@ def test_refinement_process_serializes_paths_and_preserves_attempt_logs(tmp_path
     assert driven["audit"]["baseline_and_refined_records"] == 2
     assert driven["audit"]["manifest"]["auditor_passed"] is True
     assert driven["audit"]["manifest"]["all_runs_completed"] is True
+    table = runner._pilot_report(config, root, auxiliary_root, bootstrap_replicates=100)
+    assert table["refinement"]["disagreement_by_condition"] == {"fixed-adam": {"count": 0}}
+    only_reported = next(row for row in table["runs"] if row["run_id"] == record.run_id)
+    assert only_reported["reported_outcomes"]["geometry_pass"] is True
 
 
 def test_refinement_timing_is_separate_from_primary_and_parallel_forecast(tmp_path, monkeypatch):
@@ -996,6 +1094,9 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
     assert refined.task_hash == task.task_hash
     assert refined.nc_hash == C.nc_hash((output / run_id / "rs274.nc").read_bytes())
     checks = json.loads((aux_root / f"{run_id}-refinement-link.json").read_text())
+    assert checks["schema"] == "diffcam-refinement-link/2"
+    assert checks["primary_run_path"] == run_id
+    assert "primary_run_directory" not in checks
     assert checks["refined_evaluation_sha256"] == C.sha256_bytes(refined_file.read_bytes())
     assert not (output / run_id / "eval_posted_rs274_refined.json").exists()
     assert "refinement_checks" not in metrics["execution"]
@@ -1011,6 +1112,19 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
     assert aux_report["manifest"]["auditor_passed"] is True
     assert aux_report["case_count"] == 1
     assert aux_report["baseline_and_refined_records"] == 2
+    table_path = output / "pilot_report.json"
+    table = json.loads(table_path.read_text())
+    execution = json.loads((output / "execution_summary.json").read_text())
+    assert execution["pilot_report"]["sha256"] == C.sha256_bytes(table_path.read_bytes())
+    assert table["refinement"]["applied_run_ids"] == [run_id]
+    assert table["refinement"]["links_by_run_id"][run_id]["sha256"] == C.sha256_bytes(
+        (aux_root / f"{run_id}-refinement-link.json").read_bytes())
+    row = next(row for row in table["runs"] if row["run_id"] == run_id)
+    comparison = json.loads((aux_root / f"{run_id}-refined" / "comparison.json").read_text())
+    for name in ("safety_pass", "geometry_pass", "efficiency_eligible"):
+        assert row["reported_outcomes"][name] == comparison["conservative_outcome"][name]
+    expected_disagreement = comparison["conservative_outcome"]["refinement_disagreement"]
+    assert table["refinement"]["disagreement_by_condition"][condition]["count"] == int(expected_disagreement)
 
     reports, audit = A.audit_runs(output, manifest)
     assert audit["reconciliation"]["exact_id_reconciliation"] is True

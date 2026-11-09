@@ -34,6 +34,57 @@ class AuditInputError(ValueError):
 
 
 @dataclass(frozen=True)
+class ConservativeOutcome:
+    """Verified primary/refinement outcomes joined to one primary run ID."""
+
+    safety_pass: Optional[bool]
+    geometry_pass: Optional[bool]
+    efficiency_eligible: Optional[bool]
+    refinement_disagreement: bool
+    disagreement_fields: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        for name in ("safety_pass", "geometry_pass", "efficiency_eligible"):
+            value = getattr(self, name)
+            if value is not None and not isinstance(value, bool):
+                raise AuditInputError(f"conservative {name} must be bool or None")
+        if not isinstance(self.refinement_disagreement, bool):
+            raise AuditInputError("refinement_disagreement must be boolean")
+        allowed = {"safety_pass", "geometry_pass", "coverage"}
+        if (not isinstance(self.disagreement_fields, tuple)
+                or len(set(self.disagreement_fields)) != len(self.disagreement_fields)
+                or not set(self.disagreement_fields) <= allowed):
+            raise AuditInputError("disagreement_fields must be unique safety/geometry/coverage names")
+        if self.refinement_disagreement != bool(self.disagreement_fields):
+            raise AuditInputError("disagreement fields and verdict must agree")
+        if self.refinement_disagreement and self.efficiency_eligible is True:
+            raise AuditInputError("a refinement disagreement cannot remain efficiency eligible")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "safety_pass": self.safety_pass,
+            "geometry_pass": self.geometry_pass,
+            "efficiency_eligible": self.efficiency_eligible,
+            "refinement_disagreement": self.refinement_disagreement,
+            "disagreement_fields": list(self.disagreement_fields),
+        }
+
+
+def _validate_conservative_outcomes(values, manifest):
+    if values is None:
+        return {}
+    if not isinstance(values, Mapping):
+        raise AuditInputError("conservative outcomes must be a mapping by run ID")
+    unknown = set(values) - set(manifest.runs)
+    if unknown:
+        raise AuditInputError(f"conservative outcomes for unknown run IDs: {sorted(map(str, unknown))}")
+    for run_id, value in values.items():
+        if not isinstance(value, ConservativeOutcome):
+            raise AuditInputError(f"conservative outcome for {run_id!r} is not typed")
+    return dict(values)
+
+
+@dataclass(frozen=True)
 class TaskInfo:
     task_id: str
     task_hash: str
@@ -601,9 +652,20 @@ def _outcome_value(
     evaluation: C.EvaluationResult,
     task: TaskInfo,
     outcome: str,
+    reported: Optional[ConservativeOutcome] = None,
 ) -> Optional[bool]:
+    if reported is not None and not isinstance(reported, ConservativeOutcome):
+        raise AuditInputError("reported outcome must be a typed ConservativeOutcome")
+    if reported is not None and outcome in ("safety_pass", "geometry_pass"):
+        return getattr(reported, outcome)
     if outcome == "efficiency_eligible":
-        if not evaluation.efficiency_eligible:
+        if reported is not None:
+            if reported.efficiency_eligible is not True:
+                return reported.efficiency_eligible
+            # A conservative override can never erase an ineligible primary.
+            if not evaluation.efficiency_eligible:
+                return False
+        elif not evaluation.efficiency_eligible:
             return False
         completion = _completion_value(evaluation, task)
         # A no-cut removal task cannot supply efficiency evidence even if a malformed
@@ -639,22 +701,32 @@ def _outcome_by_task(
     dialect: C.Dialect,
     outcome: str,
     tasks: Mapping[str, TaskInfo],
+    reported_outcomes: Optional[Mapping[str, ConservativeOutcome]] = None,
 ) -> dict[str, dict[str, Any]]:
     collapsed: dict[str, dict[str, Any]] = {}
     for expected in expected_runs:
         evaluation = _observation(expected, audits, dialect)
+        reported = reported_outcomes.get(expected.run_id) if reported_outcomes else None
         entry = collapsed.setdefault(
             expected.task_id,
             {"known": [], "unknown_or_missing_observations": 0},
         )
+        disagreement_excluded = False
         if evaluation is None:
             recorded_failure = _recorded_noncomplete(expected, audits)
             value = (False if recorded_failure and outcome in
                      ("safety_pass", "completion_pass", "efficiency_eligible") else None)
+        elif (reported is not None and outcome == "efficiency_eligible"
+              and reported.refinement_disagreement):
+            value = None
+            disagreement_excluded = True
+            name = "refinement_disagreement_exclusions"
+            entry[name] = entry.get(name, 0) + 1
         else:
-            value = _outcome_value(evaluation, tasks[expected.task_id], outcome)
+            value = _outcome_value(evaluation, tasks[expected.task_id], outcome, reported)
         if value is None:
-            entry["unknown_or_missing_observations"] += 1
+            if not disagreement_excluded:
+                entry["unknown_or_missing_observations"] += 1
         else:
             entry["known"].append(float(bool(value)))
     for entry in collapsed.values():
@@ -670,6 +742,7 @@ def _metric_by_task(
     dialect: C.Dialect,
     metric_name: str,
     tasks: Mapping[str, TaskInfo],
+    reported_outcomes: Optional[Mapping[str, ConservativeOutcome]] = None,
 ) -> dict[str, dict[str, Any]]:
     grouped: dict[str, list[ExpectedRun]] = defaultdict(list)
     for expected in expected_runs:
@@ -680,6 +753,9 @@ def _metric_by_task(
         reasons: Counter[str] = Counter()
         for expected in runs:
             evaluation = _observation(expected, audits, dialect)
+            reported = reported_outcomes.get(expected.run_id) if reported_outcomes else None
+            if reported is not None and not isinstance(reported, ConservativeOutcome):
+                raise AuditInputError("reported outcome must be a typed ConservativeOutcome")
             if evaluation is None:
                 reason = "recorded_noncomplete" if _recorded_noncomplete(expected, audits) else "missing_or_invalid_evidence"
                 reasons[reason] += 1
@@ -692,7 +768,11 @@ def _metric_by_task(
                 reasons["missing_or_null_metric"] += 1
                 continue
             if metric_name in EFFICIENCY_METRICS:
-                eligible = _outcome_value(evaluation, tasks[expected.task_id], "efficiency_eligible")
+                if reported is not None and reported.refinement_disagreement:
+                    reasons["refinement_disagreement"] += 1
+                    continue
+                eligible = _outcome_value(
+                    evaluation, tasks[expected.task_id], "efficiency_eligible", reported)
                 if eligible is not True:
                     reasons["not_efficiency_eligible" if eligible is False else "efficiency_eligibility_unknown"] += 1
                     continue
@@ -897,6 +977,10 @@ def _rate_summary(
             collapsed.get(task_id, {}).get("unknown_or_missing_observations", 0)
             for task_id in task_ids
         ),
+        "refinement_disagreement_exclusions": sum(
+            collapsed.get(task_id, {}).get("refinement_disagreement_exclusions", 0)
+            for task_id in task_ids
+        ),
         "task_mean_rate": point,
         "successes": int(round(sum(values))) if single_binary else None,
         "interval": interval,
@@ -918,6 +1002,7 @@ def _metric_drop_counts(task_ids: Sequence[str], method_values, baseline_values)
     failed_or_ineligible_reasons = {
         "recorded_noncomplete", "incomplete_or_unsupported_coverage",
         "not_efficiency_eligible", "efficiency_eligibility_unknown",
+        "refinement_disagreement",
     }
     exclusions_by_side = {}
     failed_total = 0
@@ -945,6 +1030,7 @@ def _comparison_rows(
     seed: int,
     replicates: int,
     confidence: float,
+    reported_outcomes: Optional[Mapping[str, ConservativeOutcome]] = None,
 ) -> dict[str, Any]:
     allowed_runs = [
         run for run in manifest.runs.values()
@@ -973,8 +1059,10 @@ def _comparison_rows(
     }
     key_prefix = f"{spec.name}|{family or 'overall'}|{spec.dialect.value}"
     for metric_name in spec.metrics:
-        method_values = _metric_by_task(method_runs, audits, spec.dialect, metric_name, manifest.tasks)
-        baseline_values = _metric_by_task(baseline_runs, audits, spec.dialect, metric_name, manifest.tasks)
+        method_values = _metric_by_task(
+            method_runs, audits, spec.dialect, metric_name, manifest.tasks, reported_outcomes)
+        baseline_values = _metric_by_task(
+            baseline_runs, audits, spec.dialect, metric_name, manifest.tasks, reported_outcomes)
         methods: list[float] = []
         baselines: list[float] = []
         families: list[str] = []
@@ -1002,10 +1090,10 @@ def _comparison_rows(
 
     for outcome in OUTCOMES:
         method_outcomes = _outcome_by_task(
-            method_runs, audits, spec.dialect, outcome, manifest.tasks
+            method_runs, audits, spec.dialect, outcome, manifest.tasks, reported_outcomes
         )
         baseline_outcomes = _outcome_by_task(
-            baseline_runs, audits, spec.dialect, outcome, manifest.tasks
+            baseline_runs, audits, spec.dialect, outcome, manifest.tasks, reported_outcomes
         )
         methods: list[float] = []
         baselines: list[float] = []
@@ -1043,6 +1131,7 @@ def aggregate_evaluations(
     bootstrap_seed: int = 20261108,
     bootstrap_replicates: int = 2000,
     confidence: float = 0.95,
+    reported_outcomes: Optional[Mapping[str, ConservativeOutcome]] = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if isinstance(bootstrap_seed, bool) or not isinstance(bootstrap_seed, int):
         raise AuditInputError("bootstrap_seed must be an integer")
@@ -1050,6 +1139,7 @@ def aggregate_evaluations(
         raise AuditInputError("bootstrap_replicates must be an integer >= 100")
     if not 0.0 < confidence < 1.0:
         raise AuditInputError("confidence must be between 0 and 1")
+    validated_outcomes = _validate_conservative_outcomes(reported_outcomes, manifest)
     rows: list[dict[str, Any]] = []
     p_value_rows: list[dict[str, Any]] = []
     for spec in manifest.comparisons:
@@ -1060,7 +1150,7 @@ def aggregate_evaluations(
         for family in ([None] if len(families) == 1 else [*families, None]):
             row = _comparison_rows(
                 spec, family, manifest, audits, bootstrap_seed,
-                bootstrap_replicates, confidence,
+                bootstrap_replicates, confidence, validated_outcomes,
             )
             p_value_rows.extend(row.pop("_p_value_rows"))
             rows.append(row)
@@ -1197,15 +1287,24 @@ def generate_report(
     bootstrap_seed: int = 20261108,
     bootstrap_replicates: int = 2000,
     confidence: float = 0.95,
+    reported_outcomes: Optional[Mapping[str, ConservativeOutcome]] = None,
 ) -> tuple[dict[str, Any], Manifest]:
     manifest = manifest_value if isinstance(manifest_value, Manifest) else load_manifest(manifest_value)
+    validated_outcomes = _validate_conservative_outcomes(reported_outcomes, manifest)
     run_reports, audit = audit_runs(runs_root, manifest)
+    if validated_outcomes and not audit["summary"]["auditor_passed"]:
+        raise AuditInputError("conservative reporting requires a clean primary audit")
+    for row in run_reports:
+        reported = validated_outcomes.get(row["run_id"])
+        if reported is not None:
+            row["reported_outcomes"] = reported.to_dict()
     comparisons, policy = aggregate_evaluations(
         manifest,
         audit.pop("_audits_by_id"),
         bootstrap_seed=bootstrap_seed,
         bootstrap_replicates=bootstrap_replicates,
         confidence=confidence,
+        reported_outcomes=validated_outcomes,
     )
     report = {
         "schema_version": REPORT_SCHEMA,
@@ -1220,6 +1319,24 @@ def generate_report(
         "runs": run_reports,
         "comparisons": comparisons,
     }
+    if reported_outcomes is not None:
+        counts = Counter({manifest.runs[run_id].method: 0 for run_id in validated_outcomes})
+        for run_id, value in validated_outcomes.items():
+            if value.refinement_disagreement:
+                counts[manifest.runs[run_id].method] += 1
+        report["refinement"] = {
+            "producer": "primary audit joined with verified refinement reported_outcomes by run_id",
+            "outcome_fields": ["safety_pass", "geometry_pass", "efficiency_eligible"],
+            "efficiency_exclusion": "disagreement runs are excluded and explicitly counted",
+            "applied_run_ids": sorted(validated_outcomes),
+            "disagreement_run_ids": sorted(
+                run_id for run_id, value in validated_outcomes.items()
+                if value.refinement_disagreement),
+            "disagreement_by_condition": {
+                method: {"count": count}
+                for method, count in sorted(counts.items())
+            },
+        }
     # Disallow NaN at the serialization boundary even if a future statistic is changed.
     json.dumps(report, allow_nan=False)
     return report, manifest
