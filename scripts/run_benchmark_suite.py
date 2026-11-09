@@ -21,6 +21,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, Optional, Sequence
 
 import numpy as np
@@ -32,6 +33,9 @@ from algorithms import parameterization as P
 from algorithms import run_artifacts as R
 from benchmarks import audit as audit
 from benchmarks import contracts as C
+from benchmarks import pilot_task as pilot_io
+from cam.posted_evaluator import PostedEvaluator, _analytic_mask
+from cam.posts import post_motion_plan
 from simulator.csg_simulator import CSGSimulatorDelta
 
 EXPERIMENTS = ("pilot", "initialization", "solvers", "mechanics", "all")
@@ -129,9 +133,11 @@ def _prototype() -> tuple[C.TaskSpec, C.MotionPlan, P.DeltaResidual]:
 
 
 def _context(config: Mapping[str, Any], repository: Path):
-    kind = config.get("task_source", "prototype_analytic")
+    kind = config.get("task_source", "pilot_pocket")
     if kind == "prototype_analytic":
         return (*_prototype(), _prototype_evaluator, None)
+    if kind == "pilot_pocket":
+        return _pilot_context(config, repository)
     if not config.get("allow_python_plugins", False):
         raise RunnerError("unregistered task_source and no allow_python_plugins=true opt-in")
     if not isinstance(kind, str) or ":" not in kind:
@@ -145,6 +151,174 @@ def _context(config: Mapping[str, Any], repository: Path):
     if len(values) not in (4, 5):
         raise RunnerError("task plugin must return (task, motion, parameterization, evaluator_factory[, posted_factory])")
     return values
+
+
+class PilotCandidateEvaluator(O.CandidateEvaluator):
+    """Same physical task, with the correct sampled/analytic representations.
+
+    The differentiable model takes the sampled photocopy of T. The production
+    posted task deliberately retains its analytic T and exclusion declaration;
+    these are not interchangeable sources of geometry or identity hashes.
+    """
+
+    def __init__(self, task, sampled_task, motion, parameterization, sim, config, seed, sources):
+        super().__init__(task=sampled_task, motion=motion, parameterization=parameterization,
+                         simulator=sim, spec=O.ObjectiveSpec(k=float(config["k_smooth"])), seed=seed)
+        if sampled_task.operation_target.geometry.kind != "sampled" or sim.target_shape != "sampled":
+            raise RunnerError("pilot requires task and simulator to use the same sampled operation target")
+        self.task = task                 # production analytic operation target
+        self.sampled_task = sampled_task # differentiable sampled operation target
+        self.geometry_sources = sources
+
+
+def _pilot_exclusion_tolerance(task, config):
+    params = task.operation_target.geometry.params
+    declared = params.get("grid_exclusion_tolerance_mm3")
+    configured = config.get("exclusion_tolerance_mm3")
+    if configured is not None and (
+            isinstance(configured, bool)
+            or not isinstance(configured, (int, float))
+            or not math.isfinite(configured) or configured < 0):
+        raise RunnerError("pilot exclusion tolerance in config must be finite and nonnegative mm^3")
+    if declared is None:
+        if task.operation_target.excluded_volume_mm3 == 0:
+            declared = 0.0
+        else:
+            # Older builder: require config, never invent the physical volume tolerance.
+            declared = configured
+    if config.get("require_grid_exclusion_tolerance") and configured is None:
+        raise RunnerError("real pilot requires config.exclusion_tolerance_mm3 with a physical-mm^3 value")
+    if configured is not None and declared is not None and not math.isclose(
+            float(configured), float(declared), rel_tol=0.0, abs_tol=1e-12):
+        raise RunnerError("pilot exclusion tolerance in config disagrees with immutable target declaration")
+    if isinstance(declared, bool) or not isinstance(declared, (int, float)) or not math.isfinite(declared) or declared < 0:
+        raise RunnerError("operation-target grid exclusion tolerance must be finite and nonnegative mm^3")
+    return float(declared)
+
+
+def _sampled_pilot_sources(task):
+    """Generate and verify immutable sampled geometry, without arbitrary files."""
+    from cam.posted_evaluator import _centres
+
+    stock_sdf, target_sdf, required, retained = pilot_io.source_fields(task)
+    centres = _centres(task.grid)
+    if not np.array_equal((stock_sdf <= 0), _analytic_mask(task.stock, centres)):
+        raise RunnerError("simulator stock is not equivalent to analytic task stock")
+    if not np.array_equal((target_sdf <= 0),
+                          _analytic_mask(task.operation_target.geometry, centres)):
+        raise RunnerError("sampled target is not the declared analytic operation target T")
+    if np.any(required & retained):
+        raise RunnerError("pilot required-retained cell sets are not disjoint")
+    if not np.isfinite(stock_sdf).all() or not np.isfinite(target_sdf).all():
+        raise RunnerError("sampled pilot geometry has non-finite SDF values")
+    directory = REPOSITORY / "external" / "benchmark-inputs" / task.task_hash[7:]
+    directory.mkdir(parents=True, exist_ok=True)
+    sources = {}
+    for label, array in (("stock", stock_sdf), ("target", target_sdf)):
+        payload = R.numpy_bytes(np.asarray(array, dtype=np.float32))
+        expected = C.sha256_bytes(payload)
+        path = directory / f"{label}.npy"
+        if path.exists():
+            if C.sha256_bytes(path.read_bytes()) != expected:
+                raise RunnerError(f"cached source changed at same immutable identity: {path}")
+            with path.open("rb") as stream:
+                loaded = np.load(stream, allow_pickle=False)
+            if loaded.shape != task.grid.shape or C.sha256_bytes(path.read_bytes()) != expected:
+                raise RunnerError(f"cached sampled payload is inconsistent: {path}")
+        else:
+            R.ArtifactWriter._replace_bytes(path, payload)
+        relative = path.relative_to(REPOSITORY).as_posix()
+        sources[label] = C.GeometrySource(kind="sampled", path=relative, sha256=expected,
+                                          grid=task.grid, frame=C.Frame.WORK)
+    return sources
+
+
+def _pilot_context(config, repository):
+    if config.get("arch", "cpu") != "cpu":
+        raise RunnerError("pilot_pocket: only arch='cpu' is validated here; no unvalidated GPU budget claim")
+    pitch = config.get("grid_pitch_mm", pilot_io.GRID_PITCH)
+    if isinstance(pitch, bool) or not isinstance(pitch, (int, float)) or not math.isfinite(pitch) or pitch <= 0:
+        raise RunnerError("grid_pitch_mm must be finite and positive")
+    task = pilot_io.build_pilot_task(voxel_mm=float(pitch))
+    from cam.seeds import pocket_with_island_seed
+    motion = pocket_with_island_seed(task)
+    motion.validate_for_task(task)
+    parameterization = pilot_io.fit_parameterization(motion, controls=12)
+    _sampled_pilot_sources(task)
+    _pilot_exclusion_tolerance(task, config)
+    return task, motion, parameterization, _pilot_evaluator, _pilot_post_factory
+
+
+def _pilot_evaluator(task, motion, parameterization, config, seed):
+    guard = os.environ.get("DIFFCAM_RUNNER_SIMULATOR", "0")
+    if guard != "0":
+        raise RunnerError("each pilot child must own exactly one simulator")
+    os.environ["DIFFCAM_RUNNER_SIMULATOR"] = "1"
+    import taichi as ti
+    ti.init(arch=ti.cpu, offline_cache=False, default_fp=ti.f32)
+    if task.operation_target.geometry.kind != "analytic":
+        raise RunnerError("pilot factory requires the original analytic operation target")
+    sources = _sampled_pilot_sources(task)
+    sampled_task = dataclasses.replace(
+        task, operation_target=dataclasses.replace(task.operation_target, geometry=sources["target"]))
+    target_work = sampled_task.operation_target.geometry
+    if target_work.kind != "sampled" or target_work.sha256 != sources["target"].sha256:
+        raise RunnerError("pilot requires a sampled operation target for CandidateEvaluator")
+    initial = np.asarray(parameterization.initial_position_mm)
+    normalized = (initial - task.grid.origin_mm) / task.grid.extent_mm
+    sim = CSGSimulatorDelta(
+        resolution=max(task.grid.shape), max_steps=parameterization.num_steps,
+        stock_size_mm=task.grid.extent_mm,
+        stock_box_origin_mm=task.stock.params["min_mm"],
+        voxel_size_mm=task.grid.voxel_mm, target_shape=None,
+        target_geometry=target_work, stock_geometry=sources["stock"],
+        tool_start=tuple(normalized), enforce_speed_limits=False,
+        init_taichi=False, k_init=float(config["k_smooth"]),
+    )
+    sim.set_tool_start(tuple(normalized))
+    sim.tool_radius[None] = task.tool.cutter_radius_mm
+    sim.tool_height[None] = task.tool.flute_length_mm
+    sim.tool_cut_height[None] = task.tool.flute_length_mm
+    sim.holder_radius[None] = task.tool.holder_radius_mm
+    sim.holder_height[None] = task.tool.holder_height_mm
+    return PilotCandidateEvaluator(task, sampled_task, motion, parameterization, sim, config, seed, sources)
+
+
+def _pilot_post_factory(task, config):
+    if not callable(getattr(pilot_io, "production_settings", None)):
+        raise RunnerError("T2.2b production_settings API is required; merge it before real pilot execution")
+    return PilotPostedEvaluator(task, config)
+
+
+class PilotPostedEvaluator(PostedEvaluator):
+    """Real production posted evaluator with unchanged, bounded refinement."""
+
+    def __init__(self, task, config):
+        super().__init__()
+        self.task_hash = task.task_hash
+        settings = dict(pilot_io.production_settings(task))
+        settings.update(expected_nc_hash=None,
+                        exclusion_tolerance_mm3=_pilot_exclusion_tolerance(task, config),
+                        record_stations=False)
+        self.settings = MappingProxyType(settings)
+        self.timings = []
+
+    def evaluate_posted_gcode(self, task, nc_bytes, dialect, settings):
+        if task.task_hash != self.task_hash:
+            raise RunnerError("pilot posted evaluator received a different task")
+        merged = dict(self.settings)
+        raw = {} if settings is None else dict(settings)
+        if raw:
+            raise RunnerError("pilot posted settings are fixed by the declared task; per-call overrides are unsupported")
+        merged["expected_nc_hash"] = C.nc_hash(nc_bytes)
+        before = time.perf_counter()
+        event = {"dialect": C.Dialect(dialect).value, "nc_hash": merged["expected_nc_hash"]}
+        try:
+            return super().evaluate_posted_gcode(task, nc_bytes, dialect, merged)
+        finally:
+            event["wall_seconds"] = round(time.perf_counter() - before, 9)
+            self.timings.append(event)
+
 
 
 def _prototype_evaluator(task, motion, parameterization, config, seed):
@@ -218,23 +392,280 @@ def _plan_entries(config: Mapping[str, Any], task: C.TaskSpec, split: str, only:
     return entries
 
 
+def _finite_seconds(value, name):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise RunnerError(f"invalid measured duration {name}: expected finite nonnegative seconds")
+    return float(value)
+
+
+def _budget_sizes(config, method):
+    """Match the optimizer's actual per-parameterization/per-generation work.
+
+    This is only workload estimation, not computation. CMA generations contain
+    a whole evaluated population; unrequested or excess simulations are never
+    This is only workload estimation, not computation. CMA generations contain
+    a whole evaluated population; unrequested or excess simulations are never
+    started here to find sizes experimentally.
+    """
+    if method == "nominal-cam":
+        return 1, 0
+    budget = _budget(config, method)
+    iterations = budget.candidate_evaluations
+    if budget.max_generations is not None:
+        iterations = min(iterations, budget.max_generations)
+    if method.endswith("cmaes") and budget.population_size is not None:
+        iterations = min(iterations, budget.candidate_evaluations // budget.population_size)
+    if iterations <= 0:
+        raise RunnerError("the requested generation budget selects no work")
+    candidates = 1 if method == "nominal-cam" else iterations
+    if method.endswith("cmaes"):
+        candidates *= (budget.population_size or 2)
+        # blackbox._run compares interval to evaluations (members), but permits
+        # at most one validation after each completed generation.
+        evaluated_for_validation = candidates
+    else:
+        evaluated_for_validation = iterations
+    validations = min(budget.max_validation_calls,
+                      evaluated_for_validation // budget.validation_interval if budget.validation_interval else 0)
+    if budget.max_validation_calls and not budget.validation_interval:
+        raise RunnerError("validation_interval must be positive when validation is enabled")
+    return candidates, validations
+
+
 def _pecent(config: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     predicted = []
     supplied = config.get("estimated_seconds_per_candidate", {})
+    if not isinstance(supplied, Mapping):
+        raise RunnerError("estimated_seconds_per_candidate must be a mapping")
+    evidence = config.get("timing_evidence")
+    if evidence is not None:
+        required = {"schema", "task_hash", "candidate_seconds", "posted_seconds", "constructor_seconds",
+                    "worker_wall_seconds", "posted_seconds_dialects"}
+        if not isinstance(evidence, Mapping) or any(key not in evidence for key in required):
+            raise RunnerError("timing_evidence must include task identity, all measurement rates and wall time")
+        if evidence["schema"] != "diffcam-pilot-timing/1":
+            raise RunnerError("unrecognized timing_evidence schema")
+        if not isinstance(evidence["task_hash"], str) or not evidence["task_hash"].startswith("sha256:"):
+            raise RunnerError("timing evidence task hash must have explicit SHA-256 form")
+        candidates_measured = evidence["candidate_seconds"]
+        if not isinstance(candidates_measured, Mapping):
+            raise RunnerError("timing evidence candidate_seconds must be a structured mapping")
+        for kind in ("smooth_forward", "smooth_gradient", "hard_forward"):
+            _finite_seconds(candidates_measured.get(kind), kind)
+        events = evidence["posted_seconds_dialects"]
+        if not isinstance(events, (list, tuple)) or len(events) != 2:
+            raise RunnerError("timing evidence requires two labelled posted-evaluation durations")
+        try:
+            labelled_post = {C.Dialect(event["dialect"]).value: _finite_seconds(event["wall_seconds"],
+                                                                                "posted evaluation")
+                             for event in events}
+        except (AttributeError, KeyError, TypeError, ValueError) as error:
+            raise RunnerError(f"invalid posted-evidence event: {error}") from error
+        if set(labelled_post) != {dialect.value for dialect in C.Dialect}:
+            raise RunnerError("posted timings must contain exactly one RS274 and one Haas evaluation")
+        raw_post = evidence["posted_seconds"]
+        if not isinstance(raw_post, (list, tuple)) or len(raw_post) != 2:
+            raise RunnerError("posted timing must contain exactly RS274 and Haas durations")
+        if sorted(_finite_seconds(value, "posted evaluation") for value in raw_post) != sorted(labelled_post.values()):
+            raise RunnerError("labelled and anonymous posted timings disagree")
+        measured_post = sum(labelled_post.values())
     for entry in entries:
-        optimizer_budget = 1 if entry["method"] == "nominal-cam" else config["candidate_evaluations"]
-        interval = config["validation_interval"]
-        if interval == 0 and config["max_validation_calls"] > 0:
-            raise RunnerError("validation_interval must be positive when validation is enabled")
-        validations = min(config["max_validation_calls"], optimizer_budget // interval if interval else 0)
+        candidates, validations = _budget_sizes(config, entry["method"])
         raw = supplied.get(entry["method"])
         if isinstance(raw, bool) or not isinstance(raw, (int, float)) or not math.isfinite(raw) or raw < 0:
             raw = None
-        predicted.append({"run_id": entry["run_id"], "candidate_evaluations": optimizer_budget,
+        extra = {}
+        if evidence is not None:
+            kind = "smooth_forward" if entry["method"] == "smooth-cmaes" else (
+                "smooth_gradient" if entry["method"] in ("fixed-adam", "annealed-adam") else "hard_forward")
+            unit = _finite_seconds(evidence["candidate_seconds"].get(kind), kind)
+            setup = _finite_seconds(evidence["constructor_seconds"], "constructor_seconds")
+            other = (_finite_seconds(evidence["worker_wall_seconds"], "worker_wall_seconds")
+                     - setup - sum(_finite_seconds(evidence["candidate_seconds"].get(key), key)
+                                   for key in ("smooth_forward", "smooth_gradient", "hard_forward"))
+                     - measured_post)
+            extra = {
+                "constructor_seconds": setup,
+                "candidate_seconds": unit * candidates,
+                "validation_seconds": _finite_seconds(evidence["candidate_seconds"]["hard_forward"], "hard_forward") * validations,
+                "posted_seconds": measured_post,
+                "other_worker_seconds": other,
+                "estimation": "one measured point per evaluation type, not a timing confidence interval",
+            }
+            estimate = setup + extra["candidate_seconds"] + extra["validation_seconds"] + measured_post + other
+            if other < -1e-9:
+                raise RunnerError("timing evidence has a negative process-overhead residual")
+            # Candidate durations are recorded to nanoseconds; do not make a
+            # valid worker fail solely because a sum rounds a fraction above its wall clock.
+            other = max(other, 0.0)
+            extra["other_worker_seconds"] = other
+            estimate = setup + extra["candidate_seconds"] + extra["validation_seconds"] + measured_post + other
+            note = "single real-task child per evaluation mode; workload estimate, not a guarantee"
+        elif raw is not None:
+            estimate = raw * (candidates + validations)
+            note = "caller-supplied per-candidate estimate"
+        else:
+            estimate = None
+            note = "unknown without a real child measurement"
+        predicted.append({"run_id": entry["run_id"], "candidate_evaluations": candidates,
                           "validation_calls": validations,
-                          "estimated_run_wall_time_s": None if raw is None else raw * (optimizer_budget + validations),
-                          "jit_warmup": "unknown without a real child measurement"})
+                          "estimated_run_wall_time_s": estimate, "jit_warmup": note, **extra})
     return predicted
+
+
+def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None):
+    """Measure one of each execution kind, with no population/Adam optimization.
+
+    ``evaluator_override`` is a pure in-process test seam (no untrusted module
+    path/name loading). Production callers always construct one real registered
+    CandidateEvaluator and one real production PostedEvaluator factory.
+    """
+    from datetime import datetime, timezone
+    started_at = datetime.now(timezone.utc).isoformat()
+    if capture_dir is not None:
+        if capture_dir.exists():
+            raise RunnerError(f"timing evidence directory already exists: {capture_dir}")
+        capture_dir.mkdir(parents=True)
+    task, motion, parameterization, evaluator_factory, posted_factory = _context(config, root)
+    if task.split != C.Split.DEV:
+        raise RunnerError("timing collection is restricted to the declared dev task")
+    created = time.perf_counter()
+    evaluator = evaluator_override or evaluator_factory(task, motion, parameterization, config, 0)
+    constructor_seconds = time.perf_counter() - created
+    zero = np.zeros(parameterization.num_params)
+    if not parameterization.in_bounds(zero):
+        raise RunnerError("timing sample is outside the declared parameterization bounds")
+    records = {}
+    for name, gradient in (
+        ("smooth_forward", False),
+        ("smooth_gradient", True),
+        ("hard_forward", False),
+    ):
+        started = time.perf_counter()
+        if gradient:
+            evaluated = evaluator.evaluate_candidate_with_gradient(zero)
+            result, gradient_theta = evaluated.result, evaluated.gradient_theta
+            if gradient_theta is None or not np.isfinite(gradient_theta).all():
+                raise RunnerError("timing gradient is missing or non-finite")
+        else:
+            result = evaluator.evaluate_candidate(zero, f"timing-{name}", "smooth" if name.startswith("smooth") else "hard")
+        seconds = time.perf_counter() - started
+        if not result.valid or not math.isfinite(result.objective):
+            raise RunnerError(f"timing evaluation {name} is not a finite valid candidate: {result.invalid_reason}")
+        records[name] = round(seconds, 9)
+    plan = evaluator.candidate_motion(zero)
+    before_post = time.perf_counter()
+    posting = R.post_motion(task, plan)
+    if any(post.status != C.PostStatus.SUPPORTED for post in posting.posted):
+        raise RunnerError("timing measurement requires support for both posted dialects")
+    post_builder = posted_factory(task, config)
+    evaluation_artifacts = {}
+    for post in posting.posted:
+        nc, eval_name = C.DIALECT_ARTIFACTS[post.dialect]
+        actual = post_builder.evaluate_posted_gcode(task, posting.files[nc], post.dialect, {})
+        if actual.dialect != post.dialect or actual.nc_hash != post.nc_hash or actual.task_hash != task.task_hash:
+            raise RunnerError("measurement posted-evaluation identity mismatches source bytes")
+        if not actual.efficiency_eligible:
+            raise RunnerError(
+                f"timing nominal candidate is not geometry/safety eligible in {post.dialect.value}: "
+                f"coverage={actual.coverage}, safety={actual.safety_pass}, geometry={actual.geometry_pass}")
+        if not actual.metrics["removed_volume_mm3"].value > 0:
+            raise RunnerError("timing measurement may not treat a no-cut path as completed material removal")
+        if capture_dir is not None:
+            nc_path = capture_dir / f"{post.dialect.value}.nc"
+            result_path = capture_dir / eval_name
+            nc_payload = posting.files[nc]
+            result_payload = R.record_bytes(actual)
+            R.ArtifactWriter._replace_bytes(nc_path, nc_payload)
+            R.ArtifactWriter._replace_bytes(result_path, result_payload)
+            evaluation_artifacts[post.dialect.value] = {
+                "nc_path": str(nc_path.relative_to(root)),
+                "nc_hash": post.nc_hash,
+                "evaluation_path": str(result_path.relative_to(root)),
+                "evaluation_sha256": C.sha256_bytes(result_payload),
+            }
+    posted_times = list(post_builder.timings)
+    expected_events = [(post.dialect.value, post.nc_hash) for post in posting.posted]
+    actual_events = [(event["dialect"], event["nc_hash"]) for event in posted_times]
+    if len(posted_times) != 2 or actual_events != expected_events:
+        raise RunnerError("exactly two real, identity-matched posted evaluations must be timed")
+    posted_seconds = [float(record["wall_seconds"]) for record in posted_times]
+    return {
+        "schema": "diffcam-pilot-timing/1",
+        "task_hash": task.task_hash,
+        "tool_setup_hash": task.tool_setup_hash,
+        "task_id": task.task_id,
+        "grid_shape": list(task.grid.shape),
+        "voxel_mm": task.grid.voxel_mm,
+        "parameter_steps": parameterization.num_steps,
+        "constructor_seconds": constructor_seconds,
+        "candidate_seconds": records,
+        "posted_seconds": posted_seconds,
+        "posted_seconds_dialects": posted_times,
+        "evaluation_artifacts": evaluation_artifacts,
+        "source_stage": {
+            "target": "analytic operation target for posted execution; exact sampled copy for simulator",
+            "sources": {name: {"path": source.path, "sha256": source.sha256}
+                        for name, source in evaluator.geometry_sources.items()},
+        },
+        "started_at": started_at,
+        "worker_wall_seconds": time.perf_counter() - created,
+        "post_file_preparation_seconds": time.perf_counter() - before_post,
+        "scope": "one real candidate of each kind and two real dialect evaluations, not the 7-run pilot",
+    }
+
+
+def _measure_timing_subprocess(config, root):
+    """Spawn one exemplar worker at the original task and collect timing."""
+    opt_in = config.get("measure_budget", True)
+    if opt_in is not True and type(opt_in) is not bool:
+        raise RunnerError("measure_budget must be an explicit boolean")
+    task, motion, parameterization, evaluator_factory, posted_factory = _context(config, root)
+    if opt_in is False:
+        if not isinstance(config.get("timing_evidence"), Mapping):
+            raise RunnerError("measure_budget=false requires caller-supplied timing_evidence")
+        return config["timing_evidence"]
+    if not isinstance(config.get("timing_evidence"), (Mapping, type(None))):
+        raise RunnerError("timing_evidence must be a structured mapping when supplied")
+    log_dir = root / "logs"
+    log_dir.mkdir(exist_ok=True)
+    _atomic(root / "timing-config.json", config)
+    started = time.perf_counter()
+    command = [sys.executable, str(Path(__file__).resolve()),
+               "--config", str(root / "timing-config.json"),
+               "--output-dir", str(root), "--split", "dev", "--experiment", "pilot",
+               "--dry-run", "--timing-worker-run"]
+    timeout = config.get("timing_timeout_s", 1800.0)
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise RunnerError("timing_timeout_s must be finite and positive")
+    log = root / "logs" / "budget_measurement.log"
+    env = dict(os.environ)
+    env["DIFFCAM_RUNNER_SIMULATOR"] = "0"
+    with log.open("w") as stream:
+        process = subprocess.Popen(command, cwd=REPOSITORY, env=env,
+                                   stdout=stream, stderr=subprocess.STDOUT)
+        try:
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                code = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                code = process.wait()
+            raise RunnerError(f"timing worker terminated: {code}")
+    if code:
+        raise RunnerError(f"timing worker failed: {code}; see {log}")
+    elapsed = time.perf_counter() - started
+    evidence_path = root / "budget-timings.json"
+    if not evidence_path.is_file():
+        raise RunnerError("timing worker did not produce a budget-timings.json report")
+    data = _json(evidence_path)
+    if not isinstance(data, dict) or data.get("task_hash") != task.task_hash:
+        raise RunnerError("timing evidence source/task identity mismatch")
+    data["worker_wall_seconds"] = elapsed
+    data["schema"] = "diffcam-pilot-timing/1"
+    return data
 
 
 def _manifest(config: Mapping[str, Any], task: C.TaskSpec, entries: Sequence[Mapping[str, Any]],
@@ -248,7 +679,8 @@ def _manifest(config: Mapping[str, Any], task: C.TaskSpec, entries: Sequence[Map
             "runner": {"schema": RUNNER_SCHEMA, "planned_not_executed": planned,
                        "experiment": config["experiment"], "split": "dev",
                        "output_dir": str(root),
-                       "prototype_analytic_task": True,
+                       "prototype_analytic_task": config.get("task_source", "pilot_pocket") == "prototype_analytic",
+                       "task_source": config.get("task_source", "pilot_pocket"),
                        "adam_conditions": "one_deterministic_replicate_each",
                        "cma_conditions": "one_run_per_declared_seed",
                        "nominal_cam": "one_deterministic_run"}}
@@ -348,19 +780,37 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
         "trajectory.npy": R.numpy_bytes(best),
         "trajectory_deltas.npy": R.numpy_bytes(np.diff(best, axis=0)),
     })
-    missing_posted = posted_factory is None
+    evaluated = {}
     if posted_factory is not None:
         evaluator_for_posts = posted_factory(task, config)
         for post in posting.posted:
             if post.status != C.PostStatus.SUPPORTED:
-                continue
+                raise RunnerError(f"cannot complete run: no supported {post.dialect.value} post: {post.reason}")
             nc_name, eval_name = C.DIALECT_ARTIFACTS[post.dialect]
             actual = evaluator_for_posts.evaluate_posted_gcode(task, files[nc_name], post.dialect, {})
             if actual.dialect != post.dialect or actual.nc_hash != post.nc_hash or actual.task_hash != task.task_hash:
                 raise RunnerError("posted evaluator returned a mismatched dialect/task/NC hash")
+            if not actual.efficiency_eligible:
+                raise RunnerError(
+                    f"posted {post.dialect.value} not eligible: coverage={actual.coverage.value}, "
+                    f"safety={actual.safety_pass}, geometry={actual.geometry_pass}, "
+                    f"reasons={actual.coverage_reasons}")
+            evaluated[post.dialect] = actual
             files[eval_name] = R.record_bytes(actual)
-    status = C.RunStatus.COMPLETE if not missing_posted else C.RunStatus.INCOMPLETE
-    reason = None if not missing_posted else PENDING_REASON
+    complete = posted_factory is not None and set(evaluated) == set(C.Dialect)
+    legacy_incomplete = posted_factory is None
+    if not complete and not legacy_incomplete:
+        raise RunnerError("complete requires real eval_posted_rs274.json and eval_posted_haas.json")
+    status = C.RunStatus.COMPLETE if complete else C.RunStatus.INCOMPLETE
+    reason = None if complete else PENDING_REASON
+    if complete and getattr(evaluator_for_posts, "timings", None):
+        details = json.loads(files["metrics.json"])
+        details["execution"]["posted_evaluation_timings"] = evaluator_for_posts.timings
+        details["execution"]["posted_sha256_pairs"] = {
+            key: {"nc_hash": value.nc_hash, "evaluation_sha256": C.sha256_bytes(C.dumps(value).encode("utf-8"))}
+            for key, value in evaluated.items()
+        }
+        files["metrics.json"] = R.json_bytes(details)
     record = R.assemble_record(entry["run_id"], task, status, posting=posting,
                                artifact_names=tuple(sorted(files)), source_commit=config_out["source_commit"],
                                dirty_patch_hash=config_out["dirty_patch_hash"],
@@ -431,6 +881,19 @@ def _record_interrupted(entry: Mapping[str, Any], task: C.TaskSpec, motion: C.Mo
         _write_failure(entry, task, motion, config, C.RunStatus.INTERRUPTED, reason, root)
 
 
+def _timing_worker_main(config, root):
+    if config.get("task_source", "pilot_pocket") != "pilot_pocket":
+        raise RunnerError("timing-worker-run is only available for the registered pilot_pocket task")
+    path = root / "budget-timings.json"
+    if path.exists():
+        raise RunnerError(f"existing timing report will not be overwritten: {path}")
+    root.mkdir(parents=True, exist_ok=True)
+    report = _measure_budget(config, root, capture_dir=root / "timing-example")
+    _atomic(path, report)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
+
+
 def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path) -> int:
     task, motion, parameterization, _, _ = _context(config, root)
     if task.split.value != args.split:
@@ -456,11 +919,43 @@ def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path)
         _atomic(frozen_path, {"raw_config": dict(config), "identity": entries[0]["identity"]})
     _atomic(root / "manifest.json", _manifest(config, task, entries, root, planned=args.dry_run))
     if args.dry_run:
-        cost = {"planned_run_count": len(entries), "costs": _pecent(config, entries),
-                "serialization": {"subprocess_per_run": True, "max_simulators_per_process": 1,
-                                  "global_simulator_cap": 12, "gpu_jobs": "serial"}}
-        _atomic(root / "dry_run.json", cost)
-        print(json.dumps(cost, indent=2, sort_keys=True))
+        timing = config.get("timing_evidence")
+        if config.get("task_source", "pilot_pocket") == "pilot_pocket":
+            timing_path = root / "budget-timings.json"
+            cached = {}
+            if args.resume and timing_path.is_file() and config.get("measure_budget", True) is not False:
+                cached = _json(timing_path)
+                if not isinstance(cached, dict) or cached.get("task_hash") != task.task_hash:
+                    raise RunnerError("resumed timing report does not describe the frozen pilot task")
+            if cached:
+                timing = dict(cached)
+            else:
+                timing = _measure_timing_subprocess(config, root)
+            if not isinstance(timing, Mapping):
+                raise RunnerError("real pilot dry-run needs actual timing evidence")
+            if timing.get("task_hash") != task.task_hash:
+                raise RunnerError("timing evidence task identity differs from the actual pilot task")
+        costs = _pecent(dict(config, timing_evidence=timing) if timing is not None else config, entries)
+        costs_with_total = {"planned_run_count": len(entries), "costs": costs,
+                            "estimated_total_wall_time_s": (
+                                sum(row["estimated_run_wall_time_s"] for row in costs)
+                                if all(row["estimated_run_wall_time_s"] is not None for row in costs) else None),
+                            "timing_evidence": timing,
+                            "serialization": {"subprocess_per_run": True, "max_simulators_per_process": 1,
+                                              "global_simulator_cap": 12, "gpu_jobs": "serial",
+                                              "pilot_launched": False}}
+        if config.get("task_source", "pilot_pocket") == "pilot_pocket":
+            elapsed = costs_with_total["estimated_total_wall_time_s"]
+            if elapsed is not None and elapsed > 7200.0:
+                costs_with_total["budget_review"] = {
+                    "recommendation": "do not launch before a coordinator review of budget/grid choices and their fidelity costs",
+                    "options_to_discuss_not_applied": [
+                        "reduce or stage sampling budgets with independently shown fidelity changes",
+                        "profile a coarse analytic grid first, without relaxing the declared 0.25mm production target",
+                        "validate GPU execution separately before any GPU-configured run; no unvalidated performance claim",
+                    ]}
+        _atomic(root / "dry_run.json", costs_with_total)
+        print(json.dumps(costs_with_total, indent=2, sort_keys=True))
         return 0
     records = []
     for entry in entries:
@@ -519,15 +1014,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--only")
     parser.add_argument("--worker-run", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--timing-worker-run", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     root = Path(args.output_dir).resolve()
-    if not args.resume and not args.worker_run and root.exists():
+    if not args.resume and not args.worker_run and not args.timing_worker_run and root.exists():
         parser.error("output-dir must be new unless --resume is set")
     try:
         config = _normalized_config(args.config)
         config["experiment"] = args.experiment
         if config["experiment"] not in EXPERIMENTS:
             raise RunnerError("invalid advertised experiment")
+        if args.timing_worker_run:
+            if not args.dry_run or args.worker_run:
+                raise RunnerError("timing-worker-run requires --dry-run and cannot combine with --worker-run")
+            return _timing_worker_main(config, root)
         if args.resume and not root.is_dir():
             raise RunnerError("--resume needs an existing output directory")
         if args.worker_run:

@@ -1,10 +1,13 @@
 """T4.1a runner tests: frozen plan first, then small actual subprocess evidence."""
 
 import json
+import os
 import subprocess
 import sys
+from types import SimpleNamespace
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from benchmarks import audit as A
@@ -27,7 +30,22 @@ def _invoke(config, root, *, extra=(), expect=0, timeout=120):
 
 
 def _base():
-    return json.loads(CONFIG.read_text())
+    config = json.loads(CONFIG.read_text())
+    # The legacy tiny subprocess tests never measure/execute the full pilot.
+    config["task_source"] = "prototype_analytic"
+    return config
+
+
+def _pilot_config():
+    """Explicit coarse task for source/format tests, never a production timing."""
+    config = _base()
+    config.update(task_source="pilot_pocket", grid_pitch_mm=2.0,
+                  require_grid_exclusion_tolerance=True)
+    from benchmarks import pilot_task
+    task = pilot_task.build_pilot_task(config["grid_pitch_mm"])
+    tolerance = task.operation_target.geometry.params.get("grid_exclusion_tolerance_mm3", 0.0)
+    config["exclusion_tolerance_mm3"] = tolerance
+    return config
 
 
 def _named(root, run_id):
@@ -190,3 +208,216 @@ def test_cma_budget_smaller_than_population_rejected():
     from algorithms import blackbox as B
     with pytest.raises(ValueError, match="smaller than one CMA population"):
         B.OptimizationBudget(candidate_evaluations=3, population_size=4, validation_interval=1, max_validation_calls=0)
+
+
+# --- T4.1b real-pilot wiring ---------------------------------------------------
+def test_pilot_sources_target_exclusion_and_initial_position(tmp_path, monkeypatch):
+    from benchmarks import pilot_task
+
+    monkeypatch.setattr(runner, "REPOSITORY", tmp_path / "repository")
+    config = _pilot_config()
+    task, motion, parameterization, evaluator_factory, posted_factory = runner._context(config, tmp_path)
+    sources = runner._sampled_pilot_sources(task)
+    assert task.operation_target.geometry.kind == "analytic"
+    assert task.original_part is not task.operation_target.geometry
+    assert task.initial_state.known and task.initial_state.position_mm is not None
+    assert motion.initial_state == task.initial_state
+    assert np.allclose(parameterization.initial_position_mm, task.initial_state.position_mm)
+    assert evaluator_factory is runner._pilot_evaluator
+    assert posted_factory is runner._pilot_post_factory
+    assert runner._pilot_exclusion_tolerance(task, config) == pytest.approx(
+        config["exclusion_tolerance_mm3"])
+    for label in ("stock", "target"):
+        source = sources[label]
+        path = runner.REPOSITORY / source.path
+        assert source.kind == "sampled" and source.frame == C.Frame.WORK
+        assert source.sha256 == C.sha256_bytes(path.read_bytes())
+        assert path.parent.name == task.task_hash[7:]
+        with path.open("rb") as stream:
+            values = np.load(stream, allow_pickle=False)
+        assert values.dtype == np.float32 and values.shape == task.grid.shape
+        assert np.isfinite(values).all()
+
+    # The operation target T, including its corner exclusions, replaces original P.
+    stock_sdf, target_sdf, required, retained = pilot_task.source_fields(task)
+    assert not np.any(required & retained)
+    for values in (stock_sdf, target_sdf):
+        assert values.shape == task.grid.shape
+
+
+def test_pilot_source_cache_rejects_changed_payload(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "REPOSITORY", tmp_path / "repository")
+    task, *_rest = runner._context(_pilot_config(), tmp_path)
+    sources = runner._sampled_pilot_sources(task)
+    source_path = runner.REPOSITORY / sources["target"].path
+    source_path.write_bytes(b"changed immutable test payload")
+    with pytest.raises(runner.RunnerError, match="cached source changed"):
+        runner._sampled_pilot_sources(task)
+    assert source_path.read_bytes() == b"changed immutable test payload"
+
+
+def test_pilot_rejects_invalid_grid_or_exclusion_overrides(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "REPOSITORY", tmp_path / "repository")
+    config = _pilot_config()
+    config["grid_pitch_mm"] = float("nan")
+    with pytest.raises(runner.RunnerError, match="grid_pitch_mm"):
+        runner._context(config, tmp_path)
+    task, *_rest = runner._context(_pilot_config(), tmp_path)
+    for invalid in (float("nan"), -1.0, True):
+        with pytest.raises(runner.RunnerError, match="exclusion tolerance"):
+            runner._pilot_exclusion_tolerance(task, {"exclusion_tolerance_mm3": invalid})
+    wrong = _pilot_config()
+    wrong = _pilot_config()
+    small = task.operation_target.geometry.params
+    if "grid_exclusion_tolerance_mm3" in small:
+        wrong["exclusion_tolerance_mm3"] += 1.0
+        with pytest.raises(runner.RunnerError, match="disagrees"):
+            runner._pilot_exclusion_tolerance(task, wrong)
+    small = task.operation_target.geometry.params
+    if "grid_exclusion_tolerance_mm3" not in small:
+        with pytest.raises(runner.RunnerError, match="requires config"):
+            runner._pilot_exclusion_tolerance(task, {
+                "require_grid_exclusion_tolerance": True,
+            })
+
+
+def test_pilot_post_factory_is_task_bound_and_settings_are_frozen(tmp_path, monkeypatch):
+    monkeypatch.setattr(runner, "REPOSITORY", tmp_path / "repository")
+    config = _pilot_config()
+    task, *_rest = runner._context(config, tmp_path)
+    monkeypatch.setattr(runner.pilot_io, "production_settings",
+                        lambda actual: {"max_step_mm": 1.0}, raising=False)
+    evaluator = runner._pilot_post_factory(task, config)
+    assert evaluator.settings["max_step_mm"] == 1.0
+    assert evaluator.settings["record_stations"] is False
+    with pytest.raises(TypeError):
+        evaluator.settings["compute_bounds"] = False
+    with pytest.raises(runner.RunnerError, match="different task"):
+        evaluator.evaluate_posted_gcode(runner._prototype()[0], b"", C.Dialect.RS274, {})
+    unsafe = {"safety_screen": False}
+    with pytest.raises(runner.RunnerError, match="per-call overrides"):
+        evaluator.evaluate_posted_gcode(task, b"", C.Dialect.RS274, unsafe)
+
+
+    """Coordination-only doubles, explicitly not real-task timing evidence."""
+    config = _base()
+    task, motion, parameterization = runner._prototype()
+    calls = []
+
+    class Evaluator:
+        geometry_sources = {"stock": SimpleNamespace(path="unit/stock.npy", sha256="sha256:" + "0" * 64),
+                            "target": SimpleNamespace(path="unit/target.npy", sha256="sha256:" + "1" * 64)}
+
+        def evaluate_candidate(self, theta, candidate_id, kind):
+            calls.append((kind, False))
+            return SimpleNamespace(valid=True, objective=1.0, invalid_reason=None)
+
+        def evaluate_candidate_with_gradient(self, theta):
+            calls.append(("smooth", True))
+            return SimpleNamespace(result=SimpleNamespace(valid=True, objective=1.0, invalid_reason=None),
+                                   gradient_theta=np.zeros(parameterization.num_params))
+
+        def candidate_motion(self, theta):
+            return motion
+
+    class Poster:
+        def __init__(self):
+            self.timings = []
+
+        def evaluate_posted_gcode(self, actual_task, nc_bytes, dialect, settings):
+            nc_hash = C.nc_hash(nc_bytes)
+            self.timings.append({"dialect": dialect.value, "wall_seconds": 0.0, "nc_hash": nc_hash})
+            return SimpleNamespace(dialect=dialect, nc_hash=nc_hash, task_hash=task.task_hash,
+                                   efficiency_eligible=True,
+                                   metrics={"removed_volume_mm3": SimpleNamespace(value=1.0)})
+
+    monkeypatch.setattr(runner, "_context", lambda cfg, root: (
+        task, motion, parameterization, lambda *args: Evaluator(), lambda *args: Poster()))
+    report = runner._measure_budget(config, tmp_path)
+    assert calls == [("smooth", False), ("smooth", True), ("hard", False)]
+    assert {row["dialect"] for row in report["posted_seconds_dialects"]} == {"rs274", "haas"}
+    assert set(report["candidate_seconds"]) == {"smooth_forward", "smooth_gradient", "hard_forward"}
+    assert len(report["posted_seconds"]) == 2
+    assert report["task_hash"] == task.task_hash
+    entries = runner._plan_entries(config, task, "dev", None)
+    costs = runner._pecent(dict(config, timing_evidence=report), entries)
+    assert len(costs) == 7
+    assert all(row["estimated_run_wall_time_s"] is not None for row in costs)
+    cma = next(row for row in costs if row["run_id"].startswith("hard-cmaes-s0-"))
+    assert (cma["candidate_evaluations"], cma["validation_calls"]) == (4, 2)
+
+    # Fixed arithmetic exposes overhead/post double-counting; no JIT or solver.
+    known = {
+        "schema": "diffcam-pilot-timing/1", "task_hash": task.task_hash,
+        "candidate_seconds": {"smooth_forward": 1.0, "smooth_gradient": 2.0, "hard_forward": 3.0},
+        "constructor_seconds": 4.0,
+        "posted_seconds": [0.5, 0.75],
+        "posted_seconds_dialects": [
+            {"dialect": "rs274", "wall_seconds": 0.5},
+            {"dialect": "haas", "wall_seconds": 0.75},
+        ],
+        "worker_wall_seconds": 4.0 + 1.0 + 2.0 + 3.0 + 0.5 + 0.75 + 2.0,
+    }
+    nominal = next(item for item in entries if item["method"] == "nominal-cam")
+    cost = runner._pecent(dict(config, timing_evidence=known), [nominal])[0]
+    assert cost["other_worker_seconds"] == pytest.approx(2.0)
+    assert cost["posted_seconds"] == pytest.approx(1.25)
+    assert cost["estimated_run_wall_time_s"] == pytest.approx(10.25)
+
+    missing = dict(report)
+    missing.pop("constructor_seconds")
+    with pytest.raises(runner.RunnerError, match="timing_evidence must include"):
+        runner._pecent(dict(config, timing_evidence=missing), entries)
+
+
+def test_timing_worker_cannot_measure_prototype_task(tmp_path):
+    output = tmp_path / "prototype-timing"
+    result = _invoke(_base(), output, extra=("--dry-run", "--timing-worker-run"),
+                     expect=2, timeout=60)
+    assert "only available for the registered pilot_pocket" in result.stderr
+    assert not (output / "budget-timings.json").exists()
+
+
+@pytest.mark.slow
+@pytest.mark.skipif(os.environ.get("DIFFCAM_REAL_PILOT_SMOKE") != "1",
+                    reason="explicit slow real-pilot smoke: set DIFFCAM_REAL_PILOT_SMOKE=1")
+@pytest.mark.parametrize("condition", ["nominal-cam", "fixed-adam", "annealed-adam", "hard-cmaes", "smooth-cmaes"])
+def test_real_pilot_one_generation_per_condition(tmp_path, condition):
+    """One bounded real task/optimizer generation and two production evaluations.
+
+    This is not the seven-run scientific pilot. Each condition is separately selectable
+    so a failure preserves the preceding conditions' independent artifacts and logs.
+    CMA cannot legally evaluate a one-member population, hence its two-candidate generation.
+    """
+    from benchmarks import pilot_task
+
+    config = _base()
+    config.update(task_source="pilot_pocket", seeds=[0], grid_pitch_mm=pilot_task.GRID_PITCH,
+                  candidate_evaluations=2 if condition.endswith("cmaes") else 1,
+                  max_validation_calls=1 if condition.endswith("adam") else 0,
+                  validation_interval=1, max_generations=1,
+                  require_grid_exclusion_tolerance=True)
+    task = pilot_task.build_pilot_task(config["grid_pitch_mm"])
+    assert callable(getattr(pilot_task, "production_settings", None)), "T2.2b is required for this smoke"
+    config["exclusion_tolerance_mm3"] = task.operation_target.geometry.params["grid_exclusion_tolerance_mm3"]
+    output = tmp_path / condition
+    _invoke(config, output, extra=("--only", f"{condition}-s0-*"), timeout=3600)
+    manifest = A.load_manifest(output / "manifest.json")
+    assert len(manifest.runs) == 1
+    run_id = next(iter(manifest.runs))
+    record = _named(output, run_id)
+    assert record.status == C.RunStatus.COMPLETE, record.failure_reason
+    metrics = json.loads((output / run_id / "metrics.json").read_text())
+    spent = json.loads((output / run_id / "config.json").read_text())["budgets"]["spent"]
+    assert spent["candidate_evaluations"] == config["candidate_evaluations"]
+    assert spent["generations"] == 1
+    assert (output / run_id / "eval_posted.json").is_file()
+    for dialect in C.Dialect:
+        nc_name, eval_name = C.DIALECT_ARTIFACTS[dialect]
+        evaluation = C.loads((output / run_id / eval_name).read_text())
+        assert evaluation.nc_hash == C.nc_hash((output / run_id / nc_name).read_bytes())
+        assert evaluation.task_hash == task.task_hash
+        assert evaluation.efficiency_eligible
+    reports, audit = A.audit_runs(output, manifest)
+    assert audit["reconciliation"]["exact_id_reconciliation"] is True
+    assert len(reports) == 1 and reports[0]["status"] == "complete"
