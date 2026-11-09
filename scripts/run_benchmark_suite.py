@@ -911,7 +911,7 @@ def _timing_worker_main(config, root):
 
 
 def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path) -> int:
-    task, motion, parameterization, _, _ = _context(config, root)
+    task, motion, parameterization, _, posted_factory = _context(config, root)
     if task.split.value != args.split:
         raise RunnerError(f"prototype source is dev-only; task split is {task.split.value}")
     if args.split != "dev":
@@ -1014,7 +1014,7 @@ def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path)
                         "wall_time_s": time.perf_counter() - before, "log": str(log.name)})
     _atomic(root / "execution_summary.json", {"runs": records,
                                                 "status_counts": dict(Counter(row["reported_status"] for row in records)),
-                                                "pending_evaluation": PENDING_REASON})
+                                                "pending_evaluation": PENDING_REASON if posted_factory is None else None})
     print(json.dumps({"execution_count": len(records),
                       "status_counts": dict(Counter(row["reported_status"] for row in records))}, sort_keys=True))
     return 0
