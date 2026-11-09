@@ -1,0 +1,537 @@
+"""Production, chronological hard evaluator for strict posted RS274/Haas motion.
+
+This is production **geometry** evaluation, not a machining safety certificate.
+It supports analytic box stock and flat, axis-vertical tool assemblies. The
+initial pose does not cut. Feed/arc cutter poses remove their closed cylinder;
+shank and holder are then checked against stock remaining at that point.
+Rapids never cut. Conservative whole-cell interval bounds include stock-bearing
+boundary cells and exclude only wholly covered previous cutter cells.
+
+Arcs are evaluated on their typed circular/helical trajectory, using
+``contracts.arc_geometry`` for radius, signed sweep and length. Every motion
+interval has an explicit path-to-endpoint-chord displacement bound, including
+multi-turn and full-circle arcs. A sample is not an exact continuous collision
+certificate. Grid metrics use the shared ``simulator.csg_metrics`` library.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, Mapping, Optional, Tuple
+
+import numpy as np
+
+from benchmarks import contracts as C
+from cam.gcode_parser import GCodeError, parse_motion_plan
+from simulator.csg_metrics import compute_grid_metrics
+
+EVALUATOR_ID = "posted_hard/production"
+_PLANE_AXES = {C.ArcPlane.XY: (0, 1, 2), C.ArcPlane.XZ: (2, 0, 1), C.ArcPlane.YZ: (1, 2, 0)}
+
+
+@dataclass(frozen=True)
+class RefinementSettings:
+    """Sampling controls; these do not alter task/tool/source identity."""
+
+    max_step_mm: Optional[float] = None
+    subdivisions: Optional[int] = None
+    compute_bounds: bool = True
+    safety_screen: bool = True
+    expected_nc_hash: Optional[str] = None
+    max_samples_per_segment: int = 4096
+
+    @classmethod
+    def from_mapping(cls, settings: Optional[Mapping[str, Any]]) -> "RefinementSettings":
+        raw = {} if settings is None else dict(settings)
+        unknown = set(raw) - {field.name for field in dataclasses.fields(cls)}
+        if unknown:
+            raise ValueError(f"unknown posted-evaluator settings: {sorted(unknown)}")
+        result = cls(**raw)
+        for name in ("compute_bounds", "safety_screen"):
+            if not isinstance(getattr(result, name), bool):
+                raise ValueError(f"{name} must be boolean")
+        if result.max_step_mm is not None and (
+            not isinstance(result.max_step_mm, (int, float))
+            or not math.isfinite(result.max_step_mm) or result.max_step_mm <= 0
+        ):
+            raise ValueError("max_step_mm must be finite and positive")
+        if result.subdivisions is not None and (
+            not isinstance(result.subdivisions, int) or result.subdivisions < 1
+        ):
+            raise ValueError("subdivisions must be a positive integer")
+        if not isinstance(result.max_samples_per_segment, int) or result.max_samples_per_segment < 2:
+            raise ValueError("max_samples_per_segment must be an integer >= 2")
+        if result.expected_nc_hash is not None:
+            C._check_hash("settings.expected_nc_hash", result.expected_nc_hash)
+        return result
+
+
+@dataclass
+class _Execution:
+    remaining: np.ndarray
+    initial: np.ndarray
+    metrics: Dict[str, C.Metric]
+    discretization: Dict[str, Any]
+    safety_pass: Optional[bool]
+    coverage_reasons: Tuple[str, ...]
+    events: Tuple[C.SegmentEvent, ...]
+
+
+def _centres(grid: C.GridSpec) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    axes = [grid.origin_mm[a] + (np.arange(grid.shape[a], dtype=np.float64) + 0.5) * grid.voxel_mm
+            for a in range(3)]
+    return tuple(np.meshgrid(*axes, indexing="ij"))
+
+
+def _box_distance(points, lo, hi):
+    q = [np.maximum(lo[a] - points[a], points[a] - hi[a]) for a in range(3)]
+    positive = [np.maximum(value, 0.0) for value in q]
+    return np.sqrt(positive[0] ** 2 + positive[1] ** 2 + positive[2] ** 2) + np.minimum(
+        np.maximum.reduce(q), 0.0)
+
+
+def _cylinder_distance(points, base, radius: float, height: float):
+    """Exact static capped-cylinder SDF in mm, not a sweep surrogate."""
+    radial = np.hypot(points[0] - base[0], points[1] - base[1]) - radius
+    vertical = np.maximum(base[2] - points[2], points[2] - (base[2] + height))
+    return np.hypot(np.maximum(radial, 0.0), np.maximum(vertical, 0.0)) + np.minimum(
+        np.maximum(radial, vertical), 0.0)
+
+
+def _body_distances(points, base, tool) -> Dict[str, Optional[np.ndarray]]:
+    shank_height = tool.holder_bottom_mm - tool.flute_length_mm
+    return {
+        "cutter": _cylinder_distance(points, base, tool.cutter_radius_mm, tool.flute_length_mm),
+        "shank": None if shank_height <= 0 else _cylinder_distance(
+            points, (base[0], base[1], base[2] + tool.flute_length_mm), tool.shank_radius_mm, shank_height),
+        "holder": _cylinder_distance(
+            points, (base[0], base[1], base[2] + tool.holder_bottom_mm),
+            tool.holder_radius_mm, tool.holder_height_mm),
+    }
+
+
+def _work_point(task, point, frame):
+    return tuple(point) if frame == C.Frame.WORK else task.work_to_machine.inverse().apply(point)
+
+
+def _arc_data(segment, task, frame) -> Tuple[C.ArcData, Dict[str, float], float, float]:
+    arc = segment.arc
+    if frame == C.Frame.MACHINE:
+        _, _, normal = _PLANE_AXES[arc.plane]
+        rotation = task.work_to_machine.inverse().matrix
+        mapped = [rotation[i][normal] for i in range(3)]
+        for plane in C.ArcPlane:
+            _, _, index = _PLANE_AXES[plane]
+            if abs(abs(mapped[index]) - 1) <= 1e-9 and all(
+                abs(mapped[i]) <= 1e-9 for i in range(3) if i != index
+            ):
+                direction = arc.direction
+                if mapped[index] < 0:
+                    direction = C.ArcDirection.CW if direction == C.ArcDirection.CCW else C.ArcDirection.CCW
+                arc = dataclasses.replace(arc, centre_mm=_work_point(task, arc.centre_mm, frame),
+                                          plane=plane, direction=direction)
+                break
+        else:
+            raise ValueError("rigid transform rotates arc normal outside a principal work-frame plane")
+    start = _work_point(task, segment.start_mm, frame)
+    start = _work_point(task, segment.start_mm, frame)
+    end = _work_point(task, segment.end_mm, frame)
+    geometry = C.arc_geometry(start, end, arc, segment.id)
+    a, b, _ = _PLANE_AXES[arc.plane]
+    r0 = math.hypot(start[a] - arc.centre_mm[a], start[b] - arc.centre_mm[b])
+    r1 = math.hypot(end[a] - arc.centre_mm[a], end[b] - arc.centre_mm[b])
+    return arc, geometry, r0, r1
+
+
+def _arc_point(segment, s: float, task, frame):
+    """Evaluate the actual arc, not a chord between its typed endpoints."""
+    arc, geometry, r0, r1 = _arc_data(segment, task, frame)
+    start = _work_point(task, segment.start_mm, frame)
+    end = _work_point(task, segment.end_mm, frame)
+    a, b, normal = _PLANE_AXES[arc.plane]
+    theta0 = math.atan2(start[b] - arc.centre_mm[b], start[a] - arc.centre_mm[a])
+    theta = theta0 + s * geometry["sweep_rad"]
+    radius = r0 + s * (r1 - r0)
+    result = list(start)
+    result[a] = arc.centre_mm[a] + radius * math.cos(theta)
+    result[b] = arc.centre_mm[b] + radius * math.sin(theta)
+    result[normal] = start[normal] + s * (end[normal] - start[normal])
+    return tuple(result)
+
+
+def _base_at(segment, s: float, task, frame):
+    if segment.kind == C.SegmentKind.ARC:
+        return _arc_point(segment, s, task, frame)
+    point = tuple(segment.start_mm[a] + s * (segment.end_mm[a] - segment.start_mm[a]) for a in range(3))
+    return _work_point(task, point, frame)
+
+
+def _arc_interval_bound(segment, subdivisions: int, task, frame) -> float:
+    """Bound sub-arc to sampled-chord separation, including major/full arcs."""
+    _, geometry, r0, r1 = _arc_data(segment, task, frame)
+    delta = abs(geometry["sweep_rad"]) / subdivisions
+    if delta >= 2 * math.pi - 1e-12:
+        result = 2 * max(r0, r1)
+    elif delta <= math.pi:
+        result = max(r0, r1) * (1 - math.cos(delta / 2)) + abs(r1 - r0) / 2
+    else:
+        result = math.sqrt(max(0.0, max(r0, r1) ** 2
+                               - min(r0, r1) ** 2 * math.cos(delta / 2) ** 2)) + abs(r1 - r0) / 2
+    return result
+
+
+def _subdivisions(segment, task, cfg):
+    if cfg.subdivisions is not None:
+        count = cfg.subdivisions
+    else:
+        step = cfg.max_step_mm or min(task.grid.voxel_mm / 2,
+                                     task.tool.cutter_radius_mm / 4,
+                                     task.tool.flute_length_mm / 4)
+        count = max(1, math.ceil(segment.path_length_mm / step))
+        count = 2 ** max(0, count - 1).bit_length()
+        if segment.kind == C.SegmentKind.ARC:
+            # Arclength refinement alone does not make a curved interval as
+            # tight as a line of the same length. Add one binary subdivision.
+            count *= 2
+    stations = 1 if segment.path_length_mm == 0 else count + 1
+    if stations > cfg.max_samples_per_segment:
+        raise ValueError(f"segment {segment.id} requires {stations} stations; limit is {cfg.max_samples_per_segment}")
+    return count
+
+
+def _analytic_mask(geometry, points):
+    if geometry.kind != "analytic" or geometry.frame != C.Frame.WORK:
+        raise ValueError("only analytic operation/part geometry in the work frame is supported")
+    p = geometry.params
+    if p.get("primitive") == "box":
+        return _box_distance(points, p["min_mm"], p["max_mm"]) <= 0
+    if p.get("primitive") == "box_minus_pocket":
+        outside = _box_distance(points, p["box_min_mm"], p["box_max_mm"])
+        pocket = _box_distance(points, p["pocket_min_mm"], p["pocket_max_mm"])
+        island = _box_distance(points, p["island_min_mm"], p["island_max_mm"])
+        return np.maximum(outside, -np.maximum(pocket, -island)) <= 0
+    raise ValueError(f"unsupported analytic geometry primitive {p.get('primitive')!r}")
+
+
+def _unsupported_reasons(task, motion, points):
+    reasons = []
+    if not task.initial_state.known or not motion.initial_state.known:
+        reasons.append("unknown initial tool state")
+    if task.tool.cutter_kind != C.CutterKind.FLAT:
+        reasons.append("ball/non-flat tool geometry is unsupported")
+    if task.fixtures:
+        reasons.append("separate workholding fixtures are unsupported")
+    if task.stock.kind != "analytic" or task.stock.params.get("primitive") != "box":
+        reasons.append("only analytic box stock is supported")
+    if task.stock.frame != C.Frame.WORK:
+        reasons.append("stock must use the work frame")
+    if task.motion_semantics.timing_rule != motion.timing_rule:
+        reasons.append("motion and task timing rules differ")
+    matrix = task.work_to_machine.matrix
+    if abs(matrix[2][0]) > 1e-9 or abs(matrix[2][1]) > 1e-9 or abs(matrix[2][2] - 1.0) > 1e-9:
+        reasons.append("work-to-machine rotation must keep work/tool +Z aligned with machine +Z")
+    try:
+        _analytic_mask(task.operation_target.geometry, points)
+        _analytic_mask(task.original_part, points)
+        for segment in motion.segments:
+            if segment.kind == C.SegmentKind.ARC:
+                _arc_data(segment, task, motion.frame)
+    except ValueError as error:
+        reasons.append(str(error))
+    return reasons
+
+
+def _unknown_metrics(reason):
+    units = dict(C.METRIC_UNITS)
+    units.update({
+        "min_clearance_lower_bound_mm": "mm",
+        "min_rapid_cutter_clearance_lower_bound_mm": "mm",
+        "rapid_cutter_penetration_upper_bound_mm": "mm",
+    })
+    return {name: C.Metric(None, unit, null_reason=reason) for name, unit in units.items()}
+
+
+def _error_plan(task):
+    frame = task.initial_state.frame if task.initial_state.known else C.Frame.MACHINE
+    return C.MotionPlan(frame, task.initial_state, (), task.motion_semantics.timing_rule)
+
+
+def _unsupported(task, motion, settings, reasons, *, nc_bytes=None, dialect=None):
+    raw_settings = dataclasses.asdict(settings) if isinstance(settings, RefinementSettings) else dict(settings)
+    return C.EvaluationResult(
+        evaluator_id=EVALUATOR_ID, evaluator_revision=_revision(),
+        task_hash=task.task_hash, tool_setup_hash=task.tool_setup_hash,
+        discretization={"settings": raw_settings}, coverage=C.Coverage.UNSUPPORTED,
+        coverage_reasons=tuple(reasons), metrics=_unknown_metrics("; ".join(reasons)),
+        safety_pass=None, geometry_pass=None,
+        motion_hash=None if nc_bytes is not None else motion.motion_hash,
+        nc_hash=None if nc_bytes is None else C.nc_hash(nc_bytes), dialect=dialect,
+    )
+
+
+def _execute(task, motion, cfg):
+    lo, hi = task.stock.params["min_mm"], task.stock.params["max_mm"]
+    grid_lo, grid_hi = task.grid.bounds_mm
+    if len(lo) != 3 or len(hi) != 3 or any(a >= b for a, b in zip(lo, hi)):
+        raise ValueError("stock min_mm must precede stock max_mm")
+    if any(lo[a] < grid_lo[a] - 1e-9 or hi[a] > grid_hi[a] + 1e-9 for a in range(3)):
+        raise ValueError("stock extends beyond represented grid; whole-cell safety is unavailable")
+
+    points = _centres(task.grid)
+    stock_d = _box_distance(points, lo, hi)
+    initial = stock_d <= 0
+    stock_interior = stock_d < 0
+    remaining = initial.copy()
+    rho = math.sqrt(3) * task.grid.voxel_mm / 2
+    voxel_volume = task.grid.voxel_mm ** 3
+    guaranteed = np.zeros(task.grid.shape, dtype=bool)
+    definite = np.zeros(task.grid.shape, dtype=bool)
+    station_upper = np.zeros(task.grid.shape, dtype=bool)
+    continuous_upper = np.zeros(task.grid.shape, dtype=bool)
+    unique_by_component = {name: np.zeros(task.grid.shape, dtype=bool)
+                           for name in ("rapid_cutter", "cutter", "shank", "holder")}
+    seen_events = set()
+    events = []
+    segment_records = []
+    uncertain_segments = []
+    collision_count = 0
+    integrated = 0.0
+    min_clearance = math.inf
+    min_clearance_lower = math.inf
+    min_rapid_clearance = math.inf
+    min_rapid_lower = math.inf
+    rapid_upper = 0.0
+    rapid_seen = False
+    safety_uncertain = False
+    tolerance = task.tolerances.rapid_penetration_mm
+
+    for segment in motion.segments:
+        m = _subdivisions(segment, task, cfg)
+        zero_length = segment.path_length_mm == 0
+        delta_t = (_arc_interval_bound(segment, m, task, motion.frame)
+                   if segment.kind == C.SegmentKind.ARC
+                   else 0.0 if zero_length else segment.path_length_mm / (2 * m))
+        segment_records.append({
+            "id": segment.id, "kind": segment.kind.value, "length_mm": segment.path_length_mm,
+            "subdivisions": m, "stations": 1 if zero_length else m + 1,
+            "endpoints_included": True, "duration_s": segment.duration_s,
+            "stations_work_mm": [list(_base_at(segment, 0.0 if zero_length else j / m,
+                                                     task, motion.frame)) for j in range(1 if zero_length else m + 1)],
+            "temporal_path_to_chord_bound_mm": delta_t,
+            "motion_model": "contracts.arc_geometry" if segment.kind == C.SegmentKind.ARC else "linear",
+        })
+        current = None
+        for j in range(1 if zero_length else m + 1):
+            s = 0.0 if zero_length else j / m
+            if current is None:
+                current = _body_distances(points, _base_at(segment, s, task, motion.frame), task.tool)
+            if segment.kind != C.SegmentKind.RAPID:
+                cutter = current["cutter"]
+                wholly_covered = cutter < -rho
+                guaranteed |= wholly_covered
+                if cfg.compute_bounds:
+                    definite |= (stock_d < -rho) & wholly_covered
+                    station_upper |= (stock_d <= rho) & (cutter <= rho)
+                    continuous_upper |= (stock_d <= rho) & (cutter <= rho + delta_t)
+                remaining[cutter <= 0] = False
+                checked = ("shank", "holder")
+            else:
+                checked = ("cutter", "shank", "holder")
+
+            material = remaining & stock_interior
+            contact_union = np.zeros(task.grid.shape, dtype=bool)
+            min_noncutting = None
+            for name in checked:
+                distance = current[name]
+                if distance is None:
+                    continue
+                rapid_cutter = segment.kind == C.SegmentKind.RAPID and name == "cutter"
+                if rapid_cutter:
+                    rapid_seen = True
+                    if material.any():
+                        min_rapid_clearance = min(min_rapid_clearance, float(distance[material].min()))
+                else:
+                    min_noncutting = distance.copy() if min_noncutting is None else np.minimum(min_noncutting, distance)
+                contact = material & (distance < (-tolerance if rapid_cutter else 0.0))
+                if not contact.any():
+                    continue
+                contact_union |= contact
+                component = "rapid_cutter" if rapid_cutter else name
+                unique_by_component[component] |= contact
+                kind = "rapid_collision" if rapid_cutter else f"{name}_collision"
+                if kind not in seen_events:
+                    seen_events.add(kind)
+                    events.append(C.SegmentEvent(segment.id, kind, s,
+                        "first sampled contact beyond the applicable tolerance; not an exact continuous first-contact time"))
+            if contact_union.any():
+                collision_count += 1
+                weight = 0.0 if zero_length else segment.duration_s * (0.5 if j in (0, m) else 1.0) / m
+                integrated += weight * float(contact_union.sum()) * voxel_volume
+            if min_noncutting is not None and material.any():
+                min_clearance = min(min_clearance, float(min_noncutting[material].min()))
+
+            possible_here = False
+            following = None
+            if cfg.safety_screen and (zero_length or j < m):
+                if not zero_length:
+                    following = _body_distances(points, _base_at(segment, (j + 1) / m, task, motion.frame), task.tool)
+                safety_material = (stock_d <= rho) & ~guaranteed
+                for name in checked:
+                    now = current[name]
+                    if now is None or not safety_material.any():
+                        continue
+                    near = now if zero_length else np.minimum(now, following[name])
+                    interval = 0.0 if zero_length else delta_t
+                    lower = float(near[safety_material].min()) - rho - interval
+                    if segment.kind == C.SegmentKind.RAPID and name == "cutter":
+                        min_rapid_lower = min(min_rapid_lower, lower)
+                        rapid_upper = max(rapid_upper, max(0.0, -lower))
+                        if rapid_upper > tolerance:
+                            possible_here = True
+                    else:
+                        min_clearance_lower = min(min_clearance_lower, lower)
+                        if lower <= 0:
+                            possible_here = True
+                if possible_here:
+                    safety_uncertain = True
+                    if segment.id not in uncertain_segments:
+                        uncertain_segments.append(segment.id)
+            current = following
+
+    metrics = {
+        "unique_contacted_volume_mm3": C.Metric(
+            float(sum((mask.sum() for mask in unique_by_component.values()))) * voxel_volume, "mm^3"),
+        "min_clearance_mm": C.Metric(min_clearance, "mm", denominator="centre-sampled only; non-cutting shank+holder versus evolving remaining-stock centres, not a continuous clearance") if math.isfinite(min_clearance) else C.Metric(None, "mm", null_reason="no non-cutting station with remaining stock"),
+        "min_rapid_cutter_clearance_mm": C.Metric(min_rapid_clearance, "mm", denominator="centre-sampled only; rapid cutter versus remaining-stock centres") if math.isfinite(min_rapid_clearance) else C.Metric(None, "mm", null_reason="no rapid station with remaining stock"),
+        "min_clearance_lower_bound_mm": C.Metric(min_clearance_lower, "mm", denominator="conservative non-cutting bound over stock-bearing whole cells and motion intervals") if math.isfinite(min_clearance_lower) else C.Metric(None, "mm", null_reason="no whole-cell non-cutting clearance sample"),
+        "min_rapid_cutter_clearance_lower_bound_mm": C.Metric(min_rapid_lower, "mm", denominator="conservative rapid-cutter distance bound over stock-bearing whole cells and rapids") if math.isfinite(min_rapid_lower) else C.Metric(None, "mm", null_reason="no whole-cell rapid clearance sample"),
+        "rapid_cutter_penetration_upper_bound_mm": C.Metric(rapid_upper, "mm", denominator="maximum possible rapid penetration over stock-bearing whole cells and rapid intervals") if rapid_seen and cfg.safety_screen else C.Metric(None, "mm", null_reason="no rapid segments" if not rapid_seen else "safety_screen=false"),
+        "collision_sample_count": C.Metric(collision_count, "count", denominator="stations with one or more contacted occupied cells"),
+        "time_integrated_overlap_mm3_s": C.Metric(integrated, "mm^3*s", denominator="stationwise trapezoidal integration of union-of-components contacted cells"),
+        "cycle_time_s": C.Metric(sum(segment.duration_s for segment in motion.segments), "s", denominator="sum of typed motion segment durations"),
+        "spatial_uncertainty_mm3": C.Metric(float(station_upper.sum() - definite.sum()) * voxel_volume, "mm^3", denominator="station_upper minus guaranteed removed volume") if cfg.compute_bounds else C.Metric(None, "mm^3", null_reason="compute_bounds=false"),
+        "temporal_uncertainty_mm3": C.Metric(float(continuous_upper.sum() - station_upper.sum()) * voxel_volume, "mm^3", denominator="continuous interval upper minus sampled-station upper") if cfg.compute_bounds else C.Metric(None, "mm^3", null_reason="compute_bounds=false"),
+        "air_fraction": C.Metric(None, "1", null_reason="no calibrated area/time denominator is available from path geometry alone"),
+        "force_proxy": C.Metric(None, "proxy", null_reason="geometry-only evaluator: no calibrated force model"),
+    }
+    unique = np.zeros(task.grid.shape, dtype=bool)
+    for mask in unique_by_component.values():
+        unique |= mask
+    metrics["unique_contacted_volume_mm3"] = C.Metric(float(unique.sum()) * voxel_volume, "mm^3", denominator="spatial union of collided cells, not component sum")
+    safety = False if collision_count else (None if safety_uncertain or not cfg.safety_screen else True)
+    reasons = ()
+    if safety_uncertain and not collision_count:
+        reasons = ("conservative stock-bearing-cell clearance/tolerance certificate remains uncertain on segments " + ",".join(uncertain_segments),)
+    elif not cfg.safety_screen and not collision_count:
+        reasons = ("safety_screen=false; no whole-cell safety certificate",)
+    bounds = None if not cfg.compute_bounds else {
+        "lower_mm3": float(definite.sum()) * voxel_volume,
+        "station_upper_mm3": float(station_upper.sum()) * voxel_volume,
+        "upper_mm3": float(continuous_upper.sum()) * voxel_volume,
+    }
+    discretization = {
+        "voxel_mm": task.grid.voxel_mm, "grid_shape": list(task.grid.shape),
+        "grid_origin_mm": list(task.grid.origin_mm), "cell_half_diagonal_mm": rho,
+        "segments": segment_records, "volume_bound": bounds,
+        "unique_by_component_mm3": {name: float(mask.sum()) * voxel_volume for name, mask in unique_by_component.items()},
+        "collision_samples_are_per_station": True,
+        "clearance_metrics": "centre diagnostics are distinct from conservative whole-cell lower bounds",
+        "tolerances": {"rapid_penetration_mm": tolerance,
+                       "noncutting_clearance_qualification_mm": task.tolerances.clearance_mm,
+                       "clearance_mm_role": "reported qualification only; safety uses strict non-cutting overlap"},
+        "execution_order": "feed/arc closed-cutter removal before shank+holder checks against remaining stock; rapid checks all bodies without subtraction",
+    }
+    return _Execution(remaining, initial, metrics, discretization, safety, reasons, tuple(events))
+
+
+def _result(task, motion, cfg, execution):
+    points = _centres(task.grid)
+    target = _analytic_mask(task.operation_target.geometry, points)
+    original = _analytic_mask(task.original_part, points)
+    metrics = compute_grid_metrics(
+        execution.remaining, target, execution.initial, task.grid.voxel_mm,
+        original_part_mask=original, surface_origin_mm=task.grid.origin_mm)
+    # Pinned contracts-1.1 qualification semantics. This explicit assignment is
+    # kept while the shared library transitions its original-part diagnostics.
+    metrics["gouge_volume_mm3"] = C.Metric(
+        float((execution.initial & target & ~execution.remaining).sum()) * task.grid.voxel_mm ** 3, "mm^3",
+        denominator="initial & operation_target & ~remaining")
+    metrics.update(execution.metrics)
+    removed = execution.initial & ~execution.remaining
+    removal_target = execution.initial & ~target
+    geometry = C.geometry_pass_from_metrics(metrics, task.tolerances)
+    if removal_target.any() and not removed.any():
+        geometry = False
+    return C.EvaluationResult(
+        evaluator_id=EVALUATOR_ID, evaluator_revision=_revision(), task_hash=task.task_hash,
+        tool_setup_hash=task.tool_setup_hash,
+        discretization={"settings": dataclasses.asdict(cfg), **execution.discretization},
+        coverage=C.Coverage.COMPLETE, coverage_reasons=execution.coverage_reasons,
+        metrics=metrics, safety_pass=execution.safety_pass, geometry_pass=geometry,
+        motion_hash=motion.motion_hash, events=execution.events)
+
+
+def _revision():
+    return f"posted_evaluator/1+{C.sha256_bytes(Path(__file__).read_bytes())}"
+
+
+class PostedEvaluator:
+    """Stateless implementation of the ``contracts.Evaluator`` protocol."""
+
+    def evaluate_candidate(self, task: C.TaskSpec, motion: C.MotionPlan,
+                           settings: Mapping[str, Any]) -> C.EvaluationResult:
+        try:
+            cfg = RefinementSettings.from_mapping(settings)
+        except ValueError as error:
+            return _unsupported(task, motion, settings, [str(error)])
+        if cfg.expected_nc_hash is not None:
+            raise C.ContractError("expected_nc_hash is only valid for posted NC evaluation")
+        try:
+            motion.validate_for_task(task)
+            reasons = _unsupported_reasons(task, motion, _centres(task.grid))
+            if reasons:
+                return _unsupported(task, motion, cfg, reasons)
+            return _result(task, motion, cfg, _execute(task, motion, cfg))
+        except ValueError as error:
+            return _unsupported(task, motion, cfg, [str(error)])
+
+    def evaluate_posted_gcode(self, task: C.TaskSpec, nc_bytes: bytes, dialect: C.Dialect,
+                              settings: Mapping[str, Any]) -> C.EvaluationResult:
+        if not isinstance(nc_bytes, bytes):
+            raise C.ContractError("nc_bytes must be immutable bytes for exact source hashing")
+        try:
+            dialect = C.Dialect(dialect)
+        except ValueError as error:
+            raise C.ContractError(f"unknown NC dialect {dialect!r}") from error
+        try:
+            cfg = RefinementSettings.from_mapping(settings)
+        except ValueError as error:
+            return _unsupported(task, _error_plan(task), settings,
+                                [str(error)], nc_bytes=nc_bytes, dialect=dialect)
+        if cfg.expected_nc_hash is not None and cfg.expected_nc_hash != C.nc_hash(nc_bytes):
+            raise C.ContractError("raw NC hash differs from settings.expected_nc_hash")
+        try:
+            motion = parse_motion_plan(nc_bytes.decode("utf-8"), task, dialect)
+            motion.validate_for_task(task)
+            reasons = _unsupported_reasons(task, motion, _centres(task.grid))
+            if reasons:
+                return _unsupported(task, motion, cfg, reasons, nc_bytes=nc_bytes, dialect=dialect)
+            base = _result(task, motion, cfg, _execute(task, motion, cfg))
+            discretization = dict(base.discretization)
+            discretization["parsed_motion_hash"] = motion.motion_hash
+            return dataclasses.replace(base, discretization=discretization, nc_hash=C.nc_hash(nc_bytes),
+                                       motion_hash=None, dialect=dialect)
+        except (GCodeError, ValueError) as error:
+            plan = _error_plan(task)
+            return _unsupported(task, plan, cfg, [str(error)], nc_bytes=nc_bytes, dialect=dialect)
+
+
+def evaluate_candidate(task, motion, settings=None):
+    return PostedEvaluator().evaluate_candidate(task, motion, settings or {})
+
+
+def evaluate_posted_gcode(task, nc_bytes, dialect, settings=None):
+    return PostedEvaluator().evaluate_posted_gcode(task, nc_bytes, dialect, settings or {})
