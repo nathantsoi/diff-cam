@@ -822,13 +822,24 @@ class CamoticsAdapter:
                 "exclusion_tolerance_mm3": exclusion_tolerance,
                 "exclusion_rule": "computed initial & operation_target & ~original_part compared with declaration; default tolerance 0 permits only floating roundoff",
             }
+            # Review C1: CAMotics 1.2.0 horizontal ConicSweep never cuts the starting disc when the segment
+            # start and end Z are equal (beta<0 rejection + (Bz-Az)=0 fallback), so any constant-Z cutting move
+            # yields known-wrong removed geometry. geometry_pass must stay null for such programs.
+            constant_z_cuts = [s.id for s in parsed_motion.segments
+                               if s.kind != C.SegmentKind.RAPID and s.chord_length_mm > 0
+                               and abs(s.end_mm[2] - s.start_mm[2]) <= 1e-9]
+            if constant_z_cuts:
+                reasons = list(reasons) + [
+                    "geometry_pass null: CAMotics 1.2.0 horizontal ConicSweep endpoint defect (start disc not cut for "
+                    f"constant-Z cutting moves; {len(constant_z_cuts)} affected segments, first {constant_z_cuts[0]})"]
             return C.EvaluationResult(
                 evaluator_id=EVALUATOR_ID, evaluator_revision=f"{facts['camsim_version']}+grid-sampler/1",
                 task_hash=task.task_hash, tool_setup_hash=task.tool_setup_hash,
                 discretization=metadata, coverage=C.Coverage.INCOMPLETE,
                 coverage_reasons=tuple(reasons), metrics=metrics,
                 safety_pass=None, geometry_pass=(C.geometry_pass_from_metrics(metrics, task.tolerances)
-                                             if stl_facts["watertight"] and not unexpected_warnings else None),
+                                             if stl_facts["watertight"] and not unexpected_warnings
+                                             and not constant_z_cuts else None),
                 nc_hash=C.nc_hash(nc_bytes), dialect=dialect,
             )
         except (AdapterError, OSError, ValueError, subprocess.TimeoutExpired) as error:
