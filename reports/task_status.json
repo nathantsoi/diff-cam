@@ -10,7 +10,7 @@
    "branch": "task/T0.0-contracts",
    "blocker": null,
    "next": "collect consumer acks",
-   "note": "v1 draft on core; ba97d6e adds arc/rapid timing checks + validate_for_task per worker-2 review; awaiting worker-2 ack"
+   "note": "v1 on core (ba97d6e). Acks: worker-2/T1.0 YES (2026-11-08). Pending: worker-1/T1.4, worker-3/T2.1."
   },
   "T0.1": {
    "status": "complete",
