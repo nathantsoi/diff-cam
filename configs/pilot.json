@@ -13,6 +13,7 @@
   "learning_rate": 0.005,
   "max_gradient_norm": 0.5,
   "k_fixed": 40.0,
+  "k_smooth": 40.0,
   "k_anneal_start": 20.0,
   "k_anneal_end": 120.0,
   "sigma0": 0.01

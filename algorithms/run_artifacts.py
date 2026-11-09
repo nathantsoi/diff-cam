@@ -175,8 +175,6 @@ class ComputeLedger:
         """Legacy counter for calls outside this ledger. Do not also tag via start_validation."""
         if isinstance(count, bool) or not isinstance(count, int) or count < 1:
             raise ValueError("validation count must be a positive integer")
-        if isinstance(count, bool) or not isinstance(count, int) or count < 1:
-            raise ValueError("validation count must be a positive integer")
         self.validation_calls += count
 
     def restore(self, snapshot: Mapping[str, Any]) -> None:

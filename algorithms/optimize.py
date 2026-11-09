@@ -483,7 +483,7 @@ def replay_adam_checkpoint(path: str | Path, evaluator: Any) -> dict[str, Any]:
     if _restore_state(document, evaluator).config_hash != document["optimizer_config_hash"]:
         raise B.BlackBoxError("replay optimizer configuration mismatch")
     theta = np.asarray(document["best"]["theta"], dtype=float)
-    evaluator.ledger.count_validation(1)
+    evaluator.ledger.start_validation()
     replayed = evaluator.evaluate_candidate(theta, f"{document['run_id']}:replay", "hard")
     expected = document["best"]["evaluation"]["objective"]
     matches = bool(replayed.valid and replayed.objective is not None

@@ -101,10 +101,9 @@ def test_budget_exhaustion_full_and_fractional_population_and_generation_cap():
     assert full.evaluations == 8 and full.generations == 2
     assert full.termination_reason == "budget_exhausted"
 
-    under_one_population = B.solve_cma_es(QuadraticObjective(), _budget(3, 4), seed=1)
-    assert under_one_population.evaluations == 0
-    assert under_one_population.generations == 0
-    assert under_one_population.termination_reason == "budget_exhausted"
+    # Review Q4: a budget smaller than one population is rejected up front instead of ending silently.
+    with pytest.raises(ValueError, match="smaller than one CMA population"):
+        _budget(3, 4)
 
     capped = B.solve_cma_es(QuadraticObjective(), _budget(100, 4, max_generations=2), seed=1, x0=[2, -2])
     assert capped.generations == 2 and capped.evaluations == 8
