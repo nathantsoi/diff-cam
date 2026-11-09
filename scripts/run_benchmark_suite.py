@@ -202,7 +202,7 @@ def _plan_entries(config: Mapping[str, Any], task: C.TaskSpec, split: str, only:
     identity = _identity(task, config, split)
     entries = []
     for condition in CONDITIONS:
-        seeds = (0,) if condition == "nominal-cam" else config["seeds"]
+        seeds = (0,) if condition in ("nominal-cam", "fixed-adam", "annealed-adam") else config["seeds"]
         for seed in seeds:
             run_id = f"{condition}-s{seed}-{task.task_hash[7:19]}-{identity[7:19]}"
             if only is None or fnmatch.fnmatchcase(run_id, only):
@@ -246,7 +246,10 @@ def _manifest(config: Mapping[str, Any], task: C.TaskSpec, entries: Sequence[Map
             "runner": {"schema": RUNNER_SCHEMA, "planned_not_executed": planned,
                        "experiment": config["experiment"], "split": "dev",
                        "output_dir": str(root),
-                       "prototype_analytic_task": True}}
+                       "prototype_analytic_task": True,
+                       "adam_conditions": "one_deterministic_replicate_each",
+                       "cma_conditions": "one_run_per_declared_seed",
+                       "nominal_cam": "one_deterministic_run"}}
 
 
 def _evaluate_outcome(condition: str, evaluator: Any, config: Mapping[str, Any], seed: int) -> Outcome:

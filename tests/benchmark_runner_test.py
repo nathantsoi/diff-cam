@@ -39,8 +39,12 @@ def test_condition_ids_are_deterministic_and_manifest_nominal_once(tmp_path):
     config["experiment"] = "pilot"
     first = runner._plan_entries(config, runner._context(config, tmp_path)[0], "dev", None)
     second = runner._plan_entries(config, runner._context(config, tmp_path)[0], "dev", None)
-    assert len(first) == len(second) == 9
+    assert len(first) == len(second) == 7
     assert [entry["run_id"] for entry in first] == [entry["run_id"] for entry in second]
+    for condition in ("nominal-cam", "fixed-adam", "annealed-adam"):
+        assert sum(entry["method"] == condition for entry in first) == 1
+    for condition in ("hard-cmaes", "smooth-cmaes"):
+        assert sum(entry["method"] == condition for entry in first) == 2
     assert [entry["method"] for entry in first].count("nominal-cam") == 1
     assert sorted({entry["seed"] for entry in first}) == [0, 1]
     ordinary = [entry for entry in first if entry["method"] != "nominal-cam"]
@@ -70,7 +74,7 @@ def test_dry_run_counts_cost_uncertainty_and_nominal_subset(tmp_path):
     output = tmp_path / "dry"
     result = _invoke(config, output, extra=("--dry-run",), timeout=60)
     planned = json.loads((output / "dry_run.json").read_text())
-    assert planned["planned_run_count"] == 9
+    assert planned["planned_run_count"] == 7
     assert not (output / "nominal-cam").exists()
     per_run = {row["run_id"]: row for row in planned["costs"]}
     fixed = next(row for row in per_run.values() if row["run_id"].startswith("fixed-adam-s0-"))
