@@ -85,12 +85,12 @@
    "note": "merged; DeltaResidual/DeltaSpline(clamped cubic, 4<=K<=T)/AbsolutePositionResidual, T=segments, anchor_end option, exact pullbacks (45 tests; coordinator independently re-verified J^T)"
   },
   "T2.2": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-1",
    "branch": "task/T2.2-pilot-pocket",
    "blocker": null,
    "next": null,
-   "note": "code merged (seed, pilot task, zero-residual pipeline; retained run at runs/retained/pilot-pocket-20261108-t22-retained). OPEN T2.2b: op-target inset excludes 4554 mm3 (~half pocket) by fixed corridor -> derive reachable target from accessibility and re-run nominal. geometry_pass null pending T1.3. | T1.3b verdict on nominal @1mm: geometry_pass False (gouge 48 mm3 > 1 mm3 tol; max surface err 1.0 mm); T2.2b must make grid/tolerances coherent."
+   "note": "T2.2 + T2.2b merged. Pilot pocket: T = P \u222a four r=2 mm corner fillets; excluded 18.0 mm\u00b3 grid-exact (continuous 20.60 diagnostic); 0.25 mm pitch. Nominal (line-only seed): production safety+geometry True, residual/gouge/surface 0 (coordinator re-verified rs274). Retained: runs/retained/pilot-pocket-20261109-t22b-exact-exclusion. COST: one posted evaluation \u2248 1085 s on CPU at 0.25 mm -> pilot budget concern."
   },
   "T2.3": {
    "status": "ready",
