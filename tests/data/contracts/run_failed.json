@@ -8,7 +8,7 @@
   "failure_reason": "non-finite loss at iteration 3",
   "posted": [],
   "run_id": "example-failed",
-  "schema_version": "diffcam-contracts/1",
+  "schema_version": "diffcam-contracts/1.1",
   "source_commit": null,
   "status": "failed",
   "task_hash": "sha256:c9e3b06fab4b4221ef2636364e16cd676aa5fdd999804c8a9000a2bca373bbff"

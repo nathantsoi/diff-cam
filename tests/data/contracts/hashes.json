@@ -1,6 +1,6 @@
 {
- "schema": "diffcam-contracts/1",
- "task_hash": "sha256:c9e3b06fab4b4221ef2636364e16cd676aa5fdd999804c8a9000a2bca373bbff",
+ "schema": "diffcam-contracts/1.1",
+ "task_hash": "sha256:f5d0798bfa53669d88662138598892fcfd1beb975525f4e25419e68ad1636b5d",
  "tool_setup_hash": "sha256:317a011cdd9ea88e4b0fd7082d74cc945134128790250cc73cd64c236584c142",
- "motion_hash": "sha256:3d14b77530bf9e4c078aab69a5a7d251f16a07f9c500a714a2b7b79a236db63a"
+ "motion_hash": "sha256:5785cbd244c4e946ef48550e7d74340726086649e92d5cdce2bd4e3e9412f481"
 }

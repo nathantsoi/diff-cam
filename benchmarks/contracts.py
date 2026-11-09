@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Protocol, Sequence, Tuple
 
-SCHEMA_VERSION = "diffcam-contracts/1"
+SCHEMA_VERSION = "diffcam-contracts/1.1"
 LENGTH_UNIT = "mm"
 
 REMOVAL_MEMBERSHIP = "closed"     # phi <= 0 removes material
@@ -404,13 +404,19 @@ class Tolerances:
     ``completion_residual_mm3``: max residual (unremoved) operation-target volume.
     ``gouge_volume_mm3``: max removed volume inside the part. ``local_surface_error_mm``:
     max local deviation on the operation-target surface. ``clearance_mm``: min
-    holder/assembly clearance to stock and fixtures during rapids and feeds.
+    clearance of the NON-CUTTING assembly (shank + holder) to remaining stock and fixtures
+    during rapids and feeds. ``rapid_penetration_mm`` (v1.1): during rapids the cutter may
+    graze remaining stock (e.g. retracting out of its own slot); a rapid is a collision only
+    if the cutter penetrates deeper than this, and safety is certified only if the evaluator's
+    upper bound on possible rapid penetration is <= this value. 0 means any possible
+    interior overlap is unsafe/unknown.
     """
 
     completion_residual_mm3: float
     gouge_volume_mm3: float
     local_surface_error_mm: float
     clearance_mm: float
+    rapid_penetration_mm: float = 0.0
 
     def __post_init__(self):
         for f_ in dataclasses.fields(self):
@@ -719,7 +725,8 @@ METRIC_UNITS: Dict[str, str] = {
     "gouge_volume_mm3": "mm^3",               # removed volume inside the part
     "max_surface_error_mm": "mm", "p99_surface_error_mm": "mm",
     "asd_mm": "mm", "hd95_mm": "mm",
-    "min_clearance_mm": "mm",
+    "min_clearance_mm": "mm",                 # non-cutting assembly (shank + holder) only
+    "min_rapid_cutter_clearance_mm": "mm",    # cutter during rapids; negative = penetration depth bound
     "unique_contacted_volume_mm3": "mm^3",    # union of collided material
     "collision_sample_count": "count",        # depends on sampling; never compare across settings
     "time_integrated_overlap_mm3_s": "mm^3*s",
@@ -1055,7 +1062,7 @@ def example_pocket_task() -> TaskSpec:
         limits=MachineLimits(max_feed_mm_s=50.0, rapid_mm_s=200.0, max_accel_mm_s2=500.0,
                              envelope_min_mm=(0.0, 0.0, -254.0), envelope_max_mm=(406.4, 304.8, 0.0)),
         tolerances=Tolerances(completion_residual_mm3=5.0, gouge_volume_mm3=1.0,
-                              local_surface_error_mm=0.2, clearance_mm=1.0),
+                              local_surface_error_mm=0.2, clearance_mm=1.0, rapid_penetration_mm=0.25),
     )
 
 

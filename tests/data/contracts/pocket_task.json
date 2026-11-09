@@ -154,7 +154,7 @@
    "path": null,
    "sha256": null
   },
-  "schema_version": "diffcam-contracts/1",
+  "schema_version": "diffcam-contracts/1.1",
   "source": {
    "checksums": {},
    "license": "MIT",
@@ -187,7 +187,8 @@
    "clearance_mm": 1.0,
    "completion_residual_mm3": 5.0,
    "gouge_volume_mm3": 1.0,
-   "local_surface_error_mm": 0.2
+   "local_surface_error_mm": 0.2,
+   "rapid_penetration_mm": 0.25
   },
   "tool": {
    "cutter_kind": "flat",

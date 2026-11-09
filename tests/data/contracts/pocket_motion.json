@@ -15,7 +15,7 @@
   },
   "length_unit": "mm",
   "provenance": "contracts:example_motion_plan@1",
-  "schema_version": "diffcam-contracts/1",
+  "schema_version": "diffcam-contracts/1.1",
   "segments": [
    {
     "arc": null,

@@ -1,8 +1,8 @@
-# DiffCAM contracts — `diffcam-contracts/1`
+# DiffCAM contracts — `diffcam-contracts/1.1`
 
 Executable source: `benchmarks/contracts.py` (T0.0). Tests: `tests/contracts_test.py`.
 Fixtures: `tests/data/contracts/` (`hashes.json` pins the serialized form — a hash change is a schema change).
-Status: **FROZEN v1** (2026-11-08; consumer acks T1.0, T1.4, T2.1). Owner: coordinator. Changing a field's meaning needs a version bump and a handoff to every consumer.
+Status: **FROZEN v1.1** (2026-11-08). v1 acked by T1.0, T1.4, T2.1; v1.1 adds `Tolerances.rapid_penetration_mm` and splits clearance metrics (see Changelog). Owner: coordinator. Changing a field's meaning needs a version bump and a handoff to every consumer.
 
 ## Units, frames, conventions
 
@@ -29,7 +29,9 @@ initial_state, tool, limits, tolerances, motion_semantics, fixtures`.
 - `ToolAssembly`: `cutter_kind ∈ {flat, ball}`, cutter radius, flute length, shank radius, holder bottom/radius/height
   measured from the tip. Consumers that model only flat cutters report coverage `unsupported` for ball tools.
 - `MachineState.known=False` ⇒ `position_mm` must be null. An evaluator cannot claim complete coverage of the approach.
-- `Tolerances` are absolute (mm³ / mm), not percentages: `completion_residual_mm3, gouge_volume_mm3, local_surface_error_mm, clearance_mm`.
+- `Tolerances` are absolute (mm³ / mm), not percentages: `completion_residual_mm3, gouge_volume_mm3, local_surface_error_mm, clearance_mm`
+  (non-cutting shank + holder only), `rapid_penetration_mm` (max cutter penetration of remaining stock during a rapid; safety needs the
+  evaluator's penetration upper bound ≤ this; 0 ⇒ any possible overlap is unsafe/unknown).
 - `task_hash` covers the whole spec. `tool_setup_hash` covers tool + transform + fixtures + initial state.
 
 ## MotionPlan
@@ -100,3 +102,11 @@ motion = C.example_motion_plan(task)      # approach, plunge, feed, arc, retract
 text = C.dumps(task); assert C.loads(text) == task
 task.task_hash, task.tool_setup_hash, motion.motion_hash
 ```
+
+## Changelog
+
+- **1.1** (2026-11-08): T1.0 review showed that a conservative voxel screen cannot certify a rapid retract out of the cutter's own slot
+  (true clearance is exactly 0), so every ordinary program would be `safety_pass=null`. Added `Tolerances.rapid_penetration_mm`
+  (default 0.0 = v1 behaviour) and metric `min_rapid_cutter_clearance_mm`; `min_clearance_mm` is now non-cutting assembly only.
+  Fixture hashes regenerated.
+- **1** (2026-11-08): initial freeze.
