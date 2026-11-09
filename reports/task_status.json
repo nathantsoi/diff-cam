@@ -226,12 +226,12 @@
    "note": "merged; certification needs evaluator band (sqrt3*v/2 + temporal) < rapid_penetration_mm \u2014 T1.3 must pick resolution accordingly (coordinator check: retract certifies at tol 0.5, unknown at 0.25 with v=0.25)"
   },
   "T5.0b": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-3",
    "branch": "task/T5.0b-cncnet-env",
    "blocker": null,
    "next": null,
-   "note": "persist modernized CNC-Net recipe (was /tmp only)"
+   "note": "merged; baselines/cncnet recipe re-proved from fresh venv: IoU 0.423786 vs 0.423761"
   }
  }
 }
