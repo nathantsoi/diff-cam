@@ -1,8 +1,9 @@
 """T2.2 one-pocket task, nominal motion, and artifact tests.
 
 Only ``test_real_nominal_pipeline_and_evidence`` executes the simulator and
-independent stock-motion reference as end-to-end evidence. ``_synthetic_posts``
-is for serialization tests only, not a simulator or a nominal safety result.
+both production/reference evaluators as end-to-end evidence, then replays the
+independent stock-motion reference. ``_synthetic_posts`` is for serialization
+tests only, not a simulator or a nominal safety result.
 """
 
 from __future__ import annotations
@@ -20,13 +21,13 @@ import pytest
 
 from benchmarks import contracts as C
 from benchmarks.pilot_task import (
-    FRINGE_VOLUME_MM3,
+    CORNER_RADIUS_PARAM,
+    GRID_PITCH,
     OP_POCKET_MAX,
     OP_POCKET_MIN,
     POCKET_MAX,
     POCKET_MIN,
     PROJECT_ROOT,
-    REACH_MARGIN_MM,
     STOCK_MAX,
     STOCK_MIN,
     build_pilot_task,
@@ -34,13 +35,17 @@ from benchmarks.pilot_task import (
     contact_boundary_diagnostics,
     expected_positions_from_motion,
     fit_parameterization,
+    original_part_field,
+    production_settings,
     run_nominal,
     source_fields,
     write_artifacts,
 )
 from cam.gcode_parser import parse_motion_plan
+from cam.posted_evaluator import PostedEvaluator
 from cam.posts import post_motion_plan
 from cam.seeds import IslandSeedSpec, pocket_with_island_seed, seed_deltas_mm
+from verification import fixtures as F
 from verification.reference_carve import run_reference
 
 
@@ -101,36 +106,52 @@ def _check_hashes(root):
     return manifest
 
 
-def test_one_declared_pocket_and_explicit_reachable_target():
+def _index(task, point):
+    values = tuple(
+        int(round((point[a] - task.grid.origin_mm[a]) / task.grid.voxel_mm - 0.5))
+        for a in range(3)
+    )
+    assert all(0 <= values[a] < task.grid.shape[a] for a in range(3))
+    np.testing.assert_allclose(task.grid.cell_centre_mm(*values), point, atol=1e-10, rtol=0)
+    return values
+
+
+def test_declared_pocket_is_full_except_finite_cutter_corners():
     task = build_pilot_task()
     assert task.split == C.Split.DEV
-    assert task.family == "pocket_island"
-    assert task.task_id == "dev-pocket-island-000-v1"
-    assert task.stock.params["min_mm"] == list(STOCK_MIN)
-    assert task.stock.params["max_mm"] == list(STOCK_MAX)
-    assert task.original_part.params["pocket_min_mm"] == list(POCKET_MIN)
-    assert task.original_part.params["pocket_max_mm"] == list(POCKET_MAX)
-    target = task.operation_target.geometry
-    assert target.params["pocket_min_mm"] == list(OP_POCKET_MIN)
-    assert target.params["pocket_max_mm"] == list(OP_POCKET_MAX)
-    assert OP_POCKET_MIN[2] == task.original_part.params["pocket_min_mm"][2] == POCKET_MIN[2] == -6.0
-    assert OP_POCKET_MAX[2] == task.original_part.params["pocket_max_mm"][2] == POCKET_MAX[2] == 0.0
-    assert task.original_part != target
-    assert task.operation_target.excluded_volume_mm3 == 4554.0 == FRINGE_VOLUME_MM3
-    exact = (
-        (POCKET_MAX[0] - POCKET_MIN[0]) * (POCKET_MAX[1] - POCKET_MIN[1])
-        - (OP_POCKET_MAX[0] - OP_POCKET_MIN[0])
-        * (OP_POCKET_MAX[1] - OP_POCKET_MIN[1])
-    ) * (POCKET_MAX[2] - POCKET_MIN[2])
-    assert exact == task.operation_target.excluded_volume_mm3
-    assert REACH_MARGIN_MM >= task.tool.holder_radius_mm + 0.5
-    assert "declared task reachability choice" in task.operation_target.exclusion_reason
-    assert "not a proof" in task.operation_target.exclusion_reason
-    assert task.tool.holder_radius_mm > task.tool.cutter_radius_mm
-    assert task.tool.holder_bottom_mm == task.tool.flute_length_mm
-    assert task.tolerances.rapid_penetration_mm == 0.0
-    assert task.grid.origin_mm == STOCK_MIN
+    assert task.task_id == "dev-pocket-island-000-v2"
+    assert task.grid.voxel_mm == GRID_PITCH == 0.25
+    assert task.grid.shape == (240, 160, 48)
     assert task.grid.extent_mm == tuple(hi - lo for lo, hi in zip(STOCK_MIN, STOCK_MAX))
+    original = task.original_part.params
+    target = task.operation_target.geometry.params
+    for key in ("box_min_mm", "box_max_mm", "pocket_min_mm", "pocket_max_mm",
+                "island_min_mm", "island_max_mm"):
+        assert target[key] == original[key]
+    assert OP_POCKET_MIN == POCKET_MIN and OP_POCKET_MAX == POCKET_MAX
+    radius = target[CORNER_RADIUS_PARAM]
+    depth = POCKET_MAX[2] - POCKET_MIN[2]
+    assert radius == task.tool.cutter_radius_mm == 2.0
+    exact_volume = 4 * (1 - math.pi / 4) * radius**2 * depth
+    assert task.operation_target.excluded_volume_mm3 == target["grid_excluded_volume_mm3"]
+    assert exact_volume == pytest.approx(20.601776313844965)
+    assert exact_volume < 0.01 * (
+        (POCKET_MAX[0] - POCKET_MIN[0])
+        * (POCKET_MAX[1] - POCKET_MIN[1]) * depth
+    )
+    assert "No wall corridor inset" in task.operation_target.exclusion_reason
+    assert target["continuous_excluded_volume_mm3"] == exact_volume
+    assert target["grid_exclusion_tolerance_mm3"] == 0.0
+    assert target["grid_excluded_voxels"] == int(round(
+        target["grid_excluded_volume_mm3"] / task.grid.voxel_mm ** 3
+    ))
+    holder = target["holder_clearance"]
+    assert holder["bottom_at_floor_mm"] == 4.0
+    assert holder["above_stock_mm"] == 4.0
+    assert holder["above_stock_mm"] > holder["qualification_and_cell_margin_mm"]
+    assert task.tool.holder_bottom_mm == task.tool.flute_length_mm
+    assert task.tolerances.local_surface_error_mm >= 2 * task.grid.voxel_mm
+    assert task.tolerances.rapid_penetration_mm == 0.0
 
 
 def test_analytic_source_fields_match_declared_target_not_original_part():
@@ -138,42 +159,48 @@ def test_analytic_source_fields_match_declared_target_not_original_part():
     stock, part, required, retained = source_fields(task)
     assert stock.shape == part.shape == required.shape == retained.shape == task.grid.shape
     assert np.all(np.isfinite(stock)) and np.all(np.isfinite(part))
-    # This point belongs to the original pocket, but to the retained fringe
-    # of the deliberately inset operation target, not to required removal.
-    x, y, z = task.grid.cell_centre_mm(10, 5, 6)
-    assert (x, y, z) == (-19.5, -14.5, -5.5)
-    assert POCKET_MIN[0] < x < POCKET_MAX[0]
-    assert POCKET_MIN[1] < y < POCKET_MAX[1]
-    assert POCKET_MIN[2] < z < POCKET_MAX[2]
-    assert not (OP_POCKET_MIN[0] <= x <= OP_POCKET_MAX[0])
-    assert part[10, 5, 6] < 0
-    assert not required[10, 5, 6]
-    assert retained[10, 5, 6]
-    # The stock outside the original pocket remains stock too: an island
-    # union cannot turn the entire non-island outer block into empty space.
-    assert stock[0, 0, 0] < 0 and part[0, 0, 0] < 0
-    assert retained[0, 0, 0]
-    # Strict negative-inside convention: centres exactly on the inset walls
-    # (x=+/-18.5, y=+/-10.5) and island perimeter (x/y=+/-3.5) are not
-    # interior cells. Required cells = (35*19 - 3*3) per layer, six layers.
-    assert np.count_nonzero(required) == (35 * 19 - 3 * 3) * 6 == 3936
-    # Zero-distance boundary cells are neither required nor retained under
-    # the strict negative-inside convention, so a volume complement here is
-    # not a continuous-volume conservation assertion.
-    assert np.any((stock < 0) & ~required & ~retained)
-    below_pocket = (5, 5, 4)
-    assert part[below_pocket] < 0
-    assert not required[below_pocket]
-    assert retained[below_pocket]
-    centre = (30, 25, 6)
-    assert task.grid.cell_centre_mm(*centre) == (0.5, 5.5, -5.5)
-    assert required[centre] and not retained[centre]
-    assert part[centre] > 0
-    island = (29, 19, 6)
-    assert not required[island]
-    assert retained[island]
-    assert part[island] < 0
+    original = original_part_field(task)
+    assert not np.any((original <= 0) & ~(part <= 0))
+
+    reachable_corner = _index(task, (23.875, 14.125, -0.125))
+    assert (23.875 - 22.0) ** 2 + (14.125 - 14.0) ** 2 < 4.0
+    assert required[reachable_corner]
+    assert not retained[reachable_corner]
+    assert part[reachable_corner] > 0
+    fillet = _index(task, (23.875, 15.875, -0.125))
+    assert (23.875 - 22.0) ** 2 + (15.875 - 14.0) ** 2 > 4.0
+    assert not required[fillet]
+    assert retained[fillet]
+    assert part[fillet] < 0 < original[fillet]
+    waste = _index(task, (0.125, 5.375, -5.875))
+    assert required[waste] and not retained[waste]
+    assert part[waste] > 0
+    island = _index(task, (0.125, 0.125, -5.875))
+    assert not required[island] and retained[island] and part[island] < 0
+    below_floor = _index(task, (0.125, 0.125, -6.125))
+    assert not required[below_floor]
+    assert retained[below_floor] and part[below_floor] < 0
+    outside = (0, 0, 0)
+    assert stock[outside] < 0 and part[outside] < 0 and retained[outside]
     assert not np.any(required & retained)
+
+    params = task.operation_target.geometry.params
+    excluded = (part <= 0) & (original > 0)
+    measured = int(excluded.sum())
+    assert measured == params["grid_excluded_voxels"]
+    assert measured * task.grid.voxel_mm ** 3 == task.operation_target.excluded_volume_mm3
+    assert task.operation_target.excluded_volume_mm3 == 18.0
+    assert measured < int(np.count_nonzero(required) / 100)
+    # Independently count one positive corner using its physical coordinates,
+    # not the target-construction helper. All four corners are symmetric.
+    pitch = task.grid.voxel_mm
+    xs = np.arange(22.0 + pitch / 2, 24.0, pitch)
+    ys = np.arange(14.0 + pitch / 2, 16.0, pitch)
+    zs = np.arange(-6.0 + pitch / 2, 0.0, pitch)
+    xx, yy, zz = np.meshgrid(xs, ys, zs, indexing="ij")
+    corner_outside_disk = (xx - 22.0) ** 2 + (yy - 14.0) ** 2 > 2.0 ** 2
+    assert 4 * int(corner_outside_disk.sum()) == measured
+
     other = build_pilot_task(voxel_mm=0.5)
     assert source_fields(other)[0].shape == other.grid.shape == (120, 80, 24)
     assert other.grid.extent_mm == task.grid.extent_mm
@@ -184,6 +211,67 @@ def test_analytic_source_fields_match_declared_target_not_original_part():
     )
     with pytest.raises(ValueError, match="inverted"):
         source_fields(replace(task, stock=inverted_stock))
+    with pytest.raises(ValueError, match="fillet radius"):
+        source_fields(replace(task, tool=replace(task.tool, cutter_radius_mm=1.0)))
+
+
+def test_wrong_pilot_corner_radius_is_rejected_by_exclusion_check():
+    # Two actual physical pocket corners at the right wall, at the pilot's
+    # 0.25 mm grid. Each has twelve unreachable cells per Z station at the
+    # correct cutter radius. Each 2x2 mm corner box spans six mm vertically.
+    fixture = F.make_fixture(
+        "wrong-corner-radius", (), F.flat_tool(2.0, 10.0),
+        0.0, "negative exclusion-mask check",
+        stock_lo=(22.0, -16.0, -6.0), stock_hi=(24.0, 16.0, 0.0),
+        voxel=0.25, initial=(0.0, 0.0, 10.0),
+    )
+    params = {
+        "primitive": "box_minus_pocket",
+        "box_min_mm": [22.0, -16.0, -6.0],
+        "box_max_mm": [24.0, 16.0, 0.0],
+        "pocket_min_mm": [-24.0, -16.0, -6.0],
+        "pocket_max_mm": [24.0, 16.0, 0.0],
+        # The island is above the small stock fixture and adds no material.
+        "island_min_mm": [22.0, 14.0, 1.0],
+        "island_max_mm": [24.0, 16.0, 2.0],
+    }
+    original = C.GeometrySource(kind="analytic", params=params, frame=C.Frame.WORK)
+    task = replace(
+        fixture.task,
+        original_part=original,
+        operation_target=C.OperationTarget(
+            geometry=replace(original, params={**params, CORNER_RADIUS_PARAM: 2.0}),
+            excluded_volume_mm3=9.0,
+            exclusion_reason="two independently counted corner quadrants",
+        ),
+    )
+    correct = PostedEvaluator().evaluate_candidate(
+        task, fixture.motion, {"exclusion_tolerance_mm3": 0.0}
+    )
+    assert correct.coverage == C.Coverage.COMPLETE
+    assert correct.metrics["excluded_volume_mm3"].value == 9.0
+    assert correct.geometry_pass is False  # this query deliberately executes no cut
+    # Continuous closed-form diagnostic for two quadrants, independently of
+    # the target mask: 2 * (1 - pi/4) * 2^2 * 6 mm^3.
+    continuous = 2 * (1 - math.pi / 4) * 2.0 ** 2 * 6.0
+    assert continuous == pytest.approx(10.300888156922482)
+    assert correct.metrics["excluded_volume_mm3"].value == 9.0
+
+    wrong_geometry = replace(
+        task.operation_target.geometry,
+        params={**params, CORNER_RADIUS_PARAM: 1.5},
+    )
+    wrong_task = replace(
+        task,
+        operation_target=replace(task.operation_target, geometry=wrong_geometry),
+    )
+    rejected = PostedEvaluator().evaluate_candidate(
+        wrong_task, fixture.motion, {"exclusion_tolerance_mm3": 0.0}
+    )
+    assert rejected.coverage == C.Coverage.UNSUPPORTED
+    assert rejected.geometry_pass is None
+    assert not rejected.efficiency_eligible
+    assert any("excluded volume mismatch" in reason for reason in rejected.coverage_reasons)
 
 
 def test_seed_is_typed_line_only_and_avoids_below_stock_cross_disc_transfers():
@@ -196,6 +284,24 @@ def test_seed_is_typed_line_only_and_avoids_below_stock_cross_disc_transfers():
     assert sum(s.tag == "outer-finish" for s in motion.segments) == 4
     assert all(s.path_length_mm > 0 for s in motion.segments)
     assert sum(s.tag == "island-finish" for s in motion.segments) == 4
+    perimeter = [s for s in motion.segments if s.tag == "outer-finish"]
+    assert [(s.start_mm, s.end_mm) for s in perimeter] == [
+        ((22.0, -14.0, -6.0), (22.0, 14.0, -6.0)),
+        ((22.0, 14.0, -6.0), (-22.0, 14.0, -6.0)),
+        ((-22.0, 14.0, -6.0), (-22.0, -14.0, -6.0)),
+        ((-22.0, -14.0, -6.0), (22.0, -14.0, -6.0)),
+    ]
+    clear_radius = IslandSeedSpec().raster_clear_radius
+    for segment in motion.segments:
+        if segment.tag != "raster-link":
+            continue
+        y = segment.end_mm[1]
+        if abs(y) < clear_radius:
+            expected_x = math.sqrt(clear_radius**2 - y**2)
+            assert abs(segment.end_mm[0]) == pytest.approx(expected_x, abs=1e-9)
+        else:
+            assert segment.end_mm[0] == 0.0
+        assert math.hypot(segment.end_mm[0], y) >= clear_radius - 1e-9
     for segment in motion.segments:
         if segment.kind == C.SegmentKind.RAPID:
             assert segment.start_mm[2] > 0 and segment.end_mm[2] > 0
@@ -280,8 +386,8 @@ def test_seed_is_typed_line_only_and_avoids_below_stock_cross_disc_transfers():
 
 def test_seed_clearance_arguments_reject_under_sized_offsets():
     task = build_pilot_task()
-    with pytest.raises(ValueError, match="outer clearance"):
-        pocket_with_island_seed(task, IslandSeedSpec(outer_xy=(21.0, 10.0)))
+    with pytest.raises(ValueError, match="outer perimeter"):
+        pocket_with_island_seed(task, IslandSeedSpec(outer_xy=(23.0, 14.0)))
     with pytest.raises(ValueError, match="holder above stock"):
         pocket_with_island_seed(task, IslandSeedSpec(floor_z=-15.0))
     with pytest.raises(ValueError, match="odd"):
@@ -362,7 +468,12 @@ def test_motion_comparison_rejects_physical_and_semantic_corruption():
 def test_contact_disagreement_is_scoped_and_rejects_deep_or_sloped_cases():
     task = build_pilot_task()
     motion = pocket_with_island_seed(task)
-    grazing = contact_boundary_diagnostics(task, motion, [[11, 12, 6]])
+    # Shift only the diagnostic grid, so a known cell at (20,0,-5.75) is
+    # exactly tangent to the outer X=22 wall, not approximately grazed.
+    grazing_task = replace(
+        task, grid=replace(task.grid, origin_mm=(-30.125, -20.125, -12.125))
+    )
+    grazing = contact_boundary_diagnostics(grazing_task, motion, [[200, 80, 25]])
     assert grazing["status"] == "boundary_contacts_only"
     assert grazing["scope_supported"] is True
     assert grazing["max_abs_contact_distance_mm"] == 0.0
@@ -432,9 +543,10 @@ def test_artifact_writer_preserves_hashes_sources_and_typed_records(tmp_path):
     metrics = json.loads((tmp_path / "metrics.json").read_text())
     assert metrics["reference_geometry_pass"] is None
     assert metrics["production_posted_evaluator"] == {
-        "status": "not_integrated_pending_T1.3",
-        "camotics_cross_check": "not_run_pending_T1.3",
+        "rs274": {"status": "synthetic_unit_fixture"},
+        "haas": {"status": "synthetic_unit_fixture"},
     }
+    assert metrics["camotics_cross_check"]["status"] == "not_run"
     assert np.load(tmp_path / "sim_removed_mask.npy").shape == task.grid.shape
     assert not (tmp_path / "sim_final_stock.npy").exists()
     np.testing.assert_array_equal(np.load(tmp_path / "initial_trajectory.npy"), actual)
@@ -497,7 +609,12 @@ def test_real_nominal_pipeline_and_evidence(tmp_path):
     assert completion["target_remaining_voxels"] == 0
     assert completion["retained_part_removed_voxels"] == 0
     assert metrics["reference_geometry_pass"] is None
-    assert metrics["production_posted_evaluator"]["status"] == "not_integrated_pending_T1.3"
+    assert completion["sampled_geometry_pass"] is True
+    for dialect in ("rs274", "haas"):
+        production_summary = metrics["production_posted_evaluator"][dialect]
+        assert production_summary["status"] == "evaluated"
+        assert production_summary["geometry_pass"] is True
+    assert metrics["camotics_cross_check"]["status"] == "not_run"
     assert metrics["training_execution"]["max_position_error_mm"] <= 0.002
     assert not metrics["training_execution"]["speed_clipping"]
     assert len(motion.segments) > 12  # not a one/two-segment toy or hidden no-cut pass
@@ -522,30 +639,46 @@ def test_real_nominal_pipeline_and_evidence(tmp_path):
     assert trained[0, 2] > 1.0  # start Z=10 is above, not at, stock top Z=0
     for name, dialect in (("rs274", C.Dialect.RS274), ("haas", C.Dialect.HAAS)):
         evaluation = C.loads((output / f"eval_posted_{name}.json").read_text())
-        assert evaluation.evaluator_id == "reference_carve"
+        assert evaluation.evaluator_id == "posted_hard/production"
         assert evaluation.coverage == C.Coverage.COMPLETE
         assert evaluation.safety_pass is True
-        assert evaluation.geometry_pass is None
-        assert evaluation.efficiency_eligible is False
+        assert evaluation.geometry_pass is True
+        assert evaluation.efficiency_eligible is True
         assert evaluation.nc_hash == C.nc_hash((output / f"{name}.nc").read_bytes())
         assert evaluation.dialect == dialect
-        assert evaluation.discretization["voxel_mm"] == 1.0
-        assert evaluation.discretization["settings"]["subdivisions"] == 8
+        assert evaluation.discretization["voxel_mm"] == task.grid.voxel_mm == 0.25
+        assert evaluation.discretization["settings"]["max_step_mm"] == task.tool.cutter_radius_mm / 2
+        assert evaluation.discretization["settings"]["expected_nc_hash"] == evaluation.nc_hash
+        assert evaluation.discretization["settings"]["exclusion_tolerance_mm3"] == (
+            task.operation_target.geometry.params["grid_exclusion_tolerance_mm3"]
+        )
         assert evaluation.metrics["removed_volume_mm3"].value > 0
-        assert evaluation.metrics["residual_volume_mm3"].value is None
-        assert evaluation.metrics["gouge_volume_mm3"].value is None
+        assert evaluation.metrics["residual_volume_mm3"].value <= task.tolerances.completion_residual_mm3
+        assert evaluation.metrics["gouge_volume_mm3"].value == 0.0
+        assert evaluation.metrics["max_surface_error_mm"].value <= task.tolerances.local_surface_error_mm
+        assert evaluation.metrics["excluded_volume_mm3"].value == pytest.approx(
+            task.operation_target.geometry.params["grid_excluded_volume_mm3"]
+        )
         restored = parse_motion_plan(
             (output / f"{name}.nc").read_text(), task, dialect=dialect
         )
         comparison = compare_motion(motion, restored)
+        reference = C.loads((output / f"reference_{name}.json").read_text())
+        assert reference.evaluator_id == "reference_carve"
+        assert reference.geometry_pass is None
+        assert reference.efficiency_eligible is False
+        assert reference.coverage == C.Coverage.COMPLETE
+        assert reference.safety_pass is True
+        assert reference.metrics["residual_volume_mm3"].value is None
+        assert reference.metrics["gouge_volume_mm3"].value is None
         fresh_trace = run_reference(task, restored, {"subdivisions": 8})
         fresh_evaluation = replace(
             fresh_trace.result,
-            nc_hash=evaluation.nc_hash,
+            nc_hash=reference.nc_hash,
             dialect=dialect,
             motion_hash=None,
         )
-        assert fresh_evaluation == evaluation
+        assert fresh_evaluation == reference
         disagreement = np.logical_xor(fresh_trace.removed, removed)
         contact = contact_boundary_diagnostics(task, restored, np.argwhere(disagreement))
         assert contact["status"] in {"identical", "boundary_contacts_only"}

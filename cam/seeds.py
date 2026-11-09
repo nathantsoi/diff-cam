@@ -22,8 +22,8 @@ Point = tuple[float, float, float]
 class IslandSeedSpec:
     """Physical source and clearance parameters for one correction-free seed."""
 
-    #: 2 mm cut from the 18.5 x 10.5 mm operation walls stays in the target.
-    outer_xy: tuple[float, float] = (16.5, 8.5)
+    #: Full-radius centres on the 24 x 16 mm original walls: +/-22,+/-14 mm.
+    outer_xy: tuple[float, float] = (22.0, 14.0)
     pocket_half_x: float = 24.0
     pocket_half_y: float = 16.0
     island_half_side: float = 3.5
@@ -86,8 +86,8 @@ def pocket_with_island_seed(
     outer_wall_gap_y = spec.pocket_half_y - abs(spec.outer_xy[1])
     island_outer_corner = math.sqrt(2.0) * spec.island_half_side
     inner_gap = spec.raster_clear_radius - island_outer_corner - radius
-    if min(outer_wall_gap_x, outer_wall_gap_y) < max(radius, task.tool.holder_radius_mm) + spec.boundary_offset_margin_mm:
-        raise ValueError("outer clearance offset is insufficient for the largest assembly radius")
+    if min(outer_wall_gap_x, outer_wall_gap_y) < radius:
+        raise ValueError("outer perimeter must keep the finite cutter inside original walls")
     if inner_gap < spec.boundary_offset_margin_mm:
         raise ValueError("inner island clearance leaves less than the cutter safety margin")
     # The finishing square touches only the intended island walls. Bulk links
@@ -153,6 +153,9 @@ def pocket_with_island_seed(
     ys = [(-oy + 2.0 * oy * index / (spec.y_rows - 1)) for index in range(spec.y_rows)]
     xmin = -ox
 
+    def raster_clip(y):
+        return math.sqrt(max(0.0, spec.raster_clear_radius**2 - y**2))
+
     def feed_at_floor(end: Point, tag: str) -> None:
         """Cut only outside the retained square, lifting unsafe floor links."""
         if current_work[2] != spec.floor_z or end[2] != spec.floor_z:
@@ -192,25 +195,25 @@ def pocket_with_island_seed(
     # Complete the left-side strips first. Outward returns and Y links never
     # cross the island; no right-side point is entered from the opposite wall.
     for row, y in enumerate(ys):
-        clipped = math.sqrt(max(0.0, spec.raster_clear_radius**2 - y**2))
+        clipped = raster_clip(y)
         outer_x, inner_x = xmin, -clipped
         if inner_x != outer_x:
             append(C.SegmentKind.FEED, (inner_x, y, spec.floor_z), f"raster-left-{row:02d}-inward")
             append(C.SegmentKind.FEED, (outer_x, y, spec.floor_z), f"raster-left-{row:02d}-outward")
         if row + 1 < len(ys):
-            feed_at_floor((inner_x, ys[row + 1], spec.floor_z), "raster-link")
+            feed_at_floor((-raster_clip(ys[row + 1]), ys[row + 1], spec.floor_z), "raster-link")
 
     append(C.SegmentKind.FEED, (outer_x, ys[-1], spec.home_z), "panel-retract")
     append(C.SegmentKind.RAPID, (clipped, ys[-1], spec.home_z), "panel-reposition")
     append(C.SegmentKind.FEED, (clipped, ys[-1], spec.floor_z), "plunge")
     for row, y in enumerate(reversed(ys)):
-        clipped = math.sqrt(max(0.0, spec.raster_clear_radius**2 - y**2))
+        clipped = raster_clip(y)
         outer_x, inner_x = ox, clipped
         if inner_x != outer_x:
             append(C.SegmentKind.FEED, (inner_x, y, spec.floor_z), f"raster-right-{row:02d}-inward")
             append(C.SegmentKind.FEED, (outer_x, y, spec.floor_z), f"raster-right-{row:02d}-outward")
         if row + 1 < len(ys):
-            feed_at_floor((inner_x, ys[-row - 2], spec.floor_z), "raster-link")
+            feed_at_floor((raster_clip(ys[-row - 2]), ys[-row - 2], spec.floor_z), "raster-link")
 
     # Join the current outside-corner point into a complete outer rectangle.
     current_xy = current_work[:2]

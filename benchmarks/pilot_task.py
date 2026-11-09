@@ -1,18 +1,15 @@
 """Create and independently validate one reachable dev pocket-with-island.
 
-The stock is complete, bounded box stock. The operation target is a pocket
-around a square island; an outer-wall fringe has a declared exclusion and
-volume from a conservative access-corridor choice, not a proof of global
-inaccessibility. The original part remains a separate geometric record. The seed is
-an in-repo heuristic from ``cam.seeds``, not adaptive CAM. The
-nominal program is executed through DeltaSpline, differentiable and hard stock
-execution, posts, typed parsing, and ``verification.reference_carve``.
-
-Original reference coverage computes stock motion chronology, not operation-
-target residual/gouge from ``box_minus_pocket`` (currently deferred to T1.3).
-Therefore completion is additionally evaluated by explicit cellwise part-mask
-counts using the same physical grid; reference ``geometry_pass=None`` remains
-visible rather than being converted into an invented passing result.
+The stock is complete, bounded box stock. The original part retains the full
+pocket and island; only finite-cutter unreachable corner fillets are excluded
+from the operation, with continuous and grid-resolved exclusion measurements.
+The seed is an in-repository heuristic from ``cam.seeds``, not adaptive CAM.
+The nominal seed is executed through DeltaSpline, differentiable and hard
+stock execution, both posts and typed reparses. Reference chronology and
+shared sampled-grid metrics are then cross-checked with the production
+posted-path evaluator. ``geometry_pass`` comes from declared completion,
+gouge and local-surface tolerances; unavailable or failing coverage is never
+rewritten as a pass.
 """
 
 from __future__ import annotations
@@ -31,8 +28,10 @@ import taichi as ti
 from algorithms.parameterization import DeltaSpline
 from benchmarks import contracts as C
 from cam.gcode_parser import parse_motion_plan
+from cam.posted_evaluator import evaluate_posted_gcode
 from cam.posts import post_motion_plan
 from cam.seeds import pocket_with_island_seed, seed_deltas_mm
+from simulator import csg_metrics
 from simulator.csg_simulator import CSGSimulatorDelta
 from taichi.lang import impl as ti_impl
 from verification.reference_carve import run_reference
@@ -45,33 +44,17 @@ POCKET_MIN = (-24.0, -16.0, -6.0)
 POCKET_MAX = (24.0, 16.0, 0.0)
 ISLAND_MIN = (-3.5, -3.5, -6.0)
 ISLAND_MAX = (3.5, 3.5, 0.0)
-GRID_PITCH = 1.0
-# Operation-target inset, not an invisible relaxation. This conservative
-# line-only dev operation uses the largest assembly radius for its access
-# corridor, including 0.5 mm additional margin. It is a declared reachability
-# choice for this task, not a proof that every cutter/flute could not finish
-# the original boundary. The original part remains separately recorded.
-REACH_MARGIN_MM = 5.5
-# Inset ONLY the X/Y walls; preserve the six-millimetre floor-to-top depth.
-OP_POCKET_MIN = (
-    POCKET_MIN[0] + REACH_MARGIN_MM,
-    POCKET_MIN[1] + REACH_MARGIN_MM,
-    POCKET_MIN[2],
-)
-OP_POCKET_MAX = (
-    POCKET_MAX[0] - REACH_MARGIN_MM,
-    POCKET_MAX[1] - REACH_MARGIN_MM,
-    POCKET_MAX[2],
-)
-FRINGE_VOLUME_MM3 = (
-    (POCKET_MAX[0] - POCKET_MIN[0]) * (POCKET_MAX[1] - POCKET_MIN[1])
-    - (OP_POCKET_MAX[0] - OP_POCKET_MIN[0]) * (OP_POCKET_MAX[1] - OP_POCKET_MIN[1])
-) * (POCKET_MAX[2] - POCKET_MIN[2])
+GRID_PITCH = 0.25
+# Full pocket walls. Only cutter-unreachable corner fillets are excluded;
+# there is deliberately no whole-side inset/corridor in the revised task.
+OP_POCKET_MIN = POCKET_MIN
+OP_POCKET_MAX = POCKET_MAX
 SCHEMA_NAME = "box_minus_pocket"
+CORNER_RADIUS_PARAM = "pocket_unreached_corner_radius_mm"
 
 
 def build_pilot_task(voxel_mm: float = GRID_PITCH) -> C.TaskSpec:
-    """The one declared dev task with physically accessible outer clearance."""
+    """The full-pocket dev task with only finite-tool corner exclusions."""
     stock_size = tuple((hi - lo) / voxel_mm for lo, hi in zip(STOCK_MIN, STOCK_MAX))
     if any(int(round(length)) != length for length in stock_size):
         raise ValueError("pilot requires integral isotropic GridSpec dimensions")
@@ -83,66 +66,67 @@ def build_pilot_task(voxel_mm: float = GRID_PITCH) -> C.TaskSpec:
         kind="analytic", params={"primitive": "box", "min_mm": list(STOCK_MIN),
                                   "max_mm": list(STOCK_MAX)},
     )
-    def part_source(pocket_min, pocket_max, fringe_volume):
-        return C.GeometrySource(
-            kind="analytic",
-            params={
-                "primitive": SCHEMA_NAME,
-                "box_min_mm": list(STOCK_MIN), "box_max_mm": list(STOCK_MAX),
-                "pocket_min_mm": list(pocket_min), "pocket_max_mm": list(pocket_max),
-                "island_min_mm": list(ISLAND_MIN), "island_max_mm": list(ISLAND_MAX),
-                "fringe_volume_mm3": fringe_volume,
-            },
-        )
-
-    # Do not silently rewrite original_part into the inset operation target.
-    part = part_source(POCKET_MIN, POCKET_MAX, 0.0)
-    operation_part = part_source(OP_POCKET_MIN, OP_POCKET_MAX, FRINGE_VOLUME_MM3)
+    original_part = C.GeometrySource(
+        kind="analytic",
+        params={
+            "primitive": SCHEMA_NAME,
+            "box_min_mm": list(STOCK_MIN), "box_max_mm": list(STOCK_MAX),
+            "pocket_min_mm": list(POCKET_MIN), "pocket_max_mm": list(POCKET_MAX),
+            "island_min_mm": list(ISLAND_MIN), "island_max_mm": list(ISLAND_MAX),
+        },
+    )
+    tool = C.ToolAssembly(
+        cutter_kind=C.CutterKind.FLAT, cutter_radius_mm=2.0,
+        flute_length_mm=10.0, shank_radius_mm=2.0,
+        holder_bottom_mm=10.0, holder_radius_mm=5.0,
+        holder_height_mm=32.0, tool_number=1,
+    )
+    tolerances = C.Tolerances(
+        completion_residual_mm3=2.0,
+        gouge_volume_mm3=0.0,
+        # 0.5 mm local error is twice the 0.25 mm cell-centre spacing,
+        # not a tolerance below the resolved grid pitch.
+        local_surface_error_mm=0.5,
+        clearance_mm=0.25,
+        # No rapid ever cuts or approaches stock: all below-stock transitions
+        # are feed, and every high reposition stays strictly above stock top.
+        rapid_penetration_mm=0.0,
+    )
+    operation_part = derive_reachable_target(stock, original_part, tool, grid,
+                                             tolerances.clearance_mm)
     return C.TaskSpec(
-        task_id="dev-pocket-island-000-v1", family="pocket_island",
+        task_id="dev-pocket-island-000-v2", family="pocket_island",
         split=C.Split.DEV,
         source=C.SourceInfo(
-            origin="procedural:pilot-pocket-with-island@1",
+            origin="procedural:pilot-pocket-with-island@2-reachable",
             license="MIT",
-            notes="Single bounded dev pocket with square island. No performance-based exclusions.",
+            notes="Full pocket with square island; only finite-tool inaccessible corner fillets excluded.",
         ),
         length_unit="mm",
         stock=stock,
-        original_part=part,
+        original_part=original_part,
         operation_target=C.OperationTarget(
             geometry=operation_part,
-            excluded_volume_mm3=FRINGE_VOLUME_MM3,
+            excluded_volume_mm3=operation_part.params["grid_excluded_volume_mm3"],
             exclusion_reason=(
-                "The outer-wall fringe between the 48x32 mm original pocket and "
-                "37x21 mm inset is excluded for this dev operation. Its access "
-                "corridor uses the 5 mm holder radius plus 0.5 mm extra margin "
-                "conservatively; this is a declared task reachability choice, not "
-                "a proof that the full pocket is inaccessible to every assembly."
+                "Only four corner fillets unreachable by a 2 mm-radius flat cutter "
+                "are excluded. The declared volume is the exact grid-cell exclusion; "
+                f"{operation_part.params['continuous_excluded_volume_mm3']} mm^3 is the "
+                "continuous geometric diagnostic, not the grid declaration. At Z=-6 mm, "
+                "holder/shank bottoms are 4 mm above stock with positive cell-clearance "
+                "margin. No wall corridor inset."
             ),
         ),
         grid=grid,
         work_to_machine=C.Transform.translation((0.0, 0.0, 0.0)),
         initial_state=C.MachineState(position_mm=(0.0, 0.0, 10.0), frame=C.Frame.MACHINE),
-        tool=C.ToolAssembly(
-            cutter_kind=C.CutterKind.FLAT, cutter_radius_mm=2.0,
-            flute_length_mm=10.0, shank_radius_mm=2.0,
-            holder_bottom_mm=10.0, holder_radius_mm=5.0,
-            holder_height_mm=32.0, tool_number=1,
-        ),
+        tool=tool,
         limits=C.MachineLimits(
             max_feed_mm_s=8.0, rapid_mm_s=80.0, max_accel_mm_s2=100.0,
             envelope_min_mm=(-40.0, -30.0, -20.0),
             envelope_max_mm=(40.0, 30.0, 60.0),
         ),
-        tolerances=C.Tolerances(
-            completion_residual_mm3=2.0,
-            gouge_volume_mm3=0.0,
-            local_surface_error_mm=0.5,
-            clearance_mm=0.25,
-            # Do not use the band to invent clearance through stock. Ordinary
-            # retracts start vertically and rise above every retained surface.
-            rapid_penetration_mm=0.0,
-        ),
+        tolerances=tolerances,
     )
 
 
@@ -169,32 +153,227 @@ def box_field(points, lower, upper):
     return outside + interior
 
 
+def _geometry_fields(stock, geometry, grid):
+    """Return analytic stock, pocket, island and original-part fields in mm."""
+    if stock.kind != "analytic" or stock.params.get("primitive") != "box":
+        raise ValueError("pilot requires analytic bounded box stock")
+    if geometry.kind != "analytic" or geometry.params.get("primitive") != SCHEMA_NAME:
+        raise ValueError("pilot requires the declared box-minus-pocket geometry")
+    points = grid_points(grid)
+    stock_d = box_field(points, stock.params["min_mm"], stock.params["max_mm"])
+    pocket_d = box_field(
+        points, geometry.params["pocket_min_mm"], geometry.params["pocket_max_mm"]
+    )
+    island_d = box_field(
+        points, geometry.params["island_min_mm"], geometry.params["island_max_mm"]
+    )
+    # Same material-sign convention as posted_evaluator._analytic_mask:
+    # bounded box minus pocket, UNION the retained island.
+    original = np.maximum(stock_d, -np.maximum(pocket_d, -island_d))
+    return stock_d, pocket_d, island_d, original
+
+
+def _corner_fillet_fields(stock, original_part, tool, grid, radius_mm):
+    """Four original-pocket corner regions outside the finite cutter sweep."""
+    if tool.cutter_kind != C.CutterKind.FLAT:
+        raise ValueError("reachable pilot geometry currently requires a flat upright cutter")
+    if radius_mm != tool.cutter_radius_mm:
+        raise ValueError("fillet radius must be derived from, and match, tool.cutter_radius_mm")
+    points = grid_points(grid)
+    lower = original_part.params["pocket_min_mm"]
+    upper = original_part.params["pocket_max_mm"]
+    fields = []
+    for sx in (0, 1):
+        for sy in (0, 1):
+            cx = upper[0] - radius_mm if sx else lower[0] + radius_mm
+            cy = upper[1] - radius_mm if sy else lower[1] + radius_mm
+            lo = (
+                cx if sx else lower[0],
+                cy if sy else lower[1],
+                lower[2],
+            )
+            hi = (
+                upper[0] if sx else cx,
+                upper[1] if sy else cy,
+                upper[2],
+            )
+            corner_box = box_field(points, lo, hi)
+            # A cut centred at (cx,cy) reaches a disk of radius r. Retain
+            # only the corner-box material outside that closed disk. Its exact
+            # per-corner area is (1-pi/4)*r^2, not (1-pi/4) times the pocket.
+            outside_disk = radius_mm - np.hypot(points[0] - cx, points[1] - cy)
+            fields.append(np.maximum(corner_box, outside_disk))
+    return fields
+
+
+def _holder_floor_margin_mm(stock, original_part, tool, grid, clearance_mm):
+    """Non-cutting assembly clearance above stock at the pocket floor."""
+    pocket_floor = original_part.params["pocket_min_mm"][2]
+    stock_top = stock.params["max_mm"][2]
+    shank_height = max(0.0, tool.holder_bottom_mm - tool.flute_length_mm)
+    lowest_noncutting_base = pocket_floor + (
+        min(tool.holder_bottom_mm, tool.flute_length_mm)
+        if shank_height > 0 else tool.holder_bottom_mm
+    )
+    above_stock = lowest_noncutting_base - stock_top
+    allowance = clearance_mm + math.sqrt(3.0) * grid.voxel_mm / 2.0
+    if above_stock < allowance:
+        raise ValueError(
+            "holder/shank no longer clears the stock at the pocket floor: "
+            f"{above_stock} mm < qualification+cell margin {allowance} mm"
+        )
+    return {
+        "bottom_at_floor_mm": lowest_noncutting_base,
+        "stock_top_mm": stock_top,
+        "above_stock_mm": above_stock,
+        "qualification_and_cell_margin_mm": allowance,
+        "shank_height_mm": shank_height,
+    }
+
+
+def derive_reachable_target(stock, original_part, tool, grid, clearance_mm):
+    """Add only physically unreachable corner fillets to the original part.
+
+    Wall access is not inset. At the floor the complete finite cutter can reach
+    x_min+r..x_max-r and y_min+r..y_max-r, leaving exactly four quarter-circle
+    complements in the original square pocket corners. Non-cutting shank and
+    holder must actually clear the stock top there, including cell/qualification
+    margin; no holder radius is used to manufacture a wall-wide exclusion.
+    The original analytic field gives continuous corner-fillet area as a
+    diagnostic, while this function declares the grid-resolved exclusion in
+    the same units the evaluator scores. Grid and continuous quantities are
+    fixed before trajectory execution. There is no sampling tolerance: a
+    wrong corner mask must fail the evaluator's exact exclusion comparison.
+    """
+    if original_part.params.get("primitive") != SCHEMA_NAME:
+        raise ValueError("derivation requires the unchanged box-minus-pocket original part")
+    radius = float(tool.cutter_radius_mm)
+    holder = _holder_floor_margin_mm(stock, original_part, tool, grid, clearance_mm)
+    _, _, _, original = _geometry_fields(stock, original_part, grid)
+    fillets = _corner_fillet_fields(stock, original_part, tool, grid, radius)
+    original_mask = original <= 0.0
+    target_mask = original_mask | np.logical_or.reduce([field <= 0.0 for field in fillets])
+    if np.any(original_mask & ~target_mask):
+        raise AssertionError("operation target must retain all original-part cells")
+    excluded_cells = int(np.count_nonzero(target_mask & ~original_mask))
+    grid_volume = float(excluded_cells * grid.voxel_mm ** 3)
+    lo = original_part.params["pocket_min_mm"]
+    hi = original_part.params["pocket_max_mm"]
+    depth = hi[2] - lo[2]
+    continuous_volume = 4.0 * (1.0 - math.pi / 4.0) * radius ** 2 * depth
+    params = dict(original_part.params)
+    params.update({
+        CORNER_RADIUS_PARAM: radius,
+        "continuous_excluded_volume_mm3": continuous_volume,
+        "grid_excluded_voxels": excluded_cells,
+        "grid_excluded_volume_mm3": grid_volume,
+        "grid_exclusion_tolerance_mm3": 0.0,
+        "grid_exclusion_tolerance_policy": (
+            "exact grid-resolved declaration, independently checked analytic mask; "
+            "zero tolerance. Continuous volume is diagnostic only"
+        ),
+        "holder_clearance": holder,
+        "accessibility": (
+            "flat upright finite cutter on full original walls; union original "
+            "part with four corner boxes outside the radius cutter disks"
+        ),
+    })
+    return C.GeometrySource(kind="analytic", params=params, frame=C.Frame.WORK)
+
+
+def original_part_field(task):
+    """The unmodified original part's analytic field on the declared grid."""
+    return _geometry_fields(task.stock, task.original_part, task.grid)[3]
+
+
 def source_fields(task: C.TaskSpec):
-    """Exact analytic inputs for sampled stock and the inset operation target."""
-    if task.stock.params.get("primitive") != "box":
-        raise ValueError("pilot source_fields requires analytic bounded box stock")
+    """Sampled stock and tool-reachable target, with finite corner exclusions."""
     target = task.operation_target.geometry
     if target.params.get("primitive") != SCHEMA_NAME:
-        raise ValueError("pilot source_fields requires the declared box-minus-pocket target")
-    points = grid_points(task.grid)
-    stock = box_field(
-        points, task.stock.params["min_mm"], task.stock.params["max_mm"]
+        raise ValueError("operation target must retain the box-minus-pocket primitive")
+    for key in ("box_min_mm", "box_max_mm", "pocket_min_mm", "pocket_max_mm",
+                "island_min_mm", "island_max_mm"):
+        if target.params.get(key) != task.original_part.params.get(key):
+            raise ValueError(f"operation target changed original geometry: {key}")
+    if CORNER_RADIUS_PARAM not in target.params:
+        raise ValueError(f"missing derived {CORNER_RADIUS_PARAM}")
+    stock_d, pocket_d, island_d, original = _geometry_fields(
+        task.stock, task.original_part, task.grid
     )
-    pocket = box_field(
-        points, target.params["pocket_min_mm"], target.params["pocket_max_mm"]
+    fillets = _corner_fillet_fields(
+        task.stock, task.original_part, task.tool, task.grid,
+        target.params[CORNER_RADIUS_PARAM],
     )
-    island = box_field(
-        points, target.params["island_min_mm"], target.params["island_max_mm"]
-    )
-    # First subtract the pocket from bounded stock, then UNION the retained
-    # island back into that solid. max(stock, -pocket, island) would instead
-    # remove all non-island outer stock and is not box-minus-pocket-with-island.
-    part = np.minimum(np.maximum(stock, -pocket), island)
-    # negative_inside and strict interior match the simulator cell occupancy.
-    # These masks are disjoint even if a grid happens to hit a pocket boundary.
-    required = (pocket < 0.0) & (island > 0.0) & (stock < 0.0)
+    part = np.minimum.reduce([original, *fillets])
+    required = (pocket_d < 0.0) & (island_d > 0.0) & (stock_d < 0.0)
+    required &= np.logical_and.reduce([field > 0.0 for field in fillets])
     retained = (part < 0.0) & ~required
-    return stock, part, required, retained
+    return stock_d, part, required, retained
+
+
+def evaluate_sampled_geometry(task, sources, initial_mask, remaining_mask):
+    """Shared T1.3a grid metrics for actual sampled simulation stock.
+
+    Target and original-part masks deliberately include zero-distance surface
+    cells, matching the production analytic evaluator. The operation target's
+    declared exclusion is its exact grid-resolved value. The independently
+    computed production-style mask must match it with **zero** tolerance;
+    the continuous fillet volume is retained only as a diagnostic.
+    """
+    initial = np.asarray(initial_mask)
+    remaining = np.asarray(remaining_mask)
+    if initial.dtype != np.dtype(bool) or remaining.dtype != np.dtype(bool):
+        raise TypeError("sampled stock metrics require boolean occupancy masks")
+    if initial.shape != task.grid.shape or remaining.shape != task.grid.shape:
+        raise ValueError("sampled stock masks do not match the declared task grid")
+    source = sources["target"]
+    if source.kind != "sampled":
+        raise ValueError("target geometry evaluator requires an actual sampled GeometrySource")
+    target_path = Path(source.path)
+    target_bytes = target_path.read_bytes()
+    if C.sha256_bytes(target_bytes) != source.sha256:
+        raise RuntimeError("sampled target hash changed after immutable source declaration")
+    payload = np.load(target_path, allow_pickle=False)
+    if payload.shape != task.grid.shape or not np.all(np.isfinite(payload)):
+        raise ValueError("sampled target does not match finite declared grid geometry")
+    target = payload <= 0.0
+    original = original_part_field(task) <= 0.0
+    metric_revision = C.sha256_bytes(Path(csg_metrics.__file__).read_bytes())
+    metrics = csg_metrics.compute_grid_metrics(
+        remaining, target, initial, task.grid.voxel_mm,
+        original_part_mask=original, surface_origin_mm=task.grid.origin_mm,
+        declared_excluded_volume_mm3=task.operation_target.excluded_volume_mm3,
+        exclusion_tolerance_mm3=task.operation_target.geometry.params[
+            "grid_exclusion_tolerance_mm3"
+        ],
+    )
+    return {
+        "metrics": metrics,
+        "geometry_pass": C.geometry_pass_from_metrics(metrics, task.tolerances),
+        "metric_library_sha256": metric_revision,
+        "target_mask": target,
+        "original_part_mask": original,
+        "excluded_grid_volume_mm3": metrics["excluded_volume_mm3"].value,
+        "declared_continuous_excluded_volume_mm3": (
+            task.operation_target.geometry.params["continuous_excluded_volume_mm3"]
+        ),
+        "declared_grid_excluded_volume_mm3": task.operation_target.excluded_volume_mm3,
+        "grid_exclusion_tolerance_mm3": (
+            task.operation_target.geometry.params["grid_exclusion_tolerance_mm3"]
+        ),
+    }
+
+
+def production_settings(task):
+    """Grid-coherent posted-path refinement policy for this flat-tool task.
+
+    The evaluator applies its own next-power-of-two subdivision after this cap.
+    For the 2 mm pilot cutter, max_step_mm=1 supplies at least 64 substeps for
+    a 44 mm perimeter edge (four times the original nominal 8-interval test),
+    rather than assuming that every long line is covered by only eight intervals.
+    Volume/time uncertainty bounds remain enabled by the production defaults.
+    """
+    return {"max_step_mm": task.tool.cutter_radius_mm / 2.0}
 
 
 def fit_parameterization(motion: C.MotionPlan, controls: int = 12) -> DeltaSpline:
@@ -445,7 +624,13 @@ def evaluate_nominal(task, motion, parameterization, theta, source_paths,
     )
     hard = sim.forward_hard(len(motion.segments) + 1, clip_speeds=False)
     assert hard is None
-    by_cell_removed = (sim.stock.to_numpy()[0] < 0) & ~(sim.stock.to_numpy()[-1] < 0)
+    stock_history = sim.stock.to_numpy()
+    initial_stock = stock_history[0] < 0
+    remaining_stock = stock_history[-1] < 0
+    by_cell_removed = initial_stock & ~remaining_stock
+    sampled_evaluation = evaluate_sampled_geometry(
+        task, source_paths, initial_stock, remaining_stock
+    )
 
     # Cellwise checks are explicit semantic expectations, not C.geometry_pass.
     remaining_required = required & ~by_cell_removed
@@ -458,13 +643,23 @@ def evaluate_nominal(task, motion, parameterization, theta, source_paths,
         "target_remaining_voxels": int(np.count_nonzero(remaining_required)),
         "retained_part_removed_voxels": int(np.count_nonzero(unwanted_retained)),
         "residual_tolerance_mm3": task.tolerances.completion_residual_mm3,
-        "target_metrics_status": "independent-grid_completion_counts; target SDF floor/island params declared in task.json",
+        "target_metrics_status": "cell counts plus shared T1.3a sampled-grid metrics",
         "reference_geometry_pass": None,
+        "sampled_geometry_pass": sampled_evaluation["geometry_pass"],
+        "sampled_grid_metrics": {
+            name: json.loads(C.canonical_json(metric))
+            for name, metric in sampled_evaluation["metrics"].items()
+        },
+        "sampled_exclusion": {
+            "continuous_volume_mm3": task.operation_target.geometry.params[
+            "continuous_excluded_volume_mm3"
+        ],
+        "declared_grid_volume_mm3": task.operation_target.excluded_volume_mm3,
+            "grid_volume_mm3": sampled_evaluation["excluded_grid_volume_mm3"],
+            "sampling_tolerance_mm3": sampled_evaluation["grid_exclusion_tolerance_mm3"],
+        },
     }
-    completion_pass = (
-        target_residual_mm3 <= task.tolerances.completion_residual_mm3
-        and unwanted_removed_mm3 <= task.tolerances.gouge_volume_mm3
-    )
+    completion_pass = sampled_evaluation["geometry_pass"] is True
     evaluations = {}
     motion_errors = {}
     for dialect in (C.Dialect.RS274, C.Dialect.HAAS):
@@ -504,10 +699,63 @@ def evaluate_nominal(task, motion, parameterization, theta, source_paths,
                 "raw stock-mask disagreement is outside the supported grazing-"
                 f"contact scope: {contact_diagnostic}"
             )
-        result = replace(trace.result, nc_hash=nc_hash, dialect=dialect, motion_hash=None)
+        reference_result = replace(
+            trace.result, nc_hash=nc_hash, dialect=dialect, motion_hash=None
+        )
+        production = evaluate_posted_gcode(
+            task, nc_bytes, dialect,
+            {
+                **production_settings(task),
+                "expected_nc_hash": nc_hash,
+                "exclusion_tolerance_mm3": task.operation_target.geometry.params[
+                    "grid_exclusion_tolerance_mm3"
+                ],
+            },
+        )
+        if (
+            production.coverage != C.Coverage.COMPLETE
+            or production.safety_pass is not True
+            or production.geometry_pass is not True
+        ):
+            raise RuntimeError(
+                f"nominal production posted evaluation failed/blocked ({dialect.value}): "
+                f"coverage={production.coverage.value}, safety={production.safety_pass}, "
+                f"geometry={production.geometry_pass}, reasons={production.coverage_reasons}, "
+                f"residual={production.metrics['residual_volume_mm3'].value} mm^3, "
+                f"gouge={production.metrics['gouge_volume_mm3'].value} mm^3, "
+                f"max_surface={production.metrics['max_surface_error_mm'].value} mm"
+            )
+        production_clearance = production.metrics["min_clearance_lower_bound_mm"].value
+        production_rapid = production.metrics[
+            "rapid_cutter_penetration_upper_bound_mm"
+        ].value
+        if (
+            production_clearance is None
+            or production_clearance < task.tolerances.clearance_mm
+            or production_rapid is None
+            or production_rapid > task.tolerances.rapid_penetration_mm
+        ):
+            raise RuntimeError(
+                f"production clearance qualification failed ({dialect.value}): "
+                f"lower={production_clearance} mm, rapid={production_rapid} mm"
+            )
+        summary = {
+            "status": "evaluated",
+            "coverage": production.coverage.value,
+            "safety_pass": production.safety_pass,
+            "geometry_pass": production.geometry_pass,
+            "residual_volume_mm3": production.metrics["residual_volume_mm3"].value,
+            "gouge_volume_mm3": production.metrics["gouge_volume_mm3"].value,
+            "max_surface_error_mm": production.metrics["max_surface_error_mm"].value,
+            "excluded_volume_mm3": production.metrics["excluded_volume_mm3"].value,
+            "min_clearance_lower_bound_mm": production_clearance,
+            "rapid_penetration_upper_bound_mm": production_rapid,
+        }
         evaluations[dialect.value] = {
             "nc_bytes": nc_bytes, "nc_hash": nc_hash,
-            "eval": C.dumps(result).encode("utf-8"),
+            "eval": C.dumps(production).encode("utf-8"),
+            "reference_eval": C.dumps(reference_result).encode("utf-8"),
+            "production_summary": summary,
             "stock_cell_disagreement": contact_diagnostic,
         }
     if not completion_pass:
@@ -592,7 +840,11 @@ def write_artifacts(root, task, motion, parameterization, theta, sources,
             "stock_min_mm": list(STOCK_MIN), "stock_max_mm": list(STOCK_MAX),
             "note": "typed exact-stop constant-speed residual execution; no silent speed clipping",
         },
-        "independent_evaluation": "verification.reference_carve (production posted evaluator not integrated yet)",
+        "independent_evaluation": (
+            "cam.posted_evaluator.evaluate_posted_gcode (primary posted evaluation); "
+            "verification.reference_carve (independent chronology cross-check); "
+            "simulator.csg_metrics (sampled-grid metric cross-check)"
+        ),
     }, indent=2, sort_keys=True) + "\n").encode("utf-8")
     files["motion_plan.json"] = C.dumps(motion).encode("utf-8")
     files["history.json"] = (json.dumps([{
@@ -604,8 +856,9 @@ def write_artifacts(root, task, motion, parameterization, theta, sources,
     files["metrics.json"] = (json.dumps({
         "completion": completion,
         "completion_metric_scope": (
-            "Cellwise operation-target residual and retained-part removal at the "
-            "declared grid; independent reference geometry_pass remains null."
+            "Shared sampled-grid residual, gouge and local-surface metrics plus "
+            "production posted-path evaluation. Independent reference "
+            "geometry_pass remains unavailable by its stock-motion-only design."
         ),
         "reference_geometry_pass": None,
         "training_execution": {
@@ -622,8 +875,12 @@ def write_artifacts(root, task, motion, parameterization, theta, sources,
             for name, record in evaluations.items()
         },
         "production_posted_evaluator": {
-            "status": "not_integrated_pending_T1.3",
-            "camotics_cross_check": "not_run_pending_T1.3",
+            name: record.get("production_summary", {"status": "synthetic_unit_fixture"})
+            for name, record in evaluations.items()
+        },
+        "camotics_cross_check": {
+            "status": "not_run",
+            "reason": "no external CAMotics result was obtained for this T2.2b run",
         },
     }, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
     files["initial_trajectory.npy"] = _npy(expected_normalized)
@@ -640,6 +897,8 @@ def write_artifacts(root, task, motion, parameterization, theta, sources,
     for name, dialect in (("rs274", C.Dialect.RS274), ("haas", C.Dialect.HAAS)):
         record = evaluations[dialect.value]
         files[f"{name}.nc"] = record["nc_bytes"]
+        if "reference_eval" in record:
+            files[f"reference_{name}.json"] = record["reference_eval"]
         eval_name = f"eval_posted_{name}.json"
         files[eval_name] = record["eval"]
         posted.append(C.PostedProgram(
@@ -652,7 +911,7 @@ def write_artifacts(root, task, motion, parameterization, theta, sources,
         index["programs"][key] = json.loads(C.canonical_json(entry))
     files["eval_posted.json"] = (json.dumps(index, indent=2, sort_keys=True) + "\n").encode("utf-8")
     run = C.RunRecord(
-        run_id="CAM-Base-dev-pocket-island-000-v1",
+        run_id="CAM-Base-dev-pocket-island-000-v2",
         task_hash=task.task_hash, status=C.RunStatus.COMPLETE,
         artifacts=tuple(sorted(files)), posted=tuple(posted),
         source_commit=head, dirty_patch_hash=dirty_hash,
