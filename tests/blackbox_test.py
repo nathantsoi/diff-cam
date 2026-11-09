@@ -181,7 +181,7 @@ def test_validation_cadence_and_ledger_are_distinct(tmp_path):
     result = B.solve_cma_es(evaluator, budget, seed=2, x0=[2, -1], run_id="validated")
     assert result.evaluations == 8 and result.validation_calls == 1
     ledger = evaluator.ledger.snapshot()
-    assert ledger["candidate_evaluations"] == 9
+    assert ledger["candidate_evaluations"] == 8
     assert ledger["validation_calls"] == 1
     assert result.best.valid
 

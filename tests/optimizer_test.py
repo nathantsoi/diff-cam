@@ -91,7 +91,7 @@ def test_hard_selection_prioritizes_modeled_safety_over_dice_or_raw_loss():
     assert opt._hard_rank(safe_with_residual, policy) < opt._hard_rank(complete_but_colliding, policy)
     missing_marker = result(0.0, 0.0, 0.1, 0.0)
     del missing_marker.components["holder_overlap_fraction"]
-    assert opt._hard_rank(missing_marker, policy)[0] == 1
+    assert opt._hard_rank(missing_marker, policy) is None
 
 
 def test_fixed_adam_known_gradient_step_clip_schedule_and_budget():

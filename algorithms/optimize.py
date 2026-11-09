@@ -355,19 +355,19 @@ def _restore_state(document: Mapping[str, Any], evaluator: Any, *, budget=None,
 
 def _validation_and_hard_select(state: _AdamState, evaluator: Any) -> None:
     state.validation_calls += 1
-    evaluator.ledger.count_validation(1)
+    evaluator.ledger.start_validation()
     before = evaluator.ledger.snapshot()
     result = evaluator.evaluate_candidate(state.theta, f"{state.run_id}:validate:{state.validation_calls}", "hard")
     after = evaluator.ledger.snapshot()
     state.forward_calls += after["forward_calls"] - before["forward_calls"]
     state.backward_calls += after["backward_calls"] - before["backward_calls"]
     rank = _hard_rank(result, state.config.selection)
-    if state.best_rank is None or rank < state.best_rank:
+    if rank is not None and (state.best_rank is None or rank < state.best_rank):
         state.best, state.best_theta, state.best_rank = result, state.theta.copy(), tuple(rank)
     return result
 
 
-def _run_adam(state: _AdamState, evaluator: Any, checkpoint_dir: Optional[Path]) -> AdamResult:
+def _run_adam_body(state: _AdamState, evaluator: Any, checkpoint_dir: Optional[Path]) -> AdamResult:
     reason = "budget_exhausted" if state.evaluations >= state.budget.candidate_evaluations else None
     checkpoint_path = None
     while state.evaluations < state.budget.candidate_evaluations:
@@ -375,8 +375,12 @@ def _run_adam(state: _AdamState, evaluator: Any, checkpoint_dir: Optional[Path])
             reason = "max_generations"
             break
         k = _k_for_step(state.config, state.evaluations, state.budget)
-        evaluator.sim.k[None] = k
+        if hasattr(evaluator, "set_evaluation_k"):
+            evaluator.set_evaluation_k(k)
+        else:
+            evaluator.sim.k[None] = k
         candidate_id = f"{state.run_id}:iter:{state.evaluations}"
+        evaluated_theta = state.theta.copy()
         before = evaluator.ledger.snapshot()
         evaluation = evaluator.evaluate_candidate_with_gradient(state.theta, candidate_id)
         after = evaluator.ledger.snapshot()
@@ -400,10 +404,22 @@ def _run_adam(state: _AdamState, evaluator: Any, checkpoint_dir: Optional[Path])
             state.theta = np.asarray(evaluator.parameterization.clip(theta), dtype=float)
             state.gradient_updates = step
         else:
-            gradient = None
+            # Do not spend the full budget re-evaluating an identical bad point.
+            # Record the failed attempt, then terminate with the best prior valid
+            # selection (if any) rather than inventing a new incumbent.
             state.invalid_evaluations += 1
+            state.history.append({
+                "iteration": state.evaluations, "k": k,
+                "theta": evaluated_theta.tolist(), "theta_after_step": state.theta.tolist(),
+                "soft_objective": evaluation.result.objective, "clip_scale": None,
+                "valid": False, "forward_calls": forward_delta,
+                "backward_calls": backward_delta,
+            })
+            reason = "invalid_evaluation"
+            break
         state.history.append({
-            "iteration": state.evaluations, "k": k, "theta": state.theta.tolist(),
+            "iteration": state.evaluations, "k": k, "theta": evaluated_theta.tolist(),
+            "theta_after_step": state.theta.tolist(),
             "soft_objective": evaluation.result.objective, "clip_scale": clip_scale,
             "valid": evaluation.result.valid,
             "forward_calls": forward_delta, "backward_calls": backward_delta,
@@ -465,7 +481,7 @@ def replay_adam_checkpoint(path: str | Path, evaluator: Any) -> dict[str, Any]:
 
 def emit_adam_artifacts(result: AdamResult, evaluator: Any, run_dir: str | Path,
                         repository: str | Path) -> C.RunRecord:
-    if result.best_theta is None or result.best is None:
+    if result.best_theta is None or result.best is None or not result.best.valid:
         raise B.BlackBoxError("no hard-selected feasible candidate; not emitting a fake completed run")
     task, motion = evaluator.task, evaluator.candidate_motion(result.best_theta)
     posting = R.post_motion(task, motion)
