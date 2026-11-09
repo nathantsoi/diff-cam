@@ -278,3 +278,77 @@ def test_writer_rejects_existing_directory_and_missing_payloads(tmp_path):
         R.ArtifactWriter().write(str(tmp_path / record.run_id), record, {})
     with pytest.raises(ValueError, match="run directory name"):
         R.ArtifactWriter().write(str(tmp_path / "different-name"), record, files)
+
+
+def test_sampled_target_real_reset_grid_gradient_and_repeated_source_identity(tmp_path):
+    # This is real T2.0 sampled geometry, not a claim about analytic box/pocket scope.
+    coordinates = (np.arange(20, dtype=np.float64) + 0.5)
+    xyz = np.meshgrid(coordinates, coordinates, coordinates, indexing="ij")
+    values = np.sqrt(sum((axis - 10.0) ** 2 for axis in xyz)) - 6.0
+    path = tmp_path / "target_sphere.npy"
+    np.save(path, values)
+    source = C.GeometrySource(kind="sampled", path=str(path),
+                               sha256=C.sha256_bytes(path.read_bytes()),
+                               grid=C.GridSpec(shape=values.shape, origin_mm=(0, 0, 0), voxel_mm=1.0))
+    task = C.example_pocket_task()
+    stock = C.GeometrySource(kind="analytic", params={"primitive": "box",
+                                                       "min_mm": [0, 0, 0], "max_mm": [20, 20, 20]})
+    grid = C.GridSpec(shape=values.shape, origin_mm=(0, 0, 0), voxel_mm=1.0)
+    initial = np.array([5.0, 5.0, 20.0])
+    state = C.MachineState(position_mm=task.work_to_machine.apply(initial), frame=C.Frame.MACHINE)
+    p1 = task.work_to_machine.apply(initial + [0, 0, -6])
+    p2 = task.work_to_machine.apply(initial + [3, 3, -12])
+    segments = (
+        C.Segment(id="plunge", kind=C.SegmentKind.FEED, start_mm=state.position_mm,
+                  end_mm=p1, duration_s=0.6, feed_mm_s=10.0),
+        C.Segment(id="slot", kind=C.SegmentKind.FEED, start_mm=p1, end_mm=p2,
+                  duration_s=np.linalg.norm(np.asarray(p1) - p2) / 10.0, feed_mm_s=10.0),
+    )
+    task = dataclasses.replace(task, stock=stock, original_part=source, grid=grid,
+                               operation_target=C.OperationTarget(geometry=source),
+                               initial_state=state,
+                               tool=dataclasses.replace(task.tool,
+                                                        holder_bottom_mm=task.tool.flute_length_mm))
+    motion = C.MotionPlan(frame=C.Frame.MACHINE, initial_state=state, segments=segments,
+                          timing_rule=C.TimingRule.EXACT_STOP_CONSTANT_SPEED,
+                          provenance="T2.0 sampled sphere objective test")
+    normalized = (initial - grid.origin_mm) / grid.extent_mm
+    mapper = P.DeltaResidual([[0, 0, -6], [3, 3, -6]], scale_mm=1.0,
+                             bounds=(-0.05, 0.05), initial_position_mm=initial)
+
+    ti.init(arch=ti.cpu, offline_cache=False)
+    sim = CSGSimulatorDelta(resolution=20, max_steps=2, stock_size_mm=20.0, voxel_size_mm=1.0,
+                            target_geometry=source, tool_start=tuple(normalized),
+                            enforce_speed_limits=False, init_taichi=False, k_init=40)
+    sim.tool_radius[None] = task.tool.cutter_radius_mm
+    sim.tool_height[None] = task.tool.flute_length_mm
+    sim.tool_cut_height[None] = task.tool.flute_length_mm
+    sim.holder_radius[None] = task.tool.holder_radius_mm
+    sim.holder_height[None] = task.tool.holder_height_mm
+    sim.bake_target_grid()
+    assert sim.target_shape == "sampled"
+    assert sim.target_source_metadata["sha256"] == source.sha256
+    assert sim.use_sampled_target[None] == 1
+    np.testing.assert_allclose(sim.target.to_numpy(), values.astype(np.float32), atol=2e-6, rtol=0)
+    reset_calls = []
+    official = sim.reset_candidate_state
+
+    def counted_reset():
+        reset_calls.append(1)
+        return official()
+
+    sim.reset_candidate_state = counted_reset
+    evaluator = O.CandidateEvaluator(task, motion, mapper, sim, seed=42)
+    theta = np.zeros(mapper.num_params)
+    first = evaluator.evaluate_candidate(theta, "sampled-first")
+    taped = evaluator.evaluate_candidate_with_gradient(theta, "sampled-grad")
+    again = evaluator.evaluate_candidate_with_gradient(theta, "sampled-repeat")
+    assert first.valid and first.objective > 0
+    assert taped.result.valid and taped.result.gradient_available
+    assert taped.result.coverage == C.Coverage.INCOMPLETE
+    assert again.result.objective == pytest.approx(taped.result.objective, abs=2e-6)
+    assert np.isfinite(taped.gradient_theta).all() and np.linalg.norm(taped.gradient_theta) > 1e-9
+    assert len(reset_calls) == 3
+    expected_start = evaluator.candidate_motion(theta).initial_state.position_mm
+    np.testing.assert_allclose(sim.tool_pos[0].to_numpy(), normalized, atol=2e-6)
+    assert list(expected_start) == list(state.position_mm)

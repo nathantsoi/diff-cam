@@ -119,9 +119,11 @@ class CandidateEvaluator:
             raise ValueError("prototype grid must begin at the analytic stock min corner")
         if tuple(simulator.stock.shape[1:]) != tuple(task.grid.shape):
             raise ValueError("simulator and task voxel shapes differ")
-        primitive = task.original_part.params.get("primitive")
+        kind = task.original_part.kind
+        primitive = task.original_part.params.get("primitive") if kind == "analytic" else kind
         if primitive != simulator.target_shape:
-            raise ValueError("task target primitive and simulator target differ")
+            raise ValueError(
+                f"task target kind {primitive} and simulator target {simulator.target_shape} differ")
         initial_work = np.asarray(task.work_to_machine.inverse().apply(task.initial_state.position_mm))
         if not np.allclose(initial_work, parameterization.initial_position_mm, atol=1e-6, rtol=0):
             raise ValueError("parameterization initial position and task tool tip disagree")
