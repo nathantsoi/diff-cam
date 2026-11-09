@@ -93,11 +93,12 @@
    "note": "T2.2 + T2.2b merged. Pilot pocket: T = P \u222a four r=2 mm corner fillets; excluded 18.0 mm\u00b3 grid-exact (continuous 20.60 diagnostic); 0.25 mm pitch. Nominal (line-only seed): production safety+geometry True, residual/gouge/surface 0 (coordinator re-verified rs274). Retained: runs/retained/pilot-pocket-20261109-t22b-exact-exclusion. COST: one posted evaluation \u2248 1085 s on CPU at 0.25 mm -> pilot budget concern."
   },
   "T2.3": {
-   "status": "ready",
+   "status": "in_progress",
    "owner": "diffcam-worker-1",
    "branch": null,
    "blocker": null,
-   "next": "after T2.2b; generator now, counts after pilot"
+   "next": "set counts after T4.1b pilot",
+   "note": "Bootstrap merged d5e320b: 3 families (facing/asymmetric stock, pocket-island contour, variable width/depth) x 1 dev + 1 test; T \u2287 P only finite-radius corner fillets, grid-exact exclusion tol 0; all 12 production evals safety+geometry True; audit clean. Seed generator gained a generic cap-clearing pass after a qualification failure (task unchanged, failure retained). Suite COUNTS pending pilot cost (target 3 dev / 10 test per family)."
   },
   "T3.0": {
    "status": "complete",
@@ -137,21 +138,22 @@
    "branch": "task/T4.1-runner",
    "blocker": "T2.2, T1.3",
    "next": null,
-   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot."
+   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts."
   },
   "T3.4": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T3.4-continuation",
    "blocker": null,
-   "next": null
+   "next": "dev ablations after pilot",
+   "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot."
   },
   "T3.3": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T3.3-gradient-mechanics",
    "blocker": null,
-   "next": null
+   "next": "real study after T4.1b pilot"
   },
   "T3.5": {
    "status": "planned",
@@ -177,12 +179,12 @@
    "note": "merged 16299a6. Scope frozen before results: one dev box pocket w/ island, 80 mm/object unit isotropic transform, ONE per-instance native step on modernized stack (no pretraining/weights). Native 64^3 IoU 0.4668; DiffCAM-mapped IoU 0.4760, residual 36.6 mm3, gouge 1131 mm3. Executable NC: 'incompatible: executable NC mapping unsupported' (variable radii, learned rotations, no ordered path). Evidence in external/cncnet-t51-pilot-worker-2/native-4/comparison.json (sha256 f561430d...). For T4.2: CNC-Net baseline limited to native reconstruction route; claims must state this."
   },
   "T5.2": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-3",
    "branch": "task/T5.2-external-titan",
    "blocker": null,
    "next": null,
-   "note": "Titan provenance/license pending user; local use only"
+   "note": "T5.2 adapters merged (1070c1c): isolated OCP 7.7.2 STEP import of Titan-M1 (inch->mm verified), sampled P/T, bounded native partial-roughing pilot. Production eval UNSUPPORTED for sampled P/T -> T1.3f (worker-3). Excluded-volume convention decided (grid-resolved, tol 0; native 82.20 mm3 diagnostic; grid 139.29 mm3 declared). Titan provenance/license still unknown (local only). | Production evaluation now runs (T1.3f): geometry False / safety null honestly reported; Titan nominal is a partial roughing pilot only. | T5.2b merged: independent analytic bore raster (plug \u2229 nominal source void, native face z-ranges recorded) matches 68/68 cells; negative r=0.875 \u2192 56 mismatches; RESOLUTION LIMIT at 1.27 mm: small bore D=2.057 mm \u22481.6 cells, 1.25\u00d7 radius undetectable (documented). Artifacts data/external/titan-m1-t52b."
   },
   "T4.2": {
    "status": "planned",
@@ -200,11 +202,12 @@
    "next": null
   },
   "T6.1": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T6.1-packets",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "software-only exporter now; final packets after T4.2 freeze"
   },
   "T6.2": {
    "status": "planned",
@@ -303,6 +306,38 @@
    "blocker": null,
    "next": null,
    "note": "merged 49c38a5. Single-thread MCUBES -> watertight, oriented STL (0.25/0.1 mm), directed-edge validation (no self-intersection guarantee). Endpoint-cap loss ROOT CAUSE: CAMotics 1.2.0 horizontal ConicSweep rejects interior start-cylinder points (beta<0) and disc fallback divides by (Bz-Az)=0 -> starting disc never cut. CAMotics remains supplementary with this documented defect; not a production oracle."
+  },
+  "T1.3f": {
+   "status": "complete",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T1.3f-sampled-eval",
+   "blocker": null,
+   "next": null,
+   "note": "merged a212925+62e5573: exact-grid sampled P/T in production evaluator (no resampling), analytic regressions preserved; Titan production posts: coverage complete, geometry False (single roughing plunge), safety null (rapid-cutter penetration upper bound 1.67 mm vs tol 0). Evaluator/task tests 106 passed on core."
+  },
+  "T2.2b": {
+   "status": "complete",
+   "owner": "diffcam-worker-1",
+   "branch": null,
+   "blocker": null,
+   "next": null,
+   "note": "reachable pilot target; merged 77a319b (G1 exact grid exclusion)"
+  },
+  "T5.2b": {
+   "status": "complete",
+   "owner": "diffcam-worker-3",
+   "branch": null,
+   "blocker": null,
+   "next": null,
+   "note": "independent Titan bore raster 68/68; merged bb552e8"
+  },
+  "T3.4b": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T3.4b-shift",
+   "blocker": null,
+   "next": null,
+   "note": "shift via sim per-voxel field, field-gap calibration in voxel SDF units, leak tests, C2"
   }
  }
 }

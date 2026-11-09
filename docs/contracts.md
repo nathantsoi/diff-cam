@@ -26,6 +26,10 @@ initial_state, tool, limits, tolerances, motion_semantics, fixtures`.
 - `GeometrySource.kind`: `analytic` (`params.primitive` required), `sampled` (path + sha256 + GridSpec),
   `mesh`/`step` (path + sha256; STEP must go through a real STEP backend).
 - Original part vs operation target are separate; any excluded volume needs a reason, fixed before optimization.
+- **Excluded-volume convention (coordinator decision 2026-11-09, applies to every task):** `operation_target.excluded_volume_mm3` is declared
+  at the TASK GRID resolution (count of initial ∧ T ∧ ¬P cells × voxel³) and checked by evaluators with `exclusion_tolerance_mm3 = 0`
+  against their independent masks. Any continuous/native excluded volume (analytic fillets, STEP-derived) is recorded as a diagnostic in
+  `exclusion_reason`/task metadata, never used to pick a tolerance after seeing results.
 - `ToolAssembly`: `cutter_kind ∈ {flat, ball}`, cutter radius, flute length, shank radius, holder bottom/radius/height
   measured from the tip. Consumers that model only flat cutters report coverage `unsupported` for ball tools.
 - `MachineState.known=False` ⇒ `position_mm` must be null. An evaluator cannot claim complete coverage of the approach.

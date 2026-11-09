@@ -1,0 +1,1749 @@
+{
+  "families": [
+    "facing_asymmetric",
+    "pocket_island",
+    "variable_width_depth"
+  ],
+  "generation_version": "t2.3-bootstrap/1",
+  "generator_seed": 133742,
+  "grid_pitch_mm": 0.25,
+  "schema_version": "t2.3-procedural/1",
+  "scope": "bounded analytic box and box-minus-pocket families; no free-form CAD claim",
+  "suite_count_policy": "one dev and one test per family for bootstrap only; full suite counts pending pilot cost",
+  "tasks": [
+    {
+      "continuous_exclusion_diagnostic_mm3": 1.7168146928204138,
+      "evaluator_exclusion_tolerance_mm3": 0.0,
+      "family": "facing_asymmetric",
+      "grid_excluded_volume_mm3": 1.5,
+      "motion_hash": "sha256:34022e4707471cdffa8987913fef7a4613aa98918770f61edff48f5504fbf222",
+      "seed_provenance": "cam_seeds:pocket_with_island_seed/1",
+      "seed_spec": {
+        "boundary_offset_margin_mm": 0.5,
+        "clearance_z": 8.0,
+        "feed_mm_s": 6.0,
+        "floor_z": -0.5,
+        "has_retained_island": false,
+        "home_z": 10.0,
+        "island_centre_xy": [
+          0.0,
+          0.0
+        ],
+        "island_half_side": 0.0,
+        "outer_xy": [
+          6.0,
+          3.0
+        ],
+        "plunge_mm_s": 4.0,
+        "pocket_centre_xy": [
+          0.0,
+          0.0
+        ],
+        "pocket_half_x": 8.0,
+        "pocket_half_y": 5.0,
+        "provenance": "cam_seeds:pocket_with_island_seed/1",
+        "raster_clear_radius": 0.0,
+        "y_rows": 3
+      },
+      "split": "dev",
+      "task_hash": "sha256:36ac91e1a292d8088fa271333e8b5142a8bb50a1dabc3a3d6c2dbe344734b632",
+      "task_id": "procedural-facing_asymmetric-dev-asymmetric-lipped-face",
+      "task_record": {
+        "record": {
+          "family": "facing_asymmetric",
+          "fixtures": [],
+          "grid": {
+            "frame": "work",
+            "origin_mm": [
+              -13.0,
+              -8.0,
+              -8.0
+            ],
+            "shape": [
+              96,
+              64,
+              32
+            ],
+            "sign_convention": "negative_inside",
+            "voxel_mm": 0.25
+          },
+          "initial_state": {
+            "frame": "machine",
+            "known": true,
+            "length_offset_applied": true,
+            "position_mm": [
+              0.0,
+              0.0,
+              10.0
+            ],
+            "work_offset": "G54"
+          },
+          "length_unit": "mm",
+          "limits": {
+            "envelope_max_mm": [
+              15.0,
+              12.0,
+              60.0
+            ],
+            "envelope_min_mm": [
+              -17.0,
+              -12.0,
+              -12.0
+            ],
+            "max_accel_mm_s2": 100.0,
+            "max_feed_mm_s": 8.0,
+            "rapid_mm_s": 80.0
+          },
+          "motion_semantics": {
+            "arcs_supported": true,
+            "dialects": [
+              "rs274",
+              "haas"
+            ],
+            "supported_gcodes": [
+              "G0",
+              "G1",
+              "G2",
+              "G3",
+              "G17",
+              "G18",
+              "G19",
+              "G20",
+              "G21",
+              "G43",
+              "G49",
+              "G53",
+              "G54",
+              "G90",
+              "G91",
+              "G94"
+            ],
+            "timing_rule": "exact_stop_constant_speed"
+          },
+          "operation_target": {
+            "excluded_volume_mm3": 1.5,
+            "exclusion_reason": "Finite-radius cutter cannot reach four pocket corner fillets. Normative exclusion 1.5 mm^3 on the declared 0.25 mm grid. Continuous diagnostic is 1.7168146928204138 mm^3. Exact zero sampling tolerance.",
+            "geometry": {
+              "frame": "work",
+              "grid": null,
+              "kind": "analytic",
+              "params": {
+                "accessibility": "flat upright finite cutter on full original walls; union original part with four corner boxes outside the radius cutter disks",
+                "box_max_mm": [
+                  11.0,
+                  8.0,
+                  0.0
+                ],
+                "box_min_mm": [
+                  -13.0,
+                  -8.0,
+                  -8.0
+                ],
+                "continuous_excluded_volume_mm3": 1.7168146928204138,
+                "empty_island": true,
+                "grid_excluded_volume_mm3": 1.5,
+                "grid_excluded_voxels": 96,
+                "grid_exclusion_tolerance_mm3": 0.0,
+                "grid_exclusion_tolerance_policy": "exact grid-resolved declaration, independently checked analytic mask; zero tolerance. Continuous volume is diagnostic only",
+                "holder_clearance": {
+                  "above_stock_mm": 9.5,
+                  "bottom_at_floor_mm": 9.5,
+                  "qualification_and_cell_margin_mm": 0.46650635094610965,
+                  "shank_height_mm": 0.0,
+                  "stock_top_mm": 0.0
+                },
+                "island_max_mm": [
+                  -12.0,
+                  -7.0,
+                  2.0
+                ],
+                "island_min_mm": [
+                  -13.0,
+                  -8.0,
+                  1.0
+                ],
+                "pocket_max_mm": [
+                  8.0,
+                  5.0,
+                  0.0
+                ],
+                "pocket_min_mm": [
+                  -8.0,
+                  -5.0,
+                  -0.5
+                ],
+                "pocket_unreached_corner_radius_mm": 2.0,
+                "primitive": "box_minus_pocket"
+              },
+              "path": null,
+              "sha256": null
+            }
+          },
+          "original_part": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "box_max_mm": [
+                11.0,
+                8.0,
+                0.0
+              ],
+              "box_min_mm": [
+                -13.0,
+                -8.0,
+                -8.0
+              ],
+              "empty_island": true,
+              "island_max_mm": [
+                -12.0,
+                -7.0,
+                2.0
+              ],
+              "island_min_mm": [
+                -13.0,
+                -8.0,
+                1.0
+              ],
+              "pocket_max_mm": [
+                8.0,
+                5.0,
+                0.0
+              ],
+              "pocket_min_mm": [
+                -8.0,
+                -5.0,
+                -0.5
+              ],
+              "primitive": "box_minus_pocket"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "schema_version": "diffcam-contracts/1.1",
+          "source": {
+            "checksums": {},
+            "license": "MIT",
+            "notes": "Bounded analytic procedural seed; no solver-performance exclusions.",
+            "origin": "t2.3-bootstrap/1:lipped_top_facing"
+          },
+          "split": "dev",
+          "stock": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "max_mm": [
+                11.0,
+                8.0,
+                0.0
+              ],
+              "min_mm": [
+                -13.0,
+                -8.0,
+                -8.0
+              ],
+              "primitive": "box"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "task_id": "procedural-facing_asymmetric-dev-asymmetric-lipped-face",
+          "tolerances": {
+            "clearance_mm": 0.25,
+            "completion_residual_mm3": 2.0,
+            "gouge_volume_mm3": 0.0,
+            "local_surface_error_mm": 0.5,
+            "rapid_penetration_mm": 0.0
+          },
+          "tool": {
+            "cutter_kind": "flat",
+            "cutter_radius_mm": 2.0,
+            "flute_length_mm": 10.0,
+            "holder_bottom_mm": 10.0,
+            "holder_height_mm": 32.0,
+            "holder_radius_mm": 5.0,
+            "reference_point": "cutter_bottom_centre",
+            "shank_radius_mm": 2.0,
+            "tool_number": 1
+          },
+          "work_to_machine": {
+            "matrix": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                1.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                1.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ]
+            ]
+          }
+        },
+        "record_type": "TaskSpec"
+      },
+      "topology": "lipped_top_facing"
+    },
+    {
+      "continuous_exclusion_diagnostic_mm3": 2.5752220392306207,
+      "evaluator_exclusion_tolerance_mm3": 0.0,
+      "family": "facing_asymmetric",
+      "grid_excluded_volume_mm3": 2.25,
+      "motion_hash": "sha256:1a765f3b1668d9ac5f2b265e50a5e121956562139327de581d51bc9e17b61b2a",
+      "seed_provenance": "cam_seeds:pocket_with_island_seed/1",
+      "seed_spec": {
+        "boundary_offset_margin_mm": 0.5,
+        "clearance_z": 8.0,
+        "feed_mm_s": 6.0,
+        "floor_z": -0.75,
+        "has_retained_island": false,
+        "home_z": 10.0,
+        "island_centre_xy": [
+          0.0,
+          0.0
+        ],
+        "island_half_side": 0.0,
+        "outer_xy": [
+          4.0,
+          3.0
+        ],
+        "plunge_mm_s": 4.0,
+        "pocket_centre_xy": [
+          2.0,
+          -2.0
+        ],
+        "pocket_half_x": 6.0,
+        "pocket_half_y": 5.0,
+        "provenance": "cam_seeds:pocket_with_island_seed/1",
+        "raster_clear_radius": 0.0,
+        "y_rows": 3
+      },
+      "split": "test",
+      "task_hash": "sha256:3dfb05db6bfb49311f5f8f4ae27b96cc303bda8c79112996f89a9a4a653d49d4",
+      "task_id": "procedural-facing_asymmetric-test-offset-shoulder-face",
+      "task_record": {
+        "record": {
+          "family": "facing_asymmetric",
+          "fixtures": [],
+          "grid": {
+            "frame": "work",
+            "origin_mm": [
+              -16.5,
+              -11.0,
+              -8.0
+            ],
+            "shape": [
+              116,
+              80,
+              32
+            ],
+            "sign_convention": "negative_inside",
+            "voxel_mm": 0.25
+          },
+          "initial_state": {
+            "frame": "machine",
+            "known": true,
+            "length_offset_applied": true,
+            "position_mm": [
+              0.0,
+              0.0,
+              10.0
+            ],
+            "work_offset": "G54"
+          },
+          "length_unit": "mm",
+          "limits": {
+            "envelope_max_mm": [
+              16.5,
+              13.0,
+              60.0
+            ],
+            "envelope_min_mm": [
+              -20.5,
+              -15.0,
+              -12.0
+            ],
+            "max_accel_mm_s2": 100.0,
+            "max_feed_mm_s": 8.0,
+            "rapid_mm_s": 80.0
+          },
+          "motion_semantics": {
+            "arcs_supported": true,
+            "dialects": [
+              "rs274",
+              "haas"
+            ],
+            "supported_gcodes": [
+              "G0",
+              "G1",
+              "G2",
+              "G3",
+              "G17",
+              "G18",
+              "G19",
+              "G20",
+              "G21",
+              "G43",
+              "G49",
+              "G53",
+              "G54",
+              "G90",
+              "G91",
+              "G94"
+            ],
+            "timing_rule": "exact_stop_constant_speed"
+          },
+          "operation_target": {
+            "excluded_volume_mm3": 2.25,
+            "exclusion_reason": "Finite-radius cutter cannot reach four pocket corner fillets. Normative exclusion 2.25 mm^3 on the declared 0.25 mm grid. Continuous diagnostic is 2.5752220392306207 mm^3. Exact zero sampling tolerance.",
+            "geometry": {
+              "frame": "work",
+              "grid": null,
+              "kind": "analytic",
+              "params": {
+                "accessibility": "flat upright finite cutter on full original walls; union original part with four corner boxes outside the radius cutter disks",
+                "box_max_mm": [
+                  12.5,
+                  9.0,
+                  0.0
+                ],
+                "box_min_mm": [
+                  -16.5,
+                  -11.0,
+                  -8.0
+                ],
+                "continuous_excluded_volume_mm3": 2.5752220392306207,
+                "empty_island": true,
+                "grid_excluded_volume_mm3": 2.25,
+                "grid_excluded_voxels": 144,
+                "grid_exclusion_tolerance_mm3": 0.0,
+                "grid_exclusion_tolerance_policy": "exact grid-resolved declaration, independently checked analytic mask; zero tolerance. Continuous volume is diagnostic only",
+                "holder_clearance": {
+                  "above_stock_mm": 9.25,
+                  "bottom_at_floor_mm": 9.25,
+                  "qualification_and_cell_margin_mm": 0.46650635094610965,
+                  "shank_height_mm": 0.0,
+                  "stock_top_mm": 0.0
+                },
+                "island_max_mm": [
+                  -15.5,
+                  -10.0,
+                  2.0
+                ],
+                "island_min_mm": [
+                  -16.5,
+                  -11.0,
+                  1.0
+                ],
+                "pocket_max_mm": [
+                  8.0,
+                  3.0,
+                  0.0
+                ],
+                "pocket_min_mm": [
+                  -4.0,
+                  -7.0,
+                  -0.75
+                ],
+                "pocket_unreached_corner_radius_mm": 2.0,
+                "primitive": "box_minus_pocket"
+              },
+              "path": null,
+              "sha256": null
+            }
+          },
+          "original_part": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "box_max_mm": [
+                12.5,
+                9.0,
+                0.0
+              ],
+              "box_min_mm": [
+                -16.5,
+                -11.0,
+                -8.0
+              ],
+              "empty_island": true,
+              "island_max_mm": [
+                -15.5,
+                -10.0,
+                2.0
+              ],
+              "island_min_mm": [
+                -16.5,
+                -11.0,
+                1.0
+              ],
+              "pocket_max_mm": [
+                8.0,
+                3.0,
+                0.0
+              ],
+              "pocket_min_mm": [
+                -4.0,
+                -7.0,
+                -0.75
+              ],
+              "primitive": "box_minus_pocket"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "schema_version": "diffcam-contracts/1.1",
+          "source": {
+            "checksums": {},
+            "license": "MIT",
+            "notes": "Bounded analytic procedural seed; no solver-performance exclusions.",
+            "origin": "t2.3-bootstrap/1:offset_shouldered_top_facing"
+          },
+          "split": "test",
+          "stock": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "max_mm": [
+                12.5,
+                9.0,
+                0.0
+              ],
+              "min_mm": [
+                -16.5,
+                -11.0,
+                -8.0
+              ],
+              "primitive": "box"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "task_id": "procedural-facing_asymmetric-test-offset-shoulder-face",
+          "tolerances": {
+            "clearance_mm": 0.25,
+            "completion_residual_mm3": 2.0,
+            "gouge_volume_mm3": 0.0,
+            "local_surface_error_mm": 0.5,
+            "rapid_penetration_mm": 0.0
+          },
+          "tool": {
+            "cutter_kind": "flat",
+            "cutter_radius_mm": 2.0,
+            "flute_length_mm": 10.0,
+            "holder_bottom_mm": 10.0,
+            "holder_height_mm": 32.0,
+            "holder_radius_mm": 5.0,
+            "reference_point": "cutter_bottom_centre",
+            "shank_radius_mm": 2.0,
+            "tool_number": 1
+          },
+          "work_to_machine": {
+            "matrix": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                1.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                1.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ]
+            ]
+          }
+        },
+        "record_type": "TaskSpec"
+      },
+      "topology": "offset_shouldered_top_facing"
+    },
+    {
+      "continuous_exclusion_diagnostic_mm3": 20.601776313844965,
+      "evaluator_exclusion_tolerance_mm3": 0.0,
+      "family": "pocket_island",
+      "grid_excluded_volume_mm3": 18.0,
+      "motion_hash": "sha256:fb5e15ba0b6f1a1603a19147fdf94644b8eb19585f6f02692274aec97e7e1839",
+      "seed_provenance": "cam_seeds:pocket_with_island_seed/1",
+      "seed_spec": {
+        "boundary_offset_margin_mm": 0.5,
+        "clearance_z": 8.0,
+        "feed_mm_s": 6.0,
+        "floor_z": -6.0,
+        "has_retained_island": true,
+        "home_z": 10.0,
+        "island_centre_xy": [
+          0.0,
+          0.0
+        ],
+        "island_half_side": 2.0,
+        "outer_xy": [
+          9.0,
+          7.0
+        ],
+        "plunge_mm_s": 4.0,
+        "pocket_centre_xy": [
+          0.0,
+          0.0
+        ],
+        "pocket_half_x": 11.0,
+        "pocket_half_y": 9.0,
+        "provenance": "cam_seeds:pocket_with_island_seed/1",
+        "raster_clear_radius": 7.0,
+        "y_rows": 7
+      },
+      "split": "dev",
+      "task_hash": "sha256:344d64e5a1de1549a5411cbe2c245d2d3bc8c126ee79a4eb194d4640086125fd",
+      "task_id": "procedural-pocket_island-dev-oblong-square-island",
+      "task_record": {
+        "record": {
+          "family": "pocket_island",
+          "fixtures": [],
+          "grid": {
+            "frame": "work",
+            "origin_mm": [
+              -15.0,
+              -11.0,
+              -8.0
+            ],
+            "shape": [
+              120,
+              88,
+              32
+            ],
+            "sign_convention": "negative_inside",
+            "voxel_mm": 0.25
+          },
+          "initial_state": {
+            "frame": "machine",
+            "known": true,
+            "length_offset_applied": true,
+            "position_mm": [
+              0.0,
+              0.0,
+              10.0
+            ],
+            "work_offset": "G54"
+          },
+          "length_unit": "mm",
+          "limits": {
+            "envelope_max_mm": [
+              19.0,
+              15.0,
+              60.0
+            ],
+            "envelope_min_mm": [
+              -19.0,
+              -15.0,
+              -12.0
+            ],
+            "max_accel_mm_s2": 100.0,
+            "max_feed_mm_s": 8.0,
+            "rapid_mm_s": 80.0
+          },
+          "motion_semantics": {
+            "arcs_supported": true,
+            "dialects": [
+              "rs274",
+              "haas"
+            ],
+            "supported_gcodes": [
+              "G0",
+              "G1",
+              "G2",
+              "G3",
+              "G17",
+              "G18",
+              "G19",
+              "G20",
+              "G21",
+              "G43",
+              "G49",
+              "G53",
+              "G54",
+              "G90",
+              "G91",
+              "G94"
+            ],
+            "timing_rule": "exact_stop_constant_speed"
+          },
+          "operation_target": {
+            "excluded_volume_mm3": 18.0,
+            "exclusion_reason": "Finite-radius cutter cannot reach four pocket corner fillets. Normative exclusion 18.0 mm^3 on the declared 0.25 mm grid. Continuous diagnostic is 20.601776313844965 mm^3. Exact zero sampling tolerance.",
+            "geometry": {
+              "frame": "work",
+              "grid": null,
+              "kind": "analytic",
+              "params": {
+                "accessibility": "flat upright finite cutter on full original walls; union original part with four corner boxes outside the radius cutter disks",
+                "box_max_mm": [
+                  15.0,
+                  11.0,
+                  0.0
+                ],
+                "box_min_mm": [
+                  -15.0,
+                  -11.0,
+                  -8.0
+                ],
+                "continuous_excluded_volume_mm3": 20.601776313844965,
+                "empty_island": false,
+                "grid_excluded_volume_mm3": 18.0,
+                "grid_excluded_voxels": 1152,
+                "grid_exclusion_tolerance_mm3": 0.0,
+                "grid_exclusion_tolerance_policy": "exact grid-resolved declaration, independently checked analytic mask; zero tolerance. Continuous volume is diagnostic only",
+                "holder_clearance": {
+                  "above_stock_mm": 4.0,
+                  "bottom_at_floor_mm": 4.0,
+                  "qualification_and_cell_margin_mm": 0.46650635094610965,
+                  "shank_height_mm": 0.0,
+                  "stock_top_mm": 0.0
+                },
+                "island_max_mm": [
+                  2.0,
+                  2.0,
+                  0.0
+                ],
+                "island_min_mm": [
+                  -2.0,
+                  -2.0,
+                  -6.0
+                ],
+                "pocket_max_mm": [
+                  11.0,
+                  9.0,
+                  0.0
+                ],
+                "pocket_min_mm": [
+                  -11.0,
+                  -9.0,
+                  -6.0
+                ],
+                "pocket_unreached_corner_radius_mm": 2.0,
+                "primitive": "box_minus_pocket"
+              },
+              "path": null,
+              "sha256": null
+            }
+          },
+          "original_part": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "box_max_mm": [
+                15.0,
+                11.0,
+                0.0
+              ],
+              "box_min_mm": [
+                -15.0,
+                -11.0,
+                -8.0
+              ],
+              "empty_island": false,
+              "island_max_mm": [
+                2.0,
+                2.0,
+                0.0
+              ],
+              "island_min_mm": [
+                -2.0,
+                -2.0,
+                -6.0
+              ],
+              "pocket_max_mm": [
+                11.0,
+                9.0,
+                0.0
+              ],
+              "pocket_min_mm": [
+                -11.0,
+                -9.0,
+                -6.0
+              ],
+              "primitive": "box_minus_pocket"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "schema_version": "diffcam-contracts/1.1",
+          "source": {
+            "checksums": {},
+            "license": "MIT",
+            "notes": "Bounded analytic procedural seed; no solver-performance exclusions.",
+            "origin": "t2.3-bootstrap/1:oblong_with_square_island"
+          },
+          "split": "dev",
+          "stock": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "max_mm": [
+                15.0,
+                11.0,
+                0.0
+              ],
+              "min_mm": [
+                -15.0,
+                -11.0,
+                -8.0
+              ],
+              "primitive": "box"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "task_id": "procedural-pocket_island-dev-oblong-square-island",
+          "tolerances": {
+            "clearance_mm": 0.25,
+            "completion_residual_mm3": 2.0,
+            "gouge_volume_mm3": 0.0,
+            "local_surface_error_mm": 0.5,
+            "rapid_penetration_mm": 0.0
+          },
+          "tool": {
+            "cutter_kind": "flat",
+            "cutter_radius_mm": 2.0,
+            "flute_length_mm": 10.0,
+            "holder_bottom_mm": 10.0,
+            "holder_height_mm": 32.0,
+            "holder_radius_mm": 5.0,
+            "reference_point": "cutter_bottom_centre",
+            "shank_radius_mm": 2.0,
+            "tool_number": 1
+          },
+          "work_to_machine": {
+            "matrix": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                1.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                1.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ]
+            ]
+          }
+        },
+        "record_type": "TaskSpec"
+      },
+      "topology": "oblong_with_square_island"
+    },
+    {
+      "continuous_exclusion_diagnostic_mm3": 17.168146928204138,
+      "evaluator_exclusion_tolerance_mm3": 0.0,
+      "family": "pocket_island",
+      "grid_excluded_volume_mm3": 15.0,
+      "motion_hash": "sha256:99946dd2e05fc9b7564f02ba1aefac7c94e5710a8f55942d222d7d546d0aba42",
+      "seed_provenance": "cam_seeds:pocket_with_island_seed/1",
+      "seed_spec": {
+        "boundary_offset_margin_mm": 0.5,
+        "clearance_z": 8.0,
+        "feed_mm_s": 6.0,
+        "floor_z": -5.0,
+        "has_retained_island": true,
+        "home_z": 10.0,
+        "island_centre_xy": [
+          2.0,
+          -1.0
+        ],
+        "island_half_side": 1.5,
+        "outer_xy": [
+          10.0,
+          6.0
+        ],
+        "plunge_mm_s": 4.0,
+        "pocket_centre_xy": [
+          0.0,
+          0.0
+        ],
+        "pocket_half_x": 12.0,
+        "pocket_half_y": 8.0,
+        "provenance": "cam_seeds:pocket_with_island_seed/1",
+        "raster_clear_radius": 5.0,
+        "y_rows": 7
+      },
+      "split": "test",
+      "task_hash": "sha256:c9ed5607e1c0754dc3732e15ab02a711e4ce0702c40e8eeff6e367b16d99ded0",
+      "task_id": "procedural-pocket_island-test-offset-truncated-square-pad",
+      "task_record": {
+        "record": {
+          "family": "pocket_island",
+          "fixtures": [],
+          "grid": {
+            "frame": "work",
+            "origin_mm": [
+              -16.5,
+              -11.0,
+              -8.0
+            ],
+            "shape": [
+              132,
+              88,
+              32
+            ],
+            "sign_convention": "negative_inside",
+            "voxel_mm": 0.25
+          },
+          "initial_state": {
+            "frame": "machine",
+            "known": true,
+            "length_offset_applied": true,
+            "position_mm": [
+              0.0,
+              0.0,
+              10.0
+            ],
+            "work_offset": "G54"
+          },
+          "length_unit": "mm",
+          "limits": {
+            "envelope_max_mm": [
+              20.5,
+              15.0,
+              60.0
+            ],
+            "envelope_min_mm": [
+              -20.5,
+              -15.0,
+              -12.0
+            ],
+            "max_accel_mm_s2": 100.0,
+            "max_feed_mm_s": 8.0,
+            "rapid_mm_s": 80.0
+          },
+          "motion_semantics": {
+            "arcs_supported": true,
+            "dialects": [
+              "rs274",
+              "haas"
+            ],
+            "supported_gcodes": [
+              "G0",
+              "G1",
+              "G2",
+              "G3",
+              "G17",
+              "G18",
+              "G19",
+              "G20",
+              "G21",
+              "G43",
+              "G49",
+              "G53",
+              "G54",
+              "G90",
+              "G91",
+              "G94"
+            ],
+            "timing_rule": "exact_stop_constant_speed"
+          },
+          "operation_target": {
+            "excluded_volume_mm3": 15.0,
+            "exclusion_reason": "Finite-radius cutter cannot reach four pocket corner fillets. Normative exclusion 15.0 mm^3 on the declared 0.25 mm grid. Continuous diagnostic is 17.168146928204138 mm^3. Exact zero sampling tolerance.",
+            "geometry": {
+              "frame": "work",
+              "grid": null,
+              "kind": "analytic",
+              "params": {
+                "accessibility": "flat upright finite cutter on full original walls; union original part with four corner boxes outside the radius cutter disks",
+                "box_max_mm": [
+                  16.5,
+                  11.0,
+                  0.0
+                ],
+                "box_min_mm": [
+                  -16.5,
+                  -11.0,
+                  -8.0
+                ],
+                "continuous_excluded_volume_mm3": 17.168146928204138,
+                "empty_island": false,
+                "grid_excluded_volume_mm3": 15.0,
+                "grid_excluded_voxels": 960,
+                "grid_exclusion_tolerance_mm3": 0.0,
+                "grid_exclusion_tolerance_policy": "exact grid-resolved declaration, independently checked analytic mask; zero tolerance. Continuous volume is diagnostic only",
+                "holder_clearance": {
+                  "above_stock_mm": 5.0,
+                  "bottom_at_floor_mm": 5.0,
+                  "qualification_and_cell_margin_mm": 0.46650635094610965,
+                  "shank_height_mm": 0.0,
+                  "stock_top_mm": 0.0
+                },
+                "island_max_mm": [
+                  3.5,
+                  0.5,
+                  -1.0
+                ],
+                "island_min_mm": [
+                  0.5,
+                  -2.5,
+                  -5.0
+                ],
+                "pocket_max_mm": [
+                  12.0,
+                  8.0,
+                  0.0
+                ],
+                "pocket_min_mm": [
+                  -12.0,
+                  -8.0,
+                  -5.0
+                ],
+                "pocket_unreached_corner_radius_mm": 2.0,
+                "primitive": "box_minus_pocket"
+              },
+              "path": null,
+              "sha256": null
+            }
+          },
+          "original_part": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "box_max_mm": [
+                16.5,
+                11.0,
+                0.0
+              ],
+              "box_min_mm": [
+                -16.5,
+                -11.0,
+                -8.0
+              ],
+              "empty_island": false,
+              "island_max_mm": [
+                3.5,
+                0.5,
+                -1.0
+              ],
+              "island_min_mm": [
+                0.5,
+                -2.5,
+                -5.0
+              ],
+              "pocket_max_mm": [
+                12.0,
+                8.0,
+                0.0
+              ],
+              "pocket_min_mm": [
+                -12.0,
+                -8.0,
+                -5.0
+              ],
+              "primitive": "box_minus_pocket"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "schema_version": "diffcam-contracts/1.1",
+          "source": {
+            "checksums": {},
+            "license": "MIT",
+            "notes": "Bounded analytic procedural seed; no solver-performance exclusions.",
+            "origin": "t2.3-bootstrap/1:oblong_with_offset_step_pad"
+          },
+          "split": "test",
+          "stock": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "max_mm": [
+                16.5,
+                11.0,
+                0.0
+              ],
+              "min_mm": [
+                -16.5,
+                -11.0,
+                -8.0
+              ],
+              "primitive": "box"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "task_id": "procedural-pocket_island-test-offset-truncated-square-pad",
+          "tolerances": {
+            "clearance_mm": 0.25,
+            "completion_residual_mm3": 2.0,
+            "gouge_volume_mm3": 0.0,
+            "local_surface_error_mm": 0.5,
+            "rapid_penetration_mm": 0.0
+          },
+          "tool": {
+            "cutter_kind": "flat",
+            "cutter_radius_mm": 2.0,
+            "flute_length_mm": 10.0,
+            "holder_bottom_mm": 10.0,
+            "holder_height_mm": 32.0,
+            "holder_radius_mm": 5.0,
+            "reference_point": "cutter_bottom_centre",
+            "shank_radius_mm": 2.0,
+            "tool_number": 1
+          },
+          "work_to_machine": {
+            "matrix": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                1.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                1.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ]
+            ]
+          }
+        },
+        "record_type": "TaskSpec"
+      },
+      "topology": "oblong_with_offset_step_pad"
+    },
+    {
+      "continuous_exclusion_diagnostic_mm3": 27.46903508512662,
+      "evaluator_exclusion_tolerance_mm3": 0.0,
+      "family": "variable_width_depth",
+      "grid_excluded_volume_mm3": 24.0,
+      "motion_hash": "sha256:6ee5b706a7db8f649f026737898c4172c916bea70c66b3c65156ec53ec86e8c3",
+      "seed_provenance": "cam_seeds:pocket_with_island_seed/1",
+      "seed_spec": {
+        "boundary_offset_margin_mm": 0.5,
+        "clearance_z": 8.0,
+        "feed_mm_s": 6.0,
+        "floor_z": -8.0,
+        "has_retained_island": false,
+        "home_z": 10.0,
+        "island_centre_xy": [
+          0.0,
+          0.0
+        ],
+        "island_half_side": 0.0,
+        "outer_xy": [
+          2.0,
+          5.0
+        ],
+        "plunge_mm_s": 4.0,
+        "pocket_centre_xy": [
+          0.0,
+          0.0
+        ],
+        "pocket_half_x": 4.0,
+        "pocket_half_y": 7.0,
+        "provenance": "cam_seeds:pocket_with_island_seed/1",
+        "raster_clear_radius": 0.0,
+        "y_rows": 5
+      },
+      "split": "dev",
+      "task_hash": "sha256:a6b02b61755d2acc0b652f476baefe46609881f962e71eec2485219f77b57b62",
+      "task_id": "procedural-variable_width_depth-dev-narrow-deep-clearing",
+      "task_record": {
+        "record": {
+          "family": "variable_width_depth",
+          "fixtures": [],
+          "grid": {
+            "frame": "work",
+            "origin_mm": [
+              -8.5,
+              -11.5,
+              -12.0
+            ],
+            "shape": [
+              68,
+              92,
+              48
+            ],
+            "sign_convention": "negative_inside",
+            "voxel_mm": 0.25
+          },
+          "initial_state": {
+            "frame": "machine",
+            "known": true,
+            "length_offset_applied": true,
+            "position_mm": [
+              0.0,
+              0.0,
+              10.0
+            ],
+            "work_offset": "G54"
+          },
+          "length_unit": "mm",
+          "limits": {
+            "envelope_max_mm": [
+              12.5,
+              15.5,
+              60.0
+            ],
+            "envelope_min_mm": [
+              -12.5,
+              -15.5,
+              -16.0
+            ],
+            "max_accel_mm_s2": 100.0,
+            "max_feed_mm_s": 8.0,
+            "rapid_mm_s": 80.0
+          },
+          "motion_semantics": {
+            "arcs_supported": true,
+            "dialects": [
+              "rs274",
+              "haas"
+            ],
+            "supported_gcodes": [
+              "G0",
+              "G1",
+              "G2",
+              "G3",
+              "G17",
+              "G18",
+              "G19",
+              "G20",
+              "G21",
+              "G43",
+              "G49",
+              "G53",
+              "G54",
+              "G90",
+              "G91",
+              "G94"
+            ],
+            "timing_rule": "exact_stop_constant_speed"
+          },
+          "operation_target": {
+            "excluded_volume_mm3": 24.0,
+            "exclusion_reason": "Finite-radius cutter cannot reach four pocket corner fillets. Normative exclusion 24.0 mm^3 on the declared 0.25 mm grid. Continuous diagnostic is 27.46903508512662 mm^3. Exact zero sampling tolerance.",
+            "geometry": {
+              "frame": "work",
+              "grid": null,
+              "kind": "analytic",
+              "params": {
+                "accessibility": "flat upright finite cutter on full original walls; union original part with four corner boxes outside the radius cutter disks",
+                "box_max_mm": [
+                  8.5,
+                  11.5,
+                  0.0
+                ],
+                "box_min_mm": [
+                  -8.5,
+                  -11.5,
+                  -12.0
+                ],
+                "continuous_excluded_volume_mm3": 27.46903508512662,
+                "empty_island": true,
+                "grid_excluded_volume_mm3": 24.0,
+                "grid_excluded_voxels": 1536,
+                "grid_exclusion_tolerance_mm3": 0.0,
+                "grid_exclusion_tolerance_policy": "exact grid-resolved declaration, independently checked analytic mask; zero tolerance. Continuous volume is diagnostic only",
+                "holder_clearance": {
+                  "above_stock_mm": 2.0,
+                  "bottom_at_floor_mm": 2.0,
+                  "qualification_and_cell_margin_mm": 0.46650635094610965,
+                  "shank_height_mm": 0.0,
+                  "stock_top_mm": 0.0
+                },
+                "island_max_mm": [
+                  -7.5,
+                  -10.5,
+                  2.0
+                ],
+                "island_min_mm": [
+                  -8.5,
+                  -11.5,
+                  1.0
+                ],
+                "pocket_max_mm": [
+                  4.0,
+                  7.0,
+                  0.0
+                ],
+                "pocket_min_mm": [
+                  -4.0,
+                  -7.0,
+                  -8.0
+                ],
+                "pocket_unreached_corner_radius_mm": 2.0,
+                "primitive": "box_minus_pocket"
+              },
+              "path": null,
+              "sha256": null
+            }
+          },
+          "original_part": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "box_max_mm": [
+                8.5,
+                11.5,
+                0.0
+              ],
+              "box_min_mm": [
+                -8.5,
+                -11.5,
+                -12.0
+              ],
+              "empty_island": true,
+              "island_max_mm": [
+                -7.5,
+                -10.5,
+                2.0
+              ],
+              "island_min_mm": [
+                -8.5,
+                -11.5,
+                1.0
+              ],
+              "pocket_max_mm": [
+                4.0,
+                7.0,
+                0.0
+              ],
+              "pocket_min_mm": [
+                -4.0,
+                -7.0,
+                -8.0
+              ],
+              "primitive": "box_minus_pocket"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "schema_version": "diffcam-contracts/1.1",
+          "source": {
+            "checksums": {},
+            "license": "MIT",
+            "notes": "Bounded analytic procedural seed; no solver-performance exclusions.",
+            "origin": "t2.3-bootstrap/1:narrow_deep_clearing"
+          },
+          "split": "dev",
+          "stock": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "max_mm": [
+                8.5,
+                11.5,
+                0.0
+              ],
+              "min_mm": [
+                -8.5,
+                -11.5,
+                -12.0
+              ],
+              "primitive": "box"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "task_id": "procedural-variable_width_depth-dev-narrow-deep-clearing",
+          "tolerances": {
+            "clearance_mm": 0.25,
+            "completion_residual_mm3": 2.0,
+            "gouge_volume_mm3": 0.0,
+            "local_surface_error_mm": 0.5,
+            "rapid_penetration_mm": 0.0
+          },
+          "tool": {
+            "cutter_kind": "flat",
+            "cutter_radius_mm": 2.0,
+            "flute_length_mm": 10.0,
+            "holder_bottom_mm": 10.0,
+            "holder_height_mm": 32.0,
+            "holder_radius_mm": 5.0,
+            "reference_point": "cutter_bottom_centre",
+            "shank_radius_mm": 2.0,
+            "tool_number": 1
+          },
+          "work_to_machine": {
+            "matrix": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                1.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                1.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ]
+            ]
+          }
+        },
+        "record_type": "TaskSpec"
+      },
+      "topology": "narrow_deep_clearing"
+    },
+    {
+      "continuous_exclusion_diagnostic_mm3": 10.300888156922483,
+      "evaluator_exclusion_tolerance_mm3": 0.0,
+      "family": "variable_width_depth",
+      "grid_excluded_volume_mm3": 9.0,
+      "motion_hash": "sha256:ac3674c288c52a7f7094d77301e39c1ddbd795163bc96ca2786591a6d37c4049",
+      "seed_provenance": "cam_seeds:pocket_with_island_seed/1",
+      "seed_spec": {
+        "boundary_offset_margin_mm": 0.5,
+        "clearance_z": 8.0,
+        "feed_mm_s": 6.0,
+        "floor_z": -3.0,
+        "has_retained_island": false,
+        "home_z": 10.0,
+        "island_centre_xy": [
+          0.0,
+          0.0
+        ],
+        "island_half_side": 0.0,
+        "outer_xy": [
+          6.0,
+          3.0
+        ],
+        "plunge_mm_s": 4.0,
+        "pocket_centre_xy": [
+          0.0,
+          0.0
+        ],
+        "pocket_half_x": 8.0,
+        "pocket_half_y": 5.0,
+        "provenance": "cam_seeds:pocket_with_island_seed/1",
+        "raster_clear_radius": 0.0,
+        "y_rows": 3
+      },
+      "split": "test",
+      "task_hash": "sha256:40904869eeecdc21b47a7ddaddbb263250811e97978fdfe7065aa2784c58c06b",
+      "task_id": "procedural-variable_width_depth-test-wide-shallow-clearing",
+      "task_record": {
+        "record": {
+          "family": "variable_width_depth",
+          "fixtures": [],
+          "grid": {
+            "frame": "work",
+            "origin_mm": [
+              -15.0,
+              -9.0,
+              -12.0
+            ],
+            "shape": [
+              120,
+              72,
+              48
+            ],
+            "sign_convention": "negative_inside",
+            "voxel_mm": 0.25
+          },
+          "initial_state": {
+            "frame": "machine",
+            "known": true,
+            "length_offset_applied": true,
+            "position_mm": [
+              0.0,
+              0.0,
+              10.0
+            ],
+            "work_offset": "G54"
+          },
+          "length_unit": "mm",
+          "limits": {
+            "envelope_max_mm": [
+              19.0,
+              13.0,
+              60.0
+            ],
+            "envelope_min_mm": [
+              -19.0,
+              -13.0,
+              -16.0
+            ],
+            "max_accel_mm_s2": 100.0,
+            "max_feed_mm_s": 8.0,
+            "rapid_mm_s": 80.0
+          },
+          "motion_semantics": {
+            "arcs_supported": true,
+            "dialects": [
+              "rs274",
+              "haas"
+            ],
+            "supported_gcodes": [
+              "G0",
+              "G1",
+              "G2",
+              "G3",
+              "G17",
+              "G18",
+              "G19",
+              "G20",
+              "G21",
+              "G43",
+              "G49",
+              "G53",
+              "G54",
+              "G90",
+              "G91",
+              "G94"
+            ],
+            "timing_rule": "exact_stop_constant_speed"
+          },
+          "operation_target": {
+            "excluded_volume_mm3": 9.0,
+            "exclusion_reason": "Finite-radius cutter cannot reach four pocket corner fillets. Normative exclusion 9.0 mm^3 on the declared 0.25 mm grid. Continuous diagnostic is 10.300888156922483 mm^3. Exact zero sampling tolerance.",
+            "geometry": {
+              "frame": "work",
+              "grid": null,
+              "kind": "analytic",
+              "params": {
+                "accessibility": "flat upright finite cutter on full original walls; union original part with four corner boxes outside the radius cutter disks",
+                "box_max_mm": [
+                  15.0,
+                  9.0,
+                  0.0
+                ],
+                "box_min_mm": [
+                  -15.0,
+                  -9.0,
+                  -12.0
+                ],
+                "continuous_excluded_volume_mm3": 10.300888156922483,
+                "empty_island": true,
+                "grid_excluded_volume_mm3": 9.0,
+                "grid_excluded_voxels": 576,
+                "grid_exclusion_tolerance_mm3": 0.0,
+                "grid_exclusion_tolerance_policy": "exact grid-resolved declaration, independently checked analytic mask; zero tolerance. Continuous volume is diagnostic only",
+                "holder_clearance": {
+                  "above_stock_mm": 7.0,
+                  "bottom_at_floor_mm": 7.0,
+                  "qualification_and_cell_margin_mm": 0.46650635094610965,
+                  "shank_height_mm": 0.0,
+                  "stock_top_mm": 0.0
+                },
+                "island_max_mm": [
+                  -14.0,
+                  -8.0,
+                  2.0
+                ],
+                "island_min_mm": [
+                  -15.0,
+                  -9.0,
+                  1.0
+                ],
+                "pocket_max_mm": [
+                  8.0,
+                  5.0,
+                  0.0
+                ],
+                "pocket_min_mm": [
+                  -8.0,
+                  -5.0,
+                  -3.0
+                ],
+                "pocket_unreached_corner_radius_mm": 2.0,
+                "primitive": "box_minus_pocket"
+              },
+              "path": null,
+              "sha256": null
+            }
+          },
+          "original_part": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "box_max_mm": [
+                15.0,
+                9.0,
+                0.0
+              ],
+              "box_min_mm": [
+                -15.0,
+                -9.0,
+                -12.0
+              ],
+              "empty_island": true,
+              "island_max_mm": [
+                -14.0,
+                -8.0,
+                2.0
+              ],
+              "island_min_mm": [
+                -15.0,
+                -9.0,
+                1.0
+              ],
+              "pocket_max_mm": [
+                8.0,
+                5.0,
+                0.0
+              ],
+              "pocket_min_mm": [
+                -8.0,
+                -5.0,
+                -3.0
+              ],
+              "primitive": "box_minus_pocket"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "schema_version": "diffcam-contracts/1.1",
+          "source": {
+            "checksums": {},
+            "license": "MIT",
+            "notes": "Bounded analytic procedural seed; no solver-performance exclusions.",
+            "origin": "t2.3-bootstrap/1:wide_shallow_clearing"
+          },
+          "split": "test",
+          "stock": {
+            "frame": "work",
+            "grid": null,
+            "kind": "analytic",
+            "params": {
+              "max_mm": [
+                15.0,
+                9.0,
+                0.0
+              ],
+              "min_mm": [
+                -15.0,
+                -9.0,
+                -12.0
+              ],
+              "primitive": "box"
+            },
+            "path": null,
+            "sha256": null
+          },
+          "task_id": "procedural-variable_width_depth-test-wide-shallow-clearing",
+          "tolerances": {
+            "clearance_mm": 0.25,
+            "completion_residual_mm3": 2.0,
+            "gouge_volume_mm3": 0.0,
+            "local_surface_error_mm": 0.5,
+            "rapid_penetration_mm": 0.0
+          },
+          "tool": {
+            "cutter_kind": "flat",
+            "cutter_radius_mm": 2.0,
+            "flute_length_mm": 10.0,
+            "holder_bottom_mm": 10.0,
+            "holder_height_mm": 32.0,
+            "holder_radius_mm": 5.0,
+            "reference_point": "cutter_bottom_centre",
+            "shank_radius_mm": 2.0,
+            "tool_number": 1
+          },
+          "work_to_machine": {
+            "matrix": [
+              [
+                1.0,
+                0.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                1.0,
+                0.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                1.0,
+                0.0
+              ],
+              [
+                0.0,
+                0.0,
+                0.0,
+                1.0
+              ]
+            ]
+          }
+        },
+        "record_type": "TaskSpec"
+      },
+      "topology": "wide_shallow_clearing"
+    }
+  ]
+}

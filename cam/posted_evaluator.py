@@ -1,7 +1,9 @@
 """Production, chronological hard evaluator for strict posted RS274/Haas motion.
 
 This is production **geometry** evaluation, not a machining safety certificate.
-It supports analytic box stock and flat, axis-vertical tool assemblies. The
+It supports analytic box stock and flat, axis-vertical tool assemblies. Operation/original
+geometry may be analytic or a hash-checked float64 field on the exact task grid;
+there is no interpolation or resampling for sampled fields in this module. The
 initial pose does not cut. Feed/arc cutter poses remove their closed cylinder;
 shank and holder are then checked against stock remaining at that point.
 Rapids never cut. Conservative whole-cell interval bounds include stock-bearing
@@ -17,6 +19,7 @@ certificate. Grid metrics use the shared ``simulator.csg_metrics`` library.
 from __future__ import annotations
 
 import dataclasses
+import io
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +33,7 @@ from simulator import csg_metrics
 from simulator.csg_metrics import compute_grid_metrics
 
 EVALUATOR_ID = "posted_hard/production"
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _PLANE_AXES = {C.ArcPlane.XY: (0, 1, 2), C.ArcPlane.XZ: (2, 0, 1), C.ArcPlane.YZ: (1, 2, 0)}
 
 
@@ -272,6 +276,98 @@ def _analytic_mask(geometry, points):
     raise ValueError(f"unsupported analytic geometry primitive {p.get('primitive')!r}")
 
 
+def _sampled_mask(geometry, task_grid):
+    """Load a checked, exact-grid sampled field without interpolation.
+
+    The SHA-256 covers the exact bytes loaded, not a separate later read. Values
+    stay float64 for the hard geometry metrics; the simulator's float32 runtime
+    representation is not used as a substitute here. Cell-centre membership is
+    ``phi <= 0`` in the declared millimetre ``negative_inside`` convention.
+    """
+    if (
+        geometry.frame != C.Frame.WORK
+        or task_grid.frame != C.Frame.WORK
+        or geometry.grid.frame != C.Frame.WORK
+    ):
+        raise ValueError("sampled operation/part source and grid must use the work frame")
+    if geometry.grid != task_grid:
+        raise ValueError(
+            "sampled geometry GridSpec must exactly match task grid "
+            "(shape, origin, voxel, frame); resampling is unsupported"
+        )
+    if geometry.grid.sign_convention != "negative_inside":
+        raise ValueError("sampled geometry must use the negative_inside sign convention")
+    path = Path(geometry.path)
+    if not path.is_absolute():
+        # Runner paths are repository-relative; never depend on invocation CWD.
+        path = (PROJECT_ROOT / path).resolve()
+    try:
+        size = path.stat().st_size
+        # A simple numeric NPY header is tiny. The allowance also covers a
+        # wider float128-like scalar kind, while rejecting unrelated gigabyte
+        # files before loading an unchecked/bogus array into memory.
+        byte_limit = math.prod(task_grid.shape) * 16 + 65_536
+        if size > byte_limit:
+            raise ValueError(
+                f"sampled payload is {size} bytes, exceeds exact-grid byte limit {byte_limit}"
+            )
+        data = path.read_bytes()
+    except OSError as error:
+        raise ValueError(f"cannot read sampled geometry payload {path}: {error}") from error
+    actual_hash = C.sha256_bytes(data)
+    if actual_hash != geometry.sha256:
+        raise ValueError(
+            f"sampled geometry SHA-256 mismatch: declared {geometry.sha256}, actual {actual_hash}"
+        )
+    try:
+        values = np.load(io.BytesIO(data), allow_pickle=False)
+    except (OSError, ValueError, TypeError) as error:
+        raise ValueError(f"cannot decode sampled geometry as a non-pickle NumPy array: {error}") from error
+    if not isinstance(values, np.ndarray):
+        close = getattr(values, "close", None)
+        if callable(close):
+            close()
+        raise ValueError("sampled geometry must be one numeric .npy array, not an NPZ/archive")
+    if values.dtype.kind not in "fiu":
+        raise ValueError(f"sampled geometry dtype {values.dtype} is not a real numeric scalar field")
+    if values.shape != task_grid.shape:
+        raise ValueError(
+            f"sampled payload shape {values.shape} != task grid shape {task_grid.shape}"
+        )
+    values = np.ascontiguousarray(values, dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError("sampled geometry contains non-finite values (NaN or infinity)")
+    return values <= 0.0
+
+
+def _geometry_mask(geometry, points, task_grid):
+    if geometry.kind == "analytic":
+        return _analytic_mask(geometry, points)
+    if geometry.kind == "sampled":
+        return _sampled_mask(geometry, task_grid)
+    raise ValueError(
+        f"unsupported operation/part geometry kind {geometry.kind!r}; "
+        "expected analytic primitives or an exact-grid sampled field"
+    )
+
+
+def _geometry_masks(task, points):
+    """Load independent original-P and operation-T masks and enforce P ⊆ T."""
+    try:
+        target = _geometry_mask(task.operation_target.geometry, points, task.grid)
+    except ValueError as error:
+        raise ValueError(f"operation_target: {error}") from error
+    try:
+        original = _geometry_mask(task.original_part, points, task.grid)
+    except ValueError as error:
+        raise ValueError(f"original_part: {error}") from error
+    if np.any(original & ~target):
+        raise ValueError(
+            "original_part must be a subset of operation_target at task-grid cell centres (P ⊆ T)"
+        )
+    return target, original
+
+
 def _unsupported_reasons(task, motion, points):
     reasons = []
     if not task.initial_state.known or not motion.initial_state.known:
@@ -290,8 +386,7 @@ def _unsupported_reasons(task, motion, points):
     if abs(matrix[2][0]) > 1e-9 or abs(matrix[2][1]) > 1e-9 or abs(matrix[2][2] - 1.0) > 1e-9:
         reasons.append("work-to-machine rotation must keep work/tool +Z aligned with machine +Z")
     try:
-        _analytic_mask(task.operation_target.geometry, points)
-        _analytic_mask(task.original_part, points)
+        _geometry_masks(task, points)
         for segment in motion.segments:
             if segment.kind == C.SegmentKind.ARC:
                 _arc_data(segment, task, motion.frame)
@@ -506,8 +601,7 @@ def _execute(task, motion, cfg):
 
 def _result(task, motion, cfg, execution):
     points = _centres(task.grid)
-    target = _analytic_mask(task.operation_target.geometry, points)
-    original = _analytic_mask(task.original_part, points)
+    target, original = _geometry_masks(task, points)
     metrics = compute_grid_metrics(
         execution.remaining, target, execution.initial, task.grid.voxel_mm,
         original_part_mask=original, surface_origin_mm=task.grid.origin_mm,
