@@ -211,11 +211,12 @@
    "note": "exporter merged (58cf85c+1e333a6): status 'simulation-qualified'/'pending setup review' only; nominal dev packet reproduced byte-identically; production_refinement slot (absent-with-reason for nominal; required for final). MUST re-check against the final T4.1b refinement-link schema (D-04 may bump to /4: verdicts from 0.125 mm both dialects) before final packets. Final packets after T4.2 freeze. No hardware authorized."
   },
   "T6.2": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T6.2-measurements",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "software only; empirical status pending real trials"
   },
   "T7.1": {
    "status": "planned",
