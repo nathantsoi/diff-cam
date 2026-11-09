@@ -6,9 +6,11 @@ with one selected small through-hole exclusion; a 6.35 mm flat cutter cannot
 enter that measured narrower hole without cutting its original wall.  Other
 features are not certified accessible.  The nominal NC removes a real, nonzero
 amount of stock in a single central plunge.  It is not a complete finishing
-program.  The production evaluator currently accepts only analytic operation
-and original-part geometry, so its sampled-geometry result is deliberately
-retained as unsupported rather than replaced by an analytic stand-in.
+program.  Production evaluates sampled P/T only on the exact matching task
+grid. The partial-roughing geometry result is expected to be false, and all
+safety/clearance outcomes are retained separately without a physical
+machining-safety or finished-target claim. No interpolated or analytic-part
+substitute is introduced.
 
 Large derived fields and actual run artifacts go in a NEW directory under
 ``data/external/`` (ignored), or an explicitly supplied new output directory.
@@ -431,6 +433,7 @@ def run_pilot(output_dir: Optional[Path] = None, *, interpreter: Optional[Path] 
         ),
         native_excluded,
     )
+    motion = nominal_motion(task)
     initial = stock_field <= 0
     original = fields["part"]["values"] <= 0
     target = fields["operation_target"]["values"] <= 0
@@ -444,11 +447,20 @@ def run_pilot(output_dir: Optional[Path] = None, *, interpreter: Optional[Path] 
             "subdivisions": 128, "expected_nc_hash": C.nc_hash(nc_bytes),
         })
         if (
-            production.coverage != C.Coverage.UNSUPPORTED
-            or E.SAMPLED_EVALUATOR_REASON not in production.coverage_reasons
-            or production.geometry_pass is not None
+            production.coverage != C.Coverage.COMPLETE
+            or production.geometry_pass is not False
+            or production.metrics["residual_volume_mm3"].value is None
+            or production.metrics["residual_volume_mm3"].value <= 0
         ):
-            raise AssertionError("production sampled-geometry unsupported contract was not preserved")
+            raise AssertionError(
+                "sampled production result did not retain complete coverage and the "
+                "expected incomplete-roughing geometry outcome: "
+                f"{production.coverage} / {production.geometry_pass}"
+            )
+        declared = task.operation_target.excluded_volume_mm3
+        measured_excluded = production.metrics["excluded_volume_mm3"].value
+        if measured_excluded is None or measured_excluded != declared:
+            raise AssertionError("grid-resolved exclusion changed during posted evaluation")
         reference = run_reference(task, parsed, {
             "max_step_mm": grid.voxel_mm / 4,
             "compute_bounds": True, "safety_screen": True,
@@ -509,9 +521,10 @@ def run_pilot(output_dir: Optional[Path] = None, *, interpreter: Optional[Path] 
     files["nominal_summary.json"] = json.dumps({
         "status": "incomplete",
         "reason": (
-            "One roughing plunge, not a complete finishing path. Production geometry is "
-            "unsupported for sampled original/operation targets; no efficiency or physical "
-            "machining-safety claim is made."
+            "One roughing plunge, not a complete finishing path. Production sampled "
+            "geometry is complete at the exact task grid and reports this partial "
+            "operation as geometry false; no efficiency or physical machining-safety "
+            "claim is made."
         ),
         "single_tool_plus_z_only": True,
         "one_selected_hole_excluded": True,
@@ -523,6 +536,8 @@ def run_pilot(output_dir: Optional[Path] = None, *, interpreter: Optional[Path] 
         "production": {
             name: {"coverage": record["production"].coverage.value,
                    "reasons": record["production"].coverage_reasons,
+                   "safety_pass": record["production"].safety_pass,
+                   "efficiency_eligible": record["production"].efficiency_eligible,
                    "geometry_pass": record["production"].geometry_pass}
             for name, record in evaluations.items()
         },
