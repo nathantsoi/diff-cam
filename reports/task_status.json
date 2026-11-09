@@ -169,9 +169,9 @@
    "note": "merged: matrix + json. CNC-Net original stack BLOCKED (sm_120); 'CNC-Net @ba0652f on modernized stack' one-step smoke PASSED (IoU 0.424, 22.5s) \u2014 not faithful reproduction; executable NC mapping unsupported natively. Titan BLOCKED (no STEP backend, no provenance/license). CNCGEN preview descriptive only."
   },
   "T5.1": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-2",
+   "branch": "task/T5.1-cncnet-adapter",
    "blocker": null,
    "next": null
   },
