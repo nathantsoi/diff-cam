@@ -206,3 +206,15 @@ The contract should expose: physical stock/grid bounds and lattice phase; cutter
 `ReferenceSettings` (spatial edge, temporal displacement limit, refinement cap, collision continuation policy) belongs outside task/tool/setup hashes but inside evaluator discretization metadata. Results need separate removed volume, occupancy/grid metadata, unique contact, count, integrated overlap, first-contact location, spatial/temporal uncertainties, and `safe/collision/unknown`; numeric zero must differ from unknown.
 
 These requirements were sent to the coordinator during the read-only phase. Any contract disagreement discovered in consumer review will be recorded as a requested change rather than silently worked around in fixture semantics.
+
+## 9. Contracts 1.1: rapid penetration and clearance split
+
+A vertical rapid retract through its own slot has exact zero nominal cutter clearance but a positive conservative uncertainty band, so a zero-penetration policy correctly yields `safety_pass=None` rather than certifying safety. Contracts 1.1 makes the allowed coverage bound explicit instead of hiding it:
+
+- for a rapid interval, the possible cutter-penetration upper bound is `max(0, rho+delta_t-min(d_cutter at both endpoints))` over remaining strict-stock cell centres; for a stationary rapid, `delta_t=0`;
+- a sampled rapid-cutter collision requires `d_cutter < -task.tolerances.rapid_penetration_mm`; non-cutting shank/holder collisions remain strict `d<0` independent of that tolerance;
+- rapid safety can certify only when no collision exists and every interval's penetration upper bound is within tolerance. Otherwise it remains false/unknown;
+- `min_clearance_mm` covers **non-cutting shank and holder only**, during both feeds and rapids. `min_rapid_cutter_clearance_mm` is reported separately. Tolerated grazing is not silently folded into collision volume/count/integrals;
+- `clearance_mm` is a reported qualification threshold for the non-cutting assembly, not a hard `safety_pass` threshold in this reference. This role and both threshold values are emitted in discretization metadata.
+
+The `retract_from_own_slot` fixture feeds down and retracts along exactly reversed poses. It is unknown at zero tolerance and safe at its measured upper bound (and at the scale-derived `rho+delta_t` band, including a fractional grid-phase variant). A separate long-flute, distant-holder rapid-through-solid control still fails at tolerances through 1.5 mm with direct cutter events and non-cutting clearance above 10 mm. The convergence report records these expectations under its own schema 1.1 and includes the shared contracts schema and task/motion hashes.

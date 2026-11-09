@@ -197,6 +197,57 @@ def test_rapid_crosses_solid_without_carving():
     assert event.s >= fixture.first_events["rapid_collision"][1]
 
 
+def test_vertical_retract_is_uncertain_at_zero_and_certified_at_penetration_bound():
+    fixture = F.retract_from_own_slot()
+    unknown = run_reference(fixture.task, fixture.motion)
+    assert unknown.result.safety_pass is None
+    assert metric(unknown, "collision_sample_count") == 0
+    upper = metric(unknown, "rapid_cutter_penetration_upper_bound_mm")
+    assert upper > 0
+    # Split metrics: the holder is far above the stock, while the cutter grazes its slot.
+    assert metric(unknown, "min_clearance_mm") > 10
+    assert metric(unknown, "min_rapid_cutter_clearance_mm") >= -1e-12
+
+    adjusted = F.with_rapid_tolerance(fixture, upper)
+    allowed = run_reference(adjusted.task, adjusted.motion)
+    assert allowed.result.safety_pass is True
+    assert allowed.result.discretization["tolerances"]["clearance_mm_role"].startswith("reported qualification")
+    assert metric(allowed, "rapid_cutter_penetration_upper_bound_mm") == pytest.approx(upper)
+    assert metric(allowed, "collision_sample_count") == 0
+    assert metric(allowed, "unique_contacted_volume_mm3") == 0
+    assert metric(allowed, "min_clearance_mm") > 10
+    feed_only = run_reference(F.plunge_above().task, F.plunge_above().motion)
+    assert feed_only.result.metrics["min_rapid_cutter_clearance_mm"].value is None
+    assert feed_only.result.metrics["rapid_cutter_penetration_upper_bound_mm"].value is None
+
+
+def test_rapid_penetration_tolerance_is_phase_stable_and_deep_penetration_still_fails():
+    fixture = F.retract_from_own_slot()
+    baseline = run_reference(fixture.task, fixture.motion)
+    rho = baseline.result.discretization["cell_half_diagonal_mm"]
+    band = rho + max(record["temporal_hausdorff_mm"]
+                     for record in baseline.result.discretization["segments"]
+                     if record["kind"] == "rapid")
+    phased = F.with_joint_phase(fixture, (0.26, 0.58, 0.74))
+    for case in (fixture, phased):
+        uncertain = run_reference(case.task, case.motion)
+        assert uncertain.result.safety_pass is None
+        adjusted = F.with_rapid_tolerance(case, band)
+        certified = run_reference(adjusted.task, adjusted.motion)
+        assert certified.result.safety_pass is True
+        assert metric(certified, "rapid_cutter_penetration_upper_bound_mm") <= band + 1e-12
+
+    solid = F.rapid_through_solid()
+    solid = dataclasses.replace(solid, task=dataclasses.replace(solid.task, tool=F.flat_tool(3, 20)))
+    for tolerance in (0.0, 0.25, 1.5):
+        adjusted = F.with_rapid_tolerance(solid, tolerance)
+        result = run_reference(adjusted.task, adjusted.motion)
+        assert result.result.safety_pass is False
+        assert any(event.kind == "rapid_collision" for event in result.result.events)
+        assert metric(result, "min_rapid_cutter_clearance_mm") < -1.5
+        assert metric(result, "min_clearance_mm") > 10
+
+
 def test_zero_length_rapid_checks_assembly_without_cutting():
     fixture = F.zero_length_rapid()
     trace = run_reference(fixture.task, fixture.motion)
@@ -285,3 +336,11 @@ def test_saved_convergence_sweep_tightens_bounds_and_settles_chronology():
     assert safe["rows"][-1]["safety_pass"] is True
     collision = next(c for c in report["chronology_cases"] if c["fixture_id"] == "genuine_holder_collision")
     assert all(row["safety_pass"] is False for row in collision["rows"])
+    assert report["contracts_schema"] == C.SCHEMA_VERSION
+    rapid_rows = {row["case"]: row for row in report["rapid_tolerance_cases"]}
+    assert rapid_rows["retract_zero"]["safety_pass"] is None
+    assert rapid_rows["retract_at_own_upper_bound"]["safety_pass"] is True
+    assert rapid_rows["retract_band_phase_0"]["safety_pass"] is True
+    assert rapid_rows["retract_zero_phase_fractional"]["safety_pass"] is None
+    assert rapid_rows["retract_band_phase_fractional"]["safety_pass"] is True
+    assert rapid_rows["rapid_through_solid_at_retract_upper_bound"]["safety_pass"] is False
