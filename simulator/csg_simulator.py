@@ -1,11 +1,12 @@
 import numpy as np
+
 import random
 import warnings
 import taichi as ti
 from pathlib import Path
 from typing import Mapping
 
-from benchmarks.contracts import Frame, GeometrySource, sha256_bytes
+from benchmarks.contracts import Frame, GeometrySource, content_hash, sha256_bytes
 from simulator.simulator_utils import *
 from cam.units import inch_to_mm, ipm_to_mm_per_s
 
@@ -107,6 +108,7 @@ class CSGSimulatorDelta:
         target_geometry=None,
         stock_geometry=None,
         stock_box_origin_mm=None,
+        precision="f32",
     ):
         """Differentiable CSG simulator over a small STOCK box placed inside a
         larger machine work volume.
@@ -144,26 +146,46 @@ class CSGSimulatorDelta:
                         coordinates. With a custom stock it must match the source
                         grid origin; an omitted custom-stock size uses its GridSpec
                         extents instead of the otherwise required stock_size_*.
+        precision: "f32" (default, available for exploration) or "f64" for
+                         every float field and adjoint. Use f64 for the
+                         comparison protocol. No partial or implicit mixed dtype.
+                         default_fp is runtime-wide, one precision per process.
         """
-        # ti.init() RESETS the whole Taichi runtime, invalidating every field
-        # allocated by any previously-created simulator. That is fine when each
-        # process uses one simulator at a time (training with a single env, or
-        # eval scoring checkpoints sequentially), but it corrupts simulators
-        # that must co-exist in one process. Pass init_taichi=False to allocate
-        # this simulator's fields on the *already-running* runtime instead of
-        # resetting it -- Taichi supports adding fields after materialization.
         self._initialization_complete = False
+        if precision not in ("f32", "f64"):
+            raise ValueError("precision must be 'f32' or 'f64'; partial/mixed precision is unsupported")
+        self.precision = precision
+        self._precision = {"f32": ti.f32, "f64": ti.f64}[precision]
+        self.numpy_dtype = np.dtype(np.float32 if precision == "f32" else np.float64)
+        # Python's ``self.dtype`` cannot be used in ti.func/kernel annotations at
+        # class-definition time. Scalar inputs therefore use ti.template(),
+        # scalar casts use this declared dtype, and scalar return annotations
+        # intentionally follow the process-wide default_fp instead of hardcoding
+        # f32. The runtime check below is made BEFORE allocating any fields.
+        from taichi.lang import impl as taichi_impl
+
         if init_taichi:
             try:
                 if ti._lib.core.with_cuda():
-                    ti.init(arch=ti.gpu, debug=False, default_fp=ti.f32, offline_cache=False)
+                    ti.init(arch=ti.gpu, debug=False, default_fp=self._precision, offline_cache=False)
                 else:
-                    ti.init(arch=ti.cpu, debug=False, default_fp=ti.f32, offline_cache=False)
+                    ti.init(arch=ti.cpu, debug=False, default_fp=self._precision, offline_cache=False)
             except RuntimeError:
                 # A CUDA-enabled build does not imply an available device.
-                ti.init(arch=ti.cpu, debug=False, default_fp=ti.f32, offline_cache=False)
+                ti.init(arch=ti.cpu, debug=False, default_fp=self._precision, offline_cache=False)
             ti.set_logging_level(ti.WARN)
-
+        runtime = taichi_impl.get_runtime()
+        if runtime is None or runtime.default_fp != self._precision:
+            actual = None if runtime is None else runtime.default_fp
+            raise RuntimeError(
+                f"simulator precision={precision} requires Taichi default_fp={self._precision}, "
+                f"but the current runtime has {actual}. default_fp is runtime-wide; "
+                "one precision per process. Construct the matching runtime in a fresh "
+                "process, or pass init_taichi=True in a fresh process: ti.init() "
+                "INVALIDATES existing fields and is never used for precision conversion."
+            )
+        # init_taichi=False attaches fields to the initialized, already-matching
+        # runtime. This never converts existing fields or resets their runtime.
         _guard_taichi_instance_lifecycle()
         if max_steps <= 0:
             raise ValueError(
@@ -266,23 +288,23 @@ class CSGSimulatorDelta:
         # envelope at a given resolution reproduces the old behavior exactly.
         self.k_ref = float(self.resolution)
 
-        self.k = ti.field(dtype=ti.f32, shape=())  # anneal during training
+        self.k = ti.field(dtype=self._precision, shape=())  # anneal during training
         self.k[None] = k_init
 
         # ---- Tool (learnable) ----
         self.tool_delta = ti.Vector.field(
-            3, dtype=ti.f32, shape=max_steps, needs_grad=True
+            3, dtype=self._precision, shape=max_steps, needs_grad=True
         )
         self.tool_pos = ti.Vector.field(
-            3, dtype=ti.f32, shape=max_steps + 1, needs_grad=True
+            3, dtype=self._precision, shape=max_steps + 1, needs_grad=True
         )
 
-        self.tool_start = ti.Vector.field(3, dtype=ti.f32, shape=())
+        self.tool_start = ti.Vector.field(3, dtype=self._precision, shape=())
         self._configured_tool_start = tuple(float(value) for value in tool_start)
         self.tool_start[None] = ti.Vector(list(tool_start))
 
-        self.tool_radius = ti.field(dtype=ti.f32, shape=())
-        self.tool_height = ti.field(dtype=ti.f32, shape=())
+        self.tool_radius = ti.field(dtype=self._precision, shape=())
+        self.tool_height = ti.field(dtype=self._precision, shape=())
         # Height of the CUTTING TIP band (mm) used ONLY by the air-time metric
         # / loss (compute_traj_metrics_volumes + compute_traj_diagnostics_hard):
         # the air/engage/swept volumes are integrated over this bottom band of
@@ -292,7 +314,7 @@ class CSGSimulatorDelta:
         # itself still uses the full cylinder (tool_sdf). 0 -> fall back to the
         # full tool_height (legacy behaviour) inside the tip SDFs. See
         # docs/memory airfrac-shank-volume-bias.
-        self.tool_cut_height = ti.field(dtype=ti.f32, shape=())
+        self.tool_cut_height = ti.field(dtype=self._precision, shape=())
 
         # ---- Tool holder (collision body, not learnable) ----
         # The holder is the wide spindle/collet shaft that sits coaxially ABOVE
@@ -305,8 +327,8 @@ class CSGSimulatorDelta:
         # Sizes are in MILLIMETRES now (converted to voxels internally). Default
         # holder is a 2.5 inch diameter spindle/collet; its height spans the full
         # machine Z (not the small stock) so it always clears above the cutter.
-        self.holder_radius = ti.field(dtype=ti.f32, shape=())
-        self.holder_height = ti.field(dtype=ti.f32, shape=())
+        self.holder_radius = ti.field(dtype=self._precision, shape=())
+        self.holder_height = ti.field(dtype=self._precision, shape=())
         self.holder_radius[None] = float(inch_to_mm(2.5 / 2.0))   # mm
         self.holder_height[None] = float(self.work_volume_mm[2])  # mm
 
@@ -326,10 +348,10 @@ class CSGSimulatorDelta:
         # inch-valued inputs are converted up front via ``cam.units``. The
         # per-axis envelope ``(Lx, Ly, Lz)`` is fixed at construction and used
         # directly as a kernel constant.
-        self.dt = ti.field(dtype=ti.f32, shape=())               # seconds / step
-        self.rapid_speed = ti.field(dtype=ti.f32, shape=())      # mm / s
-        self.feed_speed = ti.field(dtype=ti.f32, shape=())       # mm / s
-        self.safe_distance = ti.field(dtype=ti.f32, shape=())    # mm
+        self.dt = ti.field(dtype=self._precision, shape=())               # seconds / step
+        self.rapid_speed = ti.field(dtype=self._precision, shape=())      # mm / s
+        self.feed_speed = ti.field(dtype=self._precision, shape=())       # mm / s
+        self.safe_distance = ti.field(dtype=self._precision, shape=())    # mm
         self.enforce_speed_limits = ti.field(dtype=ti.i32, shape=())
         self.dt[None] = float(dt)
         self.rapid_speed[None] = float(ipm_to_mm_per_s(rapid_ipm))
@@ -350,8 +372,8 @@ class CSGSimulatorDelta:
         # part surface: as close as possible without cutting in. The barriers are
         # heavy because they encode "do not violate", while residual is the light
         # objective optimized up against them.
-        self.w_gouge = ti.field(dtype=ti.f32, shape=())
-        self.w_residual = ti.field(dtype=ti.f32, shape=())
+        self.w_gouge = ti.field(dtype=self._precision, shape=())
+        self.w_residual = ti.field(dtype=self._precision, shape=())
         self.w_gouge[None] = 2.0
         self.w_residual[None] = 1.0
         # Annulus-residual emphasis (STRUCTURAL, hole-targeted). The uniform
@@ -366,8 +388,8 @@ class CSGSimulatorDelta:
         # a differentiable param), so the multiplier is a constant per voxel that
         # merely scales the residual gradient -- autodiff-safe, and w_annulus=0
         # (default) leaves the residual exactly unchanged for every other shape.
-        self.w_annulus = ti.field(dtype=ti.f32, shape=())
-        self.annulus_dref = ti.field(dtype=ti.f32, shape=())
+        self.w_annulus = ti.field(dtype=self._precision, shape=())
+        self.annulus_dref = ti.field(dtype=self._precision, shape=())
         self.w_annulus[None] = 0.0
         self.annulus_dref[None] = 2.0
 
@@ -381,7 +403,7 @@ class CSGSimulatorDelta:
         # the optimizer targets the deployable hard carve. Default 0 = off (no
         # behavior change). A principled value is ~log(2)*k_ref/k_final (the
         # single-cut over-erosion in voxel units at the final sharpness).
-        self.loss_shift = ti.field(dtype=ti.f32, shape=())
+        self.loss_shift = ti.field(dtype=self._precision, shape=())
         self.loss_shift[None] = 0.0
 
         # Air-cut penalty: a per-step term that fires when the swept tool occupies
@@ -389,18 +411,18 @@ class CSGSimulatorDelta:
         # air" costs -- the optimizer is charged for every step the cutter spends
         # traversing or hovering in open space instead of removing material. Zero
         # (with zero gradient) when the tool is actually cutting (stock_occ ~ 1).
-        self.w_air = ti.field(dtype=ti.f32, shape=())
+        self.w_air = ti.field(dtype=self._precision, shape=())
         self.w_air[None] = 0.0
         # Jerk / smoothness penalty: squared difference of consecutive deltas, so
         # the trajectory is penalized for abrupt changes in direction/speed (the
         # "jerky" artefact). Acts directly on tool_delta (needs_grad=True).
-        self.w_jerk = ti.field(dtype=ti.f32, shape=())
+        self.w_jerk = ti.field(dtype=self._precision, shape=())
         self.w_jerk[None] = 0.0
         # Speed-regularity (constant-feed) penalty: squared difference of
         # consecutive step LENGTHS (|delta_t| - |delta_{t-1}|)^2. Encourages a
         # uniform feed rate -- the canonical CNC toolpath pattern -- independent
         # of direction. Acts directly on tool_delta (needs_grad=True).
-        self.w_step = ti.field(dtype=ti.f32, shape=())
+        self.w_step = ti.field(dtype=self._precision, shape=())
         self.w_step[None] = 0.0
         # Distance-weighted AIR-CUT (contour-hug) penalty: like w_air but the
         # charge scales with how far the swept voxel is from the TARGET surface
@@ -410,7 +432,7 @@ class CSGSimulatorDelta:
         # "tool moving far from the part surface" failure mode without the
         # blunt collapse that cranking w_air causes. Shares the air loop's
         # tool_sdf eval, so it is nearly free. Gated by w_prox (0 -> disabled).
-        self.w_prox = ti.field(dtype=ti.f32, shape=())
+        self.w_prox = ti.field(dtype=self._precision, shape=())
         self.w_prox[None] = 0.0
         # Trajectory contour-hug penalty on the tool CENTER: a GENTLE per-segment
         # penalty (T terms, not T*N^3) on the segment-midpoint distance from the
@@ -420,7 +442,7 @@ class CSGSimulatorDelta:
         # retracts beyond r_tool) are charged. Unlike the per-voxel w_prox whose
         # huge corner gradient stalls carving, this is a soft nudge on the
         # trajectory shape. Gated by w_traj_prox (0 -> disabled).
-        self.w_traj_prox = ti.field(dtype=ti.f32, shape=())
+        self.w_traj_prox = ti.field(dtype=self._precision, shape=())
         self.w_traj_prox[None] = 0.0
         # Path-length (minimal-motion) penalty: the squared step length
         # |delta_t|^2 summed over all active segments. Unlike the contour-hug
@@ -434,7 +456,7 @@ class CSGSimulatorDelta:
         # wandering away. This is the targeted fix for the trailing-excursion
         # failure mode (tool climbs into air for the last ~25% of the path).
         # Gated by w_len (0 -> disabled).
-        self.w_len = ti.field(dtype=ti.f32, shape=())
+        self.w_len = ti.field(dtype=self._precision, shape=())
         self.w_len[None] = 0.0
         # TOOL-POSITION gouge barrier (SOFT-UNION-INDEPENDENT surface respect).
         # The stock-based w_gouge charges soft-occupancy target voxels emptied in
@@ -449,7 +471,7 @@ class CSGSimulatorDelta:
         # the segment midpoint and target_sdf_scalar, and crucially INDEPENDENT
         # of the soft stock -- it constrains the trajectory geometry directly,
         # so it transfers to the hard carve. Gated by w_tool_gouge (0 -> disabled).
-        self.w_tool_gouge = ti.field(dtype=ti.f32, shape=())
+        self.w_tool_gouge = ti.field(dtype=self._precision, shape=())
         self.w_tool_gouge[None] = 0.0
         # Tool-gouge MARGIN (voxels): inflate the no-penetration radius from
         # r_tool to r_tool + margin so the tool center must stay `margin` voxels
@@ -459,7 +481,7 @@ class CSGSimulatorDelta:
         # still over-erodes); a positive margin lifts the tool so the union of
         # capsules stays tangent-only and does not gouge at the seams, at the
         # cost of a little uncut residual. Shape-agnostic (target_sdf only).
-        self.tool_gouge_margin = ti.field(dtype=ti.f32, shape=())
+        self.tool_gouge_margin = ti.field(dtype=self._precision, shape=())
         self.tool_gouge_margin[None] = 0.0
 
         # ---- Trajectory-quality measures (time + breakage) ----
@@ -480,9 +502,9 @@ class CSGSimulatorDelta:
         #    strength, single log-variance), aggregated as 1-exp(-sum P_t).
         #    Hard form = the docs/design.md threshold rule (broken iff
         #    F_cut_max > f_max).
-        self.w_time = ti.field(dtype=ti.f32, shape=())
+        self.w_time = ti.field(dtype=self._precision, shape=())
         self.w_time[None] = 0.0
-        self.w_air_time = ti.field(dtype=ti.f32, shape=())
+        self.w_air_time = ti.field(dtype=self._precision, shape=())
         self.w_air_time[None] = 0.0
         # Late-weighted air penalty (Idea 2): a SECOND air-time loss term whose
         # per-segment weight ramps from 0 (early entry/reposition air is cheap)
@@ -491,11 +513,11 @@ class CSGSimulatorDelta:
         # w_air_ramp_frac is the fraction of the trajectory held at ramp=0 before
         # the linear ramp to 1 begins (0 = ramp over the whole trajectory). The
         # ramp depends only on the step index t (shape-agnostic).
-        self.w_air_late = ti.field(dtype=ti.f32, shape=())
+        self.w_air_late = ti.field(dtype=self._precision, shape=())
         self.w_air_late[None] = 0.0
-        self.w_air_ramp_frac = ti.field(dtype=ti.f32, shape=())
+        self.w_air_ramp_frac = ti.field(dtype=self._precision, shape=())
         self.w_air_ramp_frac[None] = 0.0
-        self.w_break = ti.field(dtype=ti.f32, shape=())
+        self.w_break = ti.field(dtype=self._precision, shape=())
         self.w_break[None] = 0.0
         # Breakage-model constants (see docs/algorithms.md). kc = specific
         # cutting force (Al ~700 N/mm^2); f_ref = nominal force at which
@@ -503,13 +525,13 @@ class CSGSimulatorDelta:
         # combined log-std sqrt(sigma_alpha^2 + pi^2/(6 m^2)); f_max = hard
         # threshold force for the design.md broken flag. D = 2*tool_radius and
         # dt are existing fields, read inside the kernels.
-        self.kc = ti.field(dtype=ti.f32, shape=())
+        self.kc = ti.field(dtype=self._precision, shape=())
         self.kc[None] = 700.0
-        self.f_ref = ti.field(dtype=ti.f32, shape=())
+        self.f_ref = ti.field(dtype=self._precision, shape=())
         self.f_ref[None] = 50.0
-        self.sigma_risk = ti.field(dtype=ti.f32, shape=())
+        self.sigma_risk = ti.field(dtype=self._precision, shape=())
         self.sigma_risk[None] = 0.5
-        self.f_max = ti.field(dtype=ti.f32, shape=())
+        self.f_max = ti.field(dtype=self._precision, shape=())
         self.f_max[None] = 100.0
 
         # Holder collision is a PENETRATION BARRIER, not a proximity field: it is
@@ -520,9 +542,9 @@ class CSGSimulatorDelta:
         # holder_margin (VOXELS) requests a conservative standoff: the barrier
         # starts engaging when stock comes within holder_margin of the holder.
         # Physical clearance standoff = holder_margin * v (physical voxel mm).
-        self.holder_penalty_weight = ti.field(dtype=ti.f32, shape=())
+        self.holder_penalty_weight = ti.field(dtype=self._precision, shape=())
         self.holder_penalty_weight[None] = 50.0
-        self.holder_margin = ti.field(dtype=ti.f32, shape=())
+        self.holder_margin = ti.field(dtype=self._precision, shape=())
         self.holder_margin[None] = 0.0
 
         # Z-floor: a hard lower bound on the tool BASE z (normalized [0,1]).
@@ -534,23 +556,23 @@ class CSGSimulatorDelta:
         # speed clip below: the init deltas may command a deeper z, but the
         # executed/clipped trajectory (and the saved one) stays at/above the floor.
         # Default -1e9 (disabled); set enforce_z_floor=1 and z_floor to enable.
-        self.z_floor = ti.field(dtype=ti.f32, shape=())
+        self.z_floor = ti.field(dtype=self._precision, shape=())
         self.z_floor[None] = -1e9
         self.enforce_z_floor = ti.field(dtype=ti.i32, shape=())
         self.enforce_z_floor[None] = 0
         # Scratch accumulator for holder_min_clearance_at (a parallel min-reduction
         # needs a global field + ti.atomic_min; a local scalar races under the
         # parallel ti.ndrange loop and returns a partial/garbage value).
-        self._clearance_buf = ti.field(dtype=ti.f32, shape=())
+        self._clearance_buf = ti.field(dtype=self._precision, shape=())
 
         # Diagnostics (non-differentiable read-outs of each loss component so the
         # objective/barrier balance is observable during training).
-        self.diag_gouge = ti.field(dtype=ti.f32, shape=())
-        self.diag_residual = ti.field(dtype=ti.f32, shape=())
-        self.diag_holder = ti.field(dtype=ti.f32, shape=())
-        self.diag_air = ti.field(dtype=ti.f32, shape=())
-        self.diag_jerk = ti.field(dtype=ti.f32, shape=())
-        self.diag_step = ti.field(dtype=ti.f32, shape=())
+        self.diag_gouge = ti.field(dtype=self._precision, shape=())
+        self.diag_residual = ti.field(dtype=self._precision, shape=())
+        self.diag_holder = ti.field(dtype=self._precision, shape=())
+        self.diag_air = ti.field(dtype=self._precision, shape=())
+        self.diag_jerk = ti.field(dtype=self._precision, shape=())
+        self.diag_step = ti.field(dtype=self._precision, shape=())
         # Unweighted air-cut fraction: sum of (tool swept volume in empty stock)
         # over the trajectory, normalized per voxel -- measures how much of the
         # tool motion is cutting air (0 = all cutting, 1 = all air). Independent
@@ -559,46 +581,46 @@ class CSGSimulatorDelta:
         # the DENOMINATOR (total swept tool volume); the ratio air/swept is the
         # true per-step air-cut fraction in [0,1], independent of how much total
         # carving the trajectory did.
-        self.diag_air_unweighted = ti.field(dtype=ti.f32, shape=())
-        self.diag_tool_swept = ti.field(dtype=ti.f32, shape=())
+        self.diag_air_unweighted = ti.field(dtype=self._precision, shape=())
+        self.diag_tool_swept = ti.field(dtype=self._precision, shape=())
         # Distance-weighted air-cut (contour-hug) diagnostic: the w_prox loss
         # component value, independent of w_prox so it is non-zero even when the
         # penalty is disabled. Measures air-cutting concentrated far from the
         # target surface.
-        self.diag_prox = ti.field(dtype=ti.f32, shape=())
+        self.diag_prox = ti.field(dtype=self._precision, shape=())
         # Trajectory contour-hug diagnostic (the w_traj_prox loss component,
         # independent of w_traj_prox so it is non-zero even when disabled).
-        self.diag_traj_prox = ti.field(dtype=ti.f32, shape=())
+        self.diag_traj_prox = ti.field(dtype=self._precision, shape=())
         # Path-length (minimal-motion) diagnostic: mean squared step length
         # (the w_len loss component, independent of w_len so it is non-zero
         # even when disabled -- measures how much the tool moves).
-        self.diag_len = ti.field(dtype=ti.f32, shape=())
+        self.diag_len = ti.field(dtype=self._precision, shape=())
         # Tool-position gouge diagnostic (the w_tool_gouge loss component,
         # independent of the weight so it is non-zero even when disabled --
         # measures how far the tool center penetrates the target+r_tool).
-        self.diag_tool_gouge = ti.field(dtype=ti.f32, shape=())
+        self.diag_tool_gouge = ti.field(dtype=self._precision, shape=())
         # Trajectory-quality diagnostics (non-differentiable read-outs of the
         # three new measures, computed on the hard carve by
         # compute_traj_diagnostics_hard). diag_time/diag_air_time are seconds;
         # diag_break_prob_* are in [0,1]; diag_fcut_max is Newtons; diag_broken
         # is 0/1 (the docs/design.md hard threshold rule); diag_engage_* are
         # raw engaged-chip volumes (unit-cube^3) for calibration.
-        self.diag_time = ti.field(dtype=ti.f32, shape=())
-        self.diag_air_time = ti.field(dtype=ti.f32, shape=())
-        self.diag_break_prob_any = ti.field(dtype=ti.f32, shape=())
-        self.diag_break_prob_max = ti.field(dtype=ti.f32, shape=())
-        self.diag_fcut_max = ti.field(dtype=ti.f32, shape=())
-        self.diag_broken = ti.field(dtype=ti.f32, shape=())
-        self.diag_engage_max = ti.field(dtype=ti.f32, shape=())
-        self.diag_engage_mean = ti.field(dtype=ti.f32, shape=())
+        self.diag_time = ti.field(dtype=self._precision, shape=())
+        self.diag_air_time = ti.field(dtype=self._precision, shape=())
+        self.diag_break_prob_any = ti.field(dtype=self._precision, shape=())
+        self.diag_break_prob_max = ti.field(dtype=self._precision, shape=())
+        self.diag_fcut_max = ti.field(dtype=self._precision, shape=())
+        self.diag_broken = ti.field(dtype=self._precision, shape=())
+        self.diag_engage_max = ti.field(dtype=self._precision, shape=())
+        self.diag_engage_mean = ti.field(dtype=self._precision, shape=())
         # Idea 8: air-time split into early/mid/late thirds of the trajectory
         # (seconds). Makes the #1 user complaint -- "air cutting at the END" --
         # measurable: a high late/total ratio is the deployability fault that
         # total air_time cannot distinguish from useful entry/reposition air.
         # Pure diagnostic (computed on the hard carve, never feeds the loss).
-        self.diag_air_time_early = ti.field(dtype=ti.f32, shape=())
-        self.diag_air_time_mid = ti.field(dtype=ti.f32, shape=())
-        self.diag_air_time_late = ti.field(dtype=ti.f32, shape=())
+        self.diag_air_time_early = ti.field(dtype=self._precision, shape=())
+        self.diag_air_time_mid = ti.field(dtype=self._precision, shape=())
+        self.diag_air_time_late = ti.field(dtype=self._precision, shape=())
 
         # Per-segment differentiable intermediates for the three new measures.
         # Written by compute_seg_time / compute_seg_volumes (inside the Tape)
@@ -607,31 +629,31 @@ class CSGSimulatorDelta:
         # pattern as stock[t] -> compute_loss). The Tape clears their grad each
         # iteration. Reused as plain (non-grad) scratch by the hard diagnostic
         # path, which runs outside a Tape.
-        self.seg_time = ti.field(dtype=ti.f32, shape=max_steps, needs_grad=True)
-        self.seg_air = ti.field(dtype=ti.f32, shape=max_steps, needs_grad=True)
-        self.seg_swept = ti.field(dtype=ti.f32, shape=max_steps, needs_grad=True)
-        self.seg_engage = ti.field(dtype=ti.f32, shape=max_steps, needs_grad=True)
+        self.seg_time = ti.field(dtype=self._precision, shape=max_steps, needs_grad=True)
+        self.seg_air = ti.field(dtype=self._precision, shape=max_steps, needs_grad=True)
+        self.seg_swept = ti.field(dtype=self._precision, shape=max_steps, needs_grad=True)
+        self.seg_engage = ti.field(dtype=self._precision, shape=max_steps, needs_grad=True)
         # Scalar needs_grad accumulator for the trajectory-level breakage
         # probability: P_break_traj = 1 - exp(-sum_t P_break(t)) is a nonlinear
         # function of the WHOLE-trajectory sum, so it cannot be atomic-added
         # per-segment. The per-segment kernel accumulates P_break(t) here, then
         # a separate scalar kernel adds w_break * (1 - exp(-acc_psum)) to loss.
-        self.acc_psum = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
+        self.acc_psum = ti.field(dtype=self._precision, shape=(), needs_grad=True)
 
         # ---- Stock ----
         self.stock = ti.field(
-            dtype=ti.f32,
+            dtype=self._precision,
             shape=(max_steps + 1, self.Nx, self.Ny, self.Nz),
             needs_grad=True,
         )
-        self.stock_volume = ti.field(dtype=ti.f32, shape=())
+        self.stock_volume = ti.field(dtype=self._precision, shape=())
         # Saved mid-cut stock init (for staged training): when use_saved_init
         # is set, ``init_stock`` writes this SDF into stock[0] instead of the
         # full envelope, so a FRESH trajectory can start carving from a partially-
         # carved state left by a previous trajectory. stock[0] is a constant
         # (no grad), so autodiff through apply_cut on stock[1..T] is unaffected.
         self.saved_stock = ti.field(
-            dtype=ti.f32, shape=(self.Nx, self.Ny, self.Nz)
+            dtype=self._precision, shape=(self.Nx, self.Ny, self.Nz)
         )
         self.use_saved_init = ti.field(dtype=ti.i32, shape=())
         self.use_saved_init[None] = 0
@@ -642,33 +664,33 @@ class CSGSimulatorDelta:
             target_shape = random.choice(target_options)
         self.target_shape = target_shape
         self.target_params = {}
-        self.target_volume = ti.field(dtype=ti.f32, shape=())
+        self.target_volume = ti.field(dtype=self._precision, shape=())
         self._init_target_fields()
 
         self.target = ti.field(
-            dtype=ti.f32, shape=(self.Nx, self.Ny, self.Nz)
+            dtype=self._precision, shape=(self.Nx, self.Ny, self.Nz)
         )  # used for evaluation
         # Scalar (non-Vector) copies of the target params, for use inside
         # differentiable kernels that feed a GRAD-TRACKED position into the
         # target SDF: the Vector-field target_params trigger a Taichi autodiff
         # load-forwarding bug (MatrixPtrStmt assertion) when the SDF input
         # depends on tool_pos. Center in normalized [0,1]; sizes in voxels.
-        self.tcx = ti.field(dtype=ti.f32, shape=()); self.tcx[None] = 0.5
-        self.tcy = ti.field(dtype=ti.f32, shape=()); self.tcy[None] = 0.5
-        self.tcz = ti.field(dtype=ti.f32, shape=()); self.tcz[None] = 0.5
-        self.tr_vox = ti.field(dtype=ti.f32, shape=()); self.tr_vox[None] = 0.0
-        self.th_vox = ti.field(dtype=ti.f32, shape=()); self.th_vox[None] = 0.0
-        self.thx_vox = ti.field(dtype=ti.f32, shape=()); self.thx_vox[None] = 0.0
-        self.thy_vox = ti.field(dtype=ti.f32, shape=()); self.thy_vox[None] = 0.0
-        self.thz_vox = ti.field(dtype=ti.f32, shape=()); self.thz_vox[None] = 0.0
-        self.tbase_vox = ti.field(dtype=ti.f32, shape=()); self.tbase_vox[None] = 0.0
+        self.tcx = ti.field(dtype=self._precision, shape=()); self.tcx[None] = 0.5
+        self.tcy = ti.field(dtype=self._precision, shape=()); self.tcy[None] = 0.5
+        self.tcz = ti.field(dtype=self._precision, shape=()); self.tcz[None] = 0.5
+        self.tr_vox = ti.field(dtype=self._precision, shape=()); self.tr_vox[None] = 0.0
+        self.th_vox = ti.field(dtype=self._precision, shape=()); self.th_vox[None] = 0.0
+        self.thx_vox = ti.field(dtype=self._precision, shape=()); self.thx_vox[None] = 0.0
+        self.thy_vox = ti.field(dtype=self._precision, shape=()); self.thy_vox[None] = 0.0
+        self.thz_vox = ti.field(dtype=self._precision, shape=()); self.thz_vox[None] = 0.0
+        self.tbase_vox = ti.field(dtype=self._precision, shape=()); self.tbase_vox[None] = 0.0
         # Sub-primitive radius (voxels) for combined CSG shapes: the
         # through-hole cylinder in "sphere_hole" and the subtracted sphere in
         # "sphere_bowl". 0 disables (plain shapes ignore it).
-        self.tsub_vox = ti.field(dtype=ti.f32, shape=()); self.tsub_vox[None] = 0.0
+        self.tsub_vox = ti.field(dtype=self._precision, shape=()); self.tsub_vox[None] = 0.0
 
         # ---- Loss ----
-        self.loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
+        self.loss = ti.field(dtype=self._precision, shape=(), needs_grad=True)
 
         self._init_sampled_geometry(
             target_geometry, stock_geometry, stock_box_origin_mm
@@ -676,6 +698,63 @@ class CSGSimulatorDelta:
         ti.root.lazy_grad()
         _record_taichi_instance_success()
         self._initialization_complete = True
+
+    def precision_metadata(self):
+        """JSON-safe objective/run-setup identity, not an optimizer cost claim.
+
+        Include this entire mapping in setup signatures/run configuration. The
+        uniform f32/f64 policy explicitly covers all float fields, kernels and
+        adjoints. Comparison decisions belong to the study protocol, not a bare
+        variant name.
+        """
+        from taichi.lang import impl as taichi_impl
+
+        runtime = taichi_impl.get_runtime()
+        runtime_fp = str(runtime.default_fp)
+        backend = str(taichi_impl.current_cfg().arch)
+        policy = {
+            "schema_version": "simulator-precision-uniform/1",
+            "variant_revision": f"uniform-{self.precision}/1",
+            "default_fp": self.precision,
+            "field_scope": "all_float_fields",
+            "kernel_scope": "all_float_kernels_and_adjoints",
+        }
+        declared_fp = self.precision
+        payload = {
+            "schema_version": "simulator-precision-identity/1",
+            "requested_precision": self.precision,
+            "policy": policy,
+            "declared_default_fp": declared_fp,
+            "runtime_default_fp": runtime_fp,
+            "backend_arch": backend,
+            "process_constraint": "Taichi default_fp is runtime-wide: one precision per process",
+        }
+        payload["precision_identity_sha256"] = content_hash(payload)
+        return payload
+
+    def estimated_known_field_bytes(self):
+        """Exact declared bytes for the named historical/geometry arrays.
+
+        Not total allocated memory and NOT a runtime peak-RSS measurement:
+        trajectories, scalar fields, source buffers and Taichi allocator/compiler
+        overhead are excluded explicitly. Only uniform f32/f64 arrays are named.
+        """
+        bytes_per_float = {"f32": 4, "f64": 8}[self.precision]
+        voxels = self.Nx * self.Ny * self.Nz
+        history = (self.max_steps + 1) * voxels
+        history_and_adjoint = 2 * history * bytes_per_float
+        immutable = 2 * voxels * bytes_per_float  # target and saved_stock
+        return {
+            "bytes_per_float": bytes_per_float,
+            "stock_history_and_adjoint_bytes": history_and_adjoint,
+            "target_and_saved_stock_bytes": immutable,
+            "approximately_scaled_geometry": {
+                "stock_npy": "declared source files remain np.float32; no silent source redefinition",
+                "target_history_shape_without_grad": [self.Nx, self.Ny, self.Nz],
+            },
+            "known_fields_total_bytes": history_and_adjoint + immutable,
+            "excluded": "all other fields, trajectories, original .npy buffers, allocator and compiler overhead",
+        }
 
     def _validate_fits(self, stock_size_mm):
         """Warn if the stock box can't fit inside the machine work volume.
@@ -774,7 +853,7 @@ class CSGSimulatorDelta:
             # Creating a different sampled configuration requires a new simulator.
             setattr(
                 self, f"{which}_samples",
-                ti.field(dtype=ti.f32, shape=shape),
+                ti.field(dtype=self._precision, shape=shape),
             )
         if which == "stock":
             expected_size = np.asarray((self.Lx, self.Ly, self.Lz), dtype=np.float64)
@@ -829,14 +908,14 @@ class CSGSimulatorDelta:
         self.stock_source_metadata = None
         self._analytic_shape_before_target_sample = self.target_shape
         if target_geometry is None:
-            self.target_samples = ti.field(dtype=ti.f32, shape=(1, 1, 1))
+            self.target_samples = ti.field(dtype=self._precision, shape=(1, 1, 1))
         if stock_geometry is None:
-            self.stock_samples = ti.field(dtype=ti.f32, shape=(1, 1, 1))
-        self.target_sample_origin = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.stock_sample_origin = ti.Vector.field(3, dtype=ti.f32, shape=())
-        self.target_sample_voxel = ti.field(dtype=ti.f32, shape=())
-        self.stock_sample_voxel = ti.field(dtype=ti.f32, shape=())
-        self.stock_box_origin = ti.Vector.field(3, dtype=ti.f32, shape=())
+            self.stock_samples = ti.field(dtype=self._precision, shape=(1, 1, 1))
+        self.target_sample_origin = ti.Vector.field(3, dtype=self._precision, shape=())
+        self.stock_sample_origin = ti.Vector.field(3, dtype=self._precision, shape=())
+        self.target_sample_voxel = ti.field(dtype=self._precision, shape=())
+        self.stock_sample_voxel = ti.field(dtype=self._precision, shape=())
+        self.stock_box_origin = ti.Vector.field(3, dtype=self._precision, shape=())
         if stock_box_origin_mm is None:
             stock_box_origin_mm = (0.0, 0.0, 0.0)
         if len(stock_box_origin_mm) != 3:
@@ -853,28 +932,28 @@ class CSGSimulatorDelta:
 
     def _init_target_fields(self):
         if self.target_shape == "box":
-            self.target_params["half_size"] = ti.Vector.field(3, dtype=ti.f32, shape=())
-            self.target_params["center"] = ti.Vector.field(3, dtype=ti.f32, shape=())
+            self.target_params["half_size"] = ti.Vector.field(3, dtype=self._precision, shape=())
+            self.target_params["center"] = ti.Vector.field(3, dtype=self._precision, shape=())
         elif self.target_shape == "cylinder":
-            self.target_params["radius"] = ti.field(dtype=ti.f32, shape=())
-            self.target_params["height"] = ti.field(dtype=ti.f32, shape=())
+            self.target_params["radius"] = ti.field(dtype=self._precision, shape=())
+            self.target_params["height"] = ti.field(dtype=self._precision, shape=())
         elif self.target_shape == "sphere":
-            self.target_params["radius"] = ti.field(dtype=ti.f32, shape=())
-            self.target_params["center"] = ti.Vector.field(3, dtype=ti.f32, shape=())
+            self.target_params["radius"] = ti.field(dtype=self._precision, shape=())
+            self.target_params["center"] = ti.Vector.field(3, dtype=self._precision, shape=())
         elif self.target_shape == "pyramid":
             self.target_params["base_half_size"] = ti.Vector.field(
-                3, dtype=ti.f32, shape=()
+                3, dtype=self._precision, shape=()
             )
-            self.target_params["height"] = ti.field(dtype=ti.f32, shape=())
-            self.target_params["center"] = ti.Vector.field(3, dtype=ti.f32, shape=())
+            self.target_params["height"] = ti.field(dtype=self._precision, shape=())
+            self.target_params["center"] = ti.Vector.field(3, dtype=self._precision, shape=())
         elif self.target_shape in ("sphere_hole", "sphere_bowl"):
             # Combined CSG shapes: a 0.9in stock sphere (radius+center, same
             # fields as the plain sphere) with a 0.75in sub-primitive subtracted
             # (a through-hole cylinder for sphere_hole; a lower hemisphere for
             # sphere_bowl). The sub-primitive radius lives in the scalar
             # tsub_vox field (set by set_target_params), not here.
-            self.target_params["radius"] = ti.field(dtype=ti.f32, shape=())
-            self.target_params["center"] = ti.Vector.field(3, dtype=ti.f32, shape=())
+            self.target_params["radius"] = ti.field(dtype=self._precision, shape=())
+            self.target_params["center"] = ti.Vector.field(3, dtype=self._precision, shape=())
         else:
             raise ValueError(f"Unsupported target shape: {self.target_shape}")
 
@@ -949,7 +1028,7 @@ class CSGSimulatorDelta:
         return ti.Vector([q.x * self.Nx, q.y * self.Ny, q.z * self.Nz])
 
     @ti.func
-    def _tool_sweep_terms(self, p, t, height_vox: ti.f32, smooth_norm: ti.template()):
+    def _tool_sweep_terms(self, p, t, height_vox: ti.template(), smooth_norm: ti.template()):
         """Signed horizontal/vertical terms for a swept upright cylinder.
 
         For query height z, vertically feasible segment parameters form one
@@ -1011,7 +1090,7 @@ class CSGSimulatorDelta:
         return horizontal, vertical
 
     @ti.func
-    def _tool_sweep_smooth_z(self, p, t, height_vox: ti.f32):
+    def _tool_sweep_smooth_z(self, p, t, height_vox: ti.template()):
         """Smooth Z surrogate, deliberately different from the hard score.
 
         The hard vertical term selects a closest cap with max(), which creates
@@ -1051,7 +1130,7 @@ class CSGSimulatorDelta:
         return outside + inside
 
     @ti.func
-    def _tool_cut_h_vox(self) -> ti.f32:
+    def _tool_cut_h_vox(self) -> float:
         """Cutting-tip band height in voxels: tool_cut_height if set (>0), else
         the full tool_height (legacy). Shared by the smooth/sharp tip SDFs."""
         ch = self.tool_cut_height[None]
@@ -1478,7 +1557,7 @@ class CSGSimulatorDelta:
         )
         clearance = ti.max(stock_d, cube_d)
         clearance_mm = clearance * self.v - self.tool_radius[None]
-        is_feed = ti.cast(clearance_mm <= self.safe_distance[None], ti.f32)
+        is_feed = ti.cast(clearance_mm <= self.safe_distance[None], self._precision)
 
         # Max distance allowed this step for each regime: speed (mm/s) * dt (s).
         rapid_step = self.rapid_speed[None] * self.dt[None]
@@ -1487,7 +1566,7 @@ class CSGSimulatorDelta:
 
         # Clip: shrink the step to the cap if it is too fast (else leave it).
         scale = ti.min(1.0, cap_mm / mag_mm)
-        enforced = ti.cast(self.enforce_speed_limits[None], ti.f32)
+        enforced = ti.cast(self.enforce_speed_limits[None], self._precision)
         scale = scale * enforced + (1.0 - enforced)  # 1.0 when not enforcing
 
         next_pos = a + delta * scale
@@ -1498,7 +1577,7 @@ class CSGSimulatorDelta:
         # limit). Runtime-gated by enforce_z_floor so it is configurable per run.
         z_new = next_pos.z
         z_floored = ti.max(z_new, self.z_floor[None])
-        floor_on = ti.cast(self.enforce_z_floor[None], ti.f32)
+        floor_on = ti.cast(self.enforce_z_floor[None], self._precision)
         z_final = z_floored * floor_on + z_new * (1.0 - floor_on)
         self.tool_pos[t + 1] = ti.Vector([next_pos.x, next_pos.y, z_final])
 
@@ -1531,7 +1610,7 @@ class CSGSimulatorDelta:
             self.stock[t + 1, i, j, k] = ti.max(self.stock[t, i, j, k], -tool_d)
 
     @ti.kernel
-    def loss_at(self, t: ti.i32) -> ti.f32:
+    def loss_at(self, t: ti.i32) -> float:
         """Exact replica of compute_loss's objective, evaluated on stock[t].
 
         Same soft-occupancy formulation, same weights, same sigmoid scale.
@@ -1891,7 +1970,7 @@ class CSGSimulatorDelta:
             )
             clearance = ti.max(stock_d, cube_d)
             clearance_mm = clearance * self.v - self.tool_radius[None]
-            is_feed = ti.cast(clearance_mm <= self.safe_distance[None], ti.f32)
+            is_feed = ti.cast(clearance_mm <= self.safe_distance[None], self._precision)
             rapid_step = self.rapid_speed[None] * self.dt[None]
             feed_step = self.feed_speed[None] * self.dt[None]
             cap_mm = rapid_step + (feed_step - rapid_step) * is_feed
@@ -2030,8 +2109,8 @@ class CSGSimulatorDelta:
             w_al = self.w_air_late[None]
             if w_al > 0.0:
                 span = ti.max(1, (T - 1) - t_start)
-                warm = ti.cast(self.w_air_ramp_frac[None] * ti.cast(span, ti.f32), ti.i32)
-                ramp = ti.cast(ti.max(0, t - t_start - warm), ti.f32) / ti.cast(ti.max(1, span - warm), ti.f32)
+                warm = ti.cast(self.w_air_ramp_frac[None] * ti.cast(span, self._precision), ti.i32)
+                ramp = ti.cast(ti.max(0, t - t_start - warm), self._precision) / ti.cast(ti.max(1, span - warm), self._precision)
                 ramp = ti.max(0.0, ti.min(1.0, ramp))
                 ti.atomic_add(self.loss[None], w_al * st * is_air * ramp * inv_n)
             # Per-step breakage probability; accumulated for the traj-level term.
@@ -2115,7 +2194,7 @@ class CSGSimulatorDelta:
             )
             clearance = ti.max(stock_d, cube_d)
             clearance_mm = clearance * self.v - self.tool_radius[None]
-            is_feed = ti.cast(clearance_mm <= self.safe_distance[None], ti.f32)
+            is_feed = ti.cast(clearance_mm <= self.safe_distance[None], self._precision)
             rapid_step = self.rapid_speed[None] * self.dt[None]
             feed_step = self.feed_speed[None] * self.dt[None]
             cap_mm = rapid_step + (feed_step - rapid_step) * is_feed
@@ -2313,7 +2392,7 @@ class CSGSimulatorDelta:
         self.diag_tool_gouge[None] = tg
 
     @ti.kernel
-    def holder_overlap_at(self, t: ti.i32) -> ti.f32:
+    def holder_overlap_at(self, t: ti.i32) -> float:
         """Hard (non-diff) holder/stock overlap VOLUME for a single segment t.
 
         Counts **pre-segment** remaining-material voxels (``stock[t] < 0``)
@@ -2334,7 +2413,7 @@ class CSGSimulatorDelta:
         return vol
 
     @ti.kernel
-    def holder_min_clearance_at(self, t: ti.i32) -> ti.f32:
+    def holder_min_clearance_at(self, t: ti.i32) -> float:
         """Min holder-to-stock CLEARANCE over segment t (voxels; positive = gap).
 
         For every **pre-segment** remaining-material voxel (stock[t] < 0)
@@ -2362,7 +2441,7 @@ class CSGSimulatorDelta:
         return self._clearance_buf[None]
 
     @ti.kernel
-    def holder_overlap_total(self, T: ti.i32) -> ti.f32:
+    def holder_overlap_total(self, T: ti.i32) -> float:
         """Legacy unit-cube^3 conservative pre-cut overlap summed over cuts.
 
         This can overestimate collisions because every pre-segment stock is
@@ -2380,7 +2459,7 @@ class CSGSimulatorDelta:
         return vol
 
     @ti.kernel
-    def holder_overlap_mm3_at(self, t: ti.i32) -> ti.f32:
+    def holder_overlap_mm3_at(self, t: ti.i32) -> float:
         """Physical-mm^3 voxel-centre volume of the pre-cut holder screen."""
         volume = 0.0
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
@@ -2392,7 +2471,7 @@ class CSGSimulatorDelta:
         return volume
 
     @ti.kernel
-    def holder_overlap_total_mm3(self, T: ti.i32) -> ti.f32:
+    def holder_overlap_total_mm3(self, T: ti.i32) -> float:
         """Per-segment sum of conservative pre-cut holder overlap in mm^3.
 
         Not unique collision volume and not guaranteed chronological collision.
@@ -2407,7 +2486,7 @@ class CSGSimulatorDelta:
         return volume
 
     @ti.kernel
-    def holder_min_clearance_mm_at(self, t: ti.i32) -> ti.f32:
+    def holder_min_clearance_mm_at(self, t: ti.i32) -> float:
         """Conservative pre-cut holder clearance estimate in physical mm.
 
         Negative = possible penetration (not proof of contact); positive is
@@ -2581,7 +2660,7 @@ class CSGSimulatorDelta:
         ``stock_sdf``: (Nx, Ny, Nz) float array, the saved stock SDF.
         ``tool_pos``: (3,) float array, the saved tool position in [0,1]^3.
         """
-        self.saved_stock.from_numpy(np.asarray(stock_sdf, dtype=np.float32))
+        self.saved_stock.from_numpy(np.asarray(stock_sdf, dtype=self.numpy_dtype))
         self.use_saved_init[None] = 1
         # Prefix-only start; keep _configured_tool_start untouched so reset
         # cannot leak a staged, mid-cut candidate into a fresh evaluation.
