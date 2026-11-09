@@ -14,7 +14,7 @@ import pytest
 
 from benchmarks import contracts as C
 from cam.gcode_parser import parse_motion_plan
-from cam.posted_evaluator import PostedEvaluator
+from cam.posted_evaluator import PostedEvaluator, _analytic_mask, _centres
 from cam.posts import post_motion_plan
 from verification import fixtures as F
 from verification.reference_carve import run_reference
@@ -301,17 +301,188 @@ def test_unknown_state_and_ball_tools_cannot_claim_safe_coverage():
     assert "ball" in ball.coverage_reasons[0]
 
 
+def test_coarse_quarter_arc_bracket_includes_displaced_midpoint_removal():
+    """Reviewer repro: arc-to-chord padding misses the half-arc cutter."""
+    arc = C.ArcData((20, 20, 0), C.ArcPlane.XY, C.ArcDirection.CCW)
+    segment = C.Segment("a", C.SegmentKind.ARC, (30, 20, 0), (20, 30, 0),
+                        math.pi * 10 / 20, 10, arc)
+    fixture = F.make_fixture("arc-gap", [segment], F.flat_tool(1, 20), 0.0, "reviewer midpoint probe",
+                             stock_lo=(26, 26, 0), stock_hi=(30, 30, 12), voxel=2.0)
+    part = C.GeometrySource(kind="analytic", params={
+        "primitive": "box", "min_mm": [26.6, 26.6, 0.1], "max_mm": [27.4, 27.4, 11.9]})
+    task = replace(fixture.task, original_part=part, operation_target=C.OperationTarget(geometry=part))
+    coarse = PostedEvaluator().evaluate_candidate(task, fixture.motion, {"subdivisions": 1})
+    midpoint_volume = 12 * math.pi
+    assert metric(coarse, "removed_volume_mm3") == 0.0  # two far endpoint poses only
+    assert coarse.discretization["volume_bound"]["upper_mm3"] >= midpoint_volume
+    record = coarse.discretization["segments"][0]
+    midpoint = (20 + 10 / math.sqrt(2), 20 + 10 / math.sqrt(2), 0)
+    nearest = min(math.dist(midpoint, segment.start_mm), math.dist(midpoint, segment.end_mm))
+    assert record["temporal_station_cover_bound_mm"] >= nearest
+    refined = PostedEvaluator().evaluate_candidate(task, fixture.motion, {"subdivisions": 2})
+    assert metric(refined, "removed_volume_mm3") > 0
+    assert refined.discretization["volume_bound"]["lower_mm3"] <= midpoint_volume <= refined.discretization["volume_bound"]["upper_mm3"]
+
+
+def _corner_geometry(pitch):
+    # Pocket corners are each a 2x2 quadrant. In particular x=2 is never a
+    # cell centre for dyadic pitch, so the tiny convex island is unresolved,
+    # not accidentally rounded or erased by the new unreachable-corner code.
+    side = 4.0
+    small_island = [1.99, 1.99, 0.0]
+    params = {
+        "primitive": "box_minus_pocket",
+        "box_min_mm": [0, 0, 0], "box_max_mm": [side, side, pitch],
+        "pocket_min_mm": [0, 0, 0], "pocket_max_mm": [side, side, pitch],
+        "island_min_mm": small_island, "island_max_mm": [2.01, 2.01, pitch],
+        "pocket_unreached_corner_radius_mm": 2.0,
+    }
+    shape = (int(side / pitch), int(side / pitch), 1)
+    grid = C.GridSpec(shape, (0, 0, 0), pitch, C.Frame.WORK)
+    return C.GeometrySource(kind="analytic", params=params, frame=C.Frame.WORK), grid
+
+
+def test_pocket_reachable_corner_volume_converges_to_quarter_disc_complement():
+    expected_volume = 4 * (1 - math.pi / 4) * 2 ** 2 * 6
+    # The coordinator's reported 20.601522612 differs by 0.00025370 mm3 from
+    # this explicit closed form. Never fabricate agreement by changing pi or
+    # using a percentage criterion across unrelated radii/grid sizes.
+    assert expected_volume == pytest.approx(20.601522612, abs=0.001)
+    history = []
+    for pitch in (0.125, 0.0625, 0.03125):
+        source, grid = _corner_geometry(pitch)
+        points = _centres(grid)
+        actual = _analytic_mask(source, points)
+        assert actual.any()
+        without_corner = replace(source, params=dict(source.params,
+                                                       pocket_unreached_corner_radius_mm=0.0))
+        assert not _analytic_mask(without_corner, points).any()  # hidden tiny island only
+        # Every sampled Z point is within the full vertical corner window. Each
+        # cell occupies height pitch; normalized to six mm retained corner depth.
+        volume = float(actual.sum()) * pitch ** 3 * (6 / pitch)
+        history.append((pitch, volume, abs(volume - expected_volume)))
+    print("Fillets by pitch:", history)
+    assert history[0][2] > history[1][2]
+    assert history[-1][2] < 0.15
+    assert history[-1][2] < history[0][2]
+
+
+def test_pocket_corner_radius_zero_is_byte_identical_to_old_mask():
+    fixture = C.example_pocket_task()
+    source, grid = fixture.operation_target.geometry, fixture.grid
+    points = _centres(grid)
+    zero = replace(source, params=dict(source.params, pocket_unreached_corner_radius_mm=0.0))
+    expected = _analytic_mask(source, points)
+    np.testing.assert_array_equal(_analytic_mask(zero, points), expected)
+    # Absence is the same code path, not a newly defaulted physical fillet.
+    assert "pocket_unreached_corner_radius_mm" not in source.params
+    bad = replace(source, params=dict(source.params, pocket_unreached_corner_radius_mm=-1.0))
+    with pytest.raises(ValueError, match="nonnegative"):
+        _analytic_mask(bad, points)
+    substantial_island = np.logical_and.reduce([
+        (points[axis] >= source.params["island_min_mm"][axis])
+        & (points[axis] <= source.params["island_max_mm"][axis]) for axis in range(3)])
+    assert substantial_island.any()
+    rounded = replace(source, params=dict(source.params, pocket_unreached_corner_radius_mm=0.75))
+    np.testing.assert_array_equal(_analytic_mask(rounded, points)[substantial_island],
+                                  expected[substantial_island])
+
+
+def test_pocket_fillet_retention_stays_inside_declared_outer_stock():
+    source, grid = _corner_geometry(0.125)
+    points = _centres(grid)
+    exterior = replace(source, params=dict(
+        source.params,
+        box_min_mm=[1, 1, 0], box_max_mm=[3, 3, grid.voxel_mm],
+        island_min_mm=[1.5, 1.5, 0], island_max_mm=[2.5, 2.5, grid.voxel_mm],
+        pocket_unreached_corner_radius_mm=1.0))
+    actual = _analytic_mask(exterior, points)
+    outside_outer = (points[0] < 1) | (points[0] > 3) | (points[1] < 1) | (points[1] > 3)
+    assert outside_outer.any()
+    assert not actual[outside_outer].any()  # corner square outside stock is air, not material
+    # The convex island is retained without any corner-fillet subtraction.
+    island = ((points[0] >= 1.5) & (points[0] <= 2.5)
+              & (points[1] >= 1.5) & (points[1] <= 2.5))
+    assert island.any()
+    assert actual[island].all()
+
+
+def test_pocket_fillets_are_excluded_from_original_part_and_checked_at_quarter_mm():
+    pitch = 0.25
+    # A real six-mm-deep pocket at the requester's pitch; the tiny central island
+    # is unchanged but unresolved at this lattice. Outer stock equals pocket bounds.
+    fixture = F.make_fixture("corner-consistency", [], F.flat_tool(1, 20), 0.0, "corner exclusion",
+                             stock_lo=(0, 0, 0), stock_hi=(4, 4, 6), voxel=pitch, initial=(2, 2, 8))
+    rounded, _ = _corner_geometry(pitch)
+    depth6 = replace(rounded, params=dict(rounded.params, box_max_mm=[4, 4, 6],
+                                         pocket_max_mm=[4, 4, 6], island_max_mm=[2.01, 2.01, 6]))
+    sharp = replace(depth6, params=dict(depth6.params, pocket_unreached_corner_radius_mm=0.0))
+    task = replace(fixture.task, original_part=sharp,
+                   operation_target=C.OperationTarget(
+                       geometry=depth6,
+                       excluded_volume_mm3=20.601522612,
+                       exclusion_reason="continuous pocket-corner reachability exclusion; explicit pitch tolerance supplied"))
+    # Independent single-corner count in physical mm: 12 cells in one 2x2 corner.
+    coordinates = [0.125 + 0.25 * i for i in range(8)]
+    count = sum((2 - x) ** 2 + (2 - y) ** 2 >= 2 ** 2 for x in coordinates for y in coordinates)
+    assert count == 12
+    expected_excluded = 4 * count * 6 * pitch ** 2
+    assert expected_excluded == 18.0
+    motion = C.MotionPlan(C.Frame.WORK, task.initial_state, (), C.TimingRule.EXACT_STOP_CONSTANT_SPEED)
+    result = PostedEvaluator().evaluate_candidate(task, motion, {"exclusion_tolerance_mm3": 2.65})
+    assert result.coverage == C.Coverage.COMPLETE
+    # No cuts were executed; this is an explicit metric/exclusion test, not pass physics.
+    assert result.geometry_pass is False
+    assert metric(result, "excluded_volume_mm3") == expected_excluded
+    assert result.discretization["settings"]["exclusion_tolerance_mm3"] == 2.65
+    assert abs(task.operation_target.excluded_volume_mm3 - expected_excluded) <= 2.65
+
+
+def test_major_arc_nearest_station_bound_does_not_vanish_near_full_circle():
+    angle = math.radians(359)
+    start, end = (30, 20, 0), (20 + 10 * math.cos(angle), 20 + 10 * math.sin(angle), 0)
+    arc = C.Segment("major", C.SegmentKind.ARC, start, end, 10 * angle / 10, 10,
+                    C.ArcData((20, 20, 0), C.ArcPlane.XY, C.ArcDirection.CCW))
+    fixture = F.make_fixture("major", [arc], F.flat_tool(1, 20), 0.0, "near full-circle endpoint distance")
+    result = PostedEvaluator().evaluate_candidate(fixture.task, fixture.motion, {"subdivisions": 1})
+    midpoint = (20 + 10 * math.cos(angle / 2), 20 + 10 * math.sin(angle / 2), 0)
+    nearest = min(math.dist(midpoint, start), math.dist(midpoint, end))
+    assert nearest > 19.9
+    bound = result.discretization["segments"][0]["temporal_station_cover_bound_mm"]
+    assert bound >= nearest
+    assert bound >= 2 * 10
+
+
+def test_uncertain_rapid_does_not_taint_later_distinct_safe_rapid_segment():
+    fixture = F.retract_from_own_slot()
+    high_start = C.MachineState((20, 20, 100), C.Frame.WORK)
+    high_task = replace(fixture.task, initial_state=high_start)
+    high_only = F.rapid("high", (20, 20, 100), (30, 20, 100))
+    high_motion = C.MotionPlan(C.Frame.WORK, high_start, (high_only,), C.TimingRule.EXACT_STOP_CONSTANT_SPEED)
+    assert PostedEvaluator().evaluate_candidate(high_task, high_motion, {}).safety_pass is True
+    segments = fixture.motion.segments + (
+        F.rapid("rise", (20, 20, 16), (20, 20, 100)),
+        F.rapid("high", (20, 20, 100), (30, 20, 100)),
+    )
+    motion = replace(fixture.motion, segments=segments)
+    result = PostedEvaluator().evaluate_candidate(fixture.task, motion, {})
+    assert result.safety_pass is None  # caused by the pre-existing own-slot retract
+    assert any("retract" in reason for reason in result.coverage_reasons)
+    assert all("high" not in reason for reason in result.coverage_reasons)
+
+
 def test_full_circle_arc_removes_annulus_not_nothing_and_has_nonzero_interval_bound():
-    # Stock is a square 60 x 60 box. Cutter ring radius 9, radius 3, height 6.
-    # Keep the stock/part target meaningful: a small central block must remain.
+    # Cutter radius 3 follows a radius-9 ring, with flute 20 and bottom at 0.
+    # Its engagement is therefore the full 12mm stock height. The holder begins
+    # above the stock, so this geometry is safe and the target is a small center block.
     fixture = F.horizontal_slot()
     geometry = C.GeometrySource(kind="analytic", params={"primitive": "box", "min_mm": [24, 24, 0], "max_mm": [26, 26, 12]})
     task = simple_removal_task(fixture)
     task = replace(task, operation_target=C.OperationTarget(geometry=geometry), original_part=geometry,
-                   tool=F.flat_tool(3, 20), initial_state=replace(task.initial_state, position_mm=(29, 20, 4)))
-    segment = C.Segment("ring", C.SegmentKind.ARC, (29, 20, 4), (29, 20, 4),
+                   tool=F.flat_tool(3, 20), initial_state=replace(task.initial_state, position_mm=(29, 20, 0)))
+    segment = C.Segment("ring", C.SegmentKind.ARC, (29, 20, 0), (29, 20, 0),
                         duration_s=2 * math.pi * 9 / 10, feed_mm_s=10,
-                        arc=C.ArcData((20, 20, 4), C.ArcPlane.XY, C.ArcDirection.CW))
+                        arc=C.ArcData((20, 20, 0), C.ArcPlane.XY, C.ArcDirection.CW))
     motion = C.MotionPlan(C.Frame.WORK, task.initial_state, (segment,), C.TimingRule.EXACT_STOP_CONSTANT_SPEED)
     motion.validate_for_task(task)
     result = PostedEvaluator().evaluate_candidate(task, motion, {})
@@ -320,9 +491,9 @@ def test_full_circle_arc_removes_annulus_not_nothing_and_has_nonzero_interval_bo
     upper = result.discretization["volume_bound"]
     assert upper["lower_mm3"] <= expected_volume <= upper["upper_mm3"]
     assert result.discretization["segments"][0]["motion_model"] == "contracts.arc_geometry"
-    assert 0 < result.discretization["segments"][0]["temporal_path_to_chord_bound_mm"] < 0.01
+    assert result.discretization["segments"][0]["temporal_station_cover_bound_mm"] == pytest.approx(math.pi * 9 / 256, rel=1e-12)
     coarse = PostedEvaluator().evaluate_candidate(task, motion, {"subdivisions": 1})
-    assert coarse.discretization["segments"][0]["temporal_path_to_chord_bound_mm"] == pytest.approx(18.0)
+    assert coarse.discretization["segments"][0]["temporal_station_cover_bound_mm"] == pytest.approx(math.pi * 9)
     assert metric(result, "unique_contacted_volume_mm3") == 0.0
 
 

@@ -9,8 +9,8 @@ boundary cells and exclude only wholly covered previous cutter cells.
 
 Arcs are evaluated on their typed circular/helical trajectory, using
 ``contracts.arc_geometry`` for radius, signed sweep and length. Every motion
-interval has an explicit path-to-endpoint-chord displacement bound, including
-multi-turn and full-circle arcs. A sample is not an exact continuous collision
+interval has an explicit conservative nearest-sampled-station displacement
+bound, including multi-turn and full-circle arcs. A sample is not an exact continuous collision
 certificate. Grid metrics use the shared ``simulator.csg_metrics`` library.
 """
 
@@ -150,7 +150,6 @@ def _arc_data(segment, task, frame) -> Tuple[C.ArcData, Dict[str, float], float,
         else:
             raise ValueError("rigid transform rotates arc normal outside a principal work-frame plane")
     start = _work_point(task, segment.start_mm, frame)
-    start = _work_point(task, segment.start_mm, frame)
     end = _work_point(task, segment.end_mm, frame)
     geometry = C.arc_geometry(start, end, arc, segment.id)
     a, b, _ = _PLANE_AXES[arc.plane]
@@ -183,17 +182,20 @@ def _base_at(segment, s: float, task, frame):
 
 
 def _arc_interval_bound(segment, subdivisions: int, task, frame) -> float:
-    """Bound sub-arc to sampled-chord separation, including major/full arcs."""
-    _, geometry, r0, r1 = _arc_data(segment, task, frame)
-    delta = abs(geometry["sweep_rad"]) / subdivisions
-    if delta >= 2 * math.pi - 1e-12:
-        result = 2 * max(r0, r1)
-    elif delta <= math.pi:
-        result = max(r0, r1) * (1 - math.cos(delta / 2)) + abs(r1 - r0) / 2
-    else:
-        result = math.sqrt(max(0.0, max(r0, r1) ** 2
-                               - min(r0, r1) ** 2 * math.cos(delta / 2) ** 2)) + abs(r1 - r0) / 2
-    return result
+    """Bound distance from any pose to its nearest sampled station.
+
+    This is NOT arc-to-chord deviation. If angular/radial/normal translation
+    speed is bounded by V, every point in an h=1/m subinterval is within
+    V*h/2 of at least one endpoint. For the interpolated arc, that yields the
+    following conservative bound, valid for minor, major, helical and full arcs.
+    """
+    arc, geometry, r0, r1 = _arc_data(segment, task, frame)
+    start = _work_point(task, segment.start_mm, frame)
+    end = _work_point(task, segment.end_mm, frame)
+    _, _, normal = _PLANE_AXES[arc.plane]
+    angular_and_normal = math.hypot(
+        max(r0, r1) * abs(geometry["sweep_rad"]), end[normal] - start[normal])
+    return (angular_and_normal + abs(r1 - r0)) / (2 * subdivisions)
 
 
 def _subdivisions(segment, task, cfg):
@@ -225,7 +227,36 @@ def _analytic_mask(geometry, points):
         outside = _box_distance(points, p["box_min_mm"], p["box_max_mm"])
         pocket = _box_distance(points, p["pocket_min_mm"], p["pocket_max_mm"])
         island = _box_distance(points, p["island_min_mm"], p["island_max_mm"])
-        return np.maximum(outside, -np.maximum(pocket, -island)) <= 0
+        sharp = np.maximum(outside, -np.maximum(pocket, -island)) <= 0
+        try:
+            radius = float(p.get("pocket_unreached_corner_radius_mm", 0.0))
+        except (TypeError, ValueError) as error:
+            raise ValueError("pocket_unreached_corner_radius_mm must be finite and nonnegative") from error
+        if not math.isfinite(radius) or radius < 0:
+            raise ValueError("pocket_unreached_corner_radius_mm must be finite and nonnegative")
+        if radius == 0.0:
+            return sharp
+        pocket_min, pocket_max = p["pocket_min_mm"], p["pocket_max_mm"]
+        if any(pocket_max[axis] - pocket_min[axis] < 2 * radius for axis in (0, 1)):
+            raise ValueError("unreached-corner radius is too large for this pocket; model the complete uncut pocket explicitly")
+        unreachable = np.zeros(sharp.shape, dtype=bool)
+        for x_side in (0, 1):
+            for y_side in (0, 1):
+                cx = pocket_min[0] + radius if x_side == 0 else pocket_max[0] - radius
+                cy = pocket_min[1] + radius if y_side == 0 else pocket_max[1] - radius
+                xlo = pocket_min[0] if x_side == 0 else pocket_max[0] - radius
+                xhi = pocket_min[0] + radius if x_side == 0 else pocket_max[0]
+                ylo = pocket_min[1] if y_side == 0 else pocket_max[1] - radius
+                yhi = pocket_min[1] + radius if y_side == 0 else pocket_max[1]
+                in_corner = ((outside <= 0)
+                             & (points[0] >= xlo) & (points[0] <= xhi)
+                             & (points[1] >= ylo) & (points[1] <= yhi)
+                             & (points[2] >= pocket_min[2]) & (points[2] <= pocket_max[2]))
+                unreachable |= in_corner & (
+                    (points[0] - cx) ** 2 + (points[1] - cy) ** 2 >= radius ** 2)
+        # Only concave pocket corners change. The original outer stock and
+        # convex island are retained exactly as they are in the sharp source.
+        return sharp | unreachable
     raise ValueError(f"unsupported analytic geometry primitive {p.get('primitive')!r}")
 
 
@@ -333,7 +364,7 @@ def _execute(task, motion, cfg):
             "endpoints_included": True, "duration_s": segment.duration_s,
             "stations_work_mm": [list(_base_at(segment, 0.0 if zero_length else j / m,
                                                      task, motion.frame)) for j in range(1 if zero_length else m + 1)],
-            "temporal_path_to_chord_bound_mm": delta_t,
+            "temporal_station_cover_bound_mm": delta_t,
             "motion_model": "contracts.arc_geometry" if segment.kind == C.SegmentKind.ARC else "linear",
         })
         current = None
@@ -401,8 +432,9 @@ def _execute(task, motion, cfg):
                     lower = float(near[safety_material].min()) - rho - interval
                     if segment.kind == C.SegmentKind.RAPID and name == "cutter":
                         min_rapid_lower = min(min_rapid_lower, lower)
-                        rapid_upper = max(rapid_upper, max(0.0, -lower))
-                        if rapid_upper > tolerance:
+                        upper = max(0.0, -lower)
+                        rapid_upper = max(rapid_upper, upper)
+                        if upper > tolerance:
                             possible_here = True
                     else:
                         min_clearance_lower = min(min_clearance_lower, lower)
