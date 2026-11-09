@@ -2,7 +2,7 @@
 
 Executable source: `benchmarks/contracts.py` (T0.0). Tests: `tests/contracts_test.py`.
 Fixtures: `tests/data/contracts/` (`hashes.json` pins the serialized form — a hash change is a schema change).
-Owner: coordinator. Changing a field's meaning needs a version bump and a handoff to every consumer.
+Status: **FROZEN v1** (2026-11-08; consumer acks T1.0, T1.4, T2.1). Owner: coordinator. Changing a field's meaning needs a version bump and a handoff to every consumer.
 
 ## Units, frames, conventions
 

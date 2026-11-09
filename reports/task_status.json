@@ -5,12 +5,12 @@
  "coordinator": "diffcam-orchestrator",
  "tasks": {
   "T0.0": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-orchestrator",
    "branch": "task/T0.0-contracts",
    "blocker": null,
-   "next": "collect consumer acks",
-   "note": "v1 on core (ba97d6e). Acks: worker-2/T1.0 YES, worker-3/T2.1 YES (2026-11-08). Pending: worker-1/T1.4."
+   "next": null,
+   "note": "FROZEN v1 diffcam-contracts/1 at core ba97d6e semantics; acks: worker-2/T1.0, worker-3/T2.1, worker-1/T1.4 (2026-11-08). Changes now require version bump + handoff."
   },
   "T0.1": {
    "status": "complete",
@@ -155,7 +155,7 @@
    "branch": "task/T5.0-external-compat",
    "blocker": null,
    "next": null,
-   "note": "early warnings (worker-3): CNC-Net ba0652f has no NC/waypoint export, no tracked checkpoints/LICENSE -> executable comparison likely an incompatible/adapted subset; native reconstruction viable. Titan-M1.step is inch AP214, no license/setup record; no STEP backend in env. CNCGEN payload verified; reference paths not predictions. | Read-only recon complete 2026-11-08 (reply file); Titan parts are local parts/Titan-M*.step with no source/license record; STEP backend unavailable."
+   "note": "early warnings (worker-3): CNC-Net ba0652f has no NC/waypoint export, no tracked checkpoints/LICENSE -> executable comparison likely an incompatible/adapted subset; native reconstruction viable. Titan-M1.step is inch AP214, no license/setup record; no STEP backend in env. CNCGEN payload verified; reference paths not predictions. | Read-only recon complete 2026-11-08 (reply file); Titan parts are local parts/Titan-M*.step with no source/license record; STEP backend unavailable. | CNC-Net pinned stack BLOCKED: torch 1.12.1+cu113 lacks sm_120 (RTX 5070 Ti); pytorch3d missing. Coordinator allowed one time-boxed disclosed 'modernized stack' attempt (unchanged model code)."
   },
   "T5.1": {
    "status": "planned",
