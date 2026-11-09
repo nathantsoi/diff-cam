@@ -240,6 +240,14 @@
    "blocker": null,
    "next": null,
    "note": "priority over T3.0 prototype"
+  },
+  "T1.0c": {
+   "status": "ready",
+   "owner": "diffcam-worker-2",
+   "branch": "task/T1.0c-reference-safety",
+   "blocker": "after T4.0b",
+   "next": null,
+   "note": "discriminator: zero-length segments skip holder screen; rapid penetration bound not an upper bound under grid phase (both reproduced, false safety pass)"
   }
  }
 }
