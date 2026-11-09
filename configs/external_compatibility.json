@@ -1,0 +1,399 @@
+{
+  "schema": "diffcam-external-compatibility/1",
+  "date": "2026-11-08",
+  "input_commit": "f4d0a644c22496720d19d9c49703f932d848d3e6",
+  "source_manifest": "configs/references.json",
+  "overall": {
+    "performance_comparison": "not-performed",
+    "machine_safety_validation": "not-performed",
+    "cncnet_native_reconstruction": "original-stack-blocked; modernized one-step smoke passed and artifact-verified",
+    "cncnet_fixed_tool_3axis_nc": "unsupported-natively",
+    "titan_step_import": "blocked",
+    "cncgen_benchmark_reproduction": "unsupported-preview-only",
+    "camotics_route": "available-qualified-docker-binary; pinned-source-build-blocked"
+  },
+  "resources": {
+    "cnc-net": {
+      "url": "https://github.com/myavartanoo/CNC-Net_PyTorch.git",
+      "revision": "ba0652f9941686058c07c98617b9748e72f5f019",
+      "acquisition": {
+        "status": "verified",
+        "checkout": "external/cnc-net",
+        "command": "uv run scripts/pull_references.sh --subset cnc-net,camotics",
+        "exit_code": 0,
+        "sample": "samples/0.off",
+        "sample_sha256": "8e80d539b1c593501a55bd9f7b3c6b9099ce57fdb556e298b0bd3b744f690b7c",
+        "sample_size_bytes": 1020767
+      },
+      "license": {
+        "status": "missing-unclear",
+        "spdx": null,
+        "path": null,
+        "evidence": [
+          "git ls-files @ ba0652f9941686058c07c98617b9748e72f5f019: no LICENSE, COPYING or NOTICE",
+          "https://api.github.com/repos/myavartanoo/CNC-Net_PyTorch: license=null (observed 2026-11-08)"
+        ]
+      },
+      "input_representation": {
+        "format": "OFF triangle mesh",
+        "training_grid": [64, 64, 64],
+        "high_resolution_grid": [256, 256, 256],
+        "labels": "pysdf.SDF.contains on mesh-mapped low-grid points; outside positive, inside negative",
+        "coordinate_transform": "axiswise grid samples i/N mapped from each mesh-axis min to max using anisotropic extent scaling; dimensions returned separately; no mm declaration",
+        "evidence": [
+          "external/cnc-net/utils/dataloader.py@ba0652f9941686058c07c98617b9748e72f5f019:23-99",
+          "external/cnc-net/networks/model.py@ba0652f9941686058c07c98617b9748e72f5f019:237,251-253"
+        ]
+      },
+      "action_model": {
+        "mill": "up to 20 operations; 100 low-resolution XY samples per operation, 500 high-resolution samples, one shared Z; radius selected from [0.025,0.05,0.075,0.1] object units",
+        "drill": "conditional loop requiring best_iou>0.92, up to 20 single-XYZ operations; radii [0.01,0.02,0.03,0.04]",
+        "orientation": "two learned axis-angle components plus zero third component rotate sample points before vertical-cylinder CSG, so effective cutter orientation is not necessarily fixed +Z",
+        "evidence": [
+          "external/cnc-net/networks/model.py@ba0652f9941686058c07c98617b9748e72f5f019:246-326,344-435",
+          "external/cnc-net/networks/primitives.py@ba0652f9941686058c07c98617b9748e72f5f019:16-31"
+        ]
+      },
+      "native_outputs": {
+        "state": "occupancy field",
+        "native_score": "negative-voxel IoU on 64^3; outside-region term is commented out",
+        "mesh": "256^3 marching cubes raw and smoothed OBJ; exporter uses extent but does not retain input min-corner",
+        "native_waypoint_or_nc_export": false,
+        "evidence": [
+          "external/cnc-net/utils/eval_metric.py@ba0652f9941686058c07c98617b9748e72f5f019:44-60",
+          "external/cnc-net/run.py@ba0652f9941686058c07c98617b9748e72f5f019:287-313",
+          "external/cnc-net/utils/cad_meshing.py@ba0652f9941686058c07c98617b9748e72f5f019:19-99"
+        ]
+      },
+      "native_reconstruction": {
+        "status": "blocked",
+        "candidate": "bundled samples/0.off only; preserve native occupancy/IoU and raw/smoothed mesh output",
+        "pretrained_checkpoints": "not found in pinned source, Git tags or GitHub releases examined during recon",
+        "training_command_documented_not_run": "python run.py --input_object '0.off' --gpu 0 --experiment exp_0",
+        "training_semantics": "constructs a new Model by default; 100 epochs, DataLoader length 1000 for the same object; no corpus pretraining pipeline is supplied in this entry point",
+        "native_smoke_summary": {
+          "status": "blocked",
+          "legacy_cuda_probe": "torch 1.12.1+cu113 supports sm_37..sm_86; NVIDIA RTX 5070 Ti reports capability 12.0 (sm_120). Allocating torch.ones(1, 256**3, device='cuda').float() raised RuntimeError: CUDA error: no kernel image is available for execution on the device (exit 1)",
+          "entrypoint": "Pinned run.py with bundled 0.off failed at utils/eval_metric.py:5 importing pytorch3d (ModuleNotFoundError, exit 1), before mesh loading or model construction",
+          "isolated_python_attempt": "python -I run.py ... failed earlier with ModuleNotFoundError utils because isolated mode excludes the script directory; repeated normally as required by its imports and reached pytorch3d failure",
+          "other_dependencies": "open3d/pysdf/PyMCubes resolver aborted because PyMCubes 0.1.6 build-system requires numpy~=2.0 requiring Python>=3.9; Python 3.8.20 cannot resolve it",
+          "native_result": "no reconstruction, 64^3 IoU, mesh, checkpoint or score generated; source entrypoint is not marked available"
+        },
+        "modernized_stack": {
+          "status": "smoke-passed-limited; not-faithful-reproduction",
+          "started_at": "2026-11-08T19:10:17-06:00",
+          "time_box_latest_stop": "2026-11-08T20:40:00-06:00",
+          "label_required": "CNC-Net @ba0652f on modernized stack; NOT a faithful reproduction",
+          "constraint": "source/model/loss unchanged; compatibility shims/caps separate and disclosed; current cu128 torch with sm_120; prefer source-built PyTorch3D",
+          "environment": {
+            "python": "3.11.13",
+            "torch": "2.9.1+cu128",
+            "torch_cuda": "12.8",
+            "numpy": "2.3.4",
+            "open3d": "0.19.0",
+            "pysdf": "0.1.9",
+            "pymcubes": "0.1.6",
+            "trimesh": "5.2.0",
+            "h5py": "3.16.0",
+            "plyfile": "1.1.5",
+            "freeze": "/tmp/diffcam-worker-3-t50.gKY5mr/modern-pip-freeze.txt",
+            "freeze_sha256": "767c25a6ca520387323df3aa8cb4ed2e5df93f1bb3d0336322833daff2f5b896",
+            "isolate_from_core_lock": true
+          },
+          "cuda_dependency_probe": {
+            "exit_code": 0,
+            "arch_list": ["sm_70", "sm_75", "sm_80", "sm_86", "sm_90", "sm_100", "sm_120"],
+            "result": "256^3 float32 CUDA tensor allocation/sum=16777216.0 succeeded; Open3D/PySDF/mcubes/trimesh/h5py/plyfile imports succeeded"
+          },
+          "pytorch3d": {
+            "version": "0.7.9",
+            "source_revision": "33824be3cbc87a7dd1db0f6a9a9de9ac81b2d0ba",
+            "source": "https://github.com/facebookresearch/pytorch3d.git tag v0.7.9",
+            "build_command": "CUDA_HOME=/usr/local/cuda-12.9 CUB_HOME=/usr/local/cuda-12.9/include FORCE_CUDA=1 TORCH_CUDA_ARCH_LIST=12.0 MAX_JOBS=4 CMAKE_BUILD_PARALLEL_LEVEL=4 CC=/usr/bin/gcc CXX=/usr/bin/g++ uv --no-config pip install --no-build-isolation --no-deps -v /tmp/diffcam-worker-3-t50.gKY5mr/modern/pytorch3d-src",
+            "nvcc": "12.9.41",
+            "build_exit_code": 0,
+            "compiled_extension_sha256": "6d377cdc8d344e152aee4ca17a6f731043f7d4b47ad0d0b1851028227ef450b0",
+            "cubin_arch": "sm_120 observed with cuobjdump --list-elf",
+            "native_symbol_probe": "knn_points(x,x,K=1) matched expected self-neighbors, and Transform3d().cuda().rotate(axis_angle_to_matrix(...)).transform_points(x) returned finite expected shape"
+          },
+          "result": {
+            "status": "passed-one-step-native-smoke",
+            "native_source_modified": false,
+            "sample": "bundled samples/0.off at ba0652f",
+            "native_iou": 0.423761,
+            "native_iou_evidence": "run.py's own IOU / Average IOU debug log at checkpoints/t50-modern-smoke/logfile.log",
+            "elapsed_seconds": 22.458862777100876,
+            "started_at": "2026-11-09T01:23:18.590634+00:00",
+            "exit_code": 0,
+            "budget_patches": "NumEpochs=1 and dataset length=1 through a separate driver; DataLoader num_workers=0; native LR/model/loss same for the executed first batch",
+            "csg_point_chunking": {
+              "path": "/tmp/diffcam-worker-3-t50.gKY5mr/modern/overrides/run_cnc_net_smoke.py",
+              "sha256": "fdbb9d170eac4b03c1dab7616a1b7883614a33a923ad75509d97809cec894ac5",
+              "max_points": 1048576,
+              "reason": "avoid high-resolution broadcast memory blow-up; serializes independent point dimension only, not path samples or operations",
+              "verification": "separate CPU check: bit-identical native versus 257-point-chunk CSG outputs at 2003 points, both returned tensors, before native run"
+            },
+            "mesh_io_shim": {
+              "path": "/tmp/diffcam-worker-3-t50.gKY5mr/modern/overrides/pymesh/__init__.py",
+              "sha256": "19223c46a252cf5795105404c9e81957bb92937e15687fec177bf8cca2e95faa",
+              "scope": "Open3D-backed form_mesh/save_mesh, plus optional separate_mesh only; no model/KNN/rotation/CSG/loss replacement",
+              "limitation": "not full PyMesh, no byte-equivalence to upstream PyMesh OBJ serialization claimed"
+            },
+            "artifacts": [
+              {
+                "path": "/tmp/diffcam-worker-3-t50.gKY5mr/runtime/cnc-net/output/t50-modern-smoke/0.obj",
+                "type": "raw marching-cubes OBJ",
+                "size_bytes": 34680789,
+                "sha256": "c2395ef6f83a22604989e7b2ed67e328100a732cc3fd6ac2b8c6b3fe00147e83",
+                "vertices": 455374,
+                "triangles": 910748,
+                "finite_vertices": true
+              },
+              {
+                "path": "/tmp/diffcam-worker-3-t50.gKY5mr/runtime/cnc-net/output/t50-modern-smoke/0_smooth.obj",
+                "type": "10-iteration smoothed OBJ",
+                "size_bytes": 34687452,
+                "sha256": "c9787b150a2978183557ae597effd27c648af3f68768826f52c434cecdbad930",
+                "vertices": 455374,
+                "triangles": 910748,
+                "finite_vertices": true
+              },
+              {
+                "path": "/tmp/diffcam-worker-3-t50.gKY5mr/runtime/cnc-net/checkpoints/t50-modern-smoke/best_checkpoint.pth",
+                "type": "native best checkpoint after one optimizer step; not published pretrained weights",
+                "size_bytes": 139691301,
+                "sha256": "dbe446656cd1dc4399fd330cd128fb4c722bf0a22c4ce0e5008150e4da535169"
+              },
+              {
+                "path": "/tmp/diffcam-worker-3-t50.gKY5mr/runtime/cnc-net/checkpoints/t50-modern-smoke/logfile.log",
+                "type": "native log including 64^3 IoU",
+                "size_bytes": 8543,
+                "sha256": "69dc4fff8d0a44ea72c67041c055d916b388973349fc2a467f0d5394f9955a73"
+              }
+            ],
+            "artifact_inspection": {
+              "path": "/tmp/diffcam-worker-3-t50.gKY5mr/modern/evidence/native-artifacts.json",
+              "sha256": "b40cf8d3e6a1d9f5370c9e4c2dce84afe7ad79dda603fc765138951353a972ff",
+              "native_log_and_both_mesh_outputs_read_back": true,
+              "valid_complete_smoke": true
+            },
+            "execution_evidence": {
+              "smoke_status": "/tmp/diffcam-worker-3-t50.gKY5mr/modern/evidence/smoke-status.json",
+              "smoke_status_sha256": "85407bfd2a9cee2228ade98ff4678c820fe938030d03d3230c0235619573bbca",
+              "stdout_log": "/tmp/diffcam-worker-3-t50.gKY5mr/logs/modern-native-run-v2.log",
+              "stdout_log_sha256": "48191c8edfb2ebe1f45799fa217a82a5d797fc1cb39a82cc2d565f36b6a2d573",
+              "inspection_exit_code": 0,
+              "initial_wrapper_failure": "NameError native_loader_init before any native invocation (modern-native-run.log); corrected variable documented as harness-only, no source issue",
+              "native_warning": "run.py:255 warns about math.isnan on tensor requiring grad, then emits IoU/checkpoint/mesh normally",
+              "source_diff_exit_code": 0,
+              "post_run_gpu_compute_processes": "only pre-existing mksSandbox and rustdesk listed; no CNC-Net compute process remained"
+            },
+            "not_demonstrated": [
+              "faithful reproduction of legacy stack or its numerical results",
+              "100-epoch/full-corpus fitting, published pretrained weights or externally comparable model quality",
+              "equivalence of PyMesh/Open3D serialization at the byte level",
+              "fixed-tool fixed-+Z executable waypoints, safe NC, holder clearance or repair of missing operation metadata",
+              "independent evaluator or machining safety checks"
+            ]
+          }
+        }
+      },
+      "fixed_tool_3axis_executable": {
+        "status": "unsupported-natively",
+        "nonetheless_allowed": "native reconstruction baseline; separately justified constrained executable adapter",
+        "required_transformations": [
+          "record physical mesh-unit-to-mm and origin transforms, including the missing min-corner in mesh export",
+          "constrain effective orientation to fixed +Z before admitting a case",
+          "select/force one declared cutter and physical dimensions rather than silently accept per-operation tool selection",
+          "capture internal mill/drill XYZ/Z/radius/rotation tensors without changing native geometry scoring",
+          "add retracts and collision-safe operation connections, feed/holder/stock/WCS semantics, and validate every posted segment",
+          "exclude all cases that do not meet the declared subset before reading benchmark scores",
+          "keep pretraining/checkpoint costs separate from per-instance refinement"
+        ],
+        "why_not_direct_waypoints": "forward returns loss/current fields rather than operation tensors; run exports mesh only; no timing, holder, G54 or NC semantics exist",
+        "unknown": "Whether a faithful compatible subset can be produced remains a T5.1 gated question, not an available result."
+      }
+    },
+    "camotics": {
+      "source_url": "https://github.com/CauldronDevelopmentLLC/CAMotics.git",
+      "source_revision": "e84665f2fa9d1151f03282ac7e01320bc65e015b",
+      "acquisition_status": "verified-exact-source-pin",
+      "source_build_status": "blocked-not-attempted; T0.1 recorded missing cbang/Qt5/SCons/V8 and no PATH binary",
+      "source_license": {
+        "spdx": "GPL-2.0-or-later",
+        "evidence": ["external/camotics/LICENSE", "external/camotics/COPYING"]
+      },
+      "binary_route": {
+        "status": "qualified-by-coordinator",
+        "version": "1.2.0",
+        "release_url": "https://github.com/CauldronDevelopmentLLC/CAMotics/releases/download/1.2.0-release/camotics_1.2.0_amd64.deb",
+        "deb_sha256_expected": "5dc5ba0c53a8eb8ce6b3bd2c3bd903465fde860742a7764f2511b188a507c2c0",
+        "dockerfile_evidence": "docker/camotics/Dockerfile@f4d0a644c22496720d19d9c49703f932d848d3e6",
+        "route_evidence": "docker/camotics/README.md@f4d0a644c22496720d19d9c49703f932d848d3e6",
+        "image": "diffcam-camotics:1.2.0",
+        "image_id_observed": "sha256:e680bff023d9190ed16fe1bee21d9c3c72f0e35bfbceb0a19e704c62f6ddca80",
+        "image_id_observed_at": "2026-11-08",
+        "this_card_binary_rerun": "not-performed; route/provenance inspection only",
+        "independent_crosscheck_owner": "T1.3",
+        "command": "docker run --rm -u $(id -u):$(id -g) -v $PWD/work:/work diffcam-camotics:1.2.0 camsim --binary p.camotics out.stl"
+      },
+      "role": "independent G-code verifier, not an optimizer baseline",
+      "required_inputs": "units, manual resolution mm, cylindrical tool diameter/length, workpiece.bounds, NC files; output STL is cut workpiece",
+      "qualification_limits": "coordinator's 30x30x10 stock/20 mm slot/6.35 mm cutter/2 mm depth had exact remaining volume 8682.7 mm^3; camsim mesh volume 9277.1 at 0.25 mm and 8761.0 at 0.1 mm; padded-boundary mesh and arc/rapid semantics must be quantified by T1.3"
+    },
+    "titan": {
+      "source": "local parts/Titan-M1.step through Titan-M10.step, not a downloaded/reference dataset",
+      "introduced_commit": "a94cfde29cbda7a116125d890a1fd847c09050a4",
+      "input_revision": "f4d0a644c22496720d19d9c49703f932d848d3e6",
+      "external_origin_url": null,
+      "license": "missing-unclear; no source/provenance license in parts or its adding commit",
+      "m1": {
+        "sha256": "3ba16d17de50526b452f844a7faf66a624ddd9509fcc3eac2087fdbdbc2066e3",
+        "type": "MANIFOLD_SOLID_BREP Body1, AP214",
+        "export": "ST-DEVELOPER v20.2, Autodesk Translation Framework v15.17.0.0",
+        "units": "inch; conversion 25.4 mm, uncertainty 0.000393700787401575 inch",
+        "evidence": "parts/Titan-M1.step@f4d0a644c22496720d19d9c49703f932d848d3e6:11-28,2081-2136"
+      },
+      "step_backend_probe": {
+        "status": "blocked-unavailable",
+        "core_dependencies": "numpy, scipy, taichi only at input pyproject.toml",
+        "python_modules": {"OCP": false, "OCC": false, "cadquery": false, "trimesh": false},
+        "executables": {"FreeCAD": null, "FreeCADCmd": null, "freecad": null, "freecadcmd": null},
+        "command": "uv run python -I -c '<importlib.util.find_spec and shutil.which probe>'",
+        "exit_code": 0
+      },
+      "setup_status": "no ready-made single-tool setup, stock/G54 setup, provenance or valid nominal NC found",
+      "required_path": [
+        "pin and verify an actual OpenCascade/FreeCAD STEP importer; mesh libraries are not a STEP backend",
+        "validate solid topology, units with known dimensions, bounds and coordinate origin after inch-to-mm transformation",
+        "predeclare original target and a reachable +Z single-tool operation subtarget with excluded volume",
+        "declare stock, G54 top-centre, finite cutter/flute/holder and accessibility before performance",
+        "generate nominal CAM and independently verify posted motion before calling it compatible"
+      ],
+      "import_attempted": false
+    },
+    "cncgen-preview": {
+      "url": "https://huggingface.co/datasets/jimmy-zhou/CNCGEN",
+      "revision_observed_in_recon": "995e1944609248ed8d9beda5178cf785a15c8392",
+      "t01_manifest_status": "optional-not-acquired; revision null at T5.0 input",
+      "acquisition_status": "read-only-scratch-verified; must be promoted by T0.1 before general campaign use",
+      "zip_sha256": "03b7abce467166b22e0c7e64a7bd6ba0b8059b7205010afb2f37634388d22c4e",
+      "zip_size_bytes": 3618025,
+      "pointer_size_bytes": 132,
+      "archive_members": 181,
+      "sample_count": 20,
+      "files_per_sample": ["design.json", "manufacturing.json", "toolpath.json", "meta.json", "validation_mds3.json", "part.brep", "part.stp", "final_voxel.h5", "pointcloud.ply"],
+      "checksum_verification": {
+        "declared_entries": 180,
+        "mismatches": 0,
+        "interpretation": "payload integrity, not semantic or machining-safety validation",
+        "evidence_scratch": "/tmp/diffcam-worker-3-recon.qcN4Z6/cncgen-inspection.json",
+        "evidence_sha256": "a66924fdec45f5b9f2262e43c6894805b920fdc8f0543b74588a4da6a82b6f37"
+      },
+      "fields": {
+        "manufacturing": "features with type/depth/bounds/geometry/suggested tool/axes/undercut flags; process_plan ordered actions and feature/toolpath links; semantic status_trace not stock sequence",
+        "toolpath": "stock and preprocessing, tool id/diameter/length/flutes/class, feed/plunge/spindle/coolant, canonical XYZ waypoints, feature ids and recorded QA",
+        "waypoint_fields": ["x", "y", "z", "mode", "pass", "layer_id", "segment_id", "op_id", "feed", "spindle"],
+        "motion_modes": ["RAPID", "PLUNGE", "CUT", "RETRACT"],
+        "final_voxel": "voxel bool (128,128,128) with bbox_min/bbox_max/stock_dims/pitch/units/design_id/n_features; final part only"
+      },
+      "provenance": {
+        "split": "preview only; fixed non-random sample; no paper-aligned train/validation/test memberships",
+        "counts": {"parts": 20, "objects": 55, "operations": 55, "toolpaths": 55, "waypoints": 370},
+        "operations": {"Mill": 27, "Drill": 23, "Slant": 5},
+        "recorded_dataset": "DeepMS for every sample; external_explicit for every path",
+        "source_collections": {"Cyliner-data": 5, "Path-data": 6, "ir-data": 8, "new-data": 1},
+        "relation": "reference records, not CNCGEN model predictions or optimal/safe NC"
+      },
+      "license": {
+        "data": "CC-BY-4.0: LICENSE-DATA.txt and README @ 995e1944609248ed8d9beda5178cf785a15c8392",
+        "tools": "MIT: LICENSE-TOOLS.txt (inspect_flow.py and export_toolpath.py only)",
+        "upstream": "retain CNCGEN/DeepMS attribution; generator's software MIT is not blanket data permission",
+        "archive_caveat": "ZIP has samples plus checksums.json, no license file; preserve sibling repository notices"
+      },
+      "compatibility": "schema/stock/tool/reference-path adapter conditionally possible; no full benchmark, predictions, dense intermediate stocks or prevalidated executable comparison",
+      "provisional_schema_candidate": {
+        "id": "samples/0000/00000016",
+        "status": "not-qualified-for-execution",
+        "recorded": "one curated 28 mm pocket, +Z/3X/no-undercut, diameter 10 mm length 50 mm cutter, 8 waypoints, no retained path QA warning",
+        "caveats": [
+          "initial_occupancy_mode=external_contour_prism/internal_only_near_net_stock=true differs from loose declared box stock",
+          "three recorded generation failures and one removed external contour",
+          "is_expert_trajectory=false and one recorded depth layer",
+          "final-voxel n_features=2 versus curated plan n_features=1, consistent with historical versus curated counts but requiring explicit target definition"
+        ]
+      },
+      "counterexample": "0000/00000000 has stored qa.valid=true but a 75 mm pocket with a 50 mm tool; 0000/00000011 has two large-jump warnings and a removed contour"
+    }
+  },
+  "native_smoke_attempts": [
+    {
+      "step": "isolated-source-copy",
+      "command": "git clone --shared /home/ntsoi/src/cnc/diffcam-wt/T5.0-external-compat/external/cnc-net /tmp/diffcam-worker-3-t50.gKY5mr/runtime/cnc-net",
+      "exit_code": 0,
+      "result": "detached pinned ba0652f9941686058c07c98617b9748e72f5f019; sample digest verified; reference external checkout kept clean"
+    },
+    {
+      "step": "isolated-python38",
+      "command": "uv venv --python 3.8 /tmp/diffcam-worker-3-t50.gKY5mr/venv-py38",
+      "exit_code": 0,
+      "result": "CPython 3.8.20 (not official README's 3.8.18); outside core uv.lock"
+    },
+    {
+      "step": "legacy-index-resolution",
+      "command": "uv pip install --python /tmp/diffcam-worker-3-t50.gKY5mr/venv-py38/bin/python --index-url https://download.pytorch.org/whl/cu113 --extra-index-url https://pypi.org/simple 'torch==1.12.1+cu113' 'numpy==1.23.5'",
+      "exit_code": 1,
+      "result": "resolve failed: requested version not found under uv index selection; no native run yet",
+      "log": "/tmp/diffcam-worker-3-t50.gKY5mr/logs/uv-torch-install.log"
+    },
+    {
+      "step": "direct-legacy-wheel",
+      "command": "uv --no-config pip install --python /tmp/diffcam-worker-3-t50.gKY5mr/venv-py38/bin/python 'torch @ https://download.pytorch.org/whl/cu113/torch-1.12.1%2Bcu113-cp38-cp38-linux_x86_64.whl' 'numpy==1.23.5'",
+      "exit_code": 0,
+      "result": "installed numpy==1.23.5, torch==1.12.1+cu113, typing-extensions==4.13.2 from exact direct wheel",
+      "log": "/tmp/diffcam-worker-3-t50.gKY5mr/logs/uv-torch-direct-wheel-install.log"
+    },
+    {
+      "step": "legacy-sm120-native-allocation",
+      "command": "timeout 60 /tmp/diffcam-worker-3-t50.gKY5mr/venv-py38/bin/python -I -c 'import torch; print(torch.cuda.get_arch_list()); x=torch.ones(1,256*256*256,device=\"cuda\").float()'",
+      "exit_code": 1,
+      "result": "torch 1.12.1+cu113, compiled CUDA 11.3, archs sm_37..sm_86; GPU RTX 5070 Ti sm_120; allocation failed RuntimeError: CUDA error: no kernel image is available for execution on the device",
+      "log": "/tmp/diffcam-worker-3-t50.gKY5mr/logs/cuda-allocation-probe.log"
+    },
+    {
+      "step": "legacy-other-dependency-resolution",
+      "command": "uv --no-config pip install --python /tmp/diffcam-worker-3-t50.gKY5mr/venv-py38/bin/python 'trimesh==3.23.5' 'h5py==3.10.0' 'tqdm==4.67.1' 'plyfile==0.9' 'open3d==0.16.0' 'pysdf==0.1.9' 'PyMCubes==0.1.6'",
+      "exit_code": 1,
+      "result": "no packages from this batch installed: PyMCubes build isolation required NumPy 2 but Python 3.8 is incompatible with NumPy 2; Open3D is a 402.9 MiB download before the resolver failure",
+      "log": "/tmp/diffcam-worker-3-t50.gKY5mr/logs/uv-other-native-deps.log"
+    },
+    {
+      "step": "legacy-lightweight-entrypoint-dependencies",
+      "command": "uv --no-config pip install --python /tmp/diffcam-worker-3-t50.gKY5mr/venv-py38/bin/python 'trimesh==3.23.5' 'h5py==3.10.0' 'tqdm==4.67.1' 'plyfile==0.9'",
+      "exit_code": 0,
+      "result": "four packages installed; no PyTorch3D/PyMesh/Open3D/PyMCubes available",
+      "log": "/tmp/diffcam-worker-3-t50.gKY5mr/logs/uv-lightweight-native-deps.log"
+    },
+    {
+      "step": "native-entrypoint-isolated-import",
+      "command": "cd /tmp/diffcam-worker-3-t50.gKY5mr/runtime/cnc-net && timeout 90 /tmp/diffcam-worker-3-t50.gKY5mr/venv-py38/bin/python -I run.py --input_object '0.off' --gpu 0 --experiment t50-native-smoke",
+      "exit_code": 1,
+      "result": "ModuleNotFoundError: No module named 'utils' at run.py:15; isolated interpreter does not include the source directory, so this did not exercise model imports",
+      "log": "/tmp/diffcam-worker-3-t50.gKY5mr/logs/native-entrypoint.log"
+    },
+    {
+      "step": "native-entrypoint-normal-import",
+      "command": "cd /tmp/diffcam-worker-3-t50.gKY5mr/runtime/cnc-net && timeout 90 /tmp/diffcam-worker-3-t50.gKY5mr/venv-py38/bin/python run.py --input_object '0.off' --gpu 0 --experiment t50-native-smoke",
+      "exit_code": 1,
+      "result": "reached utils/eval_metric.py:5, then ModuleNotFoundError: No module named 'pytorch3d'; no sample loading, model construction, reconstruction, IoU, mesh, or checkpoint",
+      "log": "/tmp/diffcam-worker-3-t50.gKY5mr/logs/native-entrypoint-no-isolation.log"
+    }
+  ],
+  "required_downstream_handoffs": {
+    "T0.1_coordinator": "Promote CNCGEN source/payload pin 995e194 and its CC-BY/MIT notices into configs/references.json before ordinary acquisition; preserve CNC-Net missing-license and no-checkpoint findings.",
+    "T5.1": "Keep native reconstruction separate from any executable subset; qualify compatibility before performance and never fabricate fixed-tool waypoints from mesh-only outputs.",
+    "T5.2": "Select/pin real STEP backend; define original versus operation target; honor near-net stocks, removed contours and physical cutter/holder constraints; no demonstrated Titan pilot yet.",
+    "T1.3": "Use qualified Docker camsim 1.2.0 route; independently quantify padded-mesh, resolution and arc/rapid behavior; source build remains blocked.",
+    "coordinator_dependencies": "Do not merge CNC-Net legacy environment into core lock; isolate any future native baseline environment. Missing licenses must not be converted to redistribution permission."
+  }
+}
