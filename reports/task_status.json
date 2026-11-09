@@ -62,11 +62,11 @@
   },
   "T1.3": {
    "status": "in_progress",
-   "owner": "diffcam-worker-3",
+   "owner": "worker-3 (T1.3a CAMotics+metrics) / worker-2 (T1.3b production posted evaluator)",
    "branch": "task/T1.3a-camotics-metrics",
    "blocker": null,
    "next": "T1.3a (CAMotics adapter + metrics) now; T1.3b production posted evaluator after T1.2",
-   "note": "T1.3a resumed (worker-3): CAMotics adapter + metrics + bias; camsim STL non-manifold issue open; must inherit T1.0c whole-cell semantics"
+   "note": "T1.3a resumed (worker-3): CAMotics adapter + metrics + bias; camsim STL non-manifold issue open; must inherit T1.0c whole-cell semantics | T1.3b dispatched to worker-2 in parallel"
   },
   "T2.0": {
    "status": "complete",
