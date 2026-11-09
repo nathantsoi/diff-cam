@@ -590,7 +590,7 @@ def test_real_nominal_pipeline_and_evidence(tmp_path):
     output = tmp_path / "real-nominal"
     command = [sys.executable, "-m", "benchmarks.pilot_task", "--output", str(output)]
     completed = subprocess.run(
-        command, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=540,
+        command, cwd=PROJECT_ROOT, capture_output=True, text=True, timeout=1200,  # opt-in slow test; ~7 min idle, allow shared-box load (review D2)
         check=False,
     )
     assert completed.returncode == 0, completed.stdout + "\n" + completed.stderr
