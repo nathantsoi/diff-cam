@@ -713,8 +713,20 @@ def _evaluate_outcome(condition: str, evaluator: Any, config: Mapping[str, Any],
     zeros = np.zeros(dims)
     if condition == "nominal-cam":
         best = evaluator.evaluate_candidate(zeros, "nominal-once", "hard")
-        return Outcome(0, best, zeros.copy(), zeros.copy(), B.OptimizationBudget(1, population_size=None), 1,
-                       0, 0, 0, 0, 0, "deterministic_single_evaluation_of_nominal_cam", [])
+        ledger = evaluator.ledger.snapshot()
+        # One direct CAM evaluation, not an optimizer generation. Preserve the
+        # real call counters instead of recording a zero-forward phantom result.
+        if (ledger["candidate_evaluations"], ledger["forward_calls"],
+                ledger["backward_calls"]) != (1, 1, 0):
+            raise RunnerError("nominal-cam ledger does not match one hard candidate evaluation")
+        return Outcome(
+            seed=0, best=best, best_theta=zeros.copy(), initial_theta=zeros.copy(),
+            budget=B.OptimizationBudget(candidate_evaluations=1, population_size=None),
+            evaluations=1, validation_calls=0, generations=0,
+            forward_calls=ledger["forward_calls"], backward_calls=ledger["backward_calls"],
+            invalid_candidates=0 if best.valid else 1,
+            termination_reason="deterministic_single_evaluation_of_nominal_cam", history=[],
+        )
     if condition.endswith("cmaes"):
         kind = "hard" if condition == "hard-cmaes" else "smooth"
         result = B.solve_cma_es(evaluator, _budget(config, condition), seed=seed,

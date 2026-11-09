@@ -155,6 +155,37 @@ def test_minimal_real_subprocess_and_t40_reconciliation(tmp_path):
     assert second["record"]["run_id"] == run_id
 
 
+def test_nominal_one_hard_call_is_not_an_optimizer_generation():
+    """Bookkeeping-only spy; no physical simulation is substituted here."""
+    class Evaluator:
+        parameterization = SimpleNamespace(num_params=2)
+
+        def __init__(self):
+            self.ledger = SimpleNamespace(snapshot=lambda: {
+                "candidate_evaluations": 1, "forward_calls": 1, "backward_calls": 0,
+            })
+            self.calls = []
+
+        def evaluate_candidate(self, theta, candidate_id, kind):
+            self.calls.append((np.asarray(theta).tolist(), candidate_id, kind))
+            return C.CandidateResult(candidate_id=candidate_id,
+                                     theta_hash=C.content_hash(theta.tolist()),
+                                     objective_kind=kind, objective=0.0, valid=True,
+                                     coverage=C.Coverage.INCOMPLETE)
+
+    evaluator = Evaluator()
+    outcome = runner._evaluate_outcome("nominal-cam", evaluator, {}, 0)
+    assert evaluator.calls == [([0.0, 0.0], "nominal-once", "hard")]
+    assert (outcome.evaluations, outcome.generations, outcome.forward_calls,
+            outcome.backward_calls) == (1, 0, 1, 0)
+    assert outcome.invalid_candidates == 0
+    evaluator.ledger.snapshot = lambda: {
+        "candidate_evaluations": 1, "forward_calls": 0, "backward_calls": 0,
+    }
+    with pytest.raises(runner.RunnerError, match="does not match one hard"):
+        runner._evaluate_outcome("nominal-cam", evaluator, {}, 0)
+
+
 def test_resume_rejects_condition_identity_changes(tmp_path):
     config = _base()
     output = tmp_path / "frozen"
@@ -467,7 +498,7 @@ def test_ineligible_final_program_is_complete_and_excluded_from_efficiency(tmp_p
     outcome = runner.Outcome(
         seed=0, best=candidate, best_theta=theta, initial_theta=theta,
         budget=runner.B.OptimizationBudget(candidate_evaluations=1, population_size=None),
-        evaluations=1, validation_calls=0, generations=1,
+        evaluations=1, validation_calls=0, generations=0,
         forward_calls=1, backward_calls=0, invalid_candidates=0,
         termination_reason="unit_retained_wall_cut", history=[],
     )
@@ -541,7 +572,10 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
     metrics = json.loads((output / run_id / "metrics.json").read_text())
     spent = json.loads((output / run_id / "config.json").read_text())["budgets"]["spent"]
     assert spent["candidate_evaluations"] == config["candidate_evaluations"]
-    assert spent["generations"] == 1
+    # Nominal is one direct hard evaluation, not an optimizer generation.
+    expected_calls = (0, 1, 0) if condition == "nominal-cam" else (
+        (1, 2, 1) if condition.endswith("adam") else (1, 2, 0))
+    assert (spent["generations"], spent["forward_calls"], spent["backward_calls"]) == expected_calls
     assert (output / run_id / "eval_posted.json").is_file()
     for dialect in C.Dialect:
         nc_name, eval_name = C.DIALECT_ARTIFACTS[dialect]
