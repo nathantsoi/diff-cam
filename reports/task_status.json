@@ -9,7 +9,8 @@
    "owner": "diffcam-orchestrator",
    "branch": "task/T0.0-contracts",
    "blocker": null,
-   "next": null
+   "next": "collect consumer acks",
+   "note": "v1 draft merged; 32 contract tests pass; awaiting consumer ack (T1.0 worker-2, T1.4, T2.1) before freeze"
   },
   "T0.1": {
    "status": "in_progress",
@@ -19,18 +20,19 @@
    "next": null
   },
   "T0.2": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-orchestrator",
    "branch": "task/T0.2-environment",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "merged 22719af; uv.lock, optim extra (cma 4.5.0); pytest 20 passed + CPU smoke exit 0; GPU backend not validated"
   },
   "T1.0": {
-   "status": "planned",
+   "status": "ready",
    "owner": "diffcam-worker-2",
-   "branch": null,
+   "branch": "task/T1.0-reference-fixtures",
    "blocker": null,
-   "next": "read-only fixture design (W0); implement once T0.0+T0.2 merge"
+   "next": "implementation dispatched to diffcam-worker-2 after design note"
   },
   "T1.1": {
    "status": "planned",
@@ -47,7 +49,7 @@
    "next": null
   },
   "T1.4": {
-   "status": "planned",
+   "status": "ready",
    "owner": null,
    "branch": null,
    "blocker": null,
@@ -68,9 +70,9 @@
    "next": null
   },
   "T2.1": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T2.1-parameterization",
    "blocker": null,
    "next": null
   },
@@ -110,7 +112,7 @@
    "next": null
   },
   "T4.0": {
-   "status": "planned",
+   "status": "ready",
    "owner": null,
    "branch": null,
    "blocker": null,
@@ -145,11 +147,12 @@
    "next": null
   },
   "T5.0": {
-   "status": "planned",
+   "status": "blocked",
    "owner": "diffcam-worker-3",
    "branch": null,
-   "blocker": null,
-   "next": "read-only external reconnaissance (W0); formal card once T0.0 + T0.1 pins merge"
+   "blocker": "T0.1 pins (CNC-Net/CAMotics) not merged",
+   "next": "formal T5.0: write reports/external_compatibility.md + configs/external_compatibility.json from dispatch/diffcam/T5.0-recon-diffcam-worker-3.reply.md; isolated CNC-Net native smoke",
+   "note": "early warnings (worker-3): CNC-Net ba0652f has no NC/waypoint export, no tracked checkpoints/LICENSE -> executable comparison likely an incompatible/adapted subset; native reconstruction viable. Titan-M1.step is inch AP214, no license/setup record; no STEP backend in env. CNCGEN payload verified; reference paths not predictions. | Read-only recon complete 2026-11-08 (reply file); Titan parts are local parts/Titan-M*.step with no source/license record; STEP backend unavailable."
   },
   "T5.1": {
    "status": "planned",

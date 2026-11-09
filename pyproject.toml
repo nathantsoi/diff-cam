@@ -10,8 +10,12 @@ readme = "README.md"
 requires-python = ">=3.10,<3.13"
 dependencies = ["numpy>=1.26,<3", "scipy>=1.11", "taichi>=1.7.4,<1.8"]
 
+[project.optional-dependencies]
+# Derivative-free baselines (T3.1). Pinned upstream revision is recorded in configs/references.json (T0.1).
+optim = ["cma>=4.0,<5"]
+
 [tool.setuptools.packages.find]
-include = ["simulator*", "algorithms*", "cam*"]
+include = ["simulator*", "algorithms*", "cam*", "benchmarks*", "verification*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
