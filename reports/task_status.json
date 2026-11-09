@@ -72,11 +72,12 @@
    "next": null
   },
   "T2.1": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-3",
    "branch": "task/T2.1-parameterization",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "merged; DeltaResidual/DeltaSpline(clamped cubic, 4<=K<=T)/AbsolutePositionResidual, T=segments, anchor_end option, exact pullbacks (45 tests; coordinator independently re-verified J^T)"
   },
   "T2.2": {
    "status": "planned",
@@ -149,11 +150,11 @@
    "next": null
   },
   "T5.0": {
-   "status": "ready",
+   "status": "in_progress",
    "owner": "diffcam-worker-3",
-   "branch": null,
+   "branch": "task/T5.0-external-compat",
    "blocker": null,
-   "next": "formal T5.0 after T2.1 (worker-3)",
+   "next": null,
    "note": "early warnings (worker-3): CNC-Net ba0652f has no NC/waypoint export, no tracked checkpoints/LICENSE -> executable comparison likely an incompatible/adapted subset; native reconstruction viable. Titan-M1.step is inch AP214, no license/setup record; no STEP backend in env. CNCGEN payload verified; reference paths not predictions. | Read-only recon complete 2026-11-08 (reply file); Titan parts are local parts/Titan-M*.step with no source/license record; STEP backend unavailable."
   },
   "T5.1": {
