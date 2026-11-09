@@ -70,9 +70,9 @@
    "next": null
   },
   "T2.1": {
-   "status": "ready",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T2.1-parameterization",
    "blocker": null,
    "next": null
   },
@@ -147,12 +147,12 @@
    "next": null
   },
   "T5.0": {
-   "status": "planned",
+   "status": "blocked",
    "owner": "diffcam-worker-3",
    "branch": null,
-   "blocker": null,
-   "next": "read-only external reconnaissance (W0); formal card once T0.0 + T0.1 pins merge",
-   "note": "early warnings (worker-3): CNC-Net ba0652f has no NC/waypoint export, no tracked checkpoints/LICENSE -> executable comparison likely an incompatible/adapted subset; native reconstruction viable. Titan-M1.step is inch AP214, no license/setup record; no STEP backend in env. CNCGEN payload verified; reference paths not predictions."
+   "blocker": "T0.1 pins (CNC-Net/CAMotics) not merged",
+   "next": "formal T5.0: write reports/external_compatibility.md + configs/external_compatibility.json from dispatch/diffcam/T5.0-recon-diffcam-worker-3.reply.md; isolated CNC-Net native smoke",
+   "note": "early warnings (worker-3): CNC-Net ba0652f has no NC/waypoint export, no tracked checkpoints/LICENSE -> executable comparison likely an incompatible/adapted subset; native reconstruction viable. Titan-M1.step is inch AP214, no license/setup record; no STEP backend in env. CNCGEN payload verified; reference paths not predictions. | Read-only recon complete 2026-11-08 (reply file); Titan parts are local parts/Titan-M*.step with no source/license record; STEP backend unavailable."
   },
   "T5.1": {
    "status": "planned",
