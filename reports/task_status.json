@@ -248,6 +248,14 @@
    "blocker": "after T4.0b",
    "next": null,
    "note": "discriminator: zero-length segments skip holder screen; rapid penetration bound not an upper bound under grid phase (both reproduced, false safety pass)"
+  },
+  "T1.4b": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T1.4b-nc-review-fixes",
+   "blocker": null,
+   "next": "resume T1.3a",
+   "note": "discriminator NC/param review: N1 inch arc I/J rounding (HIGH), N3 G49 ignored (HIGH), N2 KeyError, N5 nan post, N6 comment ';', N4 bounds; legacy G18 lead. CAM lease transferred worker-1 -> worker-3."
   }
  }
 }
