@@ -248,7 +248,11 @@ def test_annealed_adam_does_not_leak_smoothing_k_into_cma():
     budget = _budget(2, 2)
     following = B.solve_cma_es(shared, budget, seed=4, objective_kind="smooth", x0=np.zeros(6))
     fresh = B.solve_cma_es(_prototype(), budget, seed=4, objective_kind="smooth", x0=np.zeros(6))
-    assert following.history[0]["fitness"] == fresh.history[0]["fitness"]
+    # Taichi CPU atomic reductions are not bitwise reproducible across runs (observed 1 float32 ulp, 6e-8,
+    # in another worker's environment). A k leak (10 -> 100 vs 40) changes the smooth objective by orders of
+    # magnitude more than this tolerance, so the regression is still detected.
+    for got, want in zip(following.history[0]["fitness"], fresh.history[0]["fitness"]):
+        assert got == pytest.approx(want, rel=1e-6, abs=1e-9)
     assert shared.spec.k == 40.0
 
 
