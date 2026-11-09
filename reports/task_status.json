@@ -85,9 +85,9 @@
    "note": "merged; DeltaResidual/DeltaSpline(clamped cubic, 4<=K<=T)/AbsolutePositionResidual, T=segments, anchor_end option, exact pullbacks (45 tests; coordinator independently re-verified J^T)"
   },
   "T2.2": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T2.2-pilot-pocket",
    "blocker": null,
    "next": null
   },
@@ -286,6 +286,11 @@
    "blocker": null,
    "next": "resume T4.1a",
    "note": "discriminator pre-merge review of T3 stack: O1 k leak across methods, O2 invalid best/inf crash, O3 Adam fake seeds, O4 budget-dependent anneal, O5 CMA final.json RNG advance, O6 ledger double count/no restore. O2-O6 reproduced."
+  },
+  "T1.4c": {
+   "status": "complete",
+   "owner": "diffcam-worker-3",
+   "note": "merged; T/H bound to task tool_number; later different H refused"
   }
  }
 }
