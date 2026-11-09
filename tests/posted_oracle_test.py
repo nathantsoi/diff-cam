@@ -301,17 +301,74 @@ def test_unknown_state_and_ball_tools_cannot_claim_safe_coverage():
     assert "ball" in ball.coverage_reasons[0]
 
 
+def test_coarse_quarter_arc_bracket_includes_displaced_midpoint_removal():
+    """Reviewer repro: arc-to-chord padding misses the half-arc cutter."""
+    arc = C.ArcData((20, 20, 0), C.ArcPlane.XY, C.ArcDirection.CCW)
+    segment = C.Segment("a", C.SegmentKind.ARC, (30, 20, 0), (20, 30, 0),
+                        math.pi * 10 / 20, 10, arc)
+    fixture = F.make_fixture("arc-gap", [segment], F.flat_tool(1, 20), 0.0, "reviewer midpoint probe",
+                             stock_lo=(26, 26, 0), stock_hi=(30, 30, 12), voxel=2.0)
+    part = C.GeometrySource(kind="analytic", params={
+        "primitive": "box", "min_mm": [26.6, 26.6, 0.1], "max_mm": [27.4, 27.4, 11.9]})
+    task = replace(fixture.task, original_part=part, operation_target=C.OperationTarget(geometry=part))
+    coarse = PostedEvaluator().evaluate_candidate(task, fixture.motion, {"subdivisions": 1})
+    midpoint_volume = 12 * math.pi
+    assert metric(coarse, "removed_volume_mm3") == 0.0  # two far endpoint poses only
+    assert coarse.discretization["volume_bound"]["upper_mm3"] >= midpoint_volume
+    record = coarse.discretization["segments"][0]
+    midpoint = (20 + 10 / math.sqrt(2), 20 + 10 / math.sqrt(2), 0)
+    nearest = min(math.dist(midpoint, segment.start_mm), math.dist(midpoint, segment.end_mm))
+    assert record["temporal_station_cover_bound_mm"] >= nearest
+    refined = PostedEvaluator().evaluate_candidate(task, fixture.motion, {"subdivisions": 2})
+    assert metric(refined, "removed_volume_mm3") > 0
+    assert refined.discretization["volume_bound"]["lower_mm3"] <= midpoint_volume <= refined.discretization["volume_bound"]["upper_mm3"]
+
+
+def test_major_arc_nearest_station_bound_does_not_vanish_near_full_circle():
+    angle = math.radians(359)
+    start, end = (30, 20, 0), (20 + 10 * math.cos(angle), 20 + 10 * math.sin(angle), 0)
+    arc = C.Segment("major", C.SegmentKind.ARC, start, end, 10 * angle / 10, 10,
+                    C.ArcData((20, 20, 0), C.ArcPlane.XY, C.ArcDirection.CCW))
+    fixture = F.make_fixture("major", [arc], F.flat_tool(1, 20), 0.0, "near full-circle endpoint distance")
+    result = PostedEvaluator().evaluate_candidate(fixture.task, fixture.motion, {"subdivisions": 1})
+    midpoint = (20 + 10 * math.cos(angle / 2), 20 + 10 * math.sin(angle / 2), 0)
+    nearest = min(math.dist(midpoint, start), math.dist(midpoint, end))
+    assert nearest > 19.9
+    bound = result.discretization["segments"][0]["temporal_station_cover_bound_mm"]
+    assert bound >= nearest
+    assert bound >= 2 * 10
+
+
+def test_uncertain_rapid_does_not_taint_later_distinct_safe_rapid_segment():
+    fixture = F.retract_from_own_slot()
+    high_start = C.MachineState((20, 20, 100), C.Frame.WORK)
+    high_task = replace(fixture.task, initial_state=high_start)
+    high_only = F.rapid("high", (20, 20, 100), (30, 20, 100))
+    high_motion = C.MotionPlan(C.Frame.WORK, high_start, (high_only,), C.TimingRule.EXACT_STOP_CONSTANT_SPEED)
+    assert PostedEvaluator().evaluate_candidate(high_task, high_motion, {}).safety_pass is True
+    segments = fixture.motion.segments + (
+        F.rapid("rise", (20, 20, 16), (20, 20, 100)),
+        F.rapid("high", (20, 20, 100), (30, 20, 100)),
+    )
+    motion = replace(fixture.motion, segments=segments)
+    result = PostedEvaluator().evaluate_candidate(fixture.task, motion, {})
+    assert result.safety_pass is None  # caused by the pre-existing own-slot retract
+    assert any("retract" in reason for reason in result.coverage_reasons)
+    assert all("high" not in reason for reason in result.coverage_reasons)
+
+
 def test_full_circle_arc_removes_annulus_not_nothing_and_has_nonzero_interval_bound():
-    # Stock is a square 60 x 60 box. Cutter ring radius 9, radius 3, height 6.
-    # Keep the stock/part target meaningful: a small central block must remain.
+    # Cutter radius 3 follows a radius-9 ring, with flute 20 and bottom at 0.
+    # Its engagement is therefore the full 12mm stock height. The holder begins
+    # above the stock, so this geometry is safe and the target is a small center block.
     fixture = F.horizontal_slot()
     geometry = C.GeometrySource(kind="analytic", params={"primitive": "box", "min_mm": [24, 24, 0], "max_mm": [26, 26, 12]})
     task = simple_removal_task(fixture)
     task = replace(task, operation_target=C.OperationTarget(geometry=geometry), original_part=geometry,
-                   tool=F.flat_tool(3, 20), initial_state=replace(task.initial_state, position_mm=(29, 20, 4)))
-    segment = C.Segment("ring", C.SegmentKind.ARC, (29, 20, 4), (29, 20, 4),
+                   tool=F.flat_tool(3, 20), initial_state=replace(task.initial_state, position_mm=(29, 20, 0)))
+    segment = C.Segment("ring", C.SegmentKind.ARC, (29, 20, 0), (29, 20, 0),
                         duration_s=2 * math.pi * 9 / 10, feed_mm_s=10,
-                        arc=C.ArcData((20, 20, 4), C.ArcPlane.XY, C.ArcDirection.CW))
+                        arc=C.ArcData((20, 20, 0), C.ArcPlane.XY, C.ArcDirection.CW))
     motion = C.MotionPlan(C.Frame.WORK, task.initial_state, (segment,), C.TimingRule.EXACT_STOP_CONSTANT_SPEED)
     motion.validate_for_task(task)
     result = PostedEvaluator().evaluate_candidate(task, motion, {})
@@ -320,9 +377,9 @@ def test_full_circle_arc_removes_annulus_not_nothing_and_has_nonzero_interval_bo
     upper = result.discretization["volume_bound"]
     assert upper["lower_mm3"] <= expected_volume <= upper["upper_mm3"]
     assert result.discretization["segments"][0]["motion_model"] == "contracts.arc_geometry"
-    assert 0 < result.discretization["segments"][0]["temporal_path_to_chord_bound_mm"] < 0.01
+    assert result.discretization["segments"][0]["temporal_station_cover_bound_mm"] == pytest.approx(math.pi * 9 / 256, rel=1e-12)
     coarse = PostedEvaluator().evaluate_candidate(task, motion, {"subdivisions": 1})
-    assert coarse.discretization["segments"][0]["temporal_path_to_chord_bound_mm"] == pytest.approx(18.0)
+    assert coarse.discretization["segments"][0]["temporal_station_cover_bound_mm"] == pytest.approx(math.pi * 9)
     assert metric(result, "unique_contacted_volume_mm3") == 0.0
 
 
