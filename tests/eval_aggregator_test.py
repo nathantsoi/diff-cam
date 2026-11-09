@@ -1,10 +1,12 @@
 """Synthetic contract-record tests for T4.0 auditing and task-clustered statistics."""
 
 import dataclasses
+import itertools
 import json
 import math
 import subprocess
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
@@ -385,6 +387,97 @@ def test_missing_comparisons_and_null_metrics_render_as_na(tmp_path):
     assert summary["paired_tasks"] == 0 and summary["mean_difference"] is None
     markdown = A.render_markdown(report)
     assert "candidate_vs_cam" in markdown and "NA" in markdown
+
+
+def test_recorded_failures_count_in_outcomes_metric_drops_and_complete_data(tmp_path):
+    tasks = _tasks(("a", "pocket"), ("b", "pocket"))
+    expected = [
+        ("c-a-0", "a", "candidate", 0), ("c-a-1", "a", "candidate", 1),
+        ("c-b-0", "b", "candidate", 0), ("c-b-1", "b", "candidate", 1),
+        ("m-a-0", "a", "cam", 0), ("m-a-1", "a", "cam", 1),
+        ("m-b-0", "b", "cam", 0), ("m-b-1", "b", "cam", 1),
+    ]
+    _write_failed_run(tmp_path, "c-a-0", tasks["a"])
+    _write_run(tmp_path, "c-a-1", tasks["a"], cycle=1.0)
+    _write_failed_run(tmp_path, "c-b-0", tasks["b"])
+    _write_failed_run(tmp_path, "c-b-1", tasks["b"])
+    for run_id in ("m-a-0", "m-a-1", "m-b-0", "m-b-1"):
+        _write_run(tmp_path, run_id, tasks[run_id[2]], cycle=5.0, method="cam")
+    report, _ = A.generate_report(tmp_path, _manifest(tasks, expected), bootstrap_replicates=100)
+    row = next(row for row in report["comparisons"] if row["family"] == "overall")
+    for outcome in ("safety_pass", "completion_pass", "efficiency_eligible"):
+        result = row["outcomes"][outcome]
+        assert result["method"]["task_mean_rate"] == pytest.approx(0.25)
+        assert result["method"]["known_task_units"] == result["method"]["expected_task_units"] == 2
+        assert result["paired_difference"]["mean_difference"] == pytest.approx(-0.75)
+        assert result["paired_difference"]["paired_tasks"] == 2
+    metric = row["metrics"]["cycle_time_s"]
+    assert metric["mean_difference"] == pytest.approx(-4.0)
+    assert metric["paired_tasks"] == 1
+    assert metric["dropped_because_side_failed_or_ineligible"] == 3
+    assert metric["dropped_missing_or_null_evidence"] == 0
+    assert metric["exclusions_by_side"]["method"] == {"recorded_noncomplete": 3}
+    # Mechanically valid terminal failures do not make the data complete or successful.
+    assert report["summary"]["auditor_passed"] is True
+    assert report["summary"]["complete_data"] is report["complete_data"] is False
+    markdown = A.render_markdown(report)
+    assert "Failed/ineligible drops" in markdown
+    assert "complete_data (expected run/evaluation artifacts complete and clean; coverage limits still reported): False" in markdown
+
+
+def test_exact_sign_flip_ties_match_4000_rational_enumerations():
+    # Copy of the reviewed regression, now self-contained and intentionally not
+    # depending on any external reviewer script/path.
+    rng = np.random.default_rng(1)
+    mismatches = 0
+    for _ in range(4000):
+        n = int(rng.integers(3, 9))
+        differences = np.round(rng.uniform(1, 500, size=n), 1)
+        k = int(rng.integers(1, n))
+        differences[k] = -differences[0] if rng.random() < 0.5 else differences[0]
+        result = A._sign_flip_p_value(differences, "k", 1, 1000)
+        exact = [Fraction(float(value)) for value in differences]
+        observed = abs(sum(exact))
+        extreme = sum(
+            1 for signs in itertools.product((1, -1), repeat=n)
+            if abs(sum(sign * value for sign, value in zip(signs, exact))) >= observed
+        )
+        mismatches += extreme != result["sign_flip_extreme"]
+    assert mismatches == 0
+
+
+def test_singleton_strata_pool_interval_and_keep_small_sample_warning():
+    summary = A._paired_stats([1, 9, -3, 20], [0] * 4, ["p", "s", "t", "u"],
+                              "singletons", 1, 100, 0.95)
+    assert summary["ci_resampling_method"] == "pooled_tasks_due_to_singleton_stratum"
+    assert summary["interval"]["lower"] < summary["interval"]["upper"]
+    assert (summary["interval"]["lower"], summary["interval"]["upper"]) != (6.75, 6.75)
+    assert "fewer than 5" in summary["small_n_warning"]
+
+
+def test_single_family_emits_one_holm_input_and_overall_row(tmp_path):
+    tasks = _tasks(("task-a", "pocket"))
+    _write_run(tmp_path, "cam-a", tasks["task-a"], cycle=5, method="cam")
+    _write_run(tmp_path, "candidate-a", tasks["task-a"], cycle=3)
+    expected = [("cam-a", "task-a", "cam", 0), ("candidate-a", "task-a", "candidate", 0)]
+    report, _ = A.generate_report(tmp_path, _manifest(tasks, expected), bootstrap_replicates=100)
+    assert len(report["comparisons"]) == 1
+    assert report["comparisons"][0]["family"] == "overall"
+    assert report["comparisons"][0]["metrics"]["cycle_time_s"]["holm_p"] == 1.0
+
+
+def test_monte_carlo_keeps_identity_without_forcing_mirror():
+    differences = np.arange(1.0, 18.0)  # 17 tasks selects the Monte Carlo branch.
+    result = A._sign_flip_p_value(differences, "manual", 42, 100)
+    rng = A._rng(42, "manual|sign-flip")
+    signs = rng.choice((-1.0, 1.0), size=(100, 17))
+    signs[0, :] = 1.0  # only the stipulated identity, not an artificial second mirror.
+    means = np.mean(signs * differences[None, :], axis=1)
+    observed = abs(float(np.mean(differences)))
+    tolerance = 1e-9 * max(1.0, float(np.sum(np.abs(differences))))
+    expected = int(np.count_nonzero(np.abs(means) >= observed - tolerance))
+    assert result["sign_flip_extreme"] == expected
+    assert result["sign_flip_total"] == 100
 
 
 def test_cli_writes_json_and_markdown_and_returns_audit_status(tmp_path):
