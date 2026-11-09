@@ -104,6 +104,9 @@ class CandidateEvaluator:
         self.sim = simulator
         self.spec = spec or ObjectiveSpec()
         self._evaluation_k_override: Optional[float] = None
+        # Optional, per-run signed field offset in INTERNAL VOXEL SDF units.
+        # None restores the neutral zero shift; it is not a scalar loss offset.
+        self._evaluation_loss_shift: Optional[float] = None
         self.seed = seed  # no stochastic objective evaluation in this prototype.
         self.ledger = ledger or ComputeLedger()
         if motion.segments and parameterization.num_steps != len(motion.segments):
@@ -145,9 +148,57 @@ class CandidateEvaluator:
     def clear_evaluation_k(self) -> None:
         self._evaluation_k_override = None
 
+    @property
+    def evaluation_loss_shift(self) -> Optional[float]:
+        """Configured raw override, in voxel SDF units, or neutral ``None``."""
+        return self._evaluation_loss_shift
+
+    def _loss_shift_voxels(self) -> float:
+        return 0.0 if self._evaluation_loss_shift is None else self._evaluation_loss_shift
+
+    def _loss_shift_mm(self) -> float:
+        return self._loss_shift_voxels() * float(self.sim.v)
+
+    def set_evaluation_loss_shift(self, value: Optional[float]) -> None:
+        """Shift the smooth stock-field iso-level before each forward, in voxels.
+
+        Positive values move sigmoid(k*(stock_d+shift)) toward more erosion.
+        This is NOT an offset added to the scalar objective or hard score. The
+        hard forward ignores the field, so policy still sees raw hard results.
+        No optimizer state is retained across a fresh CMA/Adam start: those
+        entry points clear this override, as they do for per-step k overrides.
+        """
+        if value is None:
+            self.clear_evaluation_loss_shift()
+            return
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError("evaluation_loss_shift must be finite in [-0.5,0.5] voxels or None")
+        value = float(value)
+        if not math.isfinite(value) or abs(value) > 0.5:
+            raise ValueError("evaluation_loss_shift must be finite in [-0.5,0.5] voxels or None")
+        if not hasattr(self.sim, "loss_shift"):
+            raise AttributeError("signed stock-field shifts require simulator.loss_shift")
+        self._evaluation_loss_shift = value
+
+    def clear_evaluation_loss_shift(self) -> None:
+        """Neutralize the per-run field override in voxels (default 0).
+
+        CandidateEvaluator._configure reapplies this on every evaluation, while
+        reset_candidate_state retains the configured field just as for other
+        execution settings. The following _configure after reset is therefore
+        idempotent, not an additional optimizer update.
+        """
+        self._evaluation_loss_shift = None
+        # Clear the field immediately as well as the Python override. Subsequent
+        # _configure calls keep this explicitly neutral value until changed.
+        self.sim.loss_shift[None] = 0.0
+
     def _configure(self) -> None:
         spec, sim = self.spec, self.sim
+        if not hasattr(sim, "loss_shift"):
+            raise AttributeError("signed stock-field shifts require simulator.loss_shift")
         sim.k[None] = spec.k if self._evaluation_k_override is None else self._evaluation_k_override
+        sim.loss_shift[None] = self._loss_shift_voxels()
         sim.w_gouge[None] = spec.gouge_weight
         sim.w_residual[None] = spec.residual_weight
         sim.holder_penalty_weight[None] = spec.holder_weight
@@ -194,6 +245,10 @@ class CandidateEvaluator:
             candidate_id=candidate_id, theta_hash=_theta_hash(theta), objective_kind=kind,
             objective=None, valid=False, invalid_reason=reason,
             coverage=C.Coverage.UNKNOWN,
+            components={
+                "loss_shift_voxels": self._loss_shift_voxels(),
+                "loss_shift_mm": self._loss_shift_mm(),
+            },
         ))
 
     def _gradient(self, normalized_gradient: np.ndarray) -> np.ndarray:
@@ -213,6 +268,9 @@ class CandidateEvaluator:
             normalized = self._deltas(theta)
             self._configure()
             reset_simulator(self.sim)
+            # Official reset preserves configured fields. Apply this explicitly
+            # once more for any alternative reset implementation, not ti.init.
+            self.sim.loss_shift[None] = self._loss_shift_voxels()
             self.sim.tool_delta.from_numpy(normalized.astype(np.float32))
             forward_calls = 1
             if objective_kind == "smooth":
@@ -269,6 +327,8 @@ class CandidateEvaluator:
                 "delta_l2_normalized": float(np.linalg.norm(normalized)),
                 "speed_clipping_applied": 0.0,
                 "evaluation_seed": float(self.seed),
+                "loss_shift_voxels": self._loss_shift_voxels(),
+                "loss_shift_mm": self._loss_shift_mm(),
                 "prototype_incomplete_final_target_and_posted_coverage": 1.0,
             }
             for name, value in diagnostics.items():
@@ -286,10 +346,12 @@ class CandidateEvaluator:
         except (ValueError, FloatingPointError) as error:
             return self._invalid(candidate_id, theta, objective_kind, str(error))
         finally:
-            self.ledger.finish_candidate(valid=valid, forward_calls=forward_calls,
-                                         backward_calls=backward_calls,
-                                         segment_steps=steps if forward_calls else 0,
-                                         voxel_steps=voxels if forward_calls else 0)
+            entry = self.ledger.finish_candidate(valid=valid, forward_calls=forward_calls,
+                                                 backward_calls=backward_calls,
+                                                 segment_steps=steps if forward_calls else 0,
+                                                 voxel_steps=voxels if forward_calls else 0)
+            entry["loss_shift_voxels"] = self._loss_shift_voxels()
+            entry["loss_shift_mm"] = self._loss_shift_mm()
 
     def evaluate_candidate(self, theta: Any, candidate_id: str,
                            objective_kind: str = "smooth") -> C.CandidateResult:
