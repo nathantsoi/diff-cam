@@ -599,6 +599,8 @@ def parse_motion_plan(
                 if float(mode) in gcodes:
                     motion_mode = mode
             if 43.0 in gcodes:
+                if "H" not in block:
+                    raise _nc_error(line, "G43 requires an explicit H register (e.g. G43 H1)")
                 _integer_word(block, "H", line)
                 length_offset = True
             if 49.0 in gcodes:

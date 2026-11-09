@@ -131,6 +131,11 @@ def test_typed_post_roundtrip_preserves_motion(dialect, units):
     assert reparsed.provenance.startswith(f"parsed:{dialect}:sha256:")
 
 
+def test_bare_g43_has_a_specific_missing_register_error():
+    with pytest.raises(GCodeError, match=r"G43 requires an explicit H register"):
+        parse_motion_plan("G21 G90 G43\nG0 X0 Y0 Z10\nM2\n", TASK)
+
+
 def test_wrapper_matches_direct_typed_post():
     plan = parse_motion_plan(CANONICAL, TASK)
     assert motion_plan_to_gcode(plan, TASK) == post_motion_plan(plan, TASK)
