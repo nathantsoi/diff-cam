@@ -111,12 +111,12 @@
    "branch": "task/T3.1-blackbox",
    "blocker": null,
    "next": null,
-   "note": "built on task/T3.0-objectives prototype"
+   "note": "COMPLETE at a0f91cb (CMA hard/smooth, bitwise resume, limits/spent, invalid penalty counted); awaiting merge order T2.0 -> final T3.0 -> T3.1"
   },
   "T3.2": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-2",
+   "branch": "task/T3.2-adam",
    "blocker": null,
    "next": null
   },
