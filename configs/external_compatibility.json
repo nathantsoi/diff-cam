@@ -3,6 +3,49 @@
   "date": "2026-11-08",
   "input_commit": "f4d0a644c22496720d19d9c49703f932d848d3e6",
   "source_manifest": "configs/references.json",
+  "tracked_modernized_recipe": {
+    "status": "reproduced-in-fresh-venv; valid-complete-bounded-smoke; not-faithful-reproduction",
+    "path": "baselines/cncnet/README.md",
+    "command": "baselines/cncnet/run_smoke.sh external/cncnet-tracked-venvs/proof-1 external/cncnet-tracked-runs/proof-1 0",
+    "requirements": "baselines/cncnet/requirements.txt",
+    "requirements_sha256": "dfeb7a8510336b90799e3e479e70dfe5ceefd2df2a6a16e87daab903163672a9",
+    "run_script_sha256": "37b62e42cfa6101c1f57905f18f97d1fd5b2791090e8330db72c9f13d3ae2aad",
+    "driver_sha256": "014e99a4ce18b6b9ae33bef7858e61a775452f53f59eb3d8e42665729ea0e2bb",
+    "mesh_io_shim_sha256": "19223c46a252cf5795105404c9e81957bb92937e15687fec177bf8cca2e95faa",
+    "reference_source_revision": "ba0652f9941686058c07c98617b9748e72f5f019",
+    "pytorch3d_source_revision": "33824be3cbc87a7dd1db0f6a9a9de9ac81b2d0ba",
+    "uses_core_uv_lock": false,
+    "inputs": "CNC-Net source/artifact acquisition only from configs/references.json; separately declared exact PyTorch3D source commit",
+    "outputs": "all generated under new git-ignored external paths; source git diff exit 0",
+    "fresh_proof": {
+      "pipeline_exit_code": 0,
+      "valid_complete_smoke": true,
+      "native_iou": 0.423786,
+      "reference_iou": 0.423761,
+      "iou_absolute_delta": 0.000025,
+      "elapsed_seconds": 24.751418170984834,
+      "inventory_path": "external/cncnet-tracked-runs/proof-1/artifact-inventory.json",
+      "inventory_sha256": "c34096d2c657232b363a5c55c8bc441a0a214b4b184a88d487e7772f9b72ea40",
+      "stdout_log_sha256": "5272d521ad70900f27d6103a5de1034b075fd3aa4df518fa05e91be8b6f3cb72",
+      "fresh_freeze_sha256": "a5b8acd5b55be10427096b8fdf139972e496fa0c2820a49de96ab7195186cac6",
+      "raw_mesh": {
+        "path": "external/cncnet-tracked-runs/proof-1/output/t50-tracked-smoke/0.obj",
+        "sha256": "210cd06d08e34f1cca8c32fc4a6a934e9bcd0b92f511fb99e4be33efdcb878c7",
+        "vertices": 455284,
+        "triangles": 910580,
+        "finite_vertices": true
+      },
+      "smooth_mesh": {
+        "path": "external/cncnet-tracked-runs/proof-1/output/t50-tracked-smoke/0_smooth.obj",
+        "sha256": "9a9fdc7af30787644789e3d376f864bec527f36249429a7703f9ba88ebaf1bc7",
+        "vertices": 455284,
+        "triangles": 910580,
+        "finite_vertices": true
+      },
+      "checkpoint_sha256": "663320cbe1626abe7e8190b7688b4b62e3a78ec1e13cd7218a699e5f31e76397",
+      "comparison_policy": "all four current/reference artifact hashes differ; record differences rather than claim deterministic identity or unproven cause"
+    }
+  },
   "overall": {
     "performance_comparison": "not-performed",
     "machine_safety_validation": "not-performed",
