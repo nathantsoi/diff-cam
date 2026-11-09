@@ -143,14 +143,21 @@ def _write_source(root: Path, name: str, values, grid: C.GridSpec,
 
 
 def build_pilot_evaluator(root: Path, *, config: CostConfig = CostConfig(),
-                          ledger: ComputeLedger | None = None):
+                          ledger: ComputeLedger | None = None, precision: str | None = None):
     """Construct the real sampled pilot, CPU simulator, and one evaluator.
 
     The optional voxel_mm allows a separately labelled reduced-grid smoke test;
     it never resamples or relabels a different .npy grid. The CLI's actual pilot
     uses the full 0.25 mm task grid.
+
+    When supplied, ``precision`` selects both the runtime and public constructor.
+    ``None`` preserves the prior caller/default-constructor behavior, including
+    matched wrapper-provided defaults. The existing CandidateEvaluator continues
+    assigning normalized delta inputs as float32.
     """
     t0 = time.perf_counter()
+    if precision is not None and precision not in ("f32", "f64"):
+        raise ValueError("precision must be explicit 'f32' or 'f64'")
     validate_config(config)
     root = root.resolve()
     if root.exists():
@@ -181,7 +188,8 @@ def build_pilot_evaluator(root: Path, *, config: CostConfig = CostConfig(),
     initial = np.asarray(parameterization.initial_position_mm, dtype=np.float64)
     start = (initial - np.asarray(task.grid.origin_mm)) / np.asarray(task.grid.extent_mm)
     import taichi as ti
-    ti.init(arch=ti.cpu, offline_cache=False, default_fp=ti.f32)
+    ti.init(arch=ti.cpu, offline_cache=False,
+            default_fp=ti.f32 if precision is None else getattr(ti, precision))
     from simulator.csg_simulator import CSGSimulatorDelta
 
     sim = CSGSimulatorDelta(
@@ -199,6 +207,7 @@ def build_pilot_evaluator(root: Path, *, config: CostConfig = CostConfig(),
         enforce_speed_limits=False,
         init_taichi=False,
         k_init=config.k_smooth,
+        **({} if precision is None else {"precision": precision}),
     )
     sim.tool_radius[None] = task.tool.cutter_radius_mm
     sim.tool_height[None] = task.tool.flute_length_mm
@@ -214,6 +223,7 @@ def build_pilot_evaluator(root: Path, *, config: CostConfig = CostConfig(),
         spec=objective_module.ObjectiveSpec(k=config.k_smooth),
         ledger=ledger or ComputeLedger(), seed=config.seed,
     )
+    actual_precision = getattr(sim, "precision", precision or "f32")
     metadata = {
         "task_id": task.task_id, "original_task_hash": task.task_hash,
         "sampled_evaluator_task_hash": evaluated_task.task_hash,
@@ -254,7 +264,10 @@ def build_pilot_evaluator(root: Path, *, config: CostConfig = CostConfig(),
         },
         "simulator": {
             "backend": "cpu", "taichi": ti.__version__,
-            "floating_point": "float32", "atomic_nondeterminism": "use tolerances, never bitwise assertions",
+            "floating_point": "float32" if actual_precision == "f32" else "float64",
+            "precision": actual_precision,
+            "input_delta_dispatch": "existing CandidateEvaluator normalized float32 assignment",
+            "atomic_nondeterminism": "use tolerances, never bitwise assertions",
             "immutable_geometry_declared_at_initialization": True,
             "holder_assumption": "flute top == holder bottom in this scoped pilot",
         },
@@ -429,7 +442,7 @@ def run_pilot(output: Path, config: CostConfig = CostConfig()) -> dict[str, Any]
 
 
 def ad_order_regression(output: Path, *, voxel_mm: float = 2.0,
-                        ordered: bool = True) -> dict[str, Any]:
+                        ordered: bool = True, precision: str = "f32") -> dict[str, Any]:
     """Exercise real AD resets on an explicitly coarse copy of the pilot grid.
 
     ``ordered=True`` performs same-theta AD, then a different-theta forward,
@@ -446,7 +459,7 @@ def ad_order_regression(output: Path, *, voxel_mm: float = 2.0,
         raise TypeError("ordered must select the declared sequence explicitly")
     output = output.resolve()
     _, _, parameterization, evaluator, _ = build_pilot_evaluator(
-        output, config=CostConfig(voxel_mm=voxel_mm),
+        output, config=CostConfig(voxel_mm=voxel_mm), precision=precision,
     )
     theta = np.zeros(parameterization.num_params, dtype=np.float64)
     records = {}
@@ -493,7 +506,12 @@ def ad_order_regression(output: Path, *, voxel_mm: float = 2.0,
         "theta": theta.tolist(), "different_theta_index": 35,
         "different_theta_delta": 0.025 if ordered else None,
         "loss_dtype": evaluator.sim.loss.to_numpy().dtype.str,
+        "stock_dtype": evaluator.sim.stock.to_numpy().dtype.str,
+        "stock_gradient_dtype": evaluator.sim.stock.grad.to_numpy().dtype.str,
+        "tool_delta_dtype": evaluator.sim.tool_delta.to_numpy().dtype.str,
         "tool_delta_gradient_dtype": evaluator.sim.tool_delta.grad.to_numpy().dtype.str,
+        "simulator_precision": evaluator.sim.precision,
+        "input_delta_dispatch": "existing CandidateEvaluator normalized float32 assignment",
         "records": records,
         "nonzero_gradient": any(abs(value) > 1e-10
                                 for value in records["initial"]["gradient"]),

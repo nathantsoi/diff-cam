@@ -38,3 +38,9 @@ A RunRecord field would require a SCHEMA_VERSION bump, which changes every TaskS
 config.json (required run artifact) metadata['simulator'] holds sim.precision_metadata(); benchmarks.audit requires it and fails closed on
 missing or mixed precision within a campaign; the objective setup signature (`simulator_precision`) and Adam/CMA checkpoints carry it too;
 T7.2 refuses reports whose run precision differs from the campaign's.
+
+## D-2026-11-09-07 — Posted-evaluation memory cap for the pilot
+The real-grid dry-run failed closed in the 1.0 mm screen phase: production NumPy posted evaluation peaked at 3,689,144,320 B (≈3.44 GiB)
+per job, over the 2 GiB cap extrapolated from a small grid. Host: ~124 GiB total, ~45 GiB available. DECISION: max_rss_bytes_per_job = 8 GiB,
+parallel_jobs = 2, geometry/sampling controls frozen; cap still fails closed; peaks measured per phase/dialect and reported. If a phase
+exceeds 8 GiB, stop and open an evaluator memory-optimization card rather than raise the cap further.
