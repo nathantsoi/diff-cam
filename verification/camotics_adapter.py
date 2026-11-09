@@ -1,16 +1,23 @@
-"""CAMotics 1.2.x binary-in-Docker adapter and independent STL grid sampling.
+"""Qualified CAMotics v1.2.0 binary-Docker route and independent grid sampling.
 
-Only analytic box stock/target geometry and flat cylindrical cutters are
-supported. The adapter uses the real ``camsim`` binary; it never treats CAMotics
-as a holder/assembly safety oracle. ``safety_pass`` is always null and coverage
-is incomplete because non-cutting assembly, fixtures and exact controller timing
-are outside CAMotics's geometry output. ``geometry_pass`` is computed from the
-shared grid metrics only, when returned, and is not a machining-safety verdict.
+Only analytic box stock/target geometry, flat fixed cylindrical tools, known
+initial state, pure work-frame translations and G54 source motion are supported.
+The exact calibrated Docker image ID and the binary's reported version are
+checked before simulation. G54 is calibrated in a separately retained simulation
+program using ``machine - initial_state`` coordinates; raw caller NC is not
+rewritten and both SHA-256 values are preserved. Explicit G53 is unsupported.
 
-``evaluate_candidate`` posts the current typed motion to NC before simulation,
-including arc-aware rigid frame conversion. ``evaluate_posted_gcode`` consumes
-actual NC bytes. Arbitrary STEP/sampled/non-analytic stock, ball tools,
-workholding, unsupported tool changes and malformed meshes fail closed.
+CAMotics carves rapid moves too. Conflicting rapid cutter AABB/stock overlaps
+are therefore rejected rather than reported as feed-removal agreement. Mesh
+queries use explicit closed-surface policies and do not require watertightness,
+but raw topology stays labeled and a non-watertight result never receives a
+passing geometry decision. ``safety_pass`` is always null: shank/holder
+clearance, whole-cell bounds, fixtures and controller timing are not covered.
+
+``evaluate_candidate`` posts typed motion before validation/simulation;
+``evaluate_posted_gcode`` consumes actual NC bytes. Arbitrary sampled/STEP
+stock, rotated setups, unsupported tools, invalid source programs and malformed
+meshes fail closed. A successful camsim exit is not a machining-safety verdict.
 """
 from __future__ import annotations
 
@@ -33,12 +40,16 @@ import numpy as np
 from benchmarks import contracts as C
 from cam.config import MachineConfig
 from cam.posts import post_motion_plan
+from cam.gcode_parser import GCodeError, UnsupportedGCodeError, parse_motion_plan
 from simulator.csg_metrics import grid_material_metrics
 
 
 EVALUATOR_ID = "camotics"
 DEFAULT_IMAGE = "diffcam-camotics:1.2.0"
 DEFAULT_RELEASE = "1.2.0"
+# Exact image used for the coordinate-behavior calibration and bias report.
+# Changing this digest requires requalification, not merely a new image tag.
+DEFAULT_IMAGE_DIGEST = "sha256:e680bff023d9190ed16fe1bee21d9c3c72f0e35bfbceb0a19e704c62f6ddca80"
 
 
 class AdapterError(RuntimeError):
@@ -50,6 +61,15 @@ class TriangleMesh:
     vertices_mm: np.ndarray             # (N, 3, 3), actual triangle vertices
     stl_format: str
 
+    def __post_init__(self):
+        try:
+            vertices = np.asarray(self.vertices_mm, dtype=np.float64)
+        except (TypeError, ValueError) as error:
+            raise AdapterError("mesh triangles must be numeric vertices in (N,3,3) form") from error
+        if vertices.ndim != 3 or vertices.shape[1:] != (3, 3):
+            raise AdapterError(f"mesh triangles require shape (N,3,3), got {vertices.shape}")
+        object.__setattr__(self, "vertices_mm", vertices)
+
     @property
     def triangle_count(self) -> int:
         return len(self.vertices_mm)
@@ -57,11 +77,19 @@ class TriangleMesh:
 
 @dataclass(frozen=True)
 class MeshSample:
+    """Grid occupancy and sampling provenance.
+
+    ``surface_contact_count`` counts distinct input point locations (exact
+    coordinates) whose returned surface root matches within the tolerance; it is
+    not a physical-contact volume or safety bound. Repeated ray work remains in
+    ``projected_ray_queries`` (including repeated input locations).
+    """
     occupancy: np.ndarray
     surface_contact_count: int
     projected_ray_queries: int
     touch_tolerance_mm: float
     boundary_policy: str
+    spatial_bin_count: int = 0
 
 
 def _finite_positive(name: str, value: Any) -> float:
@@ -71,6 +99,16 @@ def _finite_positive(name: str, value: Any) -> float:
         raise AdapterError(f"{name}: expected a finite positive value") from error
     if not math.isfinite(result) or result <= 0:
         raise AdapterError(f"{name}: expected a finite positive value")
+    return result
+
+
+def _finite_nonnegative(name: str, value: Any) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as error:
+        raise AdapterError(f"{name}: expected a finite nonnegative value") from error
+    if not math.isfinite(result) or result < 0:
+        raise AdapterError(f"{name}: expected a finite nonnegative value")
     return result
 
 
@@ -96,7 +134,11 @@ def read_stl(path: Path, *, max_triangles: int = 2_000_000) -> TriangleMesh:
             stl_format = "binary"
     if triangles is None and data.lstrip().lower().startswith(b"solid"):
         vertices = []
-        for line in data.decode("ascii").splitlines():
+        try:
+            text_lines = data.decode("ascii").splitlines()
+        except UnicodeDecodeError as error:
+            raise AdapterError(f"non-ASCII bytes in {path}; neither valid binary nor text STL") from error
+        for line in text_lines:
             words = line.strip().split()
             if len(words) == 4 and words[0].lower() == "vertex":
                 try:
@@ -130,16 +172,15 @@ def mesh_volume_mm3(mesh: TriangleMesh, *, require_watertight: bool = True) -> D
     vertices = mesh.vertices_mm
     if len(vertices) == 0:
         return {"volume_mm3": 0.0, "watertight": True, "boundary_or_nonmanifold_edges": 0}
-    if require_watertight:
-        flat = vertices.reshape(-1, 3)
-        _, inverse = np.unique(flat, axis=0, return_inverse=True)
-        faces = inverse.reshape(-1, 3)
-        edges = np.concatenate((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]), axis=0)
-        edges.sort(axis=1)
-        _, edge_counts = np.unique(edges, axis=0, return_counts=True)
-        defects = int(np.count_nonzero(edge_counts != 2))
-        if defects:
-            raise AdapterError(f"mesh is not a closed two-face manifold: {defects} unmatched/multiply-used edges")
+    flat = vertices.reshape(-1, 3)
+    _, inverse = np.unique(flat, axis=0, return_inverse=True)
+    faces = inverse.reshape(-1, 3)
+    edges = np.concatenate((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]), axis=0)
+    edges.sort(axis=1)
+    _, edge_counts = np.unique(edges, axis=0, return_counts=True)
+    defects = int(np.count_nonzero(edge_counts != 2))
+    if defects and require_watertight:
+        raise AdapterError(f"mesh is not a closed two-face manifold: {defects} unmatched/multiply-used edges")
     origin = vertices.reshape(-1, 3).mean(axis=0)
     signed = sum(np.dot(t[0] - origin, np.cross(t[1] - origin, t[2] - origin)) for t in vertices)
     signed /= 6.0
@@ -147,17 +188,20 @@ def mesh_volume_mm3(mesh: TriangleMesh, *, require_watertight: bool = True) -> D
         raise AdapterError("mesh signed volume is not finite")
     if signed < 0:
         raise AdapterError("mesh triangle winding produces a negative signed volume; not repaired with an absolute value")
-    return {"volume_mm3": float(signed), "watertight": True, "boundary_or_nonmanifold_edges": 0}
+    return {"volume_mm3": float(signed), "watertight": defects == 0,
+            "boundary_or_nonmanifold_edges": defects}
 
 
 def points_in_mesh(mesh: TriangleMesh, points_mm: np.ndarray, *,
                    touch_tolerance_mm: float = 1e-7, query_chunk: int = 256) -> MeshSample:
-    """Closed-surface-inclusive +Z ray parity with duplicate-root suppression.
+    """Closed-surface-inclusive +Z ray parity without watertightness assumptions.
 
-    Vertical projected triangles are skipped. Shared/coplanar roots are merged
-    within the declared tolerance; a point within tolerance of a surface is
-    deliberately counted as MATERIAL under the explicit ``closed_include``
-    policy. This is a geometry-sampling choice, not a collision/safety proof.
+    AABB-binned queries avoid a full-mesh scan for every voxel centre. Shared
+    projection roots are merged within tolerance. A three-dimensional
+    point-in-triangle check also includes vertical and edge contacts, which a
+    projected-ray-only contact test would miss. ``surface_contact_count`` is
+    still a count of distinct exact input locations, not a physical-contact or
+    safety bound. Duplicate input work remains in ``projected_ray_queries``.
     """
     if touch_tolerance_mm <= 0 or not math.isfinite(touch_tolerance_mm):
         raise AdapterError("touch_tolerance_mm must be finite and positive")
@@ -173,52 +217,154 @@ def points_in_mesh(mesh: TriangleMesh, points_mm: np.ndarray, *,
         raise AdapterError("point query count exceeds explicit one-million-point guard")
     if len(mesh.vertices_mm) == 0:
         return MeshSample(np.zeros(len(points), dtype=bool), 0, len(points), touch_tolerance_mm, "closed_include")
-    lower = mesh.vertices_mm.min(axis=(0, 1)) - touch_tolerance_mm
-    upper = mesh.vertices_mm.max(axis=(0, 1)) + touch_tolerance_mm
+
+    vertices = mesh.vertices_mm
+    lower = vertices.min(axis=(0, 1)) - touch_tolerance_mm
+    upper = vertices.max(axis=(0, 1)) + touch_tolerance_mm
+    tri_lower = vertices.min(axis=1)
+    tri_upper = vertices.max(axis=1)
+    extent = upper - lower
+    if not np.isfinite(extent).all():
+        raise AdapterError("mesh coordinate range is too large for finite spatial-bin arithmetic")
+    median_extent = float(np.median(np.max(tri_upper[:, :2] - tri_lower[:, :2], axis=1)))
+    bin_width = max(4.0 * median_extent, float(np.max(extent[:2])) / 64, touch_tolerance_mm * 8, 1e-12)
+    bin_origin = lower[:2]
+    # Sparse bins handle arbitrarily shaped meshes without allocating a giant
+    # dense spatial array. The bound avoids quadratic tiny-facet bin filling.
+    bin_keys = {}
+    for index in range(len(vertices)):
+        lo = np.floor((tri_lower[index, :2] - bin_origin - touch_tolerance_mm) / bin_width).astype(np.int64)
+        hi = np.floor((tri_upper[index, :2] - bin_origin + touch_tolerance_mm) / bin_width).astype(np.int64)
+        if np.any(hi < lo) or int(np.prod(hi - lo + 1)) > 100_000:
+            raise AdapterError("triangle spans an excessive AABB-bin range; reject oversized/degenerate coordinate data")
+        for x in range(int(lo[0]), int(hi[0]) + 1):
+            for y in range(int(lo[1]), int(hi[1]) + 1):
+                bin_keys.setdefault((x, y), []).append(index)
+    bins = {key: np.asarray(value, dtype=np.int64) for key, value in bin_keys.items()}
     results = np.zeros(len(points), dtype=bool)
-    contacts = 0
+    contacts = set()
     projected_queries = 0
     for start in range(0, len(points), query_chunk):
-        for point in points[start:start + query_chunk]:
+        for offset, point in enumerate(points[start:start + query_chunk]):
             if np.any(point < lower) or np.any(point > upper):
                 continue
-            a, b, c = mesh.vertices_mm[:, 0], mesh.vertices_mm[:, 1], mesh.vertices_mm[:, 2]
+            key = np.floor((point[:2] - bin_origin) / bin_width).astype(np.int64)
+            indices = bins.get((int(key[0]), int(key[1])))
+            if indices is None:
+                continue
+            a = vertices[indices, 0]
+            b = vertices[indices, 1]
+            c = vertices[indices, 2]
             u, v, r = b - a, c - a, point - a
+
+            # Actual closed-triangle proximity includes vertical faces. The
+            # Gram determinant is positive for non-degenerate STL triangles.
+            uu = np.einsum("ij,ij->i", u, u)
+            vv = np.einsum("ij,ij->i", v, v)
+            uv = np.einsum("ij,ij->i", u, v)
+            ru = np.einsum("ij,ij->i", r, u)
+            rv = np.einsum("ij,ij->i", r, v)
+            gram = uu * vv - uv * uv
+            nondegenerate = gram > 0.0
+            wb3 = np.zeros(len(u), dtype=float)
+            wc3 = np.zeros(len(u), dtype=float)
+            wb3[nondegenerate] = ((ru * vv - rv * uv) / gram)[nondegenerate]
+            wc3[nondegenerate] = ((rv * uu - ru * uv) / gram)[nondegenerate]
+            wa3 = 1.0 - wb3 - wc3
+            squared_distance = np.einsum("ij,ij->i", r, r)
+            height2 = squared_distance - wb3 * ru - wc3 * rv
+            bary_tolerance = touch_tolerance_mm / max(bin_width, touch_tolerance_mm)
+            close = (nondegenerate & (wa3 >= -bary_tolerance) & (wb3 >= -bary_tolerance)
+                     & (wc3 >= -bary_tolerance) & (height2 <= touch_tolerance_mm ** 2))
+
             denominator = u[:, 0] * v[:, 1] - v[:, 0] * u[:, 1]
-            projected = np.abs(denominator) > max(touch_tolerance_mm * 1e-3, 1e-14)
+            projected = np.abs(denominator) > 1e-14  # projected area, mm^2: not a length tolerance
+            if projected.any():
+                projected_queries += 1
+            if close.any():
+                results[start + offset] = True
+                contacts.add(tuple(float(value) for value in point))
+                continue
             if not projected.any():
                 continue
-            projected_queries += 1
-            u, v, r, denom = u[projected], v[projected], r[projected], denominator[projected]
-            aa, bb, cc = a[projected, 2], b[projected, 2], c[projected, 2]
-            wb = (r[:, 0] * v[:, 1] - v[:, 0] * r[:, 1]) / denom
-            wc = (u[:, 0] * r[:, 1] - r[:, 0] * u[:, 1]) / denom
+            up, vp, rp, denom = u[projected], v[projected], r[projected], denominator[projected]
+            aa = a[projected, 2]
+            bb = b[projected, 2]
+            cc = c[projected, 2]
+            wb = (rp[:, 0] * vp[:, 1] - vp[:, 0] * rp[:, 1]) / denom
+            wc = (up[:, 0] * rp[:, 1] - rp[:, 0] * up[:, 1]) / denom
             valid = (wb >= -touch_tolerance_mm) & (wc >= -touch_tolerance_mm) & (wb + wc <= 1 + touch_tolerance_mm)
             if not valid.any():
                 continue
             roots = np.sort(aa[valid] + wb[valid] * (bb[valid] - aa[valid]) + wc[valid] * (cc[valid] - aa[valid]))
             if roots.size and np.min(np.abs(roots - point[2])) <= touch_tolerance_mm:
-                results[start + np.where(points[start:start + query_chunk] == point)[0][0]] = True
-                contacts += 1
+                results[start + offset] = True
+                contacts.add(tuple(float(value) for value in point))
                 continue
             if roots.size:
-                # Combine adjacent nearly coincident roots, including shared edges.
                 keep = np.concatenate(([True], np.diff(roots) > touch_tolerance_mm * 2))
                 roots = roots[keep]
             roots = roots[roots > point[2] + touch_tolerance_mm]
             if len(roots) % 2:
-                results[start + np.where(points[start:start + query_chunk] == point)[0][0]] = True
-    return MeshSample(results, contacts, projected_queries, touch_tolerance_mm, "closed_include")
+                results[start + offset] = True
+    return MeshSample(results, len(contacts), projected_queries, touch_tolerance_mm,
+                      "closed_include", len(bins))
 
 
 def _box_mask(points_mm: np.ndarray, minimum, maximum) -> np.ndarray:
-    lower, upper = np.asarray(minimum, dtype=float), np.asarray(maximum, dtype=float)
+    try:
+        lower, upper = np.asarray(minimum, dtype=float), np.asarray(maximum, dtype=float)
+    except (TypeError, ValueError) as error:
+        raise AdapterError("box bounds must be numeric finite millimetre triples") from error
     if lower.shape != (3,) or upper.shape != (3,) or np.any(lower >= upper):
         raise AdapterError("analytic box stock/target requires finite min_mm < max_mm triples in work frame")
     if not np.isfinite(lower).all() or not np.isfinite(upper).all():
         raise AdapterError("non-finite stock bounds")
     points = np.asarray(points_mm, dtype=float)
     return ((points >= lower) & (points <= upper)).all(axis=-1)
+
+
+def _geometry_mask(source: C.GeometrySource, points_mm: np.ndarray) -> np.ndarray:
+    """Mask declared analytic geometry in its work frame, with no mesh heuristics."""
+    params = source.params
+    primitive = params.get("primitive")
+    if primitive == "box":
+        required = {"min_mm", "max_mm"}
+        bounds = (params.get("min_mm"), params.get("max_mm"))
+        if set(params) - {"primitive", "min_mm", "max_mm"}:
+            raise AdapterError("box: only primitive/min_mm/max_mm parameters are supported")
+        return _box_mask(points_mm, *bounds)
+    if primitive != "box_minus_pocket":
+        raise AdapterError(f"unsupported analytic primitive {primitive!r}")
+    required = {
+        "box_min_mm", "box_max_mm", "pocket_min_mm", "pocket_max_mm",
+        "island_min_mm", "island_max_mm",
+    }
+    unknown = set(params) - {"primitive", *required}
+    if unknown:
+        raise AdapterError(f"box_minus_pocket: unsupported parameters {sorted(unknown)}")
+    try:
+        outside = _box_mask(points_mm, params["box_min_mm"], params["box_max_mm"])
+        pocket = _box_mask(points_mm, params["pocket_min_mm"], params["pocket_max_mm"])
+    except KeyError as error:
+        raise AdapterError(f"box_minus_pocket: missing required parameter {error.args[0]}") from error
+    pocket_bounds = [tuple(params[f"pocket_{edge}_mm"][axis] for edge in ("min", "max"))
+                     for axis in range(3)]
+    box_bounds = [tuple(params[f"box_{edge}_mm"][axis] for edge in ("min", "max"))
+                  for axis in range(3)]
+    if any(pocket_bounds[a][0] < box_bounds[a][0] or pocket_bounds[a][1] > box_bounds[a][1] for a in range(3)):
+        raise AdapterError("pocket must be contained in the declared analytic stock box")
+    remaining = outside & ~pocket
+    island_min, island_max = params.get("island_min_mm"), params.get("island_max_mm")
+    if (island_min is None) != (island_max is None):
+        raise AdapterError("both island_min_mm and island_max_mm must be null or supplied")
+    if island_min is not None:
+        if any(island_min[a] < pocket_bounds[a][0] or island_max[a] > pocket_bounds[a][1] for a in range(3)):
+            raise AdapterError("preserved island must be contained in the pocket region")
+        remaining |= _box_mask(points_mm, island_min, island_max)
+    if not required.issubset(params):
+        raise AdapterError(f"box_minus_pocket: missing parameters {sorted(required - set(params))}")
+    return remaining
 
 
 def _stock_bounds_machine(task: C.TaskSpec) -> Dict[str, Any]:
@@ -238,6 +384,106 @@ def _stock_bounds_machine(task: C.TaskSpec) -> Dict[str, Any]:
     return {"min": list(min_machine), "max": list(max_machine)}
 
 
+def _translation_mm(task: C.TaskSpec) -> Tuple[float, float, float]:
+    """Only pure translations are representable in this CAMotics project.
+
+    A rotated TaskSpec needs an actual transformed solid/work-offset
+    implementation, not merely transformed axis-aligned bounds. G10 supports
+    no work-frame rotation in this release.
+    """
+    matrix = task.work_to_machine.matrix
+    if any(matrix[axis][column] != (1.0 if axis == column else 0.0)
+           for axis in range(3) for column in range(3)):
+        raise AdapterError("only a pure work_to_machine translation is supported; G10 cannot encode a rotation")
+    return tuple(float(matrix[axis][3]) for axis in range(3))
+
+
+def _rapid_sweep_conflicts(task: C.TaskSpec, motion: C.MotionPlan) -> Tuple[str, ...]:
+    """Reject rapid paths whose modeled cutter AABB overlaps initial stock.
+
+    CAMotics v1.2.0 sweeps rapid moves as well as feeds. That is incompatible
+    with the independent zero-removal rapid semantics. This is only a coarse
+    conservative compatibility guard, never a clearance or assembly safety
+    certificate. Stationary typed initial-state markers do not move the tool
+    and therefore are not converted into a rapid-motion rejection.
+    """
+    stock = _stock_bounds_machine(task)
+    lower, upper = stock["min"], stock["max"]
+    radius = float(task.tool.cutter_radius_mm)
+    length = float(task.tool.flute_length_mm)
+    reasons = []
+    for segment in motion.segments:
+        if segment.kind != C.SegmentKind.RAPID or segment.start_mm == segment.end_mm:
+            continue
+        start, end = segment.start_mm, segment.end_mm
+        swept_min = (min(start[0], end[0]) - radius, min(start[1], end[1]) - radius,
+                     min(start[2], end[2]))
+        swept_max = (max(start[0], end[0]) + radius, max(start[1], end[1]) + radius,
+                     max(start[2], end[2]) + length)
+        # Inclusive contact is compatibility-unknown, not a proof of clearance.
+        if all(swept_min[a] <= upper[a] and swept_max[a] >= lower[a] for a in range(3)):
+            reasons.append(
+                f"rapid segment {segment.id!r} (source line {segment.source_line}) "
+                "may intersect stock in the modeled cutter AABB; CAMotics would carve "
+                "this rapid, contrary to zero-removal rapid semantics, so grid geometry is unsupported"
+            )
+    return tuple(reasons)
+
+
+def _simulation_stock_bounds(task: C.TaskSpec) -> Dict[str, Any]:
+    """Box bounds in the disclosed machine-relative-to-initial-pose frame."""
+    initial = np.asarray(task.initial_state.position_mm, dtype=float)
+    bounds = _stock_bounds_machine(task)
+    return {"min": (np.asarray(bounds["min"]) - initial).tolist(),
+            "max": (np.asarray(bounds["max"]) - initial).tolist()}
+
+
+def _prepare_camotics_nc(task: C.TaskSpec, nc_bytes: bytes,
+                         dialect: C.Dialect | str) -> Tuple[bytes, C.MotionPlan]:
+    """Validate source NC and establish CAMotics' own zero-origin setup.
+
+    The entire simulation uses ``machine_mm - task.initial_state.position_mm``.
+    CAMotics' default origin is then exactly the declared initial pose, with
+    no synthetic cutter movement or origin-to-workpiece rapids. Stock bounds,
+    STL query points and the source program's G54 transform all use this one
+    frame. Explicit G53 is rejected because raw machine coordinates would need
+    a corresponding separate absolute-motion re-parameterization here.
+
+    The shared parser is the semantic boundary. The packaged v1.2.0 runtime
+    was measured to evaluate X/Y/Z as ``programmed - G10``; the configured
+    G10 words are therefore ``initial_machine - work_to_machine_translation``.
+    Positive raw G10 values took the opposite direction in the calibration
+    probes. This is release-specific adapter evidence, not portable G-code
+    advice. The source NC is retained unchanged after the separate prefix.
+    """
+    if not isinstance(nc_bytes, (bytes, bytearray)) or not nc_bytes:
+        raise AdapterError("NC input must be nonempty bytes")
+    try:
+        text = bytes(nc_bytes).decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise AdapterError("NC must be valid UTF-8 text") from error
+    translation = _translation_mm(task)
+    state = task.initial_state
+    if not state.known or state.frame != C.Frame.MACHINE:
+        raise AdapterError("CAMotics anchoring requires a known machine-frame TaskSpec.initial_state")
+    motion = parse_motion_plan(text, task, dialect=dialect)
+    if any(segment.tag == "home" for segment in motion.segments):
+        raise UnsupportedGCodeError(
+            "CAMotics initial-pose-relative calibration supports G54 motion only; "
+            "explicit absolute G53 is not reparameterized yet"
+        )
+    work_offset = np.asarray(state.position_mm, dtype=float) - np.asarray(translation)
+    offset_words = " ".join(f"{axis}{float(value):.17g}"
+                             for axis, value in zip("XYZ", work_offset))
+    prefix = (
+        "(DiffCAM adapter setup only: machine coordinates relative to the declared initial pose.)\n"
+        "G21 G90\n"
+        f"G10 L2 P1 {offset_words}\n"
+        f"T{task.tool.tool_number} M06\n"
+    ).encode("ascii")
+    return prefix + bytes(nc_bytes), motion
+
+
 def unsupported_probe(task: C.TaskSpec, motion: Optional[C.MotionPlan] = None) -> Tuple[str, ...]:
     """Explicit precheck; a failed check must not invoke Docker or create a project."""
     reasons = []
@@ -245,35 +491,57 @@ def unsupported_probe(task: C.TaskSpec, motion: Optional[C.MotionPlan] = None) -
         reasons.append("only flat cylindrical cutters are supported, not ball/non-flat tools")
     geometry = [("stock", task.stock), ("original_part", task.original_part), ("operation_target", task.operation_target.geometry)]
     for label, source in geometry:
-        if source.kind != "analytic" or source.params.get("primitive") != "box":
-            reasons.append(f"{label}: only analytic box geometry is supported by this prototype")
+        primitive = source.params.get("primitive")
+        if source.kind != "analytic" or (label == "stock" and primitive != "box"):
+            reasons.append(f"{label}: stock must be an analytic box in the work frame")
         if source.frame != C.Frame.WORK:
             reasons.append(f"{label}: geometry must be declared in the work frame")
+        try:
+            _geometry_mask(source, np.zeros((1, 3), dtype=float))
+        except AdapterError as error:
+            reasons.append(f"{label}: {error}")
+    if task.grid.frame != C.Frame.WORK:
+        reasons.append("CAMotics grid evaluation requires a work-frame GridSpec")
+    if not task.initial_state.known or task.initial_state.frame != C.Frame.MACHINE:
+        reasons.append("a known machine-frame TaskSpec.initial_state is required for the simulator reference origin")
+    else:
+        try:
+            _simulation_stock_bounds(task)
+        except AdapterError as error:
+            reasons.append(str(error))
+    try:
+        _translation_mm(task)
+    except AdapterError as error:
+        reasons.append(str(error))
     if task.fixtures:
         reasons.append("separate workholding solids are not modeled")
     if motion is not None:
-        if not task.initial_state.known or not motion.initial_state.known:
-            reasons.append("unknown initial tool state")
+        if not motion.initial_state.known:
+            reasons.append("unknown motion initial tool state")
         if motion.timing_rule != task.motion_semantics.timing_rule:
             reasons.append("motion/task timing-rule mismatch")
     return tuple(reasons)
 
 
 def build_camotics_project(task: C.TaskSpec, resolution_mm: float, *,
-                           program_name: str = "program.nc", tool_number: int = 1) -> Dict[str, Any]:
-    """Build the CAMotics JSON schema used by the binary (actual source schema v1.2)."""
+                           program_name: str = "program.nc",
+                           tool_number: Optional[int] = None) -> Dict[str, Any]:
+    """Build the v1.2 project in machine-relative-to-declared-initial coordinates."""
     error = unsupported_probe(task)
     if error:
         raise AdapterError("; ".join(error))
     resolution = _finite_positive("resolution_mm", resolution_mm)
-    if not isinstance(tool_number, int) or isinstance(tool_number, bool) or tool_number < 0:
-        raise AdapterError("tool_number must be a nonnegative integer")
-    bounds = _stock_bounds_machine(task)
+    effective_tool = task.tool.tool_number if tool_number is None else tool_number
+    if not isinstance(effective_tool, int) or isinstance(effective_tool, bool) or effective_tool < 1:
+        raise AdapterError("tool_number must be a positive integer")
+    if effective_tool != task.tool.tool_number:
+        raise AdapterError("CAMotics tool table must use TaskSpec.tool.tool_number, not a second implicit tool")
+    bounds = _simulation_stock_bounds(task)
     if not re.fullmatch(r"[A-Za-z0-9_.-]+\.nc", program_name):
         raise AdapterError("CAMotics program must be a plain local .nc filename (no URLs/paths)")
     return {
         "units": "metric", "resolution-mode": "manual", "resolution": resolution,
-        "tools": {str(tool_number): {
+        "tools": {str(effective_tool): {
             "units": "metric", "shape": "cylindrical",
             "diameter": float(2.0 * task.tool.cutter_radius_mm),
             "length": float(task.tool.flute_length_mm),
@@ -309,8 +577,13 @@ def _machine_motion(task: C.TaskSpec, motion: C.MotionPlan) -> C.MotionPlan:
 def _unknown_metrics(reason: str) -> Dict[str, C.Metric]:
     units = {"iou": "1", "dice": "1", "removed_volume_mm3": "mm^3",
              "residual_volume_mm3": "mm^3", "gouge_volume_mm3": "mm^3",
+             "excluded_volume_mm3": "mm^3", "removal_target_volume_mm3": "mm^3",
+             "original_part_volume_mm3": "mm^3", "original_part_gouge_volume_mm3": "mm^3",
+             "gouge_fraction": "1", "residual_fraction": "1", "operation_target_removed_fraction": "1",
              "max_surface_error_mm": "mm", "p99_surface_error_mm": "mm", "asd_mm": "mm", "hd95_mm": "mm",
-             "remaining_volume_mm3": "mm^3", "stl_padded_volume_mm3": "mm^3"}
+             "remaining_volume_mm3": "mm^3", "stl_padded_volume_mm3": "mm^3",
+             "min_clearance_mm": "mm", "min_rapid_cutter_clearance_mm": "mm",
+             "unique_contacted_volume_mm3": "mm^3", "collision_sample_count": "count"}
     return {name: C.Metric(None, unit, null_reason=reason) for name, unit in units.items()}
 
 
@@ -346,14 +619,35 @@ class CamoticsAdapter:
         info = self._docker_call(["docker", "image", "inspect", self.image, "--format", "{{.Id}}"], timeout=20)
         if info.returncode:
             raise AdapterError(f"Docker/image unavailable: {info.stderr.strip() or info.stdout.strip()}")
+        digest = info.stdout.strip()
+        if digest != DEFAULT_IMAGE_DIGEST:
+            raise AdapterError(
+                f"CAMotics image {digest!r} is not the calibrated {DEFAULT_IMAGE_DIGEST}; "
+                "requalify coordinate semantics before running this adapter on another image"
+            )
         binary = self._docker_call(["docker", "run", "--rm", "--network", "none", self.image,
                                     "camsim", "--version"], timeout=30)
         if binary.returncode:
             raise AdapterError(f"CAMotics binary version probe failed: {binary.stderr.strip() or binary.stdout.strip()}")
-        return {"image": self.image, "image_digest": info.stdout.strip(),
-                "camsim_version": binary.stdout.strip(), "binary_release": DEFAULT_RELEASE}
+        # The qualified upstream binary writes '1.2' to stderr, not stdout.
+        # An empty stdout must not turn into a missing evaluator revision.
+        version = binary.stdout.strip() or binary.stderr.strip()
+        if not version:
+            raise AdapterError("CAMotics binary version probe returned no version on stdout or stderr")
+        if version != "1.2":
+            raise AdapterError(
+                f"CAMotics runtime version {version!r} is not the calibrated v1.2.0 binary reporting '1.2'; "
+                "the release-specific G10 convention cannot be assumed"
+            )
+        return {"image": self.image, "image_digest": digest,
+                "camsim_version": version, "binary_release": DEFAULT_RELEASE,
+                "version_probe_stdout": binary.stdout, "version_probe_stderr": binary.stderr}
 
-    def _run_camsim(self, task, nc_bytes, project, workdir: Path, timeout_s: float) -> Mapping[str, Any]:
+    def _run_camsim(self, task, nc_bytes, project, workdir: Path, timeout_s: float,
+                    source_nc_bytes: bytes) -> Mapping[str, Any]:
+        # program.nc has a controlled adapter prologue. Preserve the exact
+        # caller input beside it so neither program nor hash is conflated.
+        (workdir / "source_program.nc").write_bytes(source_nc_bytes)
         program = workdir / "program.nc"
         program.write_bytes(nc_bytes)
         spec = workdir / "project.camotics"
@@ -379,7 +673,8 @@ class CamoticsAdapter:
         facts.update({
             "command": command, "exit_code": running.returncode,
             "stdout": running.stdout, "stderr": running.stderr, "wall_time_s": time.monotonic() - started,
-            "workdir": str(workdir), "nc_sha256": C.sha256_bytes(nc_bytes),
+            "workdir": str(workdir), "simulation_nc_sha256": C.sha256_bytes(nc_bytes),
+            "source_nc_sha256": C.sha256_bytes(source_nc_bytes),
             "project_sha256": C.sha256_bytes(spec.read_bytes()),
         })
         if running.returncode:
@@ -403,56 +698,115 @@ class CamoticsAdapter:
         root.mkdir(parents=True, exist_ok=True)
         workdir = Path(tempfile.mkdtemp(prefix="t13a-", dir=root))
         try:
-            project = build_camotics_project(task, resolution, tool_number=int(settings.get("tool_number", 1)))
-            facts = self._run_camsim(task, nc_bytes, project, workdir, timeout)
+            exclusion_tolerance = _finite_nonnegative(
+                "exclusion_tolerance_mm3", settings.get("exclusion_tolerance_mm3", 0.0))
+            try:
+                simulation_nc, parsed_motion = _prepare_camotics_nc(task, nc_bytes, dialect)
+            except (GCodeError, AdapterError, C.ContractError) as error:
+                return _empty_evaluation(task, [str(error)], coverage=C.Coverage.UNSUPPORTED,
+                                         nc=(nc_bytes, dialect), settings=settings)
+            rapid_reasons = _rapid_sweep_conflicts(task, parsed_motion)
+            if rapid_reasons:
+                return _empty_evaluation(task, rapid_reasons, coverage=C.Coverage.UNSUPPORTED,
+                                         nc=(nc_bytes, dialect), motion=parsed_motion, settings=settings)
+            project = build_camotics_project(task, resolution)
+            facts = self._run_camsim(task, simulation_nc, project, workdir, timeout,
+                                     source_nc_bytes=nc_bytes)
+            facts = {**facts, "source_motion_hash": parsed_motion.motion_hash,
+                     "simulation_frame": "machine_mm - task.initial_state.position_mm",
+                     "source_nc_unchanged_suffix": True,
+                     "adapter_prefix_lines": 4,
+                     "external_warnings": [line.strip() for line in
+                                           (facts["stdout"] + "\n" + facts["stderr"]).splitlines()
+                                           if "WARNING" in line or "ERROR" in line]}
             mesh = read_stl(workdir / "cut_workpiece.stl", max_triangles=int(settings.get("max_triangles", 2_000_000)))
-            stl_facts = mesh_volume_mm3(mesh)
+            stl_facts = mesh_volume_mm3(mesh, require_watertight=False)
             grid = task.grid
             axes = [grid.origin_mm[a] + (np.arange(grid.shape[a]) + 0.5) * grid.voxel_mm for a in range(3)]
             coordinates = np.stack(np.meshgrid(*axes, indexing="ij"), axis=-1)
             flat_work = coordinates.reshape(-1, 3)
             flat_machine = np.asarray([task.work_to_machine.apply(tuple(point)) for point in flat_work])
-            sample = points_in_mesh(mesh, flat_machine, touch_tolerance_mm=settings.get(
+            flat_simulation = flat_machine - np.asarray(task.initial_state.position_mm, dtype=float)
+            sample = points_in_mesh(mesh, flat_simulation, touch_tolerance_mm=settings.get(
                 "touch_tolerance_mm", max(1e-9, min(grid.voxel_mm, resolution) * 1e-6)))
             remaining = sample.occupancy.reshape(grid.shape)
             initial = _box_mask(coordinates, task.stock.params["min_mm"], task.stock.params["max_mm"])
-            part = _box_mask(coordinates, task.operation_target.geometry.params["min_mm"],
-                             task.operation_target.geometry.params["max_mm"])
+            part = _geometry_mask(task.operation_target.geometry, coordinates)
+            original_part = _geometry_mask(task.original_part, coordinates)
             if np.any(remaining & ~initial):
                 raise AdapterError("sampled grid unexpectedly contains stock outside declared initial stock")
-            metrics = grid_material_metrics(remaining, part, initial, grid.voxel_mm,
-                                            surface_origin_mm=grid.origin_mm)
+            excluded_mm3 = float(task.operation_target.excluded_volume_mm3)
+            metrics = grid_material_metrics(
+                remaining, part, initial, grid.voxel_mm,
+                original_part_mask=original_part, surface_origin_mm=grid.origin_mm,
+                declared_excluded_volume_mm3=excluded_mm3,
+                exclusion_tolerance_mm3=exclusion_tolerance)
+            if excluded_mm3 and np.array_equal(original_part, part):
+                raise AdapterError("excluded_volume_mm3 is declared but original_part equals operation_target; supply filtered geometry without remasking")
             metrics["remaining_volume_mm3"] = C.Metric(int(remaining.sum()) * grid.voxel_mm**3, "mm^3")
             metrics["stl_padded_volume_mm3"] = C.Metric(
                 stl_facts["volume_mm3"], "mm^3",
                 denominator="whole STL diagnostic surface, including CAMotics boundary padding; not exact initial-stock volume")
+            if excluded_mm3:
+                metrics["declared_excluded_volume_mm3"] = C.Metric(excluded_mm3, "mm^3")
             reasons = [
                 "non-cutting shank/holder and workholding clearance are not modeled; safety_pass is null",
                 "controller acceleration/blending timings and machine dynamics are not certified by STL comparison",
                 "grid and STL metrics include discretization/slab padding effects; see camotics bias study",
+                "simulation is expressed relative to TaskSpec.initial_state; source and generated-setup NC hashes are distinct",
+                "G43 is supported only under this adapter's zero tool-register-vector convention; physical H-table calibration is not checked by camsim",
+                "the prototype supports pure work-frame translations and rejects G53 rather than misrepresenting absolute-machine moves",
+                "rapid cutter/stock AABB overlap is unsupported because CAMotics can carve rapids; this is not an assembly-clearance proof",
+                "grid exclusions are checked against the declaration with explicit exclusion_tolerance_mm3 (default 0, roundoff-only)",
             ]
+            if facts["external_warnings"]:
+                reasons.append("external interpreter diagnostics retained: " + " | ".join(facts["external_warnings"]))
+            unexpected_warnings = [warning for warning in facts["external_warnings"]
+                                   if "Tool Length Offset not supported" not in warning]
+            if not stl_facts["watertight"]:
+                reasons.append(
+                    f"CAMotics exported non-watertight topology with {stl_facts['boundary_or_nonmanifold_edges']} unmatched/multiply-used STL edges; mesh comparisons are approximate and geometry_pass is null"
+                )
             metadata = {
                 **facts, "resolution_mm": resolution, "stl_format": mesh.stl_format,
                 "triangle_count": mesh.triangle_count, "stl_volume_mm3": stl_facts["volume_mm3"],
                 "grid_shape": list(grid.shape), "grid_voxel_mm": grid.voxel_mm,
                 "grid_origin_mm": list(grid.origin_mm), "grid_frame": "work",
+                "simulation_reference_offset_mm": list(task.initial_state.position_mm),
+                "simulation_frame": "machine_mm - task.initial_state.position_mm",
+                "source_program_filename": "source_program.nc",
+                "simulation_program_filename": "program.nc",
+                "stl_frame": "same initial-pose-relative frame as cut_workpiece.stl and project.camotics",
+                "source_motion_hash": parsed_motion.motion_hash,
+                "external_warning_geometry_policy": "geometry_pass null for any diagnostic other than the documented G43 warning",
                 "sample_ray": "+Z projected XY barycentric intersection with duplicate-root merging",
                 "on_surface_policy": sample.boundary_policy, "touch_tolerance_mm": sample.touch_tolerance_mm,
                 "surface_contact_count": sample.surface_contact_count,
                 "padded_volume_caveat": "STL output is on stock expanded by one resolution cell; do not use its whole volume as true stock",
                 "safety_pass_role": "null because holder/fixture/dynamics are not modeled by camsim mesh comparison",
+                "whole_cell_safety_bounds": "not computed; centre-only mesh occupancy/bounding-box masks are not interval safety clearances",
+                "stl_topology": {
+                    "watertight": stl_facts["watertight"],
+                    "unmatched_or_multiply_used_edges": stl_facts["boundary_or_nonmanifold_edges"],
+                    "geometry_pass_rule": "null unless watertight topology and all tolerances pass",
+                },
+                "complete_stock_cell_count": int(initial.sum()),
                 "complete_stock_grid_volume_mm3": float(initial.sum()) * grid.voxel_mm**3,
+                "declared_excluded_volume_mm3": excluded_mm3,
+                "exclusion_tolerance_mm3": exclusion_tolerance,
+                "exclusion_rule": "computed initial & operation_target & ~original_part compared with declaration; default tolerance 0 permits only floating roundoff",
             }
             return C.EvaluationResult(
                 evaluator_id=EVALUATOR_ID, evaluator_revision=f"{facts['camsim_version']}+grid-sampler/1",
                 task_hash=task.task_hash, tool_setup_hash=task.tool_setup_hash,
                 discretization=metadata, coverage=C.Coverage.INCOMPLETE,
                 coverage_reasons=tuple(reasons), metrics=metrics,
-                safety_pass=None, geometry_pass=C.geometry_pass_from_metrics(metrics, task.tolerances),
+                safety_pass=None, geometry_pass=(C.geometry_pass_from_metrics(metrics, task.tolerances)
+                                             if stl_facts["watertight"] and not unexpected_warnings else None),
                 nc_hash=C.nc_hash(nc_bytes), dialect=dialect,
             )
-        except (AdapterError, OSError) as error:
-            return _empty_evaluation(task, [str(error)], coverage=C.Coverage.UNKNOWN,
+        except (AdapterError, OSError, ValueError, subprocess.TimeoutExpired) as error:
+            return _empty_evaluation(task, [f"evaluation blocked: {error}"], coverage=C.Coverage.UNKNOWN,
                                      nc=(nc_bytes, dialect), settings={**settings, "workdir": str(workdir)})
 
     def evaluate_candidate(self, task: C.TaskSpec, motion: C.MotionPlan, settings: Mapping[str, Any]):
@@ -461,7 +815,10 @@ class CamoticsAdapter:
             return _empty_evaluation(task, reasons, motion=motion, settings=settings)
         settings = dict(settings)
         dialect = C.Dialect(settings.get("dialect", C.Dialect.HAAS))
-        config = settings.get("machine_config", MachineConfig(tool_number=1))
+        config = settings.get(
+            "machine_config",
+            MachineConfig(tool_number=task.tool.tool_number),
+        )
         try:
             machine_motion = _machine_motion(task, motion)
             nc_bytes = post_motion_plan(machine_motion, task, dialect=dialect, config=config).encode("utf-8")
@@ -476,5 +833,6 @@ class CamoticsAdapter:
 
 __all__ = [
     "AdapterError", "CamoticsAdapter", "TriangleMesh", "MeshSample", "read_stl", "mesh_volume_mm3",
-    "points_in_mesh", "build_camotics_project", "unsupported_probe", "DEFAULT_IMAGE", "DEFAULT_RELEASE",
+    "points_in_mesh", "build_camotics_project", "unsupported_probe",
+    "_prepare_camotics_nc", "DEFAULT_IMAGE", "DEFAULT_RELEASE", "DEFAULT_IMAGE_DIGEST",
 ]
