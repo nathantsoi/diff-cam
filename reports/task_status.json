@@ -118,7 +118,7 @@
    "next": null
   },
   "T4.0": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-2",
    "branch": "task/T4.0-auditor",
    "blocker": null,
@@ -234,18 +234,18 @@
    "note": "merged; baselines/cncnet recipe re-proved from fresh venv: IoU 0.423786 vs 0.423761"
   },
   "T4.0b": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-2",
    "branch": "task/T4.0b-audit-fixes",
    "blocker": null,
    "next": null,
-   "note": "priority over T3.0 prototype"
+   "note": "merged; failures counted as known 0, drop counts, complete_data flag, relative tie tol, pooled CI for singleton strata, Holm dedupe; verified with reviewer repros"
   },
   "T1.0c": {
-   "status": "ready",
+   "status": "in_progress",
    "owner": "diffcam-worker-2",
    "branch": "task/T1.0c-reference-safety",
-   "blocker": "after T4.0b",
+   "blocker": null,
    "next": null,
    "note": "discriminator: zero-length segments skip holder screen; rapid penetration bound not an upper bound under grid phase (both reproduced, false safety pass)"
   },
