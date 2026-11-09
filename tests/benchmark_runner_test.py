@@ -580,6 +580,246 @@ def test_ineligible_final_program_is_complete_and_excluded_from_efficiency(tmp_p
         assert removed[task.task_id]["value"] > 0
 
 
+def _typed_evaluation(task, nc_bytes, dialect=C.Dialect.RS274, *, geometry_pass=True, step=1.0):
+    """Typed data-format fixture, not a production geometry computation."""
+    return C.EvaluationResult(
+        evaluator_id="unit-typed-result", evaluator_revision="unit",
+        task_hash=task.task_hash, tool_setup_hash=task.tool_setup_hash,
+        discretization={"settings": {
+            "max_step_mm": step, "expected_nc_hash": C.nc_hash(nc_bytes),
+            "exclusion_tolerance_mm3": 0.0,
+        }, "segments": []},
+        coverage=C.Coverage.COMPLETE, coverage_reasons=(),
+        metrics={
+            "cycle_time_s": C.Metric(value=20.0, unit="s"),
+            "residual_volume_mm3": C.Metric(value=0.5 if geometry_pass else 0.25, unit="mm^3"),
+            "gouge_volume_mm3": C.Metric(value=0.0 if geometry_pass else 0.25, unit="mm^3"),
+            "max_surface_error_mm": C.Metric(value=0.0 if geometry_pass else 0.25, unit="mm"),
+            "removed_volume_mm3": C.Metric(value=8904.0, unit="mm^3"),
+        },
+        safety_pass=True, geometry_pass=geometry_pass,
+        dialect=dialect, nc_hash=C.nc_hash(nc_bytes),
+    )
+
+
+def _pilot_refinement_fixture(root: Path, *, method="fixed-adam"):
+    """Make real typed task/motion/NC/artifact files with a typed input result."""
+    from algorithms import objectives as O
+    from algorithms import run_artifacts as R
+    from benchmarks import pilot_task
+    from cam import posts
+    from cam.posts import post_motion_plan
+    from cam.seeds import pocket_with_island_seed
+
+    config = _pilot_config()
+    config["experiment"] = "pilot"
+    task = pilot_task.build_pilot_task(config["grid_pitch_mm"])
+    motion = pocket_with_island_seed(task)
+    parameterization = pilot_task.fit_parameterization(motion)
+    posting = R.post_motion(task, motion)
+    entry = runner._plan_entries(config, task, "dev", f"{method}-s0-*")[0]
+    primary = _typed_evaluation(task, posting.files["rs274.nc"], geometry_pass=True)
+    haas = _typed_evaluation(task, posting.files["haas.nc"], dialect=C.Dialect.HAAS)
+    files = dict(posting.files)
+    position = parameterization.positions(np.zeros(parameterization.num_params))
+    files.update({
+        "config.json": R.json_bytes(R.build_run_config(
+            entry["run_id"], task, motion, seed=0, parameterization=parameterization,
+            objective=O.ObjectiveSpec(k=40.0),
+            budgets={"limits": {}, "spent": {"candidate_evaluations": 1}},
+            repository=runner.REPOSITORY)),
+        "history.json": R.json_bytes({"history": [], "ledger": {"candidate_evaluations": 1,
+                                                               "forward_calls": 1,
+                                                               "backward_calls": 0,
+                                                               "validation_calls": 0}}),
+        "metrics.json": R.json_bytes({"best_candidate": None, "execution": {"subprocess": 0}}),
+        "motion_plan.json": R.record_bytes(motion),
+        "initial_trajectory.npy": R.numpy_bytes(position),
+        "trajectory.npy": R.numpy_bytes(position),
+        "trajectory_deltas.npy": R.numpy_bytes(np.diff(position, axis=0)),
+        "eval_posted_rs274.json": R.record_bytes(primary),
+        "eval_posted_haas.json": R.record_bytes(haas),
+    })
+    metadata = R.source_metadata(runner.REPOSITORY)
+    record = R.assemble_record(
+        entry["run_id"], task, C.RunStatus.COMPLETE, posting=posting,
+        artifact_names=tuple(sorted(files)), source_commit=metadata["source_commit"],
+        dirty_patch_hash=metadata["dirty_patch_hash"])
+    directory = root / entry["run_id"]
+    original_run = (directory / "run.json").read_bytes() if (directory / "run.json").exists() else None
+    R.ArtifactWriter().write(str(directory), record, files)
+    if original_run is None:
+        original_run = (directory / "run.json").read_bytes()
+    runner._atomic(root / "manifest.json", runner._manifest(config, task, [entry], root, planned=False))
+    runner._atomic(root / "frozen_config.json", {"raw_config": config, "identity": entry["identity"]})
+    return root, config, record, original_run, primary
+
+
+def test_refinement_sidecar_metadata_and_audit_report_are_real_files(tmp_path):
+    root, config, record, immutable_run, primary = _pilot_refinement_fixture(tmp_path / "primary")
+    aux_root = tmp_path / "shared-refined"
+    auxiliary_id = record.run_id + "-refined"
+    seen = []
+
+    def evaluate(task, nc_bytes, dialect, settings):
+        seen.append(settings)
+        assert nc_bytes == (root / record.run_id / "rs274.nc").read_bytes()
+        return _typed_evaluation(task, nc_bytes, geometry_pass=False, step=0.125)
+
+    result = runner._refinement_worker(config, root, record.run_id, aux_root, evaluator_override=evaluate)
+    assert seen == [{"max_step_mm": 0.125,
+                     "exclusion_tolerance_mm3": primary.discretization["settings"]["exclusion_tolerance_mm3"],
+                     "expected_nc_hash": primary.nc_hash}]
+    assert (root / record.run_id / "run.json").read_bytes() == immutable_run
+    assert result["comparison"]["geometry_pass"]["changed"] is True
+    assert result["comparison"]["gouge_volume_mm3"]["delta"] == pytest.approx(0.25)
+    path = root / record.run_id / "eval_posted_rs274_refined.json"
+    refined = C.loads(path.read_text())
+    assert refined.discretization["settings"]["max_step_mm"] == 0.125
+    assert refined.geometry_pass is False and primary.geometry_pass is True
+    assert refined.nc_hash == C.nc_hash((root / record.run_id / "rs274.nc").read_bytes())
+    metadata = json.loads((root / record.run_id / "metrics.json").read_text())
+    link = metadata["execution"]["refinement_checks"]["rs274"]
+    assert link["sha256"] == C.sha256_bytes(path.read_bytes())
+    audit_dir = aux_root / auxiliary_id
+    audit_record = audit_dir / "run.json"
+    assert link["audit_record"]["sha256"] == C.sha256_bytes(audit_record.read_bytes())
+    assert Path(link["audit_record"]["path"]).name == "run.json"
+    haas = (root / record.run_id / "haas.nc").read_bytes()
+    assert (audit_dir / "haas.nc").read_bytes() == haas
+    assert (audit_dir / "eval_posted_haas.json").read_bytes() == (
+        root / record.run_id / "eval_posted_haas.json").read_bytes()
+    original_metrics = json.loads((audit_dir / "original_metrics_before_refinement.json").read_text())
+    assert "refinement_checks" not in original_metrics["execution"]
+    assert A._audit_run(audit_record).complete_and_audited
+
+    result = runner._refinement_worker(config, root, record.run_id, aux_root,
+                                       evaluator_override=lambda *args: pytest.fail("re-evaluated immutable cache"))
+    assert result["status"] == "skipped_complete"
+
+    path.write_bytes(b"deliberately corrupted test-only sidecar")
+    with pytest.raises(runner.RunnerError, match="refusing to overwrite immutable evidence"):
+        runner._refinement_worker(config, root, record.run_id, aux_root,
+                                  evaluator_override=lambda *args: pytest.fail("must not re-run on corruption"))
+
+
+def test_refinement_audit_exposes_baseline_refined_and_verdict_change(tmp_path):
+    root, config, record, _original, _primary = _pilot_refinement_fixture(tmp_path / "primary")
+    aux_root = tmp_path / "audit"
+    case = runner._refinement_worker(
+        config, root, record.run_id, aux_root,
+        evaluator_override=lambda task, nc, dialect, settings:
+        _typed_evaluation(task, nc, geometry_pass=False, step=0.125))
+    case["manifest"] = A.load_manifest(root / "manifest.json")
+    document = runner._audit_refinement_root([case], aux_root)
+    assert document["case_count"] == 1
+    assert document["baseline_and_refined_records"] == 2
+    assert document["manifest"]["auditor_passed"] is True
+    assert document["manifest"]["all_runs_completed"] is True
+    path = aux_root / "refinement-audit.json"
+    assert path.is_file()
+    row = document["comparisons"][0]
+    metric = row["metrics"]["cycle_time_s"]
+    task_id = record.task_hash and document["records"][0]["task_hash"]
+    info = next(iter(A.load_manifest(root / "manifest.json").tasks))
+    assert metric["efficiency_eligibility_required"] is True
+    assert metric["method_task_availability"][info]["observations_used"] == 0
+    assert metric["baseline_task_availability"][info]["observations_used"] == 1
+    assert metric["method_task_availability"][info]["exclusions"]["not_efficiency_eligible"] == 1
+    audited_by_id = {entry["run_id"]: entry for entry in document["records"]}
+    assert audited_by_id[case["refined_run_id"]]["dialects"]["rs274"]["evaluation"]["geometry_pass"] is False
+    assert audited_by_id[record.run_id]["dialects"]["rs274"]["evaluation"]["geometry_pass"] is True
+
+
+def test_refinement_driver_bounds_two_independent_workers(tmp_path, monkeypatch):
+    import threading
+    left, left_config, left_record, _, _ = _pilot_refinement_fixture(tmp_path / "left", method="fixed-adam")
+    right, right_config, right_record, _, _ = _pilot_refinement_fixture(tmp_path / "right", method="annealed-adam")
+    assert left_record.run_id != right_record.run_id
+    barrier = threading.Barrier(2)
+    seen = []
+
+    def subprocess_stub(config_path, root, run_id, aux_root, timeout):
+        seen.append(threading.get_ident())
+        barrier.wait(timeout=10)
+        return runner._refinement_worker(
+            json.loads((root / "frozen_config.json").read_text())["raw_config"], root, run_id, aux_root,
+            evaluator_override=lambda task, nc, dialect, settings:
+            _typed_evaluation(task, nc, geometry_pass=False, step=0.125))
+
+    monkeypatch.setattr(runner, "_refine_process", subprocess_stub)
+    aux_root = tmp_path / "collective-refined"
+    result = runner._refinement_driver(left_config, "unit-test-scheduler.json", [left, right], None, aux_root)
+    assert result["status_counts"] == {"complete": 2}
+    assert len(seen) == 2
+    assert result["audit"]["baseline_and_refined_records"] == 4
+    assert result["audit"]["manifest"]["auditor_passed"] is True
+
+
+def test_refinement_timing_is_separate_from_primary_and_parallel_forecast(tmp_path, monkeypatch):
+    from algorithms import run_artifacts as R
+    from benchmarks import pilot_task
+    from cam.seeds import pocket_with_island_seed
+
+    config = _pilot_config()
+    task = pilot_task.build_pilot_task(config["grid_pitch_mm"])
+    motion = pocket_with_island_seed(task)
+    parameterization = pilot_task.fit_parameterization(motion)
+
+    class Candidate:
+        geometry_sources = {"stock": SimpleNamespace(path="stock.npy", sha256="sha256:" + "0" * 64),
+                            "target": SimpleNamespace(path="target.npy", sha256="sha256:" + "1" * 64)}
+
+        def evaluate_candidate(self, theta, candidate_id, kind):
+            return SimpleNamespace(valid=True, objective=1.0, invalid_reason=None)
+
+        def evaluate_candidate_with_gradient(self, theta, candidate_id):
+            return SimpleNamespace(result=SimpleNamespace(valid=True, objective=1.0, invalid_reason=None),
+                                   gradient_theta=np.zeros(parameterization.num_params))
+
+        def candidate_motion(self, theta):
+            return motion
+
+    class Primary:
+        def __init__(self):
+            self.timings = []
+
+        def evaluate_posted_gcode(self, actual_task, nc_bytes, dialect, settings):
+            self.timings.append({"dialect": dialect.value, "wall_seconds": 0.0, "nc_hash": C.nc_hash(nc_bytes)})
+            return _typed_evaluation(actual_task, nc_bytes, dialect=dialect)
+
+    refinement = SimpleNamespace(evaluate_posted_gcode=lambda actual_task, nc_bytes, dialect, settings:
+                                  _typed_evaluation(actual_task, nc_bytes, geometry_pass=False, step=0.125))
+    monkeypatch.setattr(runner, "_context", lambda cfg, root: (
+        task, motion, parameterization, lambda *args: Candidate(), lambda *args: Primary()))
+    evidence = runner._measure_budget(
+        config, tmp_path, capture_dir=tmp_path / "timing-example",
+        refinement_evaluator_override=refinement)
+    assert (tmp_path / evidence["evaluation_artifacts"]["rs274_refined"]["evaluation_path"]).is_file()
+    assert evidence["refinement_check_seconds"]["comparison"]["any_outcome_verdict_change"] is True
+    # Explicit unit arithmetic, not a measured benchmark duration:
+    for key, value in evidence["candidate_seconds"].items():
+        evidence["candidate_seconds"][key] = 0.0
+    evidence["constructor_seconds"] = 0.0
+    evidence["worker_wall_seconds"] = 4.0
+    evidence["refinement_check_seconds"]["wall_seconds"] = 2.0
+    entries = runner._plan_entries(config, task, "dev", None)
+    costs = runner._pecent(dict(config, timing_evidence=evidence), entries)
+    nominal = next(item for item in costs if item["run_id"].startswith("nominal-cam-"))
+    assert nominal["estimated_run_wall_time_s"] == pytest.approx(2.0)
+    projection = runner._refinement_projection(config, entries, evidence, tmp_path)
+    assert projection["serial_evaluation_work_seconds"] == pytest.approx(14.0)
+    assert projection["estimated_phase_wall_time_s"] == pytest.approx(8.0)
+    assert projection["expected_program_count"] == 7
+    assert projection["parallel_jobs"] == 2
+
+    damaged = dict(evidence["evaluation_artifacts"]["rs274_refined"])
+    damaged["evaluation_sha256"] = "sha256:" + "0" * 64
+    evidence["evaluation_artifacts"]["rs274_refined"] = damaged
+    with pytest.raises(runner.RunnerError, match="no longer matches"):
+        runner._refinement_projection(config, entries, evidence, tmp_path)
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(os.environ.get("DIFFCAM_REAL_PILOT_SMOKE") != "1",
                     reason="explicit slow real-pilot smoke: set DIFFCAM_REAL_PILOT_SMOKE=1")
@@ -631,6 +871,28 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
         # Eligibility is derived from coverage/safety/geometry by contracts;
         # it need not be a standalone serialized key. Preserve False outcomes.
         assert isinstance(evaluation.efficiency_eligible, bool)
+    refined_file = output / run_id / "eval_posted_rs274_refined.json"
+    refined = C.loads(refined_file.read_text())
+    assert refined.dialect == C.Dialect.RS274
+    assert refined.discretization["settings"]["max_step_mm"] == 0.125
+    assert refined.task_hash == task.task_hash
+    assert refined.nc_hash == C.nc_hash((output / run_id / "rs274.nc").read_bytes())
+    checks = metrics["execution"]["refinement_checks"]
+    assert checks["rs274"]["sha256"] == C.sha256_bytes(refined_file.read_bytes())
+    aux_root = output.resolve().parent / f"{output.resolve().name}-refinement"
+    aux_record_path = aux_root / f"{run_id}-refined" / "run.json"
+    assert aux_record_path.is_file()
+    assert (aux_root / "refinement-audit.json").is_file()
+    aux_record = C.loads(aux_record_path.read_text())
+    assert aux_record.task_hash == task.task_hash
+    assert aux_record.status == C.RunStatus.COMPLETE
+    assert checks["rs274"]["audit_record"]["sha256"] == C.sha256_bytes(aux_record_path.read_bytes())
+    assert checks["rs274"]["audit_record"]["path"] == os.path.relpath(aux_record_path, output / run_id)
+    aux_report = json.loads((aux_root / "refinement-audit.json").read_text())
+    assert aux_report["manifest"]["auditor_passed"] is True
+    assert aux_report["case_count"] == 1
+    assert aux_report["baseline_and_refined_records"] == 2
+
     reports, audit = A.audit_runs(output, manifest)
     assert audit["reconciliation"]["exact_id_reconciliation"] is True
     assert len(reports) == 1 and reports[0]["status"] == "complete"

@@ -20,6 +20,12 @@
   "timeout_s": 10800.0,
   "timing_timeout_s": 10800.0,
   "population_size": 2,
+  "refinement_check": {
+    "enabled": true,
+    "max_step_mm": 0.125,
+    "parallel_jobs": 2,
+    "timeout_s": 10800.0
+  },
   "validation_interval": 2,
   "max_validation_calls": 2,
   "max_generations": null,

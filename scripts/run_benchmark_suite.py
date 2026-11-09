@@ -9,6 +9,7 @@ Evaluator plug into the same frozen-run protocol.
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import dataclasses
 import fnmatch
 import importlib
@@ -18,6 +19,8 @@ import math
 import os
 import subprocess
 import sys
+import re
+import shutil
 import time
 from collections import Counter
 from dataclasses import dataclass
@@ -336,6 +339,28 @@ def _pilot_refinement_settings(task, config):
     return dataclasses.asdict(RefinementSettings.from_mapping(settings))
 
 
+def _refinement_policy(config):
+    """Secondary RS274 refinement-check policy; never hidden overrides."""
+    if config.get("task_source", "pilot_pocket") != "pilot_pocket":
+        return {"enabled": False}
+    fields = {"enabled", "max_step_mm", "parallel_jobs", "timeout_s"}
+    policy = config.get("refinement_check")
+    if not isinstance(policy, Mapping) or set(policy) != fields:
+        raise RunnerError(f"refinement_check must declare exactly {sorted(fields)}")
+    if not isinstance(policy["enabled"], bool):
+        raise RunnerError("refinement_check.enabled must be boolean")
+    step = policy["max_step_mm"]
+    if isinstance(step, bool) or not isinstance(step, (int, float)) or step != 0.125:
+        raise RunnerError("refinement_check.max_step_mm must be the coordinator-declared 0.125")
+    jobs = _positive_int(policy["parallel_jobs"], "refinement_check.parallel_jobs")
+    if jobs > 2:
+        raise RunnerError("refinement_check parallel_jobs must be bounded at 2")
+    timeout = policy["timeout_s"]
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise RunnerError("refinement_check.timeout_s must be finite and positive")
+    return dict(policy)
+
+
 class PilotPostedEvaluator(PostedEvaluator):
     """Real production posted evaluator with unchanged, bounded refinement."""
 
@@ -508,6 +533,17 @@ def _pecent(config: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]) -> 
         if sorted(_finite_seconds(value, "posted evaluation") for value in raw_post) != sorted(labelled_post.values()):
             raise RunnerError("labelled and anonymous posted timings disagree")
         measured_post = sum(labelled_post.values())
+    refinement_measurement = evidence.get("refinement_check_seconds") if evidence is not None else None
+    if _refinement_policy(config)["enabled"]:
+        if not isinstance(refinement_measurement, Mapping):
+            raise RunnerError("refinement_check is enabled but no actual refinement timing was measured")
+        refined_seconds = _finite_seconds(refinement_measurement.get("wall_seconds"), "refinement evaluation")
+        if refinement_measurement.get("settings", {}).get("max_step_mm") != 0.125:
+            raise RunnerError("timing evidence refinement max_step_mm is not 0.125")
+        if not isinstance(refinement_measurement.get("comparison"), Mapping):
+            raise RunnerError("timing evidence lacks the primary/refined verdict comparison")
+    else:
+        refined_seconds = 0.0
     for entry in entries:
         candidates, validations = _budget_sizes(config, entry["method"])
         raw = supplied.get(entry["method"])
@@ -522,7 +558,7 @@ def _pecent(config: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]) -> 
             other = (_finite_seconds(evidence["worker_wall_seconds"], "worker_wall_seconds")
                      - setup - sum(_finite_seconds(evidence["candidate_seconds"].get(key), key)
                                    for key in ("smooth_forward", "smooth_gradient", "hard_forward"))
-                     - measured_post)
+                     - measured_post - refined_seconds)
             extra = {
                 "constructor_seconds": setup,
                 "candidate_seconds": unit * candidates,
@@ -552,7 +588,49 @@ def _pecent(config: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]) -> 
     return predicted
 
 
-def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None):
+def _refinement_projection(config, entries, evidence, root):
+    """Serialize separate refinement-phase cost without charging primary runs."""
+    if evidence is None or not _refinement_policy(config)["enabled"]:
+        return {"enabled": False, "estimated_phase_wall_time_s": 0.0}
+    if not isinstance(evidence, Mapping):
+        raise RunnerError("refinement cost requires measured typed evaluation evidence")
+    event = evidence.get("refinement_check_seconds")
+    if not isinstance(event, Mapping):
+        raise RunnerError("enabled refinement_check lacks real nominal RS274 refinement time")
+    per_program = _finite_seconds(event.get("wall_seconds"), "refinement evaluation")
+    artifacts = evidence.get("evaluation_artifacts", {}).get("rs274_refined")
+    if not isinstance(artifacts, Mapping):
+        raise RunnerError("refinement timing lacks its evaluation artifact/hash link")
+    required = {"nc_hash", "evaluation_path", "evaluation_sha256"}
+    if any(not isinstance(artifacts.get(key), str) or not artifacts[key] for key in required):
+        raise RunnerError(f"refinement artifact requires {sorted(required)}")
+    nc_path = audit._artifact_path(root, artifacts["nc_path"])
+    nc_bytes = nc_path.read_bytes()
+    if C.nc_hash(nc_bytes) != event.get("nc_hash"):
+        raise RunnerError("refinement timing evidence does not match the primary RS274 bytes")
+    evaluation_path = audit._artifact_path(root, artifacts["evaluation_path"])
+    payload = evaluation_path.read_bytes()
+    if C.sha256_bytes(payload) != artifacts["evaluation_sha256"]:
+        raise RunnerError("refinement evaluation file no longer matches its recorded SHA-256")
+    result = C.loads(payload)
+    if result.dialect != C.Dialect.RS274 or result.task_hash != evidence.get("task_hash"):
+        raise RunnerError("refinement artifact task/dialect mismatch")
+    jobs = _refinement_policy(config)["parallel_jobs"]
+    count = len(entries)
+    return {
+        "enabled": True, "dialect": "rs274", "max_step_mm": 0.125,
+        "expected_program_count": count, "parallel_jobs": jobs,
+        "per_program_seconds": per_program,
+        "serial_evaluation_work_seconds": per_program * count,
+        "estimated_phase_wall_time_s": per_program * ((count + jobs - 1) // jobs),
+        "comparison": event.get("comparison"),
+        "evidence": artifacts,
+        "estimation_basis": "one real measurement; independent subprocess slots after primary runs, not a confidence interval or guaranteed parallel speedup",
+    }
+
+
+def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None,
+                    refinement_evaluator_override=None):
     """Measure one of each execution kind, with no population/Adam optimization.
 
     ``evaluator_override`` is a pure in-process test seam (no untrusted module
@@ -598,12 +676,16 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None):
     if any(post.status != C.PostStatus.SUPPORTED for post in posting.posted):
         raise RunnerError("timing measurement requires support for both posted dialects")
     post_builder = posted_factory(task, config)
+    primary_rs274 = None
+    evaluation_artifacts = {}
     evaluation_artifacts = {}
     for post in posting.posted:
         nc, eval_name = C.DIALECT_ARTIFACTS[post.dialect]
         actual = post_builder.evaluate_posted_gcode(task, posting.files[nc], post.dialect, {})
         if actual.dialect != post.dialect or actual.nc_hash != post.nc_hash or actual.task_hash != task.task_hash:
             raise RunnerError("measurement posted-evaluation identity mismatches source bytes")
+        if post.dialect == C.Dialect.RS274:
+            primary_rs274 = actual
         if not actual.efficiency_eligible:
             raise RunnerError(
                 f"timing nominal candidate is not geometry/safety eligible in {post.dialect.value}: "
@@ -623,6 +705,50 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None):
                 "evaluation_path": str(result_path.relative_to(root)),
                 "evaluation_sha256": C.sha256_bytes(result_payload),
             }
+    refinement = None
+    if config.get("task_source", "pilot_pocket") == "pilot_pocket" and _refinement_policy(config)["enabled"]:
+        if primary_rs274 is None:
+            raise RunnerError("refinement measurement requires the primary RS274 result")
+        refinement_evaluator = refinement_evaluator_override or PostedEvaluator()
+        evaluate_refinement = getattr(refinement_evaluator, "evaluate_posted_gcode", refinement_evaluator)
+        if not callable(evaluate_refinement):
+            raise RunnerError("refinement evaluator does not implement the typed protocol")
+        nc_bytes = posting.files["rs274.nc"]
+        started = time.perf_counter()
+        refined = evaluate_refinement(
+            task, nc_bytes, C.Dialect.RS274,
+            {"max_step_mm": _refinement_policy(config)["max_step_mm"],
+             "exclusion_tolerance_mm3": _pilot_exclusion_tolerance(task, config),
+             "expected_nc_hash": primary_rs274.nc_hash})
+        seconds = _finite_seconds(time.perf_counter() - started, "refinement evaluation")
+        if not isinstance(refined, C.EvaluationResult):
+            raise RunnerError("refinement measurement did not return a typed evaluation")
+        if (refined.dialect != C.Dialect.RS274 or refined.nc_hash != primary_rs274.nc_hash
+                or refined.task_hash != task.task_hash):
+            raise RunnerError("refinement result identity differs from the primary RS274 program")
+        if refined.discretization["settings"]["max_step_mm"] != _refinement_policy(config)["max_step_mm"]:
+            raise RunnerError("refinement measurement used the wrong spatial step")
+        payload = R.record_bytes(refined)
+        if capture_dir is not None:
+            refined_path = capture_dir / "eval_posted_rs274_refined.json"
+            R.ArtifactWriter._replace_bytes(refined_path, payload)
+            evaluation_artifacts["rs274_refined"] = {
+                "nc_path": evaluation_artifacts["rs274"]["nc_path"],
+                "nc_hash": primary_rs274.nc_hash,
+                "evaluation_path": str(refined_path.relative_to(root)),
+                "evaluation_sha256": C.sha256_bytes(payload),
+            }
+        else:
+            evaluation_artifacts["rs274_refined"] = {
+                "nc_hash": primary_rs274.nc_hash,
+                "evaluation_path": None, "evaluation_sha256": C.sha256_bytes(payload),
+            }
+        refinement = {
+            "dialect": "rs274", "wall_seconds": seconds,
+            "nc_hash": primary_rs274.nc_hash,
+            "settings": refined.discretization["settings"],
+            "comparison": _refinement_comparison(primary_rs274, refined),
+        }
     posted_times = list(post_builder.timings)
     expected_events = [(post.dialect.value, post.nc_hash) for post in posting.posted]
     actual_events = [(event["dialect"], event["nc_hash"]) for event in posted_times]
@@ -654,6 +780,7 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None):
         "posted_seconds": posted_seconds,
         "posted_seconds_dialects": posted_times,
         "evaluation_artifacts": evaluation_artifacts,
+        "refinement_check_seconds": refinement,
         "source_stage": {
             "target": "analytic operation target for posted execution; exact sampled copy for simulator",
             "sources": {name: {"path": source.path, "sha256": source.sha256}
@@ -662,7 +789,7 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None):
         "started_at": started_at,
         "worker_wall_seconds": time.perf_counter() - created,
         "post_file_preparation_seconds": time.perf_counter() - before_post,
-        "scope": "one real candidate of each kind and two real dialect evaluations, not the 7-run pilot",
+        "scope": "one real candidate of each kind, both primary dialects, and one real RS274 refinement per enabled policy; not the 7-run pilot",
     }
 
 
@@ -905,6 +1032,469 @@ def _child(config: Mapping[str, Any], entry: Mapping[str, Any], root: Path) -> N
         raise
 
 
+def _refinement_jsonable(value):
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return _refinement_jsonable(value.tolist())
+    if isinstance(value, Mapping):
+        return {key: _refinement_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_refinement_jsonable(item) for item in value]
+    return value
+
+
+def _refinement_comparison(primary, refined):
+    """Report actual outcome/quantity changes, never a preferred verdict."""
+    result = {}
+    for name in ("safety_pass", "geometry_pass"):
+        result[name] = {"primary": getattr(primary, name), "refined": getattr(refined, name),
+                        "changed": getattr(primary, name) != getattr(refined, name)}
+    result["coverage"] = {"primary": primary.coverage.value, "refined": refined.coverage.value,
+                          "changed": primary.coverage != refined.coverage}
+    result["efficiency_eligible"] = {
+        "primary": primary.efficiency_eligible, "refined": refined.efficiency_eligible,
+        "changed": primary.efficiency_eligible != refined.efficiency_eligible,
+    }
+    for name in ("residual_volume_mm3", "gouge_volume_mm3", "max_surface_error_mm"):
+        expected_unit = "mm" if name.endswith("_mm") else "mm^3"
+        values = []
+        for result_doc in (primary, refined):
+            metric = result_doc.metrics.get(name)
+            if metric is None or metric.unit != expected_unit:
+                raise RunnerError(f"refinement metric {name} lacks expected {expected_unit}")
+            if metric.value is not None and not math.isfinite(metric.value):
+                raise RunnerError(f"refinement metric {name} is non-finite")
+            values.append(metric.value)
+        delta = values[1] - values[0] if all(value is not None for value in values) else None
+        result[name] = {"primary": values[0], "refined": values[1], "delta": delta,
+                        "unit": expected_unit}
+    result["any_outcome_verdict_change"] = any(
+        result[name]["changed"] for name in ("safety_pass", "geometry_pass", "coverage", "efficiency_eligible"))
+    return result
+
+
+def _safe_refinement_directory(primary_root: Path, auxiliary_root: Path) -> tuple[Path, Path]:
+    primary_root, auxiliary_root = primary_root.resolve(), auxiliary_root.resolve()
+    if primary_root == auxiliary_root or auxiliary_root.is_relative_to(primary_root):
+        raise RunnerError("auxiliary refinement root must be a sibling, not inside a primary run root")
+    return primary_root, auxiliary_root
+
+
+def _load_refinement_case(root: Path, run_id: str):
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,200}", run_id):
+        raise RunnerError(f"unsafe refinement run id: {run_id!r}")
+    directory = root.resolve() / run_id
+    parent = audit._audit_run(directory / "run.json")
+    if not parent.complete_and_audited or parent.record.status != C.RunStatus.COMPLETE:
+        raise RunnerError(f"refinement requires a completed, cleanly audited primary run: {run_id}")
+    record = parent.record
+    doc = _json(directory / "config.json")
+    task = C.TaskSpec.from_dict(doc["task"])
+    primary = C.loads((directory / "eval_posted_rs274.json").read_text(encoding="utf-8"))
+    raw_nc = (directory / "rs274.nc").read_bytes()
+    nc_hash = C.nc_hash(raw_nc)
+    if (record.task_hash != task.task_hash or primary.task_hash != task.task_hash
+            or primary.nc_hash != nc_hash or primary.dialect != C.Dialect.RS274):
+        raise RunnerError("refinement primary task/dialect/NC identity mismatch")
+    return directory, record, doc, task, primary, raw_nc
+
+
+def _compare_existing_refinement(directory: Path, task, primary_directory: Path, raw_nc):
+    """Accept a fully audited, identical copy; never overwrite another result."""
+    audit_doc = audit._audit_run(directory / "run.json")
+    if not audit_doc.complete_and_audited or audit_doc.record.task_hash != task.task_hash:
+        raise RunnerError(f"existing refinement directory is not a clean audited result: {directory}")
+    refined = C.loads((directory / "eval_posted_rs274.json").read_text(encoding="utf-8"))
+    if refined.nc_hash != C.nc_hash(raw_nc) or refined.task_hash != task.task_hash:
+        raise RunnerError("existing refinement has a different task/NC identity")
+    if refined.discretization["settings"]["max_step_mm"] != 0.125:
+        raise RunnerError("existing refinement has the wrong max_step_mm; refusing to overwrite it")
+    if (directory / "haas.nc").read_bytes() != (primary_directory / "haas.nc").read_bytes():
+        raise RunnerError("existing refinement changed primary Haas evidence")
+    return refined
+
+
+def _refinement_worker(config, root, run_id, auxiliary_root, *, evaluator_override=None):
+    """Evaluate the original RS274 bytes and publish immutable primary/auxiliary evidence."""
+    policy = _refinement_policy(config)
+    if not policy["enabled"]:
+        raise RunnerError("refinement checking was explicitly disabled by the frozen policy")
+    root, auxiliary_root = _safe_refinement_directory(root, Path(auxiliary_root))
+    directory, record, parent_config, task, primary, raw_nc = _load_refinement_case(root, run_id)
+    auxiliary_id = f"{run_id}-refined"
+    auxiliary_dir = auxiliary_root / auxiliary_id
+    created = time.perf_counter()
+    computed = evaluator_override
+    if auxiliary_dir.exists():
+        refined = _compare_existing_refinement(auxiliary_dir, task, directory, raw_nc)
+        elapsed = 0.0
+        status = "skipped_complete"
+    else:
+        if computed is None:
+            computed = PostedEvaluator()
+        tolerance = primary.discretization["settings"]["exclusion_tolerance_mm3"]
+        evaluate = getattr(computed, "evaluate_posted_gcode", computed)
+        if not callable(evaluate):
+            raise RunnerError("refinement evaluator must implement the typed protocol or a callable")
+        started = time.perf_counter()
+        refined = evaluate(
+            task, raw_nc, C.Dialect.RS274,
+            {"max_step_mm": policy["max_step_mm"], "exclusion_tolerance_mm3": tolerance,
+             "expected_nc_hash": primary.nc_hash})
+        elapsed = time.perf_counter() - started
+        status = "complete"
+    if not isinstance(refined, C.EvaluationResult) or refined.dialect != C.Dialect.RS274:
+        raise RunnerError("refinement did not return a typed RS274 EvaluationResult")
+    if refined.nc_hash != primary.nc_hash or refined.task_hash != task.task_hash:
+        raise RunnerError("refinement result has a different task or NC hash")
+    if refined.discretization["settings"]["max_step_mm"] != policy["max_step_mm"]:
+        raise RunnerError("refinement result does not describe the required 0.125 mm setting")
+    if refined.discretization["settings"]["expected_nc_hash"] != primary.nc_hash:
+        raise RunnerError("refinement was evaluated without exact byte-hash checking")
+    comparison = _refinement_comparison(primary, refined)
+    payload = R.record_bytes(refined)
+    root_file = directory / "eval_posted_rs274_refined.json"
+    if root_file.exists() and root_file.read_bytes() != payload:
+        raise RunnerError("existing refined sidecar differs; refusing to overwrite immutable evidence")
+
+    auxiliary_config = dict(parent_config)
+    aux_spent = {
+        "candidate_evaluations": 0, "forward_calls": 0, "backward_calls": 0,
+        "generations": 0, "validation_calls": 0, "posted_refinement_evaluations": 1,
+    }
+    auxiliary_config.update({
+        "run_id": auxiliary_id, "refinement_of": record.run_id,
+        "dialect": C.Dialect.RS274.value, "max_step_mm": policy["max_step_mm"],
+        "budgets": {"limits": parent_config["budgets"]["limits"], "spent": aux_spent},
+    })
+    aux_files = {
+        "config.json": R.json_bytes(auxiliary_config),
+        "history.json": R.json_bytes({
+            "stage": "post-pilot-refinement-check", "parent_run_id": record.run_id,
+            "new_evaluation": "RS274 with max_step_mm=0.125 on the exact original NC bytes",
+            "primary_haas_evidence_copied": True, "wall_seconds": elapsed,
+            "thread_environment": {
+                key: os.environ.get(key)
+                for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TAICHI_NUM_THREADS")},
+        }),
+        "motion_plan.json": (directory / "motion_plan.json").read_bytes(),
+        "metrics.json": R.json_bytes({"evaluation": refined.to_dict(),
+                                      "primary": primary.to_dict(),
+                                      "comparison": comparison,
+                                      "refinement_of": record.run_id}),
+        "rs274.nc": raw_nc,
+        "haas.nc": (directory / "haas.nc").read_bytes(),
+        "haas_eval_copied_from_primary": b"",
+        "eval_posted_haas.json": (directory / "eval_posted_haas.json").read_bytes(),
+        "eval_posted.json": (directory / "eval_posted.json").read_bytes(),
+        "eval_posted_rs274.json": payload,
+        "original_metrics_before_refinement.json": (directory / "metrics.json").read_bytes(),
+        "initial_trajectory.npy": (directory / "initial_trajectory.npy").read_bytes(),
+        "trajectory.npy": (directory / "trajectory.npy").read_bytes(),
+        "trajectory_deltas.npy": (directory / "trajectory_deltas.npy").read_bytes(),
+    }
+    # Avoid inventing an unsupported Haas evaluation: it is copied from the real primary.
+    del aux_files["haas_eval_copied_from_primary"]
+    aux_files["original_metrics_before_refinement.json"] = (directory / "metrics.json").read_bytes()
+    source_meta = R.source_metadata(REPOSITORY)
+    auxiliary_record = R.assemble_record(
+        auxiliary_id, task, C.RunStatus.COMPLETE, posting=R.PostingResult(files={}, posted=record.posted),
+        artifact_names=tuple(sorted(aux_files)), source_commit=source_meta["source_commit"],
+        dirty_patch_hash=source_meta["dirty_patch_hash"])
+    if auxiliary_dir.exists():
+        # _compare_existing_refinement validated the immutable bundle and sidecar hashes.
+        auxiliary_payload = (auxiliary_dir / "run.json").read_bytes()
+    else:
+        R.ArtifactWriter().write(str(auxiliary_dir), auxiliary_record, aux_files)
+        auxiliary_payload = (auxiliary_dir / "run.json").read_bytes()
+    if not root_file.exists():
+        R.ArtifactWriter._replace_bytes(root_file, payload)
+
+    # Preserve the original primary metrics before the controlled metadata append.
+    old_metrics_payload = aux_files["original_metrics_before_refinement.json"]
+    metrics = json.loads(old_metrics_payload.decode("utf-8"))
+    if not isinstance(metrics, dict) or not isinstance(metrics.get("execution", {}), dict):
+        raise RunnerError("primary metrics execution is not a mapping")
+    execution = dict(metrics.get("execution", {}))
+    checks = dict(execution.get("refinement_checks", {}))
+    if "rs274" in checks and checks["rs274"].get("sha256") != C.sha256_bytes(payload):
+        raise RunnerError("primary metadata already contains a different refinement hash")
+    link = {
+        "artifact": root_file.name, "sha256": C.sha256_bytes(payload),
+        "task_hash": task.task_hash, "nc_hash": primary.nc_hash,
+        "refinement_settings": refined.discretization["settings"],
+        "evaluation": {"coverage": refined.coverage.value, "safety_pass": refined.safety_pass,
+                       "geometry_pass": refined.geometry_pass,
+                       "efficiency_eligible": refined.efficiency_eligible},
+        "comparison": comparison,
+        "audit_record": {
+            "path": os.path.relpath(auxiliary_dir / "run.json", directory),
+            "sha256": C.sha256_bytes(auxiliary_payload),
+        },
+    }
+    if checks.get("rs274") and checks["rs274"] != link:
+        raise RunnerError("primary refinement metadata differs; refusing to overwrite it")
+    checks["rs274"] = link
+    execution["refinement_checks"] = checks
+    metrics["execution"] = execution
+    _atomic(directory / "metrics.json", metrics)
+    return {
+        "root": root, "run_id": run_id, "refined_run_id": auxiliary_id,
+        "primary_config": parent_config, "source_config": config,
+        "source_commit": record.source_commit, "auxiliary_id": auxiliary_id,
+        "auxiliary_root": auxiliary_root, "auxiliary_directory": auxiliary_dir,
+        "status": status, "comparison": comparison,
+        "completion_residual_mm3": task.tolerances.completion_residual_mm3,
+        "refined_sha256": C.sha256_bytes(payload),
+        "metrics_link": link, "worker_seconds": time.perf_counter() - created,
+    }
+
+
+def _copy_primary_for_refinement(directory: Path, auxiliary_root: Path):
+    """Clone immutable baseline evidence for a distinct, local audit root."""
+    target = auxiliary_root / directory.name
+    record = C.loads((directory / "run.json").read_text(encoding="utf-8"))
+    sources = {name: (directory / name).read_bytes()
+               for name in (*record.artifacts, "run.json")}
+    if target.exists():
+        for name, content in sources.items():
+            path = target / name
+            if not path.is_file() or path.read_bytes() != content:
+                raise RunnerError(f"refinement baseline differs at {path}; refusing to overwrite")
+        return target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(directory, target)
+    for name, content in sources.items():
+        if (target / name).read_bytes() != content:
+            raise RunnerError(f"baseline copy failed byte verification: {target / name}")
+    return target
+
+
+def _audit_refinement_root(outcomes, auxiliary_root):
+    """Expose baseline and refined artifacts through the real benchmark auditor."""
+    tasks, runs, comparisons = {}, {}, []
+    seen_methods = set()
+    for case in outcomes:
+        expected = case["manifest"].runs[case["run_id"]]
+        task_info = case["manifest"].tasks[expected.task_id]
+        if case.get("completion_residual_mm3") is not None:
+            task_info = dataclasses.replace(
+                task_info, completion_residual_mm3=case["completion_residual_mm3"])
+        previous = tasks.get(expected.task_id)
+        if previous is not None and previous.task_hash != task_info.task_hash:
+            raise RunnerError("one task id has different source hashes in a refinement bundle")
+        tasks[expected.task_id] = task_info
+        runs[case["run_id"]] = expected
+        _copy_primary_for_refinement(case["root"] / case["run_id"], auxiliary_root)
+        aux_id = case["refined_run_id"]
+        if aux_id in runs:
+            raise RunnerError(f"duplicate baseline/refinement run identifier: {aux_id}")
+        refined_method = expected.method + "-refinement"
+        runs[aux_id] = audit.ExpectedRun(aux_id, expected.task_id, refined_method, expected.seed)
+        if expected.method not in seen_methods:
+            seen_methods.add(expected.method)
+            comparisons.append(audit.ComparisonSpec(
+                name=f"{expected.method} RS274 refinement", method=refined_method,
+                baseline=expected.method, dialect=C.Dialect.RS274, metrics=("cycle_time_s",),
+            ))
+    manifest = audit.Manifest(tasks=tasks, runs=runs, comparisons=tuple(comparisons))
+    manifest_path = auxiliary_root / "manifest.json"
+    if manifest_path.exists():
+        if audit.load_manifest(manifest_path) != manifest:
+            raise RunnerError("refinement auxiliary manifest differs; refusing mixed audit roots")
+    else:
+        _atomic(manifest_path, {
+            "schema_version": 1,
+            "tasks": [{"task_id": task.task_id, "task_hash": task.task_hash, "family": task.family}
+                      for task in tasks.values()],
+            "expected_runs": [{"run_id": item.run_id, "task_id": item.task_id,
+                                "method": item.method, "seed": item.seed} for item in runs.values()],
+            "comparisons": [
+                {"name": comparison.name, "method": comparison.method,
+                 "baseline": comparison.baseline, "dialect": comparison.dialect.value,
+                 "metrics": list(comparison.metrics)} for comparison in comparisons],
+            "runner": {"schema": "diffcam-refinement-check/1",
+                       "policy": "baseline copied unchanged; refined RS274 is a named auxiliary method",
+                       "source_commit": R.source_metadata(REPOSITORY)["source_commit"],
+                       "physical_machining_certificate": False},
+        })
+    reports, audit_result = audit.audit_runs(auxiliary_root, manifest)
+    if not audit_result["summary"]["auditor_passed"]:
+        raise RunnerError(f"auxiliary refinement audit failed: {audit_result['summary']}")
+    aggregate_rows, statistics = audit.aggregate_evaluations(
+        manifest, audit_result["_audits_by_id"], bootstrap_replicates=100)
+    document = {
+        "manifest": audit_result["summary"], "records": reports,
+        "comparisons": aggregate_rows, "statistics": statistics,
+        "case_count": len(outcomes), "baseline_and_refined_records": len(reports),
+        "audited_result_paths": [str(case["auxiliary_directory"]) for case in outcomes],
+    }
+    _atomic(auxiliary_root / "refinement-audit.json", _refinement_jsonable(document))
+    return document
+
+
+def _refine_process(config_path, source_root, run_id, auxiliary_root, timeout):
+    """Own exactly one exact-PID refinement worker; no process-pattern kills."""
+    auxiliary_log = Path(auxiliary_root) / "logs"
+    auxiliary_log.mkdir(parents=True, exist_ok=True)
+    log_path = auxiliary_log / f"{run_id}.log"
+    env = dict(os.environ)
+    env["DIFFCAM_RUNNER_SIMULATOR"] = "0"
+    command = [sys.executable, str(Path(__file__).resolve()), "--config", str(config_path),
+               "--output-dir", str(source_root), "--split", "dev", "--experiment", "pilot",
+               "--only", run_id, "--aux-root", str(auxiliary_root), "--refinement-worker-run"]
+    started = time.perf_counter()
+    with log_path.open("w") as stream:
+        process = subprocess.Popen(command, cwd=REPOSITORY, env=env, stdout=stream, stderr=subprocess.STDOUT)
+        try:
+            code = process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                code = process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                code = process.wait()
+    if code:
+        return {"run_id": run_id, "source_root": source_root, "status": "failed",
+                "returncode": code, "log": str(log_path),
+                "elapsed_seconds": time.perf_counter() - started}
+    text = log_path.read_text(encoding="utf-8")
+    for line in reversed(text.splitlines()):
+        if line.startswith("REFINEMENT_RESULT="):
+            result = json.loads(line[len("REFINEMENT_RESULT="):])
+            result.update({"elapsed_seconds": time.perf_counter() - started, "log": str(log_path)})
+            return result
+    return {"run_id": run_id, "source_root": source_root, "status": "failed",
+            "reason": "refinement worker returned no typed result", "returncode": code,
+            "log": str(log_path), "elapsed_seconds": time.perf_counter() - started}
+
+
+def _refinement_driver(config, config_path, primary_roots, only, auxiliary_root):
+    """Run independent post-evaluation subprocesses after selected primary work."""
+    policy = _refinement_policy(config)
+    if not policy["enabled"]:
+        raise RunnerError("refinement checking was explicitly disabled by the frozen policy")
+    work = []
+    ready_ids = set()
+    for raw_root in primary_roots:
+        root = Path(raw_root).resolve()
+        if not root.is_dir():
+            raise RunnerError(f"primary refinement source directory does not exist: {root}")
+        manifest = audit.load_manifest(root / "manifest.json")
+        for entry in manifest.runs.values():
+            if only and not fnmatch.fnmatch(entry.run_id, only):
+                continue
+            if entry.run_id in ready_ids:
+                raise RunnerError(f"duplicate primary run ID across refinement roots: {entry.run_id}")
+            ready_ids.add(entry.run_id)
+            child = root / entry.run_id
+            if not child.is_dir():
+                work.append({"root": root, "run_id": entry.run_id, "status": "missing_primary",
+                             "reason": "no run directory for final selected program"})
+                continue
+            record = audit._audit_run(child / "run.json")
+            if not record.complete_and_audited:
+                work.append({"root": root, "run_id": entry.run_id, "status": "skipped_incomplete",
+                             "reason": "primary record is not complete and cleanly audited"})
+                continue
+            work.append({"root": root, "run_id": entry.run_id, "manifest": manifest,
+                         "auxiliary_root": Path(auxiliary_root).resolve(), "status": "scheduled"})
+    if not work:
+        raise RunnerError("refinement selection matched no expected primary runs")
+    executable = [item for item in work if item["status"] == "scheduled"]
+    if not executable:
+        raise RunnerError("no completed primary programs are available for refinement")
+    for item in executable:
+        _safe_refinement_directory(item["root"], item["auxiliary_root"])
+    completed = []
+    with concurrent.futures.ThreadPoolExecutor(max_workers=policy["parallel_jobs"]) as pool:
+        pending = {
+            pool.submit(_refine_process, config_path, item["root"], item["run_id"],
+                        item["auxiliary_root"], policy["timeout_s"]): item
+            for item in executable
+        }
+        for future in concurrent.futures.as_completed(pending):
+            completed.append(future.result())
+    scheduled = [item for item in completed if item["status"] in ("complete", "skipped_complete")]
+    aux_root = Path(auxiliary_root).resolve()
+    if scheduled:
+        for item in scheduled:
+            planned = next(w for w in executable if w["run_id"] == item["run_id"])
+            if str(item["root"]) != str(planned["root"]):
+                raise RunnerError("refinement child returned a different primary source root")
+            if str(item["auxiliary_root"]) != str(planned["auxiliary_root"]):
+                raise RunnerError("refinement children must use one declared auxiliary root")
+            item["manifest"] = planned["manifest"]
+        for item in scheduled:
+            if item["auxiliary_directory"] != aux_root / item["refined_run_id"]:
+                raise RunnerError("refinement result points outside the declared audit root")
+        audited = _audit_refinement_root(scheduled, aux_root)
+    else:
+        audited = None
+    remaining = [item for item in work if item["status"] != "scheduled"]
+    reporting_items = []
+    for item in [*completed, *remaining]:
+        row = {key: value for key, value in item.items() if key != "manifest"}
+        for key in ("root", "auxiliary_root", "auxiliary_directory"):
+            if key in row:
+                row[key] = str(row[key])
+        reporting_items.append(_refinement_jsonable(row))
+    output = {
+        "schema": "diffcam-refinement-check/1", "policy": policy,
+        "required_primary_programs": len(work), "scheduled_worker_count": len(executable),
+        "status_counts": dict(Counter(item["status"] for item in [*completed, *remaining])),
+        "results": reporting_items, "audit": audited,
+        "auxiliary_root": str(aux_root),
+        "process_policy": "independent subprocesses, at most two; exact child PID timeout handling",
+        "thread_environment": {
+            key: os.environ.get(key)
+            for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "TAICHI_NUM_THREADS")
+        },
+    }
+    _atomic(aux_root / "refinement_report.json", output)
+    failed = [item for item in completed if item["status"] == "failed"]
+    if failed:
+        raise RunnerError(f"refinement workers failed: {[item['run_id'] for item in failed]}")
+    return output
+
+
+def _default_auxiliary_root(root: Path) -> Path:
+    return root.resolve().parent / f"{root.resolve().name}-refinement"
+
+
+def _refinement_check_main(config, args, root: Path) -> int:
+    """Read-only primary selection with real subprocess evaluations, never a solver launch."""
+    roots = [root]
+    if args.split != "dev" or config["experiment"] != "pilot":
+        raise RunnerError("refinement is implemented only for the declared dev pilot")
+    if args.primary_root:
+        roots = [Path(item).resolve() for item in args.primary_root]
+    auxiliary_root = Path(args.aux_root).resolve() if args.aux_root else _default_auxiliary_root(roots[0])
+    result = _refinement_driver(config, args.config, roots, args.only, auxiliary_root)
+    print(json.dumps(result, indent=2, sort_keys=True))
+    return 0
+
+
+def _refinement_worker_main(config, root: Path, args) -> int:
+    if args.split != "dev" or config["experiment"] != "pilot":
+        raise RunnerError("refinement worker is implemented only for the declared dev pilot")
+    if not args.only or args.only != args.only.strip() or "*" in args.only:
+        raise RunnerError("refinement worker requires one exact primary run id")
+    if not args.aux_root:
+        raise RunnerError("refinement worker requires an explicit auxiliary root")
+    result = _refinement_worker(config, root, args.only, args.aux_root)
+    serialized = {key: value for key, value in result.items()
+                  if key not in ("primary_config", "source_config")}
+    for key in ("root", "auxiliary_root", "auxiliary_directory"):
+        serialized[key] = str(serialized[key])
+    print("REFINEMENT_RESULT=" + json.dumps(serialized, sort_keys=True))
+    return 0
+
+
 def _resume_existing(root: Path, entry: Mapping[str, Any], task: C.TaskSpec) -> bool:
     """Skip a matching completed run, otherwise preserve its partial artifacts."""
     directory = root / entry["run_id"]
@@ -960,6 +1550,7 @@ def _timing_worker_main(config, root):
 
 
 def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path) -> int:
+    _refinement_policy(config)
     task, motion, parameterization, _, posted_factory = _context(config, root)
     if task.split.value != args.split:
         raise RunnerError(f"prototype source is dev-only; task split is {task.split.value}")
@@ -1001,6 +1592,7 @@ def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path)
             if timing.get("task_hash") != task.task_hash:
                 raise RunnerError("timing evidence task identity differs from the actual pilot task")
         costs = _pecent(dict(config, timing_evidence=timing) if timing is not None else config, entries)
+        refinement = _refinement_projection(config, entries, timing, root)
         costs_with_total = {"planned_run_count": len(entries), "costs": costs,
                             "estimated_total_wall_time_s": (
                                 sum(row["estimated_run_wall_time_s"] for row in costs)
@@ -1008,16 +1600,26 @@ def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path)
                             "timing_evidence": timing,
                             "serialization": {"subprocess_per_run": True, "max_simulators_per_process": 1,
                                               "global_simulator_cap": 12, "gpu_jobs": "serial",
+                                              "refinement_subprocesses_per_program": 1,
+                                              "refinement_parallel_jobs": refinement["parallel_jobs"] if refinement["enabled"] else 0,
                                               "pilot_launched": False}}
+        if refinement["enabled"]:
+            costs_with_total["refinement_check"] = refinement
+        if costs_with_total["estimated_total_wall_time_s"] is not None:
+            costs_with_total["estimated_total_wall_time_including_refinement_s"] = (
+                costs_with_total["estimated_total_wall_time_s"]
+                + refinement["estimated_phase_wall_time_s"])
+        else:
+            costs_with_total["estimated_total_wall_time_including_refinement_s"] = None
         if config.get("task_source", "pilot_pocket") == "pilot_pocket":
-            elapsed = costs_with_total["estimated_total_wall_time_s"]
+            elapsed = costs_with_total["estimated_total_wall_time_including_refinement_s"]
             if elapsed is not None and elapsed > 7200.0:
                 costs_with_total["budget_review"] = {
                     "recommendation": "do not launch before a coordinator review of budget/grid choices and their fidelity costs",
                     "current_execution_policy": [
                         "one production evaluation per dialect only on each run's final selected motion, not per optimizer validation",
                         "strict 0.25mm production geometry, sampling and posted-evaluation fidelity unchanged",
-                        "serial execution and one simulator per child process; GPU is not selected or validated here",
+                        "primary runs remain serial with one simulator per child; at most two independent refinement subprocesses after primary work, with GPU unselected",
                     ],
                     "options_to_discuss_not_applied": [
                         "reduce or stage sampling budgets with independently shown fidelity changes",
@@ -1067,9 +1669,18 @@ def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path)
                            f"child exited with returncode {code}", root)
         records.append({"run_id": entry["run_id"], "returncode": code, "reported_status": status,
                         "wall_time_s": time.perf_counter() - before, "log": str(log.name)})
-    _atomic(root / "execution_summary.json", {"runs": records,
-                                                "status_counts": dict(Counter(row["reported_status"] for row in records)),
-                                                "pending_evaluation": PENDING_REASON if posted_factory is None else None})
+    summary = {"runs": records,
+               "status_counts": dict(Counter(row["reported_status"] for row in records)),
+               "pending_evaluation": PENDING_REASON if posted_factory is None else None}
+    _atomic(root / "execution_summary.json", summary)
+    if _refinement_policy(config)["enabled"]:
+        # Only after the selected primary records exist. These are subprocess
+        # evaluations of the exact selected RS274 bytes, never solver launches.
+        refinement = _refinement_driver(
+            config, args.config, [root], args.only,
+            Path(args.aux_root).resolve() if args.aux_root else _default_auxiliary_root(root))
+        summary["refinement_check"] = refinement
+        _atomic(root / "execution_summary.json", summary)
     print(json.dumps({"execution_count": len(records),
                       "status_counts": dict(Counter(row["reported_status"] for row in records))}, sort_keys=True))
     return 0
@@ -1086,15 +1697,35 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--only")
     parser.add_argument("--worker-run", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--timing-worker-run", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--refinement-check", action="store_true",
+                        help="evaluate final primary RS274 programs at 0.125 mm")
+    parser.add_argument("--refinement-worker-run", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--aux-root", help="sibling audit root for refinement evidence")
+    parser.add_argument("--primary-root", action="append", help="additional completed primary root")
     args = parser.parse_args(argv)
     root = Path(args.output_dir).resolve()
-    if not args.resume and not args.worker_run and not args.timing_worker_run and root.exists():
+    if (not args.resume and not args.worker_run and not args.timing_worker_run
+            and not args.refinement_check and not args.refinement_worker_run and root.exists()):
         parser.error("output-dir must be new unless --resume is set")
     try:
         config = _normalized_config(args.config)
         config["experiment"] = args.experiment
         if config["experiment"] not in EXPERIMENTS:
             raise RunnerError("invalid advertised experiment")
+        if args.refinement_check and (args.worker_run or args.timing_worker_run):
+            raise RunnerError("refinement checking cannot be combined with solver/timing worker modes")
+        if args.refinement_worker_run and (args.worker_run or args.timing_worker_run):
+            raise RunnerError("refinement worker cannot be combined with solver/timing worker modes")
+        if args.dry_run and args.refinement_check:
+            raise RunnerError("--dry-run estimates refinement cost without dispatching that phase")
+        if args.primary_root and not args.refinement_check:
+            raise RunnerError("--primary-root requires --refinement-check")
+        if args.refinement_worker_run and not root.is_dir():
+            raise RunnerError("refinement worker requires an existing primary root")
+        if args.refinement_worker_run:
+            return _refinement_worker_main(config, root, args)
+        if args.refinement_check:
+            return _refinement_check_main(config, args, root)
         if args.timing_worker_run:
             if not args.dry_run or args.worker_run:
                 raise RunnerError("timing-worker-run requires --dry-run and cannot combine with --worker-run")
