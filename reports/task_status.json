@@ -101,14 +101,16 @@
    "owner": "diffcam-worker-2",
    "branch": "task/T3.0-objectives",
    "blocker": null,
-   "next": "prototype now; final gate after T2.0/T1.2"
+   "next": "prototype now; final gate after T2.0/T1.2",
+   "note": "PROTOTYPE gate passed at bedfd14 (A/B/A bitwise, tape/no-tape, pullback FD, atomic artifacts audited); not merged; final re-run owed after T1.2+T2.0"
   },
   "T3.1": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-2",
+   "branch": "task/T3.1-blackbox",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "built on task/T3.0-objectives prototype"
   },
   "T3.2": {
    "status": "planned",
@@ -258,12 +260,12 @@
    "note": "discriminator NC/param review: N1 inch arc I/J rounding (HIGH), N3 G49 ignored (HIGH), N2 KeyError, N5 nan post, N6 comment ';', N4 bounds; legacy G18 lead. CAM lease transferred worker-1 -> worker-3."
   },
   "T4.0c": {
-   "status": "ready",
+   "status": "complete",
    "owner": "diffcam-worker-2",
    "branch": "task/T4.0c-audit-flags",
-   "blocker": "after T1.0c",
+   "blocker": null,
    "next": null,
-   "note": "split complete_data -> evidence_complete (T4.1 gate) + all_runs_completed; stale labels R1/R2 (discriminator re-review)"
+   "note": "merged"
   }
  }
 }
