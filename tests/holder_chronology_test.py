@@ -547,3 +547,55 @@ def test_hard_holder_cell_inflation_detects_interior_contact():
     sim.loss[None] = 0.0
     sim.compute_holder_penalty(0, 1)
     assert sim.loss[None] == pytest.approx(0.0, abs=0.0)
+
+
+def test_failed_constructors_do_not_consume_instance_lifecycle_budget():
+    code = textwrap.dedent(
+        """
+        import taichi as ti
+        from simulator.csg_simulator import CSGSimulatorDelta
+
+        ti.init(arch=ti.cpu, offline_cache=False)
+        for _ in range(20):
+            try:
+                CSGSimulatorDelta(
+                    voxel_size_mm=3.0, stock_size_mm=(40.0, 24.0, 16.0),
+                    max_steps=1, init_taichi=False, target_shape="sphere",
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("intentionally anisotropic grid unexpectedly accepted")
+        for _ in range(12):
+            CSGSimulatorDelta(
+                resolution=6, stock_size_in=(1, 1, 1), max_steps=1,
+                target_shape="sphere", enforce_speed_limits=False, init_taichi=False,
+            )
+        print("VALID_CONSTRUCTED_AFTER_FAILED=12")
+        try:
+            CSGSimulatorDelta(
+                resolution=6, stock_size_in=(1, 1, 1), max_steps=1,
+                target_shape="sphere", enforce_speed_limits=False, init_taichi=False,
+            )
+        except RuntimeError as error:
+            assert "simulator instance lifecycle budget" in str(error)
+            print("BUDGET_GUARD_INTACT")
+        else:
+            raise AssertionError("13th valid constructor should still hit the lifecycle guard")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True,
+        check=False, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "VALID_CONSTRUCTED_AFTER_FAILED=12" in result.stdout
+    assert "BUDGET_GUARD_INTACT" in result.stdout
+
+
+def test_zero_max_steps_fails_clearly_before_taichi_allocation():
+    with pytest.raises(ValueError, match="positive"):
+        CSGSimulatorDelta(
+            resolution=1, stock_size_mm=1.0, max_steps=0,
+            target_shape="sphere", init_taichi=False,
+        )

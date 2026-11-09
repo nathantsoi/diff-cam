@@ -42,6 +42,20 @@ def _guard_taichi_instance_lifecycle() -> None:
             "This guard does not claim dense-stock RAM is consumed and does not "
             "call ti.init(), which would invalidate existing fields."
         )
+    # Registration is deliberately separate: an exception during validation,
+    # array allocation or parameter initialization is not a live CSG instance.
+
+
+def _record_taichi_instance_success() -> None:
+    from taichi.lang import impl as taichi_impl
+
+    runtime = taichi_impl.get_runtime()
+    if runtime is None:
+        raise RuntimeError("Taichi runtime disappeared during simulator construction")
+    identity = id(runtime)
+    state = _TAICHI_RUNTIME_CSG_STATE
+    if identity != state["identity"]:
+        raise RuntimeError("Taichi runtime changed during simulator construction")
     state["instances"] += 1
 
 
@@ -623,6 +637,7 @@ class CSGSimulatorDelta:
         self.loss = ti.field(dtype=ti.f32, shape=(), needs_grad=True)
 
         ti.root.lazy_grad()
+        _record_taichi_instance_success()
 
     def _validate_fits(self, stock_size_mm):
         """Warn if the stock box can't fit inside the machine work volume.
