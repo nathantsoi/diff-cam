@@ -118,12 +118,12 @@
    "next": null
   },
   "T4.0": {
-   "status": "complete",
+   "status": "in_progress",
    "owner": "diffcam-worker-2",
    "branch": "task/T4.0-auditor",
    "blocker": null,
    "next": null,
-   "note": "merged; auditor + exact paired sign-flip test (n<=16 enumerated), CI null n<2, small-n warning <5, Holm, cluster bootstrap CIs; coordinator re-verified p by enumeration"
+   "note": "merged; auditor + exact paired sign-flip test (n<=16 enumerated), CI null n<2, small-n warning <5, Holm, cluster bootstrap CIs; coordinator re-verified p by enumeration | REOPENED: discriminator review (3 reproduced defects: failed runs dropped from denominators [HIGH], abs tie tolerance, 1-task-family CI) -> T4.0b worker-2"
   },
   "T4.1": {
    "status": "planned",
@@ -232,6 +232,14 @@
    "blocker": null,
    "next": null,
    "note": "merged; baselines/cncnet recipe re-proved from fresh venv: IoU 0.423786 vs 0.423761"
+  },
+  "T4.0b": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-2",
+   "branch": "task/T4.0b-audit-fixes",
+   "blocker": null,
+   "next": null,
+   "note": "priority over T3.0 prototype"
   }
  }
 }
