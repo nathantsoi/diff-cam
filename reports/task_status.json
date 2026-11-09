@@ -342,12 +342,12 @@
    "note": "merged 2424699: shift via sim per-voxel stock field; phi_hard = hard stock_d[T]; two-sided band predicate; leak tests; C2. Coordinator real-sim gaps small and shrinking with k (k=20: +0.06/+0.17/+0.00 vox)."
   },
   "T3.3b": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-3",
    "branch": "task/T3.3b-adfd",
    "blocker": null,
    "next": null,
-   "note": "SYSTEMATIC AD/FD mismatch: idx2 AD -0.4785 vs FD -0.4990 (4.1%, eps-independent), idx35 sign flip; per-component bisect (sigmoid clamp, ti.max carve, stop-gradients, f32 backward). Affects Adam/T3.4 step quality. | PRIORITY right after pilot launch; gates T3.4 ablations and any optimizer choice for T4.2. | INTERIM: index-2 bias is f32 field/adjoint accumulation (full f64: AD -0.3407647 vs FD -0.3407663); helper-only f64 does not fix; terminal block verified. Index-35 +0.00728 NOT reproduced (fresh AD -0.00296 \u2248 FD) -> investigating possible state leakage. Pending: precision-fix cost (f64 full vs narrow). | Reviewer G2: f32 ADJOINT bias grows ~linearly with path length (prefix 8: 0.24%, 48: 2.5%, 75: 4.1%); f32 FORWARD accurate (f32 FD \u2248 f64 FD) -> CMA/hard rows unaffected; only gradient rows provisional. Precision choice must be validated on the longest suite path. | RESULT: full f64 fixes index-2 (AD -0.49917 vs FD -0.49916), 112 s/3.67 GB vs f32 93 s/1.94 GB; scalar-only f64 insufficient; idx-35 UNREPRODUCED on exact c955b60 (closed). -> D-2026-11-09-05."
+   "note": "SYSTEMATIC AD/FD mismatch: idx2 AD -0.4785 vs FD -0.4990 (4.1%, eps-independent), idx35 sign flip; per-component bisect (sigmoid clamp, ti.max carve, stop-gradients, f32 backward). Affects Adam/T3.4 step quality. | PRIORITY right after pilot launch; gates T3.4 ablations and any optimizer choice for T4.2. | INTERIM: index-2 bias is f32 field/adjoint accumulation (full f64: AD -0.3407647 vs FD -0.3407663); helper-only f64 does not fix; terminal block verified. Index-35 +0.00728 NOT reproduced (fresh AD -0.00296 \u2248 FD) -> investigating possible state leakage. Pending: precision-fix cost (f64 full vs narrow). | Reviewer G2: f32 ADJOINT bias grows ~linearly with path length (prefix 8: 0.24%, 48: 2.5%, 75: 4.1%); f32 FORWARD accurate (f32 FD \u2248 f64 FD) -> CMA/hard rows unaffected; only gradient rows provisional. Precision choice must be validated on the longest suite path. | RESULT: full f64 fixes index-2 (AD -0.49917 vs FD -0.49916), 112 s/3.67 GB vs f32 93 s/1.94 GB; scalar-only f64 insufficient; idx-35 UNREPRODUCED on exact c955b60 (closed). -> D-2026-11-09-05. | MERGED 8320c05 with permanent AD-consistency regression (same \u03b8 / after other \u03b8 / fresh process)."
   },
   "T3.3c": {
    "status": "in_progress",
