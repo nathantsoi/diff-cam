@@ -106,8 +106,8 @@ def screen_for(fixture):
     np.testing.assert_allclose(
         legacy_volume * sim.Nx * sim.Ny * sim.Nz * sim.v ** 3,
         physical_volume,
-        rtol=0.0,
-        atol=2e-4,
+        rtol=2e-6,
+        atol=2e-3,  # independent float32 volume reductions, not geometry tolerance
     )
     sim.loss[None] = 0.0
     sim.compute_holder_penalty(0, segment_count)
@@ -518,3 +518,32 @@ def test_tip_band_height_is_not_silently_replaced_by_full_flute_height():
     smooth_tip_point_loss(sim, 0.5)
     full_flute = float(sim.loss[None])
     assert narrow_band > full_flute
+
+
+def test_hard_holder_cell_inflation_detects_interior_contact():
+    # One cubic millimetre cell at [0,1]^3. Holder centre x=.9, radius .1:
+    # the holder covers x=.8..1.0 and intersects the cell interior by .9 mm.
+    # Its centre starts .1 mm from the boundary, but the closest point at cell
+    # centre x=.5 reads +.4 cell from the holder. A centre-only test misses it.
+    sim = CSGSimulatorDelta(
+        voxel_size_mm=1.0, stock_size_mm=1.0, max_steps=1,
+        tool_start=(0.9, 0.5, 0.0), target_shape="sphere",
+        enforce_speed_limits=False, init_taichi=False,
+    )
+    sim.tool_radius[None] = 0.01  # stationary tiny cutter does not remove cell
+    sim.tool_height[None] = 0.25
+    sim.holder_radius[None] = 0.1
+    sim.holder_height[None] = 1.0
+    sim.tool_delta.from_numpy(np.zeros((1, 3), dtype=np.float32))
+    sim.forward_hard(2, clip_speeds=False)
+    assert sim.stock.to_numpy()[1, 0, 0, 0] < 0.0
+    assert sim.holder_overlap_at(0) > 0.0
+    assert sim.holder_overlap_mm3_at(0) > 0.0
+    assert sim.holder_overlap_total(1) > 0.0
+    assert sim.holder_overlap_total_mm3(1) > 0.0
+    assert sim.holder_min_clearance_at(0) < 0.0
+    assert sim.holder_min_clearance_mm_at(0) < 0.0
+    # The separate smooth objective is deliberately not the inflated hard metric.
+    sim.loss[None] = 0.0
+    sim.compute_holder_penalty(0, 1)
+    assert sim.loss[None] == pytest.approx(0.0, abs=0.0)

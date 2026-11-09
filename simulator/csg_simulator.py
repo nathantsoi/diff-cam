@@ -2391,12 +2391,16 @@ class CSGSimulatorDelta:
 
     @ti.func
     def holder_sdf_sharp(self, p, t):
-        """Hard holder-membership score for the conservative pre-cut screen.
+        """Hard cell-inflated holder-membership for the pre-cut screen.
 
-        The whole-segment Z union is conservative, not exact chronological
-        holder motion: a path may clear material with the cutter-leading edge
-        even though the unioned holder overlaps pre-segment stock. Positive
-        overlap is therefore a diagnostic flag, not proof of physical contact.
+        Subtract sqrt(3)/2 voxels (half a cubic-cell diagonal) from the final
+        membership/clearance score. Material occupies cells, not centres only;
+        this mirrors the reference's lower-bound geometry instead of missing a
+        holder that almost fills a cell while its centre is outside it. There
+        is no +1e-8 sqrt bias on this hard path. The separate smooth CSG penalty
+        retains its own derivative regularization and is intentionally not the
+        hard cell-inflated measure. Whole-segment conservatism is not a
+        chronological-safety proof: safe cutter-leading paths can still flag.
         Not differentiable -- never call under ti.ad.Tape.
         """
         r = self.holder_radius[None] / self.v        # voxels
@@ -2412,7 +2416,7 @@ class CSGSimulatorDelta:
         ba_len2 = ba_xy.dot(ba_xy) + 1e-12
         h_param = ti.max(0.0, ti.min(1.0, pa_xy.dot(ba_xy) / ba_len2))
         closest_xy = ti.Vector([a.x, a.y]) + ba_xy * h_param
-        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2 + 1e-8) - r
+        d_xy = ti.sqrt((pv.x - closest_xy.x) ** 2 + (pv.y - closest_xy.y) ** 2) - r
 
         # Holder Z extent UNIONED over the swept segment. The holder bottom
         # tracks the tool base (z_base + tool_h) from a to b; the body extends
@@ -2431,10 +2435,13 @@ class CSGSimulatorDelta:
         z_high = ti.max(z_bottom_a, z_bottom_b) + h
         z_center = 0.5 * (z_low + z_high)
         z_half = 0.5 * (z_high - z_low)
-        d_z = ti.sqrt((pv.z - z_center) ** 2 + 1e-8) - z_half
+        d_z = ti.sqrt((pv.z - z_center) ** 2) - z_half
 
         d_xy_pos = ti.max(d_xy, 0.0)
         d_z_pos = ti.max(d_z, 0.0)
-        outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
+        outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos)
         inside = -ti.max(-ti.max(d_xy, d_z), 0.0)
-        return outside + inside
+        raw_score = outside + inside
+        # Cell half-diagonal, not a free user tuning margin. All hard overlap
+        # and clearance consumers use this inflated score, in voxel units.
+        return raw_score - ti.sqrt(3.0) * 0.5
