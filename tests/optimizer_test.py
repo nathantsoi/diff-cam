@@ -131,7 +131,7 @@ def _checkpoint_pair(tmp_path):
     initial = opt.solve_adam(
         DifferentiableObjective(), _budget(2, interval=2, max_validation=1),
         opt.AdamConfig("annealed", learning_rate=0.02, k_start=20, k_end=120,
-                       max_gradient_norm=0.5), seed=5,
+                       max_gradient_norm=0.5, n_steps=5), seed=5,
         x0=np.array([1.0, 0.5, -0.5]), run_id="replay",
         checkpoint_dir=checkpoint_dir,
     )
@@ -202,6 +202,79 @@ def test_analytic_gradient_path_and_incomplete_posted_artifacts(tmp_path):
     payload = json.loads((tmp_path / "adam-smooth/config.json").read_text())
     assert payload["budgets"]["limits"]["candidate_evaluations"] == 4
     assert payload["budgets"]["spent"]["backward_calls"] == 4
+
+
+def test_invalid_selection_never_becomes_best_or_crash_checkpoint(tmp_path):
+    class InvalidHard(DifferentiableObjective):
+        def evaluate_candidate(self, theta, candidate_id, objective_kind="smooth"):
+            if objective_kind == "hard":
+                return C.CandidateResult(candidate_id, C.content_hash("invalid"), "hard",
+                                         None, False, "injected invalid validation")
+            return super().evaluate_candidate(theta, candidate_id, objective_kind)
+
+    objective = InvalidHard()
+    config = opt.AdamConfig("fixed", k_start=40, k_end=40, learning_rate=0.001)
+    result = opt.solve_adam(objective, _budget(4, interval=2, max_validation=2), config,
+                            x0=np.zeros(3), run_id="invalid-validation",
+                            checkpoint_dir=tmp_path / "checkpoints")
+    assert result.best is None and result.best_theta is None
+    document = json.loads((tmp_path / "checkpoints/final.json").read_text())
+    assert document["best"] is None
+    with pytest.raises(opt.B.BlackBoxError):
+        opt.emit_adam_artifacts(result, objective, tmp_path / "invalid-run", Path.cwd())
+
+
+def test_invalid_gradient_stops_after_one_attempt():
+    class InvalidGradient(DifferentiableObjective):
+        def evaluate_candidate_with_gradient(self, theta, candidate_id="bad-gradient"):
+            return O.CandidateEvaluation(C.CandidateResult(
+                candidate_id, C.content_hash("bad-gradient"), "smooth", None, False,
+                "injected invalid gradient"), gradient_theta=None)
+
+    objective = InvalidGradient()
+    result = opt.solve_adam(objective, _budget(10), opt.AdamConfig("fixed", k_start=40, k_end=40),
+                            x0=np.zeros(3), run_id="invalid-gradient")
+    assert result.termination_reason == "invalid_evaluation"
+    assert result.evaluations == result.invalid_evaluations == 1
+    assert result.gradient_updates == 0
+    assert result.best is None
+    assert result.history[0]["theta"] == [0.0, 0.0, 0.0]
+
+
+def test_seed_tag_does_not_create_fake_adam_replicates():
+    config = opt.AdamConfig(mode="fixed", learning_rate=0.01, k_start=40, k_end=40)
+    first = opt.solve_adam(DifferentiableObjective(), _budget(3), config, seed=0)
+    second = opt.solve_adam(DifferentiableObjective(), _budget(3), config, seed=1)
+    assert first.run_id == second.run_id == "adam-fixed-deterministic"
+    assert first.deterministic_replicates == second.deterministic_replicates == 1
+    np.testing.assert_array_equal(first.current_theta, second.current_theta)
+    assert first.best is second.best is None
+    assert first.validation_calls == second.validation_calls == 0
+
+
+def test_resume_preserves_declared_annealing_length(tmp_path):
+    config = opt.AdamConfig(mode="annealed", k_start=10, k_end=100,
+                            learning_rate=0.001, max_gradient_norm=0.5)
+    initial = opt.solve_adam(
+        DifferentiableObjective(), _budget(3, interval=3, max_validation=3), config,
+        x0=np.zeros(3), run_id="fixed-schedule", checkpoint_dir=tmp_path / "schedule")
+    assert initial.config.n_steps == 3
+    document = json.loads((tmp_path / "schedule/final.json").read_text())
+    assert document["optimizer_config"]["n_steps"] == 3
+    assert document["optimizer_config_hash"] == C.content_hash(document["optimizer_config"])
+    resumed = opt.resume_adam(
+        tmp_path / "schedule/final.json", DifferentiableObjective(),
+        budget=_budget(6, interval=3, max_validation=3), run_id="resumed-schedule")
+    assert resumed.config.n_steps == 3
+    assert all(row["k"] == 100.0 for row in resumed.history[3:])
+    with pytest.raises(opt.B.BlackBoxError, match="no declared annealing"):
+        invalid = dict(document)
+        invalid["optimizer_config"].pop("n_steps")
+        payload = dict(invalid)
+        payload.pop("payload_hash")
+        invalid["payload_hash"] = C.content_hash(payload)
+        (tmp_path / "schedule/invalid.json").write_text(json.dumps(invalid))
+        opt.resume_adam(tmp_path / "schedule/invalid.json", DifferentiableObjective())
 
 
 def test_legacy_smoke_cli_remains_usable(tmp_path):

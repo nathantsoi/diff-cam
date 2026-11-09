@@ -234,3 +234,56 @@ def test_analytic_hard_smooth_shared_objective_and_incomplete_posted_artifacts(t
     # Valid artifacts honestly show why this is not scientific end-to-end evidence.
     assert reports[0]["status"] == "incomplete"
     assert audit["summary"]["evidence_complete"] is False
+
+
+def test_annealed_adam_does_not_leak_smoothing_k_into_cma():
+    from algorithms import optimize as adam
+    shared = _prototype()
+    adam.solve_adam(
+        shared, B.OptimizationBudget(2, population_size=None),
+        adam.AdamConfig(mode="annealed", learning_rate=0.001,
+                        k_start=10, k_end=100, n_steps=2),
+        seed=4, x0=np.zeros(6), run_id="anneal-before-cma",
+    )
+    budget = _budget(2, 2)
+    following = B.solve_cma_es(shared, budget, seed=4, objective_kind="smooth", x0=np.zeros(6))
+    fresh = B.solve_cma_es(_prototype(), budget, seed=4, objective_kind="smooth", x0=np.zeros(6))
+    assert following.history[0]["fitness"] == fresh.history[0]["fitness"]
+    assert shared.spec.k == 40.0
+
+
+def test_final_checkpoint_does_not_advance_dropped_population(tmp_path):
+    full = B.solve_cma_es(QuadraticObjective(), _budget(40, 4), seed=3, sigma0=0.5, x0=[2, -2])
+    B.solve_cma_es(QuadraticObjective(), _budget(22, 4), seed=3, sigma0=0.5, x0=[2, -2],
+                   checkpoint_dir=tmp_path / "checkpoints")
+    final = tmp_path / "checkpoints/final.json"
+    document = json.loads(final.read_text())
+    assert document["state"]["evaluations"] == 20
+    import pickle, base64
+    es = pickle.loads(base64.b64decode(document["state"]["es_pickle_b64"]))
+    assert es.countevals == 20
+    resumed = B.resume_cma_es(final, QuadraticObjective(), budget=_budget(40, 4))
+    np.testing.assert_array_equal(resumed.best_theta, full.best_theta)
+    assert resumed.best.objective == full.best.objective
+
+
+def test_cma_validation_is_separate_and_ledger_restores(tmp_path):
+    evaluator = QuadraticObjective()
+    checkpoint_dir = tmp_path / "cma-ledger"
+    result = B.solve_cma_es(evaluator, _budget(8, 4, validation_interval=2, max_validation_calls=2),
+                            seed=9, run_id="cma-tags", checkpoint_dir=checkpoint_dir)
+    ledger = evaluator.ledger.snapshot()
+    assert ledger["candidate_evaluations"] == 8
+    assert ledger["validation_calls"] == 2
+    assert ledger["forward_calls"] == 10
+    assert ledger["backward_calls"] == 0
+    assert result.forward_calls == 10 and result.backward_calls == 0
+    assert sum(bool(entry.get("validation", False)) for entry in ledger["entries"]) == 2
+    restored_evaluator = QuadraticObjective()
+    B.resume_cma_es(checkpoint_dir / "final.json", restored_evaluator,
+                    budget=_budget(8, 4, validation_interval=2, max_validation_calls=2))
+
+    restored = restored_evaluator.ledger.snapshot()
+    for field in ("candidate_evaluations", "validation_calls", "forward_calls", "backward_calls",
+                  "segment_steps", "voxel_steps"):
+        assert restored[field] == ledger[field]

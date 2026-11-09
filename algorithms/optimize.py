@@ -146,6 +146,7 @@ class AdamConfig:
     k_start: float = 20.0
     k_end: float = 20.0
     selection: HardSelectionPolicy = dataclasses.field(default_factory=HardSelectionPolicy)
+    n_steps: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.mode not in ("fixed", "annealed"):
@@ -161,6 +162,8 @@ class AdamConfig:
             raise ValueError("max_gradient_norm must be positive or None")
         if self.mode == "fixed" and self.k_start != self.k_end:
             raise ValueError("fixed mode requires k_start == k_end")
+        if self.n_steps is not None and (not isinstance(self.n_steps, int) or self.n_steps < 1):
+            raise ValueError("n_steps must be null or a positive integer")
 
 
 def _required_budget(budget: B.OptimizationBudget) -> None:
@@ -223,6 +226,12 @@ def _config_hash(config: AdamConfig) -> str:
 
 def _initial_state(evaluator: Any, budget: B.OptimizationBudget, config: AdamConfig,
                    seed: int, x0: Any, run_id: str) -> _AdamState:
+    if config.mode == "annealed" and config.n_steps is None:
+        steps = budget.max_generations if budget.max_generations is not None else budget.candidate_evaluations
+        if steps < 1:
+            raise ValueError("annealed mode needs a positive declared n_steps/budget")
+        # Resolve once at initialization, freeze into config and checkpoint hash.
+        config = dataclasses.replace(config, n_steps=steps)
     theta, _, _ = B._options(evaluator, seed, 0.1, x0, None)
     theta = np.asarray(theta, dtype=np.float64)
     return _AdamState(
@@ -233,21 +242,24 @@ def _initial_state(evaluator: Any, budget: B.OptimizationBudget, config: AdamCon
 
 
 def _k_for_step(config: AdamConfig, step: int, budget: B.OptimizationBudget) -> float:
-    total = budget.max_generations if budget.max_generations is not None else budget.candidate_evaluations
-    fraction = 1.0 if total <= 1 else min(1.0, step / (total - 1))
     if config.mode == "fixed":
         return config.k_start
+    total = config.n_steps
+    if total is None:
+        raise ValueError("annealing requires n_steps in the resolved configuration")
+    fraction = 1.0 if total <= 1 else min(1.0, step / (total - 1))
     return config.k_start + fraction * (config.k_end - config.k_start)
 
 
-def _hard_rank(result: C.CandidateResult, policy: HardSelectionPolicy) -> tuple:
+def _hard_rank(result: C.CandidateResult, policy: HardSelectionPolicy) -> Optional[tuple]:
     if not result.valid or result.objective is None:
-        return (1, math.inf, math.inf, math.inf)
+        return None
     required = {name: result.components.get(name)
                 for name in ("gouge_fraction", "residual_fraction", "holder_overlap_fraction")}
     if any(value is None for value in required.values()):
-        # Do not quietly convert unavailable modeled safety information to success.
-        return (1, math.inf, math.inf, math.inf)
+        return None
+    # Do not convert unavailable or invalid modeled safety markers into a best
+    # candidate. Callers must compare finite ranks only, never serialize inf.
     gouge = max(0.0, required["gouge_fraction"] - policy.max_gouge_fraction)
     holder = max(0.0, required["holder_overlap_fraction"] - policy.max_holder_overlap_fraction)
     violations = max(gouge, holder)
@@ -307,6 +319,8 @@ def _restore_state(document: Mapping[str, Any], evaluator: Any, *, budget=None,
             or budget.max_validation_calls < document["validation_calls"]):
         raise B.BlackBoxError("resume cadence must be preserved and used validation budget not reduced")
     raw_config = dict(document["optimizer_config"])
+    if raw_config["mode"] == "annealed" and raw_config.get("n_steps") is None:
+        raise B.BlackBoxError("checkpoint has no declared annealing n_steps; refusing to change it on resume")
     if isinstance(raw_config.get("selection"), Mapping):
         raw_config["selection"] = HardSelectionPolicy(**raw_config["selection"])
     config = AdamConfig(**raw_config)
