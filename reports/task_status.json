@@ -141,11 +141,11 @@
    "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min."
   },
   "T3.4": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T3.4-continuation",
    "blocker": null,
-   "next": null
+   "next": "dev ablations after T4.1b pilot"
   },
   "T3.3": {
    "status": "in_progress",
