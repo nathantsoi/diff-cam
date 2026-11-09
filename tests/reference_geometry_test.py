@@ -4,6 +4,8 @@ import ast
 import dataclasses
 import math
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +31,17 @@ def test_reference_has_no_production_geometry_imports():
                 assert all(alias.name.split(".")[0] not in roots for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 assert node.module.split(".")[0] not in roots
+
+
+def test_fresh_process_loads_no_production_geometry_modules():
+    code = (
+        "import sys; import verification.reference_carve, verification.fixtures; "
+        "bad=[m for m in sys.modules if m == 'simulator' or m.startswith('simulator.') "
+        "or m == 'cam' or m.startswith('cam.')]; "
+        "assert not bad, bad"
+    )
+    completed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+    assert completed.returncode == 0, completed.stderr
 
 
 @pytest.mark.parametrize("fixture", F.all_fixtures(), ids=lambda f: f.fixture_id)
