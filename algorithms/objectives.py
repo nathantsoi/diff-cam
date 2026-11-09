@@ -244,10 +244,13 @@ class CandidateEvaluator:
                 # gouge = removed ∧ T over |initial ∧ T|; residual = remaining ∧ ¬T over |initial ∧ ¬T|.
                 in_target = np.count_nonzero(initial & target)
                 removal_target = np.count_nonzero(initial & ~target)
-                gouge_fraction = (float(np.count_nonzero(initial & target & ~stock) / in_target)
-                                  if in_target else 0.0)
-                residual_fraction = (float(np.count_nonzero(~target & stock) / removal_target)
-                                     if removal_target else 0.0)
+                if not in_target or not removal_target:
+                    # Review M5: csg_metrics reports null for these denominators; never score a degenerate
+                    # task as perfect. ValueError -> invalid CandidateResult with this reason.
+                    raise ValueError("degenerate task: no stock inside the operation target "
+                                     f"({in_target} cells) or empty removal target ({removal_target} cells)")
+                gouge_fraction = float(np.count_nonzero(initial & target & ~stock) / in_target)
+                residual_fraction = float(np.count_nonzero(~target & stock) / removal_target)
                 holder_fraction = float(self.sim.holder_overlap_total(steps))
                 geometry = (self.spec.gouge_weight * gouge_fraction ** 2
                             + self.spec.residual_weight * residual_fraction ** 2)
