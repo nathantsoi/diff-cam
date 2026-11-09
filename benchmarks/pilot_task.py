@@ -652,9 +652,9 @@ def evaluate_nominal(task, motion, parameterization, theta, source_paths,
         },
         "sampled_exclusion": {
             "continuous_volume_mm3": task.operation_target.geometry.params[
-            "continuous_excluded_volume_mm3"
-        ],
-        "declared_grid_volume_mm3": task.operation_target.excluded_volume_mm3,
+                "continuous_excluded_volume_mm3"
+            ],
+            "declared_grid_volume_mm3": task.operation_target.excluded_volume_mm3,
             "grid_volume_mm3": sampled_evaluation["excluded_grid_volume_mm3"],
             "sampling_tolerance_mm3": sampled_evaluation["grid_exclusion_tolerance_mm3"],
         },
