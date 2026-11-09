@@ -173,8 +173,66 @@ def test_genuine_holder_count_unique_volume_and_integral_are_distinct():
     for m, trace in traces.items():
         event = next(e for e in trace.result.events if e.kind == "holder_collision")
         assert event.segment_id == "wide_plunge"
-        assert expected_contact_s - 1e-12 <= event.s <= expected_contact_s + (1 - expected_contact_s)
         assert event.s - 1 / m - 1e-12 <= expected_contact_s <= event.s + 1e-12
+
+
+def test_zero_length_noncutting_screen_is_continuous_in_length():
+    tool = F.flat_tool(3, 6, holder_radius=10)
+    zero = F.make_fixture("zero", [F.feed("zero", (20, 20, 5.5), (20, 20, 5.5))], tool, 0.0, "zero")
+    tiny = F.make_fixture("tiny", [F.feed("tiny", (20, 20, 5.5), (20, 20, 5.5 + 1e-9))], tool, 0.0, "tiny")
+    zero_trace = run_reference(zero.task, zero.motion)
+    tiny_trace = run_reference(tiny.task, tiny.motion)
+    assert zero_trace.result.safety_pass is None
+    assert tiny_trace.result.safety_pass is None
+    assert metric(zero_trace, "min_clearance_lower_bound_mm") < 0
+    assert metric(zero_trace, "min_clearance_lower_bound_mm") == pytest.approx(
+        metric(tiny_trace, "min_clearance_lower_bound_mm"), abs=1e-7)
+    assert metric(zero_trace, "min_clearance_mm") == metric(tiny_trace, "min_clearance_mm") == 0.5
+    assert "centre-sampled only" in zero_trace.result.metrics["min_clearance_mm"].denominator
+
+
+def test_phase_misaligned_rapid_penetration_bound_covers_analytic_value():
+    base = F.make_fixture("graze", [F.rapid("r", (-10, 20, 11.01), (70, 20, 11.01))],
+                          F.flat_tool(3, 20), 0.0, "0.99 mm true penetration")
+    for z_phase in (0.0, 0.13, 0.5, 0.99):
+        phased = F.with_joint_phase(base, (0.0, 0.0, z_phase))
+        phased = F.with_rapid_tolerance(phased, 0.8)
+        trace = run_reference(phased.task, phased.motion, {"max_step_mm": 0.01})
+        upper = metric(trace, "rapid_cutter_penetration_upper_bound_mm")
+        lower = metric(trace, "min_rapid_cutter_clearance_lower_bound_mm")
+        assert upper >= 0.99
+        assert lower == pytest.approx(-upper, abs=1e-9)
+        assert trace.result.safety_pass is not True
+        assert "whole-cell" in trace.result.discretization["clearance_metrics"]
+
+
+def test_phase_boundary_noncutting_clearance_uses_lower_bound():
+    base = F.make_fixture("hg", [F.feed("f", (-15, 20, 7.01), (75, 20, 7.01))],
+                          F.flat_tool(3, 4, holder_radius=10), 0.0, "0.99 mm holder intrusion")
+    phased = F.with_joint_phase(base, (0.0, 0.0, 0.99))
+    trace = run_reference(phased.task, phased.motion, {"max_step_mm": 0.01, "compute_bounds": False})
+    assert metric(trace, "min_clearance_lower_bound_mm") < 0
+    assert trace.result.safety_pass is not True
+    # Preserve the centre-only diagnostic separately from the solved whole-cell bound.
+    assert metric(trace, "min_clearance_mm") == 1.0
+    assert "centre-sampled only" in trace.result.metrics["min_clearance_mm"].denominator
+
+
+def test_stock_beyond_grid_and_disabled_screen_cannot_certify_safety():
+    fixture = F.plunge_above()
+    task = dataclasses.replace(fixture.task, grid=dataclasses.replace(fixture.task.grid, shape=(5, 5, 5)))
+    result = run_reference(task, fixture.motion).result
+    assert result.coverage == C.Coverage.UNSUPPORTED
+    assert result.safety_pass is None
+    assert "beyond represented grid" in result.coverage_reasons[0]
+
+    fixture = F.retract_from_own_slot()
+    unknown = run_reference(fixture.task, fixture.motion)
+    upper = metric(unknown, "rapid_cutter_penetration_upper_bound_mm")
+    adjusted = F.with_rapid_tolerance(fixture, upper)
+    disabled = run_reference(adjusted.task, adjusted.motion, {"safety_screen": False}).result
+    assert disabled.safety_pass is None
+    assert "safety_screen disabled" in disabled.coverage_reasons[0]
 
 
 def test_rapid_crosses_solid_without_carving():
@@ -223,15 +281,17 @@ def test_vertical_retract_is_uncertain_at_zero_and_certified_at_penetration_boun
 
 def test_rapid_penetration_tolerance_is_phase_stable_and_deep_penetration_still_fails():
     fixture = F.retract_from_own_slot()
-    baseline = run_reference(fixture.task, fixture.motion)
-    rho = baseline.result.discretization["cell_half_diagonal_mm"]
-    band = rho + max(record["temporal_hausdorff_mm"]
-                     for record in baseline.result.discretization["segments"]
-                     if record["kind"] == "rapid")
     phased = F.with_joint_phase(fixture, (0.26, 0.58, 0.74))
-    for case in (fixture, phased):
+    cases = (fixture, phased)
+    uppers = []
+    for case in cases:
         uncertain = run_reference(case.task, case.motion)
         assert uncertain.result.safety_pass is None
+        uppers.append(metric(uncertain, "rapid_cutter_penetration_upper_bound_mm"))
+    # Partially carved boundary cells can hold stock beyond their removed centre.
+    # The complete whole-cell bound therefore supersedes rho+delta_t alone.
+    band = max(uppers)
+    for case in cases:
         adjusted = F.with_rapid_tolerance(case, band)
         certified = run_reference(adjusted.task, adjusted.motion)
         assert certified.result.safety_pass is True

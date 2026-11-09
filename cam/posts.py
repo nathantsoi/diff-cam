@@ -15,11 +15,13 @@ Register additional machines by adding a :class:`PostProcessor` subclass to
 CLI ``--post`` flag) picks them up automatically.
 """
 
+import math
 import numpy as np
 
 from benchmarks.contracts import (
     ArcDirection,
     ArcPlane,
+    ARC_RADIUS_TOL_MM,
     Dialect,
     Frame,
     MotionPlan,
@@ -52,8 +54,9 @@ def _feed_out(feed_mm_per_min: float, config: MachineConfig) -> float:
 # Formatting helpers (shared by all posts)
 # ---------------------------------------------------------------------------
 def _fmt(value: float, precision: int) -> str:
-    """Format one coordinate value, trimming trailing zeros but keeping it
-    unambiguous (``0`` stays ``0``)."""
+    """Format one finite coordinate value, trimming zeros without losing its meaning."""
+    if not np.isfinite(value):
+        raise ValueError(f"numeric G-code words must be finite; got {value!r}")
     s = f"{value:.{precision}f}"
     if "." in s:
         s = s.rstrip("0").rstrip(".")
@@ -67,6 +70,12 @@ def _axis_words(point_mm, precision: int) -> str:
         f"Y{_fmt(y, precision)} "
         f"Z{_fmt(z, precision)}"
     )
+
+
+def _posted_work_vector(point_work, config: MachineConfig, precision: int):
+    """Coordinates exactly as a parser receives them for this post precision."""
+    converted = _len_out(np.asarray(point_work, dtype=np.float64), config)
+    return np.asarray([float(_fmt(float(value), precision)) for value in converted], dtype=np.float64)
 
 
 # ---------------------------------------------------------------------------
@@ -87,6 +96,8 @@ class PostProcessor:
             raise ValueError(f"positions must be (T, 3); got {positions.shape}")
         if len(positions) == 0:
             raise ValueError("positions is empty")
+        if not np.isfinite(positions).all():
+            raise ValueError("positions must contain only finite values")
         return positions
 
 
@@ -227,6 +238,68 @@ class UnsupportedPostError(ValueError):
     """A motion/task feature that the requested NC dialect cannot preserve."""
 
 
+def _arc_offset_words(start_work, end_work, centre_work, plane, config, precision, segment_id):
+    """Quantize arc offsets, allowing a bounded center correction.
+
+    The emitted centre-remapping is reconstructed from the POSTED start. Only
+    the nearest I/J/K offset grid points plus/minus one code step are considered.
+    Endpoints, direction, turn count and the 1e-3 mm typed-arc radius tolerance
+    are never changed. If nearest-neighbor correction cannot preserve these
+    constraints, the arc is refused with UnsupportedPostError instead of being
+    silently turned into a different-radius/invalid path.
+    """
+    from .gcode_parser import _typed_plane_axes
+
+    start_out = _posted_work_vector(start_work, config, precision)
+    end_out = _posted_work_vector(end_work, config, precision)
+    if math.dist(start_work, end_work) > 0 and np.array_equal(start_out, end_out):
+        raise UnsupportedPostError(
+            f"segment {segment_id}: distinct arc endpoints collapse to the same posted point at "
+            f"{config.units} precision {precision}; rejecting a partial arc that would become a full turn"
+        )
+    centre_out = _len_out(np.asarray(centre_work, dtype=np.float64), config)
+    a, b, _ = _typed_plane_axes(plane)
+    axis_names = {0: "I", 1: "J", 2: "K"}
+    unit_to_mm = 25.4 if config.units == "inch" else 1.0
+    step = 10.0 ** (-precision)
+    native_mean_radius = 0.5 * (
+        np.linalg.norm(np.asarray(start_work)[[a, b]] - np.asarray(centre_work)[[a, b]])
+        + np.linalg.norm(np.asarray(end_work)[[a, b]] - np.asarray(centre_work)[[a, b]])
+    )
+    best = (math.inf, math.inf, math.inf, [])
+    for dx in (-1, 0, 1):
+        for dy in (-1, 0, 1):
+            centre = start_out.copy()
+            candidate = []
+            for axis_index, shift in zip((a, b), (dx, dy)):
+                offset = centre_out[axis_index] - start_out[axis_index] + shift * step
+                word = _fmt(offset, precision)
+                centre[axis_index] += float(word)
+                candidate.append(f"{axis_names[axis_index]}{word}")
+            r_start = np.linalg.norm((start_out[[a, b]] - centre[[a, b]]) * unit_to_mm)
+            r_end = np.linalg.norm((end_out[[a, b]] - centre[[a, b]]) * unit_to_mm)
+            if min(r_start, r_end) <= ARC_RADIUS_TOL_MM:
+                continue  # a degenerate radius-zero post is not a valid arc
+            radius_error = abs(r_start - r_end)
+            mean_error = abs(0.5 * (r_start + r_end) - native_mean_radius)
+            score = (radius_error, mean_error, dx * dx + dy * dy)
+            if score < best[:3]:
+                best = (*score, candidate)
+    error, _, _, words = best
+    if not words:
+        raise UnsupportedPostError(
+            f"segment {segment_id}: post quantization collapses the arc to zero/near-zero radius at "
+            f"{config.units} precision {precision}; increase post precision or reject this incompatible arc"
+        )
+    if error > ARC_RADIUS_TOL_MM + 1e-12:
+        raise UnsupportedPostError(
+            f"segment {segment_id}: no nearest-grid arc offset preserves radii at {config.units} "
+            f"precision {precision} (best error {error:g} mm > {ARC_RADIUS_TOL_MM:g} mm). "
+            "Increase post precision or reject this incompatible arc; it was not emitted"
+        )
+    return words
+
+
 def _validate_typed_post(plan: MotionPlan, task: TaskSpec, dialect: Dialect) -> None:
     if dialect not in task.motion_semantics.dialects:
         raise UnsupportedPostError(f"dialect {dialect.value!r} is disabled by this TaskSpec")
@@ -257,7 +330,6 @@ def _typed_motion_lines(plan: MotionPlan, task: TaskSpec, config: MachineConfig)
     output_plane = ArcPlane.XY
     lines: list[str] = []
     plane_codes = {ArcPlane.XY: "G17", ArcPlane.XZ: "G18", ArcPlane.YZ: "G19"}
-    offset_codes = {"X": "I", "Y": "J", "Z": "K"}
     precision = config.precision
 
     for segment in plan.segments:
@@ -278,13 +350,10 @@ def _typed_motion_lines(plan: MotionPlan, task: TaskSpec, config: MachineConfig)
             end_work = inverse.apply(segment.end_mm)
             centre_work = inverse.apply(arc.centre_mm)
             start_work = inverse.apply(segment.start_mm)
-            end_out = _len_out(np.asarray(end_work, dtype=np.float64), config)
+            end_out = _posted_work_vector(end_work, config, precision)
             words = [_axis_words(end_out, precision)]
-            a, b, _ = _typed_plane_axes(work_plane)
-            for axis_index in (a, b):
-                axis = "XYZ"[axis_index]
-                value = _len_out(centre_work[axis_index] - start_work[axis_index], config)
-                words.append(f"{offset_codes[axis]}{_fmt(value, precision)}")
+            words.extend(_arc_offset_words(start_work, end_work, centre_work,
+                                           work_plane, config, precision, segment.id))
             if arc.turns:
                 words.append(f"P{arc.turns + 1}")
             words.append(f"F{_fmt(_feed_out(segment.feed_mm_s * 60.0, config), precision)}")

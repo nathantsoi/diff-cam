@@ -217,6 +217,29 @@ def test_per_parameter_bounds_accept_matrix_or_three_column_vector():
     assert DeltaResidual(np.zeros((2, 3)), scale_mm=2, bounds=None).in_bounds(np.full(6, 1e30))
 
 
+@pytest.mark.parametrize("mode", ["raw", "spline", "absolute"])
+def test_bound_array_length_uses_free_parameter_count(mode):
+    if mode == "raw":
+        parameterization = DeltaResidual(np.zeros((4, 3)), 1.0, anchor_end=True)
+    elif mode == "spline":
+        parameterization = DeltaSpline(np.zeros((5, 3)), 1.0, num_control_points=4, anchor_end=True)
+    else:
+        parameterization = AbsolutePositionResidual(np.zeros((4, 3)), 1.0, anchor_end=True)
+    count = parameterization.num_params
+    lower = -np.arange(1, count + 1, dtype=float)
+    upper = np.arange(1, count + 1, dtype=float)
+    if mode == "raw":
+        parameterization = DeltaResidual(np.zeros((4, 3)), 1.0, bounds=(lower, upper), anchor_end=True)
+    elif mode == "spline":
+        parameterization = DeltaSpline(np.zeros((5, 3)), 1.0, num_control_points=4,
+                                       bounds=(lower, upper), anchor_end=True)
+    else:
+        parameterization = AbsolutePositionResidual(np.zeros((4, 3)), 1.0, bounds=(lower, upper), anchor_end=True)
+    np.testing.assert_array_equal(parameterization.bounds[0], lower)
+    np.testing.assert_array_equal(parameterization.bounds[1], upper)
+    assert parameterization.in_bounds(lower)
+
+
 @pytest.mark.parametrize("steps,controls,match", [
     (4, 3, "K"), (4, 5, "K"), (2, 4, "K"), (4, 4.0, "K"), (0, 4, "T"),
 ])

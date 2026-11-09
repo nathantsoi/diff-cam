@@ -71,11 +71,11 @@ def _strip_comments(text: str) -> str:
 
 
 def _plane_axes(plane):
-    """Return the two in-plane axis indices and the out-of-plane axis index."""
+    """Shared right-handed arc bases: XY=(X,Y), XZ=(Z,X), YZ=(Y,Z)."""
     if plane == PLANE_XY:
         return 0, 1, 2
     if plane == PLANE_XZ:
-        return 0, 2, 1
+        return 2, 0, 1
     return 1, 2, 0  # PLANE_YZ
 
 
@@ -141,6 +141,15 @@ def parse_gcode(text: str, config: MachineConfig = MachineConfig()):
     Returns segments in execution order with all coordinates in the unit cube.
     """
     text = _strip_comments(text)
+    # The permissive legacy tokenizer intentionally ignores setup words it does
+    # not model, but it must never discard NaN/Inf numbers as if no move existed.
+    bad_number = re.search(
+        r"[A-Za-z]\s*(?:nan|[+-]?inf(?:inity)?)(?![0-9A-Za-z_])",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if bad_number:
+        raise ValueError(f"non-finite numeric NC word near: {bad_number.group(0)!r}")
 
     pos_mm = np.zeros(3, dtype=np.float64)   # current position, machine mm
     have_pos = False
@@ -280,10 +289,9 @@ _STRICT_WORD_RE = re.compile(r"([A-Za-z])\s*([-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]
 
 def _strict_line_words(raw: str, line: int) -> list[tuple[str, float]]:
     """Tokenise one complete block, retaining no unexamined trailing text."""
-    text = raw.split(";", 1)[0]
     chars: list[str] = []
     depth = 0
-    for char in text:
+    for char in raw:
         if char == "(":
             if depth:
                 raise _nc_error(line, "nested parenthesised comments are unsupported", True)
@@ -292,6 +300,8 @@ def _strict_line_words(raw: str, line: int) -> list[tuple[str, float]]:
             if not depth:
                 raise _nc_error(line, "unmatched closing comment delimiter")
             depth = 0
+        elif char == ";" and not depth:
+            break  # start-of-line or trailing executable comment, not inside ( ... )
         elif not depth:
             chars.append(char)
     if depth:
@@ -599,6 +609,8 @@ def parse_motion_plan(
                 if float(mode) in gcodes:
                     motion_mode = mode
             if 43.0 in gcodes:
+                if "H" not in block:
+                    raise _nc_error(line, "G43 requires an explicit H register (e.g. G43 H1)")
                 _integer_word(block, "H", line)
                 length_offset = True
             if 49.0 in gcodes:
@@ -614,6 +626,28 @@ def parse_motion_plan(
             axis_present = any(axis in block for axis in ("X", "Y", "Z"))
             offsets_present = any(word in block for word in ("I", "J", "K"))
             arc_words_present = offsets_present or "R" in block or "P" in block
+            # G49 is emitted in a no-motion safety prologue even when the declared
+            # mode is G43; G43 re-establishes it before motion. A no-motion register
+            # declaration does not alter trajectory, but every MOTION block must
+            # match the task's single declared initial state.
+            if (axis_present or arc_words_present) and length_offset != task.initial_state.length_offset_applied:
+                raise _nc_error(
+                    line,
+                    f"G43/G49 changes tool-length state to {length_offset}, incompatible with "
+                    f"task.initial_state.length_offset_applied={task.initial_state.length_offset_applied}; "
+                    "intermediate register changes outside the single declared initial state are unsupported",
+                    True,
+                )
+            requested_offset_commands = {43.0, 49.0}.intersection(gcodes)
+            expected_offset_command = {43.0} if task.initial_state.length_offset_applied else {49.0}
+            if ((axis_present or arc_words_present) and requested_offset_commands
+                    and requested_offset_commands != expected_offset_command):
+                raise _nc_error(
+                    line,
+                    "tool-length-changing G43/G49 block with motion cannot represent the one declared initial state; "
+                    f"motion may contain only {sorted(expected_offset_command)} for this task",
+                    True,
+                )
             if not axis_present and not arc_words_present:
                 if 2 in mcodes or 30 in mcodes:
                     program_ended = True

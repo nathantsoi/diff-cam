@@ -231,7 +231,13 @@ class _LinearDeltaParameterization:
                 raise ValueError(f"bounds {name}: expected a scalar or flattened numeric array") from exc
             if array.ndim == 0:
                 result = np.full(self.num_params, float(array), dtype=np.float64)
-            elif array.size == self.num_params or array.shape == (3,):
+            if array.ndim == 0:
+                result = np.full(self.num_params, float(array), dtype=np.float64)
+            elif array.size == self.num_params:
+                # Free-control count can differ from the raw trajectory length
+                # (anchored/spline/absolute modes), so reshape by num_params.
+                result = array.reshape(-1).copy()
+            elif array.shape == (3,):
                 try:
                     result = np.broadcast_to(array, self.parameter_shape).reshape(-1).copy()
                 except ValueError as exc:

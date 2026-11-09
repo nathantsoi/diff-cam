@@ -38,7 +38,7 @@
         },
         {
           "collision_sample_count": 0.0,
-          "safety_pass": true,
+          "safety_pass": null,
           "sampled_removed_mm3": 175.0,
           "subdivisions": 4,
           "time_integrated_overlap_mm3_s": 0.0,
@@ -607,7 +607,7 @@
     }
   ],
   "contracts_schema": "diffcam-contracts/1.1",
-  "evaluator_revision": "reference_carve/1+sha256:27ecab210e0de35beef0484ce08455ccb7cc9fa19f58b1d4373988dfe852725b",
+  "evaluator_revision": "reference_carve/1+sha256:5446e7cadf8bc256da3e452e4ef4c15e704243e203bd83bd4e296f4b123f0b01",
   "notes": [
     "Analytic continuous volumes are independent of sampled voxel volumes.",
     "lower/station_upper/upper brackets concern removed stock, not collision contact volumes.",
@@ -617,10 +617,12 @@
     {
       "case": "retract_zero",
       "collision_sample_count": 0.0,
+      "min_clearance_lower_bound_mm": 15.017949192431123,
       "min_clearance_mm": 17.000774512915278,
+      "min_rapid_cutter_clearance_lower_bound_mm": -3.567837245195782,
       "min_rapid_cutter_clearance_mm": 0.16227766016837952,
       "motion_hash": "sha256:149228fde4664979e2470179cc9270724d1969af7976525d0b95ba9fe4ed47a5",
-      "penetration_upper_bound_mm": 1.8197731474004977,
+      "penetration_upper_bound_mm": 3.567837245195782,
       "rapid_penetration_mm": 0.0,
       "removed_mm3": 64.0,
       "safety_pass": null,
@@ -629,34 +631,40 @@
     {
       "case": "retract_at_own_upper_bound",
       "collision_sample_count": 0.0,
+      "min_clearance_lower_bound_mm": 15.017949192431123,
       "min_clearance_mm": 17.000774512915278,
+      "min_rapid_cutter_clearance_lower_bound_mm": -3.567837245195782,
       "min_rapid_cutter_clearance_mm": 0.16227766016837952,
       "motion_hash": "sha256:149228fde4664979e2470179cc9270724d1969af7976525d0b95ba9fe4ed47a5",
-      "penetration_upper_bound_mm": 1.8197731474004977,
-      "rapid_penetration_mm": 1.8197731474004977,
+      "penetration_upper_bound_mm": 3.567837245195782,
+      "rapid_penetration_mm": 3.567837245195782,
       "removed_mm3": 64.0,
       "safety_pass": true,
-      "task_hash": "sha256:81be5dbf7cbbaa1bf8338d232b82d76136e5162e47efe9c29765c335b650f37c"
+      "task_hash": "sha256:26c6778fe9afc4993c7d9d278f41aff5527d4fca3d7357edd4ab67d542476e53"
     },
     {
       "case": "retract_band_phase_0",
       "collision_sample_count": 0.0,
+      "min_clearance_lower_bound_mm": 15.017949192431123,
       "min_clearance_mm": 17.000774512915278,
+      "min_rapid_cutter_clearance_lower_bound_mm": -3.567837245195782,
       "min_rapid_cutter_clearance_mm": 0.16227766016837952,
       "motion_hash": "sha256:149228fde4664979e2470179cc9270724d1969af7976525d0b95ba9fe4ed47a5",
-      "penetration_upper_bound_mm": 1.8197731474004977,
-      "rapid_penetration_mm": 1.9820508075688772,
+      "penetration_upper_bound_mm": 3.567837245195782,
+      "rapid_penetration_mm": 3.653894190298156,
       "removed_mm3": 64.0,
       "safety_pass": true,
-      "task_hash": "sha256:bedab419b1be56b784f254a533e49380be282303860462b329361fdf7a944694"
+      "task_hash": "sha256:6c27a3ab6dd783d9c435b443010ea8f5ad950bfaa1258c945434805fd52ae5ec"
     },
     {
       "case": "retract_zero_phase_fractional",
       "collision_sample_count": 0.0,
+      "min_clearance_lower_bound_mm": 13.757949192431125,
       "min_clearance_mm": 17.740748002415092,
+      "min_rapid_cutter_clearance_lower_bound_mm": -3.653894190298156,
       "min_rapid_cutter_clearance_mm": 0.16291005246750334,
       "motion_hash": "sha256:9d25c8594ebec7f0c295cb6955691300abc16f8d2da84b0c9bf22213821603d3",
-      "penetration_upper_bound_mm": 1.8191407551013739,
+      "penetration_upper_bound_mm": 3.653894190298156,
       "rapid_penetration_mm": 0.0,
       "removed_mm3": 112.0,
       "safety_pass": null,
@@ -665,26 +673,30 @@
     {
       "case": "retract_band_phase_fractional",
       "collision_sample_count": 0.0,
+      "min_clearance_lower_bound_mm": 13.757949192431125,
       "min_clearance_mm": 17.740748002415092,
+      "min_rapid_cutter_clearance_lower_bound_mm": -3.653894190298156,
       "min_rapid_cutter_clearance_mm": 0.16291005246750334,
       "motion_hash": "sha256:9d25c8594ebec7f0c295cb6955691300abc16f8d2da84b0c9bf22213821603d3",
-      "penetration_upper_bound_mm": 1.8191407551013739,
-      "rapid_penetration_mm": 1.9820508075688772,
+      "penetration_upper_bound_mm": 3.653894190298156,
+      "rapid_penetration_mm": 3.653894190298156,
       "removed_mm3": 112.0,
       "safety_pass": true,
-      "task_hash": "sha256:f11c24edbaf98091fca7e1f1e635c01597f1314284eaaf7712047ab3c8667f80"
+      "task_hash": "sha256:e612311d095c7181e5733128f860d6b6fde8f06745dafc36b60adcb579179d99"
     },
     {
       "case": "rapid_through_solid_at_retract_upper_bound",
       "collision_sample_count": 101.0,
+      "min_clearance_lower_bound_mm": -3.044550807568877,
       "min_clearance_mm": -1.0,
+      "min_rapid_cutter_clearance_lower_bound_mm": -3.044550807568877,
       "min_rapid_cutter_clearance_mm": -1.0,
       "motion_hash": "sha256:4b926a7c00c5b4255854a93395a03d4b4c3bcc56827af4e7fe9378d5822af9db",
       "penetration_upper_bound_mm": 3.044550807568877,
-      "rapid_penetration_mm": 1.8197731474004977,
+      "rapid_penetration_mm": 3.567837245195782,
       "removed_mm3": 0.0,
       "safety_pass": false,
-      "task_hash": "sha256:d3017fb3a15fa314b64a9e0d5e528c4926fe969c6d23d27e13cb811ae189783d"
+      "task_hash": "sha256:bd77b17cc00c77f7e775f59cce6e4c188e00c25694279967562cd1762a41bc98"
     }
   ],
   "schema": "diffcam-reference-convergence/1.1"

@@ -6,6 +6,45 @@ from simulator.simulator_utils import *
 from cam.units import inch_to_mm, ipm_to_mm_per_s
 
 
+# Taichi 1.7.4 lifecycle guard, characterized in holder_chronology_test. On
+# x64, repeated CSG construction segfaults on the 13th instance's
+# from_numpy launch at both fine and coarse grid sizes. Cached-kernel counts
+# differ by case (48 and 60 immediately before index 12), so this is explicitly
+# an instance-lifetime guard, NOT a claimed portable kernel-count limit or a
+# dense-stock memory bound. A new ti.init() runtime resets the count because it
+# invalidates all prior fields; no reset is performed on the user's behalf.
+_TAICHI_MAX_CSG_INSTANCES_PER_RUNTIME = 12
+_TAICHI_RUNTIME_CSG_STATE = {"identity": None, "instances": 0}
+
+
+def _guard_taichi_instance_lifecycle() -> None:
+    from taichi.lang import impl as taichi_impl
+
+    runtime = taichi_impl.get_runtime()
+    if runtime is None:
+        raise RuntimeError(
+            "CSGSimulatorDelta(init_taichi=False) needs an initialized Taichi "
+            "runtime; use init_taichi=True in a fresh process instead"
+        )
+    identity = id(runtime)
+    state = _TAICHI_RUNTIME_CSG_STATE
+    if state["identity"] != identity:
+        state["identity"] = identity
+        state["instances"] = 0
+    if state["instances"] >= _TAICHI_MAX_CSG_INSTANCES_PER_RUNTIME:
+        backend = taichi_impl.current_cfg().arch
+        raise RuntimeError(
+            f"Taichi simulator instance lifecycle budget: 12 instances on {backend}. "
+            "The 13th repeated CSG allocation reproducibly segfaults in "
+            "from_numpy on Taichi 1.7.4/x64, independent of stock-grid size. "
+            "Reuse existing fields with reset_candidate_state(), or isolate "
+            "additional instances in a fresh process with init_taichi=True. "
+            "This guard does not claim dense-stock RAM is consumed and does not "
+            "call ti.init(), which would invalidate existing fields."
+        )
+    state["instances"] += 1
+
+
 @ti.data_oriented
 class CSGSimulatorDelta:
     """
@@ -88,6 +127,9 @@ class CSGSimulatorDelta:
                 ti.init(arch=ti.cpu, debug=False, default_fp=ti.f32, offline_cache=False)
             ti.set_logging_level(ti.WARN)
 
+        _guard_taichi_instance_lifecycle()
+        if max_steps < 0:
+            raise ValueError("max_steps must be non-negative")
         self.max_steps = max_steps
 
         # ---- Stock box (the normalized cube) & machine work volume -----------
@@ -122,6 +164,8 @@ class CSGSimulatorDelta:
                 "stock_size_in (or stock_size_mm) is required; the normalized "
                 "cube [0,1]^3 is the stock bounding box, not the work volume"
             )
+        if not np.all(np.isfinite((sx, sy, sz))) or min(sx, sy, sz) <= 0.0:
+            raise ValueError("stock size components must be finite and positive")
         self.Lx, self.Ly, self.Lz = sx, sy, sz          # stock box mm (x, y, z up)
 
         # Work origin (G54 offset): the stock's TOP-CENTRE in machine coords.
@@ -137,12 +181,30 @@ class CSGSimulatorDelta:
         # voxels along the stock's longest axis. The other axes get round(L/v)
         # voxels so every voxel is a physical cube of side ``v`` mm.
         if voxel_size_mm is not None:
+            if not np.isfinite(voxel_size_mm) or float(voxel_size_mm) <= 0.0:
+                raise ValueError("voxel_size_mm must be finite and positive")
             self.v = float(voxel_size_mm)               # mm per voxel (cube side)
         else:
+            if not np.isfinite(resolution) or float(resolution) <= 0.0:
+                raise ValueError("resolution must be finite and positive")
             self.v = max(sx, sy, sz) / float(resolution)
         self.Nx = max(1, int(round(sx / self.v)))
         self.Ny = max(1, int(round(sy / self.v)))
         self.Nz = max(1, int(round(sz / self.v)))
+        # Rounded counts are only valid if the ACTUAL physical pitch on every
+        # axis remains cubic. Squaring lengths by an unrelated nominal voxel
+        # size silently turns a flat cutter into a distorted one. Fail early
+        # rather than accepting e.g. (40,24,16) mm at a nominal 3 mm pitch
+        # (actual pitches 40/13,24/8,16/5, including 3.2 mm on Z).
+        actual_pitch_mm = np.asarray((sx / self.Nx, sy / self.Ny, sz / self.Nz))
+        if not np.allclose(actual_pitch_mm, self.v, rtol=2e-6, atol=1e-8):
+            raise ValueError(
+                "rounded grid counts make physical voxels anisotropic; "
+                f"actual per-axis pitches are {actual_pitch_mm.tolist()} mm, "
+                f"nominal is {self.v} mm. Choose voxel_size_mm/resolution that "
+                "divides every physical stock axis (within 2e-6 relative tolerance) "
+                "rather than silently stretching cutter or stock coordinates."
+            )
         self.resolution = max(self.Nx, self.Ny, self.Nz)  # voxels on longest axis
 
         # Reachability: the stock (and, if its origin is known, its placement)
@@ -407,8 +469,9 @@ class CSGSimulatorDelta:
         # with the squared depth the holder pushes into remaining stock. This is
         # what lets the optimizer bring the holder right up to the surface (so the
         # cutter removes the most material) and only resists actual contact.
-        # holder_margin (in unit-cube length) requests a standoff: the barrier
+        # holder_margin (VOXELS) requests a conservative standoff: the barrier
         # starts engaging when stock comes within holder_margin of the holder.
+        # Physical clearance standoff = holder_margin * v (physical voxel mm).
         self.holder_penalty_weight = ti.field(dtype=ti.f32, shape=())
         self.holder_penalty_weight[None] = 50.0
         self.holder_margin = ti.field(dtype=ti.f32, shape=())
@@ -706,7 +769,7 @@ class CSGSimulatorDelta:
         # b(lambda) <= z <= b(lambda)+h intersected with lambda in [0,1].
         lo = 0.0
         hi = 1.0
-        if ti.abs(dz) > 1e-12:
+        if dz != 0.0:  # no arbitrary "near vertical" epsilon gate
             at_base = (pv.z - a.z) / dz
             at_top = (pv.z - h - a.z) / dz
             lo = ti.max(0.0, ti.min(at_base, at_top))
@@ -726,7 +789,7 @@ class CSGSimulatorDelta:
         dxy = ti.Vector([b.x - a.x, b.y - a.y])
         dxy_len2 = dxy.dot(dxy)
         projection = 0.0
-        if dxy_len2 > 1e-20:
+        if dxy_len2 > 0.0:  # only exact XY degeneracy bypasses projection
             projection = pa.dot(dxy) / dxy_len2
         if lo <= hi:
             # Restricted nearest centre is exact for fixed-height membership.
@@ -745,18 +808,39 @@ class CSGSimulatorDelta:
         return horizontal, vertical
 
     @ti.func
+    def _tool_sweep_smooth_z(self, p, t, height_vox: ti.f32):
+        """Smooth Z surrogate, deliberately different from the hard score.
+
+        The hard vertical term selects a closest cap with max(), which creates
+        an interior absolute-value kink at equal cap distances. This surrogate
+        instead uses a centred norm of the moving Z interval with a smooth norm
+        of the segment's |dz| displacement. Coincident poses/cap midpoints no
+        longer add an undocumented one-sided derivative branch. This is not
+        used by hard membership and need not equal its signed value.
+        """
+        pv = self._vox(p)
+        a = self._vox(self.tool_pos[t])
+        b = self._vox(self.tool_pos[t + 1])
+        displacement = b.z - a.z
+        # min(a,b)+max(a,b)=a+b, so this is the interval centre without abs().
+        centre = 0.5 * (a.z + b.z + height_vox)
+        extent = height_vox + ti.sqrt(displacement * displacement + 1e-8)
+        return ti.sqrt((pv.z - centre) ** 2 + 1e-8) - 0.5 * extent
+
+    @ti.func
     def tool_sdf(self, p, t):
         """SEPARATE differentiable surrogate for the swept flat cutter.
 
         The hard sign certificate lives in ``tool_sdf_sharp``. This method uses
-        its horizontal/vertical terms but smooth-CSG combinations for training;
-        it is not the hard Euclidean SDF and need not preserve its sign/value
-        near boundaries. Interval clamps/endpoints remain nonsmooth even though
-        the CSG composition is smoothed. Gradient tests therefore stay away
-        from those gates. Radius/height in mm become isotropic voxel units.
+        the restricted horizontal term but a separately centred, smooth Z norm
+        plus smooth-CSG combinations. It is not the hard Euclidean SDF and need
+        not preserve its sign/value near boundaries. Interval clamps/endpoints
+        in XY remain nonsmooth; the hard max-based vertical cap kink is not
+        inherited. Gradient tests stay away from the remaining projection gates. Radius/height in mm become isotropic voxel units.
         """
         kv = self.k[None] / self.k_ref
         d_xy, d_z = self._tool_sweep_terms(p, t, self.tool_height[None] / self.v, True)
+        d_z = self._tool_sweep_smooth_z(p, t, self.tool_height[None] / self.v)
         d_xy_pos = smooth_max(d_xy, 0.0, kv)
         d_z_pos = smooth_max(d_z, 0.0, kv)
         outside = ti.sqrt(d_xy_pos * d_xy_pos + d_z_pos * d_z_pos + 1e-8)
@@ -784,6 +868,7 @@ class CSGSimulatorDelta:
         """
         kv = self.k[None] / self.k_ref               # smoothness in voxel space
         d_xy, d_z = self._tool_sweep_terms(p, t, self._tool_cut_h_vox(), True)
+        d_z = self._tool_sweep_smooth_z(p, t, self._tool_cut_h_vox())
 
         d_xy_pos = smooth_max(d_xy, 0.0, kv)
         d_z_pos = smooth_max(d_z, 0.0, kv)
@@ -793,13 +878,13 @@ class CSGSimulatorDelta:
 
     @ti.func
     def holder_sdf(self, p, t):
-        """Smoothed swept-cylinder SDF for the tool holder over segment t (voxels).
+        """Smoothed conservative holder-surrogate over whole segment ``t``.
 
-        Geometry mirrors ``tool_sdf`` (a capsule axis in XY swept from
-        tool_pos[t] to tool_pos[t+1]) but with the holder radius and a z-range
-        that begins at the TOP of the tool. The holder therefore tracks the
-        tool laterally while riding above the cutting flutes. Differentiable in
-        tool_pos (hence tool_delta), so the collision penalty has gradients.
+        This is not a chronological holder collision field. It uses a holder
+        radius with a z-range above the cutting-flute height, then takes the
+        conservative union of start/end Z spans. Differentiable with respect
+        to tool_pos/tool_delta for the penalty screen. Physical non-cutting
+        shank length or a distinct holder_bottom is not modeled.
         """
         r = self.holder_radius[None] / self.v        # voxels
         h = self.holder_height[None] / self.v        # voxels
@@ -1232,17 +1317,22 @@ class CSGSimulatorDelta:
     def compute_holder_penalty(self, t_start: ti.i32, T: ti.i32):
         """Differentiable holder-collision PENETRATION BARRIER added to ``self.loss``.
 
-        For every cut t the holder rides above the tool along segment t. For each
-        remaining-material voxel we measure how far the holder pushes INTO it:
+        For every cut t the holder rides above the tool along segment t. The
+        occupancy source is **stock[t], the pre-segment remaining stock**. The
+        holder uses its unioned whole-segment pose interval, so this is a
+        CONSERVATIVE WHOLE-SEGMENT training screen, not an exact chronological
+        collision claim. Material that the current cutter will remove cannot be
+        credited to the holder on the same segment. Temporal refinement reduces
+        (does not necessarily eliminate) conservative false positives.
+
+        For each pre-segment material voxel:
 
             penetration = relu( (holder_margin - holder_sdf) * scale )
 
-        This is exactly zero -- with zero gradient -- whenever the holder has
-        clearance (holder_sdf >= holder_margin), so the optimizer is free to
-        bring the holder right down to the surface and remove the most material.
-        It only grows (quadratically) once the holder actually penetrates the
-        stock, pushing the holder back out. Gated by stock occupancy so only
-        contact with REMAINING material is penalized (empty space is free).
+        This is zero with zero gradient when conservative clearance holds, and
+        quadratic with penetration. holder_sdf and the margin are in voxels;
+        physical standoff = margin*v mm. The non-cutting shank interval from
+        contract ToolAssembly is not modeled (see handoff geometry limitations).
 
         This is a one-sided barrier, not a proximity field: a high weight makes
         it a near-hard constraint that stays inactive until violated, instead of
@@ -1260,7 +1350,7 @@ class CSGSimulatorDelta:
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
-            stock_d = self.stock[t + 1, i, j, k]
+            stock_d = self.stock[t, i, j, k]  # pre-cut conservative screen
             holder_d = self.holder_sdf(p, t)
 
             sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
@@ -1707,7 +1797,9 @@ class CSGSimulatorDelta:
             )
             tool_d = self.tool_sdf_sharp_tip(p, t)
             tool_occ = 0.0
-            if tool_d < 0.0:
+            # Feed removal uses a CLOSED swept set (score <= 0), matching
+            # apply_cut_hard. Exact-tip-tangent cells are engaged, never air.
+            if tool_d <= 0.0:
                 tool_occ = 1.0
             pre = 0.0
             if self.stock[t, i, j, k] < 0.0:
@@ -1866,7 +1958,7 @@ class CSGSimulatorDelta:
         # Holder barrier + air-cut penalty summed over every segment.
         for t, i, j, k in ti.ndrange(T, self.Nx, self.Ny, self.Nz):
             p = ti.Vector([(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz])
-            stock_d = self.stock[t + 1, i, j, k]
+            stock_d = self.stock[t, i, j, k]  # pre-cut conservative screen
             holder_d = self.holder_sdf(p, t)
             sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
             stock_occ = 1.0 / (1.0 + ti.exp(sa))
@@ -1940,17 +2032,20 @@ class CSGSimulatorDelta:
     def holder_overlap_at(self, t: ti.i32) -> ti.f32:
         """Hard (non-diff) holder/stock overlap VOLUME for a single segment t.
 
-        Counts remaining-material voxels (stock[t+1] < 0) that lie inside the
-        holder (sharp SDF < 0) and returns their volume in unit-cube^3. A
-        positive value means the holder is contacting the stock -- used by the
-        RL env to terminate the episode. Safe to call outside a Tape.
+        Counts **pre-segment** remaining-material voxels (``stock[t] < 0``)
+        inside the whole-segment holder interval (sharp holder score < 0) and
+        returns their voxel-centre fraction of the grid (legacy unit-cube^3).
+        This is a conservative screen: positive values are not a proof of
+        chronological collision and can include legitimate cutter-leading
+        motion. For physical mm^3 contact estimates use holder_overlap_mm3_at.
+        Exact time-resolved clearance belongs to the independent evaluator.
         """
         vol = 0.0
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
-            if self.stock[t + 1, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
+            if self.stock[t, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
                 vol += 1.0 / (self.Nx * self.Ny * self.Nz)
         return vol
 
@@ -1958,20 +2053,21 @@ class CSGSimulatorDelta:
     def holder_min_clearance_at(self, t: ti.i32) -> ti.f32:
         """Min holder-to-stock CLEARANCE over segment t (voxels; positive = gap).
 
-        For every remaining-material voxel (stock[t+1] < 0) takes the min of the
-        sharp holder SDF: positive means the holder clears that voxel by that
-        many voxels, negative means the holder penetrates it. The min over all
-        material voxels is the worst-case clearance for the segment -- the value
-        ``truncate_collision`` compares against the safety margin to decide where
-        to stop the toolpath. Voxels far from the holder return large positives
-        and do not affect the min. Non-differentiable; safe outside a Tape.
+        For every **pre-segment** remaining-material voxel (stock[t] < 0)
+        takes the min of the whole-segment holder score: positive means this
+        conservative pre-screen clears that voxel, negative means possible
+        penetration. It is not a certified chronological minimum clearance and
+        cutter-leading safe paths can be conservatively negative. No-material
+        input returns the legacy 1e9 sentinel, not a physical measured clearance.
+        Non-differentiable; safe outside a Tape. Use holder_min_clearance_mm_at
+        for physical units.
 
         Uses a global scratch field (``_clearance_buf``) with ``ti.atomic_min``
         because a local-scalar min races under the parallel ``ti.ndrange`` loop.
         """
         self._clearance_buf[None] = 1e9
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
-            if self.stock[t + 1, i, j, k] < 0.0:
+            if self.stock[t, i, j, k] < 0.0:
                 d = self.holder_sdf_sharp(
                     ti.Vector(
                         [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
@@ -1983,19 +2079,65 @@ class CSGSimulatorDelta:
 
     @ti.kernel
     def holder_overlap_total(self, T: ti.i32) -> ti.f32:
-        """Hard holder/stock overlap summed over all segments (diagnostics).
+        """Legacy unit-cube^3 conservative pre-cut overlap summed over cuts.
 
-        Sum of per-segment overlap volume; > 0 means the trajectory collides
-        the holder with the stock somewhere. Non-differentiable.
+        This can overestimate collisions because every pre-segment stock is
+        evaluated against a whole-segment holder interval. It is not a unique
+        chronological collision volume and repeated contact is deliberately
+        accumulated by segment. Non-differentiable.
         """
         vol = 0.0
         for t, i, j, k in ti.ndrange(T, self.Nx, self.Ny, self.Nz):
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
-            if self.stock[t + 1, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
+            if self.stock[t, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
                 vol += 1.0 / (self.Nx * self.Ny * self.Nz)
         return vol
+
+    @ti.kernel
+    def holder_overlap_mm3_at(self, t: ti.i32) -> ti.f32:
+        """Physical-mm^3 voxel-centre volume of the pre-cut holder screen."""
+        volume = 0.0
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            p = ti.Vector(
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+            )
+            if self.stock[t, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
+                volume += self.v ** 3
+        return volume
+
+    @ti.kernel
+    def holder_overlap_total_mm3(self, T: ti.i32) -> ti.f32:
+        """Per-segment sum of conservative pre-cut holder overlap in mm^3.
+
+        Not unique collision volume and not guaranteed chronological collision.
+        """
+        volume = 0.0
+        for t, i, j, k in ti.ndrange(T, self.Nx, self.Ny, self.Nz):
+            p = ti.Vector(
+                [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+            )
+            if self.stock[t, i, j, k] < 0.0 and self.holder_sdf_sharp(p, t) < 0.0:
+                volume += self.v ** 3
+        return volume
+
+    @ti.kernel
+    def holder_min_clearance_mm_at(self, t: ti.i32) -> ti.f32:
+        """Conservative pre-cut holder clearance estimate in physical mm.
+
+        Negative = possible penetration (not proof of contact); positive is
+        interval-screen clearance, not a time-resolved certificate. If no stock
+        remains before this segment, returns 1e9*v as the existing sentinel.
+        """
+        self._clearance_buf[None] = 1e9
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            if self.stock[t, i, j, k] < 0.0:
+                p = ti.Vector(
+                    [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
+                )
+                ti.atomic_min(self._clearance_buf[None], self.holder_sdf_sharp(p, t))
+        return self._clearance_buf[None] * self.v
 
     def forward(self, num_active_steps):
         """Pure forward pass. Wrap in ti.ad.Tape externally if you need gradients.
@@ -2148,6 +2290,72 @@ class CSGSimulatorDelta:
             [float(tool_pos[0]), float(tool_pos[1]), float(tool_pos[2])]
         )
 
+    @ti.kernel
+    def reset_candidate_state(self):
+        """Clear all per-candidate mutable evaluation state (T3.0 hook).
+
+        Preserves configured target/tool/holder geometry, k, speeds/limits,
+        target grids, tool_start, and allocated Taichi fields. Clears stock
+        history/prefixes and their grads, positions/deltas/grads, loss/grad,
+        seg_* values+grads, acc_psum+grad, diagnostic accumulators/scratch, and
+        saved_stock/use_saved_init. Does NOT call ti.init or change parameters.
+
+        After this call stock is deliberately zero, NOT a freshly initialized
+        box. Supply candidate deltas and call forward()/forward_hard(), which
+        reconstructs positions and initializes stock before reading it.
+        """
+        self.loss[None] = 0.0
+        self.loss.grad[None] = 0.0
+        self.acc_psum[None] = 0.0
+        self.acc_psum.grad[None] = 0.0
+        self._clearance_buf[None] = 0.0
+        self.use_saved_init[None] = 0
+        for t in range(self.max_steps):
+            self.tool_delta[t] = ti.Vector([0.0, 0.0, 0.0])
+            self.tool_delta.grad[t] = ti.Vector([0.0, 0.0, 0.0])
+            self.seg_time[t] = 0.0
+            self.seg_air[t] = 0.0
+            self.seg_swept[t] = 0.0
+            self.seg_engage[t] = 0.0
+            self.seg_time.grad[t] = 0.0
+            self.seg_air.grad[t] = 0.0
+            self.seg_swept.grad[t] = 0.0
+            self.seg_engage.grad[t] = 0.0
+        for t in range(self.max_steps + 1):
+            self.tool_pos[t] = ti.Vector([0.0, 0.0, 0.0])
+            self.tool_pos.grad[t] = ti.Vector([0.0, 0.0, 0.0])
+        for t, i, j, k in ti.ndrange(
+            self.max_steps + 1, self.Nx, self.Ny, self.Nz
+        ):
+            self.stock[t, i, j, k] = 0.0
+            self.stock.grad[t, i, j, k] = 0.0
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            self.saved_stock[i, j, k] = 0.0
+
+        self.diag_gouge[None] = 0.0
+        self.diag_residual[None] = 0.0
+        self.diag_holder[None] = 0.0
+        self.diag_air[None] = 0.0
+        self.diag_jerk[None] = 0.0
+        self.diag_step[None] = 0.0
+        self.diag_air_unweighted[None] = 0.0
+        self.diag_tool_swept[None] = 0.0
+        self.diag_prox[None] = 0.0
+        self.diag_traj_prox[None] = 0.0
+        self.diag_len[None] = 0.0
+        self.diag_tool_gouge[None] = 0.0
+        self.diag_time[None] = 0.0
+        self.diag_air_time[None] = 0.0
+        self.diag_break_prob_any[None] = 0.0
+        self.diag_break_prob_max[None] = 0.0
+        self.diag_fcut_max[None] = 0.0
+        self.diag_broken[None] = 0.0
+        self.diag_engage_max[None] = 0.0
+        self.diag_engage_mean[None] = 0.0
+        self.diag_air_time_early[None] = 0.0
+        self.diag_air_time_mid[None] = 0.0
+        self.diag_air_time_late[None] = 0.0
+
     # ========================================================================
     # Rendering
     # ========================================================================
@@ -2183,10 +2391,13 @@ class CSGSimulatorDelta:
 
     @ti.func
     def holder_sdf_sharp(self, p, t):
-        """Exact (non-smoothed) holder SDF for collision detection and rendering.
+        """Hard holder-membership score for the conservative pre-cut screen.
 
-        Same geometry as ``holder_sdf`` but with hard ti.max. Not
-        differentiable -- never call under ti.ad.Tape.
+        The whole-segment Z union is conservative, not exact chronological
+        holder motion: a path may clear material with the cutter-leading edge
+        even though the unioned holder overlaps pre-segment stock. Positive
+        overlap is therefore a diagnostic flag, not proof of physical contact.
+        Not differentiable -- never call under ti.ad.Tape.
         """
         r = self.holder_radius[None] / self.v        # voxels
         h = self.holder_height[None] / self.v        # voxels
@@ -2210,9 +2421,10 @@ class CSGSimulatorDelta:
         # the evaluated point, dropping the holder into material the SDF reads
         # as clear. The unioned range [min(bottom_a, bottom_b),
         # max(bottom_a, bottom_b) + h] captures the full swept Z extent (a
-        # superset of the true swept volume, so collision-safe). With the
-        # default holder_height = full machine Z (>> stock), the top is always
-        # above the grid and the lowest bottom is the binding constraint.
+        # superset of the true swept volume, used for the conservative screen,
+        # not a chronological-safety proof). With the default holder_height =
+        # full machine Z (>> stock), the top is always above the grid and the
+        # lowest bottom is the binding constraint.
         z_bottom_a = a.z + tool_h
         z_bottom_b = b.z + tool_h
         z_low = ti.min(z_bottom_a, z_bottom_b)

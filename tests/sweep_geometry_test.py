@@ -206,10 +206,13 @@ def test_repeated_and_reversed_sweeps_are_set_unions(factory):
 
 @pytest.mark.parametrize("motion_kind", ["sloped", "pure_vertical"])
 def test_smooth_objective_gradient_matches_epsilon_sweep_away_from_gates(motion_kind):
+    # Use a genuinely cubic 2 mm grid: stock (40,24,16) mm -> (20,12,8)
+    # cells. The legacy resolution=16 test silently produced pitches
+    # 2.5/2.4/2.666... mm, incompatible with the isotropic sweep contract.
     # A larger stock-relative displacement exercises Z interpolation and the
     # restricted interval; no probe epsilon reaches a segment or cap gate.
     sim = CSGSimulatorDelta(
-        resolution=16, stock_size_mm=(40.0, 24.0, 16.0),
+        voxel_size_mm=2.0, stock_size_mm=(40.0, 24.0, 16.0),
         max_steps=1, target_shape="sphere", tool_start=(0.25, 0.5, 0.75),
         enforce_speed_limits=False, init_taichi=False, k_init=40,
     )
