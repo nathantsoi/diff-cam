@@ -1,0 +1,19 @@
+{
+  "schema": "diffcam-benchmark-runner/1",
+  "experiment": "pilot",
+  "task_source": "prototype_analytic",
+  "arch": "cpu",
+  "notes": "T4.1a protocol example only; T2.2 replaces this analytic task before a real campaign.",
+  "seeds": [0, 1],
+  "candidate_evaluations": 4,
+  "population_size": 2,
+  "validation_interval": 2,
+  "max_validation_calls": 2,
+  "max_generations": null,
+  "learning_rate": 0.005,
+  "max_gradient_norm": 0.5,
+  "k_fixed": 40.0,
+  "k_anneal_start": 20.0,
+  "k_anneal_end": 120.0,
+  "sigma0": 0.01
+}
