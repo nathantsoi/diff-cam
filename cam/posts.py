@@ -300,7 +300,15 @@ def _arc_offset_words(start_work, end_work, centre_work, plane, config, precisio
     return words
 
 
-def _validate_typed_post(plan: MotionPlan, task: TaskSpec, dialect: Dialect) -> None:
+def _validate_typed_post(plan: MotionPlan, task: TaskSpec, dialect: Dialect, config: MachineConfig) -> None:
+    if config.h_register != task.tool.tool_number:
+        raise UnsupportedPostError(
+            f"G43 H{config.h_register} does not match TaskSpec.tool.tool_number={task.tool.tool_number}"
+        )
+    if dialect == Dialect.HAAS and config.tool_number != task.tool.tool_number:
+        raise UnsupportedPostError(
+            f"T{config.tool_number} does not match TaskSpec.tool.tool_number={task.tool.tool_number}"
+        )
     if dialect not in task.motion_semantics.dialects:
         raise UnsupportedPostError(f"dialect {dialect.value!r} is disabled by this TaskSpec")
     if plan.frame != Frame.MACHINE:
@@ -389,7 +397,7 @@ def post_motion_plan(
     """
     dialect = Dialect(dialect)
     config = config or MachineConfig(units="mm")
-    _validate_typed_post(plan, task, dialect)
+    _validate_typed_post(plan, task, dialect, config)
     unit_code = config.units_code
     motion_lines = _typed_motion_lines(plan, task, config)
     offset_line = (

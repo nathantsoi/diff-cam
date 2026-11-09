@@ -249,6 +249,37 @@ def test_offset_change_in_motion_is_rejected_even_if_cancelled_in_same_block():
         parse_motion_plan("G21 G90 G43 H1 G49 G1 X1 F600\nM2\n", TASK)
 
 
+def test_h_register_must_match_task_tool_and_first_register():
+    with pytest.raises(UnsupportedGCodeError, match=r"H2 is incompatible.*tool_number=1"):
+        parse_motion_plan("G21 G90 G54 T1 M6 G43 H2 G0 X0 Y0 Z10\nM2\n", TASK)
+    with pytest.raises(UnsupportedGCodeError, match=r"H2 is incompatible.*tool_number=1"):
+        parse_motion_plan("G21 G90 G43 H1\nG0 X1\nG43 H2\nG1 X2 F600\nM2\n", TASK)
+
+
+def test_selected_tool_must_match_task_tool_number():
+    with pytest.raises(UnsupportedGCodeError, match=r"T2 is incompatible"):
+        parse_motion_plan("G21 G90 T2 M6 G43 H1 G0 X1\nM2\n", TASK)
+
+
+def test_matching_h_register_and_t_value_are_accepted():
+    program = "G21 G90 G54 T1 M6 G43 H1\nG0 X1\nM2\n"
+    assert parse_motion_plan(program, TASK).initial_state.known is True
+    task_two = replace(TASK, tool=replace(TASK.tool, tool_number=2))
+    plan = parse_motion_plan("G21 G90 G54 T2 M6 G43 H2\nG0 X1\nM2\n", task_two)
+    assert plan.initial_state.known and len(plan.segments) == 1
+    text = post_motion_plan(C.example_motion_plan(task_two), task_two,
+                            dialect="haas", config=MachineConfig(tool_number=2))
+    assert "T2 M06" in text and "G43 H2" in text
+
+
+def test_post_rejects_incompatible_h_and_tool_configuration():
+    plan = C.example_motion_plan(TASK)
+    with pytest.raises(UnsupportedPostError, match=r"H2 does not match TaskSpec.tool.tool_number=1"):
+        post_motion_plan(plan, TASK, config=MachineConfig(length_offset=2, tool_number=1))
+    with pytest.raises(UnsupportedPostError, match=r"T2 does not match TaskSpec.tool.tool_number=1"):
+        post_motion_plan(plan, TASK, dialect="haas", config=MachineConfig(tool_number=2, length_offset=1))
+
+
 def test_wrapper_matches_direct_typed_post():
     plan = parse_motion_plan(CANONICAL, TASK)
     assert motion_plan_to_gcode(plan, TASK) == post_motion_plan(plan, TASK)
@@ -454,7 +485,7 @@ def test_tilted_arc_plane_is_explicitly_unsupported():
 def test_tool_offset_declarations_and_g43_h_register_validate():
     task = task_at((0.0, 0.0, 10.0))
     plan = parse_motion_plan(
-        "G21 G90 G54 G49\nG43 H2\nG0 X0 Y0 Z10\nM2\n", task
+        "G21 G90 G54 G49\nG43 H1\nG0 X0 Y0 Z10\nM2\n", task
     )
     assert len(plan.segments) == 1
     with pytest.raises(GCodeError, match="H is only accepted"):
@@ -510,5 +541,5 @@ def test_arc_disabled_task_and_disabled_dialect_are_unsupported():
 def test_repeated_tool_number_is_allowed_but_tool_change_is_not():
     header = "G21 G90 G54 G49\n"
     parse_motion_plan(header + "T1 M06\nT1 M06\nM2\n", TASK)
-    with pytest.raises(UnsupportedGCodeError, match="multiple tool numbers"):
+    with pytest.raises(UnsupportedGCodeError, match="T2 is incompatible"):
         parse_motion_plan(header + "T1 M06\nT2 M06\n", TASK)

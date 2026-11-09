@@ -494,8 +494,11 @@ def parse_motion_plan(
     Tool-length register tables are not modeled.  G43 Hn declares that the H
     register is calibrated so coordinates refer to the cutter tip; G49 declares
     the equivalent zero-length/gauge-tip convention.  The caller must provision
-    those registers for physical execution.  Tool changes are limited to one
-    repeated tool number because TaskSpec describes one fixed tool assembly.
+    those registers for physical execution.  If T appears, it must equal
+    task.tool.tool_number; every H must equal that number too.  Once the first H
+    register is recorded, a later different register is unsupported.  Tool changes
+    are limited to one repeated tool number because TaskSpec describes one fixed
+    tool assembly.
 
     The plan uses the task's declared timing rule; G61/G61.1 are accepted and
     G64/other blended path-control modes are unsupported.  Initial units,
@@ -524,6 +527,7 @@ def parse_motion_plan(
     feed_mm_s: Optional[float] = None
     length_offset = task.initial_state.length_offset_applied
     tool_number: Optional[int] = None
+    h_register: Optional[int] = None
     program_ended = False
 
     supported_g = {
@@ -585,6 +589,8 @@ def parse_motion_plan(
                 _integer_word(block, "O", line)
             if "T" in block:
                 selected_tool = _integer_word(block, "T", line, minimum=1)
+                if selected_tool != task.tool.tool_number:
+                    raise _nc_error(line, f"T{selected_tool} is incompatible with fixed TaskSpec.tool.tool_number={task.tool.tool_number}", True)
                 if tool_number is not None and selected_tool != tool_number:
                     raise _nc_error(line, "multiple tool numbers are incompatible with fixed TaskSpec.tool", True)
                 tool_number = selected_tool
@@ -611,7 +617,13 @@ def parse_motion_plan(
             if 43.0 in gcodes:
                 if "H" not in block:
                     raise _nc_error(line, "G43 requires an explicit H register (e.g. G43 H1)")
-                _integer_word(block, "H", line)
+                selected_h = _integer_word(block, "H", line)
+                if selected_h != task.tool.tool_number:
+                    raise _nc_error(line, f"H{selected_h} is incompatible with fixed TaskSpec.tool.tool_number={task.tool.tool_number}", True)
+                if h_register is None:
+                    h_register = selected_h
+                elif selected_h != h_register:
+                    raise _nc_error(line, f"later H{selected_h} conflicts with initial H{h_register}; changing length-register identity is unsupported", True)
                 length_offset = True
             if 49.0 in gcodes:
                 length_offset = False
