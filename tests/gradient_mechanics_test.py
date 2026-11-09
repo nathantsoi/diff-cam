@@ -353,20 +353,25 @@ def test_terminal_geometry_numpy_handles_clamps_and_bad_inputs():
         terminal_geometry_loss_numpy([0.0], [0.0], gouge_weight=-1, residual_weight=1)
 
 
-def test_ad_same_theta_after_other_theta_matches_fresh_process(tmp_path):
-    """The real AD tape must not leak same/different-theta evaluation state.
+@pytest.mark.parametrize(
+    ("precision", "atol", "rtol"),
+    [("f32", 1.6e-5, 1e-5), ("f64", 2e-12, 0.0)],
+    ids=("f32", "f64"),
+)
+def test_ad_same_theta_after_other_theta_matches_fresh_process(tmp_path, precision, atol, rtol):
+    """Real AD evaluation order stays neutral in each declared storage precision.
 
     Both contexts create the public evaluator in isolated child processes.
-    The 2 mm coarse grid is sampled independently by the shared factory; it
-    catches state-order regressions without spending the full pilot's cost.
-    It does not assert AD==FD or resolve the larger reverse-precision issue.
+    The 2 mm coarse grid is independently sampled by the shared factory. This
+    compares order invariance, not AD with FD or the larger f32 reverse bias.
+    The f64 comparison is explicitly tighter than the f32 atomic-noise bound.
     """
     code = """
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[3])
 from scripts.run_gradient_mechanics import ad_order_regression
-ad_order_regression(Path(sys.argv[1]), voxel_mm=2.0, ordered=sys.argv[2] == 'ordered')
+ad_order_regression(Path(sys.argv[1]), voxel_mm=2.0, ordered=sys.argv[2] == 'ordered', precision=sys.argv[4])
 """
     environment = dict(os.environ)
     environment["TI_OFFLINE_CACHE_FILE_PATH"] = str(tmp_path / "ti-cache")
@@ -376,7 +381,7 @@ ad_order_regression(Path(sys.argv[1]), voxel_mm=2.0, ordered=sys.argv[2] == 'ord
         output = tmp_path / name
         run = subprocess.run(
             [sys.executable, "-I", "-c", code, str(output), "ordered" if ordered else "fresh",
-             str(Path(__file__).resolve().parents[1])],
+             str(Path(__file__).resolve().parents[1]), precision],
             cwd=str(Path(__file__).resolve().parents[1]),
             env=environment, capture_output=True, text=True, timeout=180,
         )
@@ -384,8 +389,15 @@ ad_order_regression(Path(sys.argv[1]), voxel_mm=2.0, ordered=sys.argv[2] == 'ord
         import json
         return json.loads((output / "ad_order.json").read_text(encoding="utf-8"))
 
-    fresh = run_child("fresh", False)
-    ordered = run_child("ordered", True)
+    fresh = run_child(f"fresh-{precision}", False)
+    ordered = run_child(f"ordered-{precision}", True)
+    expected_dtype = {"f32": "<f4", "f64": "<f8"}[precision]
+    for record in (fresh, ordered):
+        assert record["simulator_precision"] == precision
+        for field in ("loss_dtype", "stock_dtype", "stock_gradient_dtype",
+                      "tool_delta_dtype", "tool_delta_gradient_dtype"):
+            assert record[field] == expected_dtype
+        assert record["input_delta_dispatch"].startswith("existing CandidateEvaluator")
     assert fresh["ledger"]["candidate_evaluations"] == 1
     assert fresh["ledger"]["backward_calls"] == 1
     assert ordered["ledger"]["candidate_evaluations"] == 4
@@ -403,13 +415,12 @@ ad_order_regression(Path(sys.argv[1]), voxel_mm=2.0, ordered=sys.argv[2] == 'ord
     assert reference.shape == (36,)
     assert (ordered["records"]["initial"]["theta_hash"]
             == fresh["records"]["initial"]["theta_hash"])
-    # Absolute tolerance is larger than one f32 ulp because parallel atomic
-    # reverse accumulations are scheduling-sensitive. The measured full-grid
-    # eight-repeat all-coordinate range was 8.778511393206512e-06. Never use
-    # bitwise identity here or pretend the 4.1% index-2 AD/FD error is noise.
+    # Preserve the already measured f32 tolerance. For f64, a leak substantially
+    # below f32 noise cannot hide: atol=2e-12, rtol=0. This makes no claim of
+    # mathematical exactness of the underlying trilinear/CSG reverse operation.
     for key in ("initial", "repeat_same", "after_other"):
         actual = np.asarray(ordered["records"][key]["gradient"])
-        np.testing.assert_allclose(actual, reference, atol=1.6e-5, rtol=1e-5)
+        np.testing.assert_allclose(actual, reference, atol=atol, rtol=rtol)
         assert ordered["records"][key]["actual_path"]["same_within_tolerance"]
 
 
