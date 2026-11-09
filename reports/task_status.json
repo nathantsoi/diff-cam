@@ -62,11 +62,11 @@
   },
   "T1.3": {
    "status": "in_progress",
-   "owner": "diffcam-worker-3",
+   "owner": "worker-3 (T1.3a CAMotics+metrics) / worker-2 (T1.3b production posted evaluator)",
    "branch": "task/T1.3a-camotics-metrics",
    "blocker": null,
    "next": "T1.3a (CAMotics adapter + metrics) now; T1.3b production posted evaluator after T1.2",
-   "note": "T1.3a resumed (worker-3): CAMotics adapter + metrics + bias; camsim STL non-manifold issue open; must inherit T1.0c whole-cell semantics"
+   "note": "T1.3a resumed (worker-3): CAMotics adapter + metrics + bias; camsim STL non-manifold issue open; must inherit T1.0c whole-cell semantics | T1.3b dispatched to worker-2 in parallel"
   },
   "T2.0": {
    "status": "complete",
@@ -99,28 +99,28 @@
    "next": null
   },
   "T3.0": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-2",
    "branch": "task/T3.0-objectives",
    "blocker": null,
-   "next": "prototype now; final gate after T2.0/T1.2",
-   "note": "PROTOTYPE gate passed at bedfd14 (A/B/A bitwise, tape/no-tape, pullback FD, atomic artifacts audited); not merged; final re-run owed after T1.2+T2.0"
+   "next": null,
+   "note": "merged (final gate vs real reset hook + sampled targets); stateless candidates, ObjectiveSpec incl. k, atomic artifacts"
   },
   "T3.1": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-2",
    "branch": "task/T3.1-blackbox",
    "blocker": null,
    "next": null,
-   "note": "COMPLETE at a0f91cb (CMA hard/smooth, bitwise resume, limits/spent, invalid penalty counted); awaiting merge order T2.0 -> final T3.0 -> T3.1"
+   "note": "merged; CMA-ES hard/smooth, exact resume incl. final.json | Q1-Q4 follow-ups merged (fcb57db), reviewer-verified. Residual nit: popsize guard only when population_size explicit; direct solve_cma_es with population_size=None and budget < cma default popsize still ends at 0 generations (runner unaffected)."
   },
   "T3.2": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-2",
    "branch": "task/T3.2-adam",
    "blocker": null,
    "next": null,
-   "note": "COMPLETE at 592b9e3 (fixed/annealed Adam, safety-first selection, fwd/bwd accounting, exact resume/replay); awaiting merge order"
+   "note": "merged; fixed/annealed Adam, deterministic (n=1), schedule length frozen in config, invalid never best"
   },
   "T4.0": {
    "status": "complete",
@@ -134,9 +134,9 @@
    "status": "in_progress",
    "owner": "diffcam-worker-2 (runner T4.1a) / coordinator (real pilot T4.1b)",
    "branch": "task/T4.1-runner",
-   "blocker": null,
+   "blocker": "T2.2, T1.3",
    "next": null,
-   "note": "T4.1a paused for T3.xb"
+   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator."
   },
   "T3.4": {
    "status": "planned",
@@ -280,12 +280,12 @@
    "note": "merged; H1 hard holder checks inflated by cell half-diagonal (safe-case overlap 100->25->0 mm3 at n=1,2,3), H2 lifecycle charged after init, H3 max_steps>=1, H4 reset restores configured start. Reviewer repros pass."
   },
   "T3.xb": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-2",
    "branch": "task/T3.2-adam",
    "blocker": null,
-   "next": "resume T4.1a",
-   "note": "discriminator pre-merge review of T3 stack: O1 k leak across methods, O2 invalid best/inf crash, O3 Adam fake seeds, O4 budget-dependent anneal, O5 CMA final.json RNG advance, O6 ledger double count/no restore. O2-O6 reproduced."
+   "next": null,
+   "note": "merged; O1-O6 fixed, reviewer repros re-run by coordinator"
   },
   "T1.4c": {
    "status": "complete",
