@@ -112,7 +112,7 @@
    "branch": "task/T3.1-blackbox",
    "blocker": null,
    "next": null,
-   "note": "merged; CMA-ES hard/smooth, exact resume incl. final.json"
+   "note": "merged; CMA-ES hard/smooth, exact resume incl. final.json | Q1-Q4 follow-ups merged (fcb57db), reviewer-verified. Residual nit: popsize guard only when population_size explicit; direct solve_cma_es with population_size=None and budget < cma default popsize still ends at 0 generations (runner unaffected)."
   },
   "T3.2": {
    "status": "complete",
