@@ -248,7 +248,8 @@ def _analytic_mask(geometry, points):
                 xhi = pocket_min[0] + radius if x_side == 0 else pocket_max[0]
                 ylo = pocket_min[1] if y_side == 0 else pocket_max[1] - radius
                 yhi = pocket_min[1] + radius if y_side == 0 else pocket_max[1]
-                in_corner = ((points[0] >= xlo) & (points[0] <= xhi)
+                in_corner = ((outside <= 0)
+                             & (points[0] >= xlo) & (points[0] <= xhi)
                              & (points[1] >= ylo) & (points[1] <= yhi)
                              & (points[2] >= pocket_min[2]) & (points[2] <= pocket_max[2]))
                 unreachable |= in_corner & (

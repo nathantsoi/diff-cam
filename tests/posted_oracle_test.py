@@ -388,6 +388,25 @@ def test_pocket_corner_radius_zero_is_byte_identical_to_old_mask():
                                   expected[substantial_island])
 
 
+def test_pocket_fillet_retention_stays_inside_declared_outer_stock():
+    source, grid = _corner_geometry(0.125)
+    points = _centres(grid)
+    exterior = replace(source, params=dict(
+        source.params,
+        box_min_mm=[1, 1, 0], box_max_mm=[3, 3, grid.voxel_mm],
+        island_min_mm=[1.5, 1.5, 0], island_max_mm=[2.5, 2.5, grid.voxel_mm],
+        pocket_unreached_corner_radius_mm=1.0))
+    actual = _analytic_mask(exterior, points)
+    outside_outer = (points[0] < 1) | (points[0] > 3) | (points[1] < 1) | (points[1] > 3)
+    assert outside_outer.any()
+    assert not actual[outside_outer].any()  # corner square outside stock is air, not material
+    # The convex island is retained without any corner-fillet subtraction.
+    island = ((points[0] >= 1.5) & (points[0] <= 2.5)
+              & (points[1] >= 1.5) & (points[1] <= 2.5))
+    assert island.any()
+    assert actual[island].all()
+
+
 def test_pocket_fillets_are_excluded_from_original_part_and_checked_at_quarter_mm():
     pitch = 0.25
     # A real six-mm-deep pocket at the requester's pitch; the tiny central island
