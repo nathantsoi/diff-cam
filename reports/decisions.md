@@ -22,3 +22,13 @@ DECISION: verdicts (completion, safety, geometry, efficiency eligibility) come f
 The 1.0 mm evaluation is retained as a screen/fidelity diagnostic (reported per run, never combined into verdicts). Record a 0.25 mm RS274
 point on every pilot program as convergence evidence for T4.2's cost/fidelity choice. Cost ≈ 18 min/program/dialect; parallel subprocesses
 bounded by memory (~2 GB each). Reviewer: diffcam-discriminator E1.
+
+## D-2026-11-09-05 — Simulator precision for comparisons: full float64
+Evidence (T3.3b, worker-3; reviewer G2): the float32 ADJOINT is biased and the bias grows ~linearly with path length (0.24% at 8 steps →
+4.1% at 75 on index 2); the float32 forward is accurate (f32 FD ≈ f64 FD). Full f64 fields+adjoints: AD −0.49917075 vs FD −0.49915996
+(index 2), 112.5 s and 3.67 GB peak on the pilot probe vs 93 s / 1.94 GB in f32. Scalar-loss-only f64 (83 s / 2.0 GB) does NOT fix it.
+Index-35 sign flip: unreproduced on the exact c955b60 replay (AD −0.00296 ≈ FD) — closed.
+DECISION: all optimizer conditions in a matched comparison (CMA hard/smooth, fixed/annealed Adam, continuation) use full f64 so every
+method sees the same numerical objective; f32 remains an option for exploration only. Implemented by T3.3c (declared `precision` option,
+validated with a per-coordinate relative-error gate on the LONGEST suite path). The pilot declares precision f64 and launches after T3.3c
+merges (avoids rerunning gradient rows); its Adam rows are then no longer provisional for this reason.

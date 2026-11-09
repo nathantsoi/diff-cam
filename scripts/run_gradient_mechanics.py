@@ -84,6 +84,48 @@ def validate_config(config: CostConfig, dimension: int | None = None) -> None:
             raise ValueError(f"{name} must be finite and positive")
 
 
+def terminal_geometry_loss_numpy(stock, target, *, gouge_weight: float,
+                                  residual_weight: float, loss_shift: float = 0.0):
+    """Independent float64 terminal-loss/derivative reference for diagnostics.
+
+    This mirrors the CSG simulator's fixed-target terminal gouge and residual
+    terms on a declared grid. It is not a new production objective or a holder,
+    trajectory, or machining-safety evaluation. Gradients are with respect to
+    each voxel's stock SDF, before its sigmoid clamp. Clamp-tie coordinates are
+    returned separately rather than assigned a fabricated classical derivative.
+    """
+    stock = np.asarray(stock, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    if stock.shape != target.shape or stock.size == 0:
+        raise ValueError("terminal diagnostic requires matching nonempty stock/target Float64 fields")
+    if not np.isfinite(stock).all() or not np.isfinite(target).all():
+        raise ValueError("terminal diagnostic fields must be finite")
+    if not math.isfinite(loss_shift):
+        raise ValueError("loss_shift must be finite")
+    for name, weight in (("gouge_weight", gouge_weight), ("residual_weight", residual_weight)):
+        if not isinstance(weight, (int, float)) or not math.isfinite(weight) or weight < 0:
+            raise ValueError(f"{name} must be finite and nonnegative")
+    shifted = stock + loss_shift
+    stock_occ = 1.0 / (1.0 + np.exp(np.clip(shifted, -50.0, 50.0)))
+    target_occ = 1.0 / (1.0 + np.exp(np.clip(target, -50.0, 50.0)))
+    gouge = target_occ * (1.0 - stock_occ)
+    residual = (1.0 - target_occ) * stock_occ
+    g = np.sum(gouge_weight * gouge * gouge) / stock.size
+    r = np.sum(residual_weight * residual * residual) / stock.size
+    # Use the exact two weighted terms' chain rule; avoid hand-simplified factors.
+    apply_jacobian = np.divide(
+        (2.0 * gouge_weight * gouge * -target_occ
+         + 2.0 * residual_weight * residual * (1.0 - target_occ))
+        * (-stock_occ * (1.0 - stock_occ)), stock.size,
+    )
+    inside_clamp = (shifted > -50.0) & (shifted < 50.0)
+    gradient = np.where(inside_clamp, apply_jacobian, 0.0)
+    return {"loss": float(g + r), "gouge": float(g), "residual": float(r),
+            "gradient": gradient, "clamp_ties": (shifted == -50.0) | (shifted == 50.0),
+            "interior_to_clamp": inside_clamp,
+            "gouge_weight": float(gouge_weight), "residual_weight": float(residual_weight)}
+
+
 def _write_source(root: Path, name: str, values, grid: C.GridSpec,
                   params: dict[str, Any]) -> C.GeometrySource:
     path = root / f"{name}.npy"
@@ -381,6 +423,87 @@ def run_pilot(output: Path, config: CostConfig = CostConfig()) -> dict[str, Any]
     }
     C.canonical_json(report)  # Reject non-finite values before artifact commit.
     path = output / "gradient_mechanics.json"
+    with path.open("x", encoding="utf-8") as handle:
+        handle.write(C.canonical_json(report) + "\n")
+    return report
+
+
+def ad_order_regression(output: Path, *, voxel_mm: float = 2.0,
+                        ordered: bool = True) -> dict[str, Any]:
+    """Exercise real AD resets on an explicitly coarse copy of the pilot grid.
+
+    ``ordered=True`` performs same-theta AD, then a different-theta forward,
+    then AD at the original theta. ``False`` performs only that original AD.
+    Callers must put the latter in a fresh process for a fresh-process control;
+    this helper must not re-initialize Taichi or create a second simulator.
+
+    The default 2 mm grid is independently sampled by the existing factory,
+    not a resampling of the declared 0.25 mm pilot arrays. It is a regression
+    for evaluation-state ordering, not a substitute for the full-grid cost
+    artifact, a machining completion check, or an AD/finite-difference oracle.
+    """
+    if not isinstance(ordered, bool):
+        raise TypeError("ordered must select the declared sequence explicitly")
+    output = output.resolve()
+    _, _, parameterization, evaluator, _ = build_pilot_evaluator(
+        output, config=CostConfig(voxel_mm=voxel_mm),
+    )
+    theta = np.zeros(parameterization.num_params, dtype=np.float64)
+    records = {}
+
+    def ad_record(key: str, candidate_id: str):
+        evaluated = evaluator.evaluate_candidate_with_gradient(theta, candidate_id)
+        if not evaluated.result.valid:
+            raise RuntimeError(f"AD regression candidate failed: {evaluated.result.invalid_reason}")
+        path = _actual_path(evaluator, theta)
+        if not path["same_within_tolerance"]:
+            raise AssertionError(f"AD regression path mismatch: {path}")
+        gradient = np.asarray(evaluated.gradient_theta, dtype=np.float64)
+        if gradient.shape != theta.shape or not np.isfinite(gradient).all():
+            raise AssertionError("AD regression requires a finite full theta gradient")
+        records[key] = {
+            "gradient": gradient.tolist(), "objective": float(evaluated.result.objective),
+            "candidate_id": candidate_id, "theta_hash": evaluated.result.theta_hash,
+            "actual_path": path,
+        }
+
+    ad_record("initial", "order-initial" if ordered else "fresh-process-control")
+    if ordered:
+        ad_record("repeat_same", "order-repeat-same")
+        other = theta.copy()
+        other[35] = 0.025
+        changed = evaluator.evaluate_candidate(other, "order-different-theta", "smooth")
+        if not changed.valid:
+            raise RuntimeError(f"different-theta evaluation failed: {changed.invalid_reason}")
+        other_path = _actual_path(evaluator, other)
+        if not other_path["same_within_tolerance"]:
+            raise AssertionError(f"different-theta path mismatch: {other_path}")
+        if changed.theta_hash == records["initial"]["theta_hash"]:
+            raise AssertionError("the intervening evaluation did not change theta")
+        ad_record("after_other", "order-after-different")
+    snapshot = evaluator.ledger.snapshot()
+    expected = 4 if ordered else 1
+    if snapshot["candidate_evaluations"] != expected:
+        raise AssertionError("state-order regression consumed an unexpected candidate count")
+    report = {
+        "schema": "diffcam-ad-order-regression/1",
+        "sequence": "same_then_different_then_same" if ordered else "fresh_process_control",
+        "grid": {"voxel_mm": voxel_mm, "shape": list(evaluator.task.grid.shape),
+                 "independently_sampled": True},
+        "theta": theta.tolist(), "different_theta_index": 35,
+        "different_theta_delta": 0.025 if ordered else None,
+        "loss_dtype": evaluator.sim.loss.to_numpy().dtype.str,
+        "tool_delta_gradient_dtype": evaluator.sim.tool_delta.grad.to_numpy().dtype.str,
+        "records": records,
+        "nonzero_gradient": any(abs(value) > 1e-10
+                                for value in records["initial"]["gradient"]),
+        "ledger": {key: value for key, value in snapshot.items() if key != "entries"},
+        "candidate_order": [entry["candidate_id"] for entry in evaluator.ledger.entries],
+        "source": source_metadata(PROJECT_ROOT),
+    }
+    if not math.isfinite(records["initial"]["objective"]) or not report["nonzero_gradient"]:
+        raise AssertionError("degenerate AD regression cannot test stale state")
+    path = output / "ad_order.json"
     with path.open("x", encoding="utf-8") as handle:
         handle.write(C.canonical_json(report) + "\n")
     return report
