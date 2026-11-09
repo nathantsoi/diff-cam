@@ -26,6 +26,7 @@ import numpy as np
 
 from benchmarks import contracts as C
 from cam.gcode_parser import GCodeError, parse_motion_plan
+from simulator import csg_metrics
 from simulator.csg_metrics import compute_grid_metrics
 
 EVALUATOR_ID = "posted_hard/production"
@@ -42,6 +43,7 @@ class RefinementSettings:
     safety_screen: bool = True
     expected_nc_hash: Optional[str] = None
     max_samples_per_segment: int = 4096
+    exclusion_tolerance_mm3: float = 0.0
 
     @classmethod
     def from_mapping(cls, settings: Optional[Mapping[str, Any]]) -> "RefinementSettings":
@@ -64,6 +66,9 @@ class RefinementSettings:
             raise ValueError("subdivisions must be a positive integer")
         if not isinstance(result.max_samples_per_segment, int) or result.max_samples_per_segment < 2:
             raise ValueError("max_samples_per_segment must be an integer >= 2")
+        if (not isinstance(result.exclusion_tolerance_mm3, (int, float))
+                or not math.isfinite(result.exclusion_tolerance_mm3) or result.exclusion_tolerance_mm3 < 0):
+            raise ValueError("exclusion_tolerance_mm3 must be finite and nonnegative")
         if result.expected_nc_hash is not None:
             C._check_hash("settings.expected_nc_hash", result.expected_nc_hash)
         return result
@@ -87,7 +92,15 @@ def _centres(grid: C.GridSpec) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 
 def _box_distance(points, lo, hi):
-    q = [np.maximum(lo[a] - points[a], points[a] - hi[a]) for a in range(3)]
+    try:
+        lower, upper = np.asarray(lo, dtype=np.float64), np.asarray(hi, dtype=np.float64)
+    except (TypeError, ValueError) as error:
+        raise ValueError("analytic box requires three finite numeric min/max coordinates") from error
+    if lower.shape != (3,) or upper.shape != (3,) or not np.isfinite(lower).all() or not np.isfinite(upper).all():
+        raise ValueError("analytic box requires three finite numeric min/max coordinates")
+    if np.any(upper <= lower):
+        raise ValueError("analytic box min_mm must be strictly less than max_mm in every axis")
+    q = [np.maximum(lower[a] - points[a], points[a] - upper[a]) for a in range(3)]
     positive = [np.maximum(value, 0.0) for value in q]
     return np.sqrt(positive[0] ** 2 + positive[1] ** 2 + positive[2] ** 2) + np.minimum(
         np.maximum.reduce(q), 0.0)
@@ -453,12 +466,11 @@ def _result(task, motion, cfg, execution):
     original = _analytic_mask(task.original_part, points)
     metrics = compute_grid_metrics(
         execution.remaining, target, execution.initial, task.grid.voxel_mm,
-        original_part_mask=original, surface_origin_mm=task.grid.origin_mm)
-    # Pinned contracts-1.1 qualification semantics. This explicit assignment is
-    # kept while the shared library transitions its original-part diagnostics.
-    metrics["gouge_volume_mm3"] = C.Metric(
-        float((execution.initial & target & ~execution.remaining).sum()) * task.grid.voxel_mm ** 3, "mm^3",
-        denominator="initial & operation_target & ~remaining")
+        original_part_mask=original, surface_origin_mm=task.grid.origin_mm,
+        declared_excluded_volume_mm3=task.operation_target.excluded_volume_mm3,
+        exclusion_tolerance_mm3=cfg.exclusion_tolerance_mm3)
+    # Shared library (core 67b7f37): gouge is removed & operation_target;
+    # original-part gouge remains a diagnostic with its own separate denominator.
     metrics.update(execution.metrics)
     removed = execution.initial & ~execution.remaining
     removal_target = execution.initial & ~target
@@ -468,7 +480,9 @@ def _result(task, motion, cfg, execution):
     return C.EvaluationResult(
         evaluator_id=EVALUATOR_ID, evaluator_revision=_revision(), task_hash=task.task_hash,
         tool_setup_hash=task.tool_setup_hash,
-        discretization={"settings": dataclasses.asdict(cfg), **execution.discretization},
+        discretization={"settings": dataclasses.asdict(cfg),
+                        "metric_library_sha256": C.sha256_bytes(Path(csg_metrics.__file__).read_bytes()),
+                        **execution.discretization},
         coverage=C.Coverage.COMPLETE, coverage_reasons=execution.coverage_reasons,
         metrics=metrics, safety_pass=execution.safety_pass, geometry_pass=geometry,
         motion_hash=motion.motion_hash, events=execution.events)

@@ -138,6 +138,44 @@ def test_shank_is_distinct_from_cutter_and_holder():
     assert result.discretization["volume_bound"]["lower_mm3"] <= 24 * math.pi <= result.discretization["volume_bound"]["upper_mm3"]
 
 
+def test_operation_target_gouge_and_original_part_diagnostic_are_separate():
+    fixture = F.zero_length_feed()
+    original = C.GeometrySource(kind="analytic", params={
+        "primitive": "box", "min_mm": [26, 26, 0], "max_mm": [30, 30, 12]})
+    target = C.GeometrySource(kind="analytic", params={
+        "primitive": "box", "min_mm": [16, 16, 0], "max_mm": [30, 30, 12]})
+    # At this 2mm grid, T has 7*7*6 cells and P has 2*2*6; the hand-counted
+    # excluded volume is (294-24)*8 mm^3.
+    declared_excluded = (7 * 7 * 6 - 2 * 2 * 6) * 8.0
+    task = replace(fixture.task, original_part=original,
+                   operation_target=C.OperationTarget(geometry=target,
+                                                      excluded_volume_mm3=declared_excluded,
+                                                      exclusion_reason="fixture T includes P plus explicit excluded stock"))
+    result = PostedEvaluator().evaluate_candidate(task, fixture.motion, {})
+    assert result.coverage == C.Coverage.COMPLETE
+    assert metric(result, "gouge_volume_mm3") > 0
+    assert metric(result, "original_part_gouge_volume_mm3") == 0.0
+    assert metric(result, "excluded_volume_mm3") == declared_excluded
+    assert "initial & operation_target" in result.metrics["gouge_fraction"].denominator
+    assert "diagnostic only" in result.metrics["original_part_gouge_volume_mm3"].denominator
+    mismatched = replace(task, operation_target=replace(
+        task.operation_target, excluded_volume_mm3=declared_excluded + 8))
+    rejected = PostedEvaluator().evaluate_candidate(mismatched, fixture.motion, {})
+    assert rejected.coverage == C.Coverage.UNSUPPORTED
+    assert rejected.safety_pass is None
+    assert "excluded volume mismatch" in rejected.coverage_reasons[0]
+
+
+def test_nonfinite_stock_box_fails_instead_of_becoming_empty_safe_stock():
+    fixture = F.plunge_above()
+    source = replace(fixture.task.stock, params=dict(fixture.task.stock.params, min_mm=[float("nan"), 0, 0]))
+    task = replace(fixture.task, stock=source)
+    # Contract identity cannot silently hash NaN. There is no valid
+    # EvaluationResult record or unsafe "no material is present" conclusion.
+    with pytest.raises(C.ContractError, match="non-finite"):
+        PostedEvaluator().evaluate_candidate(task, fixture.motion, {})
+
+
 @pytest.mark.parametrize("fixture", [F.rapid_through_solid(), F.zero_length_rapid()])
 def test_rapids_disable_stock_subtraction_at_moving_and_stationary_poses(fixture):
     reference = run_reference(fixture.task, fixture.motion)
@@ -165,8 +203,12 @@ def test_no_cut_rejection_and_explicit_unknown_surface_metrics():
     assert evaluated.geometry_pass is False
     assert evaluated.metrics["force_proxy"].value is None
     assert evaluated.metrics["air_fraction"].value is None
-    empty_task = replace(task, operation_target=C.OperationTarget(geometry=replace(
-        task.operation_target.geometry, params={"primitive": "box", "min_mm": [80, 80, 0], "max_mm": [81, 81, 1]})))
+    empty_geometry = C.GeometrySource(kind="analytic", params={
+        "primitive": "box", "min_mm": [0, 0, 0], "max_mm": [0.5, 0.5, 0.5]})
+    # Both masks have no occupied voxel centres in this 2mm grid; the original
+    # target is not an out-of-stock geometry that the metric library must reject.
+    empty_task = replace(task, original_part=empty_geometry,
+                         operation_target=C.OperationTarget(geometry=empty_geometry))
     empty_motion = C.MotionPlan(C.Frame.WORK, empty_task.initial_state, (),
                                 C.TimingRule.EXACT_STOP_CONSTANT_SPEED)
     empty = PostedEvaluator().evaluate_candidate(empty_task, empty_motion, {})
