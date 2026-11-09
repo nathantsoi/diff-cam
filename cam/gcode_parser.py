@@ -71,11 +71,11 @@ def _strip_comments(text: str) -> str:
 
 
 def _plane_axes(plane):
-    """Return the two in-plane axis indices and the out-of-plane axis index."""
+    """Shared right-handed arc bases: XY=(X,Y), XZ=(Z,X), YZ=(Y,Z)."""
     if plane == PLANE_XY:
         return 0, 1, 2
     if plane == PLANE_XZ:
-        return 0, 2, 1
+        return 2, 0, 1
     return 1, 2, 0  # PLANE_YZ
 
 

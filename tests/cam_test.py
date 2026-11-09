@@ -8,6 +8,7 @@ end-to-end check carves both trajectories in the simulator and compares the
 resulting stock.
 """
 
+import math
 import os
 
 import numpy as np
@@ -225,6 +226,25 @@ def test_arc_radius_word():
     r_expected = np.linalg.norm(cfg.wcs_to_unit([60.0, 50.0, 0.0])[:2] - center)
     radii = np.linalg.norm(pts[:, :2] - center, axis=1)
     assert np.allclose(radii, r_expected, atol=1e-3)
+
+
+def test_g18_radius_center_and_sampling_use_shared_plane_convention():
+    cfg = _cfg()
+    radius = 3.3333333
+    # In the contract's XZ basis (Z,X), an angle theta gives (X,Z)=r(sin,cos).
+    # This general-position minor arc must be centered on the origin, not a
+    # mirror-image candidate circle from the legacy X,Z reversal.
+    p0 = np.array([radius * math.sin(0.3), 0.0, radius * math.cos(0.3)])
+    p1 = np.array([radius * math.sin(1.5), 0.0, radius * math.cos(1.5)])
+    text = (f"G21 G90 G18\nG0 X{p0[0]:.8f} Z{p0[2]:.8f}\n"
+            f"G3 X{p1[0]:.8f} Z{p1[2]:.8f} R{radius}\nM2\n")
+    segments = parse_gcode(text, cfg)
+    assert len(segments) == 1
+    assert np.linalg.norm(cfg.to_wcs(segments[0].center)) < 5e-5
+    sampled_mm, _ = plan_trajectory(segments, cfg)
+    midpoint = np.array([radius * math.sin(0.9), 0.0, radius * math.cos(0.9)])
+    nearest_error = np.min(np.linalg.norm(cfg.to_wcs(sampled_mm) - midpoint, axis=1))
+    assert nearest_error < 0.1
 
 
 # ---------------------------------------------------------------------------
