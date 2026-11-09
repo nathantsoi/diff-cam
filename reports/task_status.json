@@ -267,6 +267,14 @@
    "blocker": null,
    "next": null,
    "note": "merged"
+  },
+  "T1.2b": {
+   "status": "complete",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T2.0-custom-geometry@9644d1b",
+   "blocker": null,
+   "next": null,
+   "note": "merged; H1 hard holder checks inflated by cell half-diagonal (safe-case overlap 100->25->0 mm3 at n=1,2,3), H2 lifecycle charged after init, H3 max_steps>=1, H4 reset restores configured start. Reviewer repros pass."
   }
  }
 }
