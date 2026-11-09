@@ -144,7 +144,7 @@
    "status": "in_progress",
    "owner": "diffcam-worker-1",
    "branch": "task/T3.4-continuation",
-   "blocker": "T3.4b (K1/K2) + T3.3b AD/FD characterization before dev ablations",
+   "blocker": "T3.3b AD/FD characterization before dev ablations",
    "next": "dev ablations after pilot",
    "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot."
   },
@@ -333,12 +333,12 @@
    "note": "independent Titan bore raster 68/68; merged bb552e8"
   },
   "T3.4b": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-1",
    "branch": "task/T3.4b-shift",
    "blocker": null,
    "next": null,
-   "note": "shift via sim per-voxel field, field-gap calibration in voxel SDF units, leak tests, C2"
+   "note": "merged 2424699: shift via sim per-voxel stock field; phi_hard = hard stock_d[T]; two-sided band predicate; leak tests; C2. Coordinator real-sim gaps small and shrinking with k (k=20: +0.06/+0.17/+0.00 vox)."
   },
   "T3.3b": {
    "status": "in_progress",
