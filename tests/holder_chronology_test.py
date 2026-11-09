@@ -106,8 +106,8 @@ def screen_for(fixture):
     np.testing.assert_allclose(
         legacy_volume * sim.Nx * sim.Ny * sim.Nz * sim.v ** 3,
         physical_volume,
-        rtol=0.0,
-        atol=2e-4,
+        rtol=2e-6,
+        atol=2e-3,  # independent float32 volume reductions, not geometry tolerance
     )
     sim.loss[None] = 0.0
     sim.compute_holder_penalty(0, segment_count)
@@ -518,3 +518,118 @@ def test_tip_band_height_is_not_silently_replaced_by_full_flute_height():
     smooth_tip_point_loss(sim, 0.5)
     full_flute = float(sim.loss[None])
     assert narrow_band > full_flute
+
+
+def test_hard_holder_cell_inflation_detects_interior_contact():
+    # One cubic millimetre cell at [0,1]^3. Holder centre x=.9, radius .1:
+    # the holder covers x=.8..1.0 and intersects the cell interior by .9 mm.
+    # Its centre starts .1 mm from the boundary, but the closest point at cell
+    # centre x=.5 reads +.4 cell from the holder. A centre-only test misses it.
+    sim = CSGSimulatorDelta(
+        voxel_size_mm=1.0, stock_size_mm=1.0, max_steps=1,
+        tool_start=(0.9, 0.5, 0.0), target_shape="sphere",
+        enforce_speed_limits=False, init_taichi=False,
+    )
+    sim.tool_radius[None] = 0.01  # stationary tiny cutter does not remove cell
+    sim.tool_height[None] = 0.25
+    sim.holder_radius[None] = 0.1
+    sim.holder_height[None] = 1.0
+    sim.tool_delta.from_numpy(np.zeros((1, 3), dtype=np.float32))
+    sim.forward_hard(2, clip_speeds=False)
+    assert sim.stock.to_numpy()[1, 0, 0, 0] < 0.0
+    assert sim.holder_overlap_at(0) > 0.0
+    assert sim.holder_overlap_mm3_at(0) > 0.0
+    assert sim.holder_overlap_total(1) > 0.0
+    assert sim.holder_overlap_total_mm3(1) > 0.0
+    assert sim.holder_min_clearance_at(0) < 0.0
+    assert sim.holder_min_clearance_mm_at(0) < 0.0
+    # The separate smooth objective is deliberately not the inflated hard metric.
+    sim.loss[None] = 0.0
+    sim.compute_holder_penalty(0, 1)
+    assert sim.loss[None] == pytest.approx(0.0, abs=0.0)
+
+
+def test_failed_constructors_do_not_consume_instance_lifecycle_budget():
+    code = textwrap.dedent(
+        """
+        import taichi as ti
+        from simulator.csg_simulator import CSGSimulatorDelta
+        from simulator.csg_simulator import _TAICHI_MAX_CSG_INSTANCES_PER_RUNTIME as BUDGET
+
+        ti.init(arch=ti.cpu, offline_cache=False)
+        for _ in range(20):
+            try:
+                CSGSimulatorDelta(
+                    voxel_size_mm=3.0, stock_size_mm=(40.0, 24.0, 16.0),
+                    max_steps=1, init_taichi=False, target_shape="sphere",
+                )
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("intentionally anisotropic grid unexpectedly accepted")
+        for _ in range(BUDGET):
+            CSGSimulatorDelta(
+                resolution=6, stock_size_in=(1, 1, 1), max_steps=1,
+                target_shape="sphere", enforce_speed_limits=False, init_taichi=False,
+            )
+        print(f"VALID_CONSTRUCTED_AFTER_FAILED={BUDGET}")
+        try:
+            CSGSimulatorDelta(
+                resolution=6, stock_size_in=(1, 1, 1), max_steps=1,
+                target_shape="sphere", enforce_speed_limits=False, init_taichi=False,
+            )
+        except RuntimeError as error:
+            assert "simulator instance lifecycle budget" in str(error)
+            print("BUDGET_GUARD_INTACT")
+        else:
+            raise AssertionError("configured lifecycle budget exceeded without guard")
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", code], capture_output=True, text=True,
+        check=False, timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "VALID_CONSTRUCTED_AFTER_FAILED=11" in result.stdout
+    assert "BUDGET_GUARD_INTACT" in result.stdout
+
+
+def test_zero_max_steps_fails_clearly_before_taichi_allocation():
+    with pytest.raises(ValueError, match="positive"):
+        CSGSimulatorDelta(
+            resolution=1, stock_size_mm=1.0, max_steps=0,
+            target_shape="sphere", init_taichi=False,
+        )
+
+
+def test_saved_prefix_cannot_change_next_candidate_start_or_state():
+    sim = CSGSimulatorDelta(
+        resolution=10, max_steps=1, stock_size_in=(1, 1, 1),
+        target_shape="sphere", tool_start=(0.2, 0.25, 0.5),
+        enforce_speed_limits=False, init_taichi=False, k_init=40,
+    )
+    sim.set_target_params(radius_mm=9.0)
+    sim.set_tool_start((0.2, 0.25, 0.5))
+
+    def evaluate():
+        sim.tool_delta.from_numpy(np.array([[0.03, 0.02, 0.0]], dtype=np.float32))
+        with ti.ad.Tape(loss=sim.loss):
+            sim.forward(2)
+        return (
+            sim.stock.to_numpy()[:2].copy(),
+            float(sim.loss[None]),
+            sim.tool_delta.grad.to_numpy().copy(),
+            sim.tool_pos.to_numpy()[:2].copy(),
+        )
+
+    fresh = evaluate()
+    sim.load_saved_init(np.ones_like(sim.saved_stock.to_numpy()), (0.9, 0.9, 0.9))
+    np.testing.assert_allclose(sim.tool_start.to_numpy(), (0.9, 0.9, 0.9))
+    sim.reset_candidate_state()
+    np.testing.assert_allclose(sim.tool_start.to_numpy(), (0.2, 0.25, 0.5))
+    assert sim.use_saved_init[None] == 0
+    again = evaluate()
+    np.testing.assert_allclose(fresh[0], again[0], rtol=2e-6, atol=2e-7)
+    assert fresh[1] == pytest.approx(again[1], rel=2e-6, abs=2e-7)
+    np.testing.assert_allclose(fresh[2], again[2], rtol=2e-6, atol=2e-7)
+    np.testing.assert_allclose(fresh[3], again[3], rtol=0.0, atol=0.0)
