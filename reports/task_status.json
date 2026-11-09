@@ -10,7 +10,7 @@
    "branch": "task/T0.0-contracts",
    "blocker": null,
    "next": "collect consumer acks",
-   "note": "v1 on core (ba97d6e). Acks: worker-2/T1.0 YES (2026-11-08). Pending: worker-1/T1.4, worker-3/T2.1."
+   "note": "v1 on core (ba97d6e). Acks: worker-2/T1.0 YES, worker-3/T2.1 YES (2026-11-08). Pending: worker-1/T1.4."
   },
   "T0.1": {
    "status": "complete",
