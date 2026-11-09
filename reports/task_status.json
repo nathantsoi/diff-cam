@@ -66,7 +66,7 @@
    "branch": "task/T1.3a-camotics-metrics",
    "blocker": null,
    "next": "T1.3a (CAMotics adapter + metrics) now; T1.3b production posted evaluator after T1.2",
-   "note": "T1.3a resumed (worker-3): CAMotics adapter + metrics + bias; camsim STL non-manifold issue open; must inherit T1.0c whole-cell semantics | T1.3b dispatched to worker-2 in parallel | T1.3b MERGED (posted_evaluator: analytic box/box_minus_pocket, flat tools, shank+holder chronology, whole-cell bounds, arcs). Pilot nominal: safety True, geometry False at 1 mm grid (gouge 48 mm3, surface err 1 voxel). Remaining T1.3: CAMotics cross-check (T1.3a, worker-3)."
+   "note": "T1.3a resumed (worker-3): CAMotics adapter + metrics + bias; camsim STL non-manifold issue open; must inherit T1.0c whole-cell semantics | T1.3b dispatched to worker-2 in parallel | T1.3b MERGED (posted_evaluator: analytic box/box_minus_pocket, flat tools, shank+holder chronology, whole-cell bounds, arcs). Pilot nominal: safety True, geometry False at 1 mm grid (gouge 48 mm3, surface err 1 voxel). Remaining T1.3: CAMotics cross-check (T1.3a, worker-3). | CORRECTION: T1.3b merged before worker-2's HOLD arrived; known defects (arc interval bound misses midpoint clearance/removal, major-arc/full-turn bound, rapid uncertainty attribution across segments, full-circle fixture engagement height) -> T1.3b-fixes in progress (worker-2). Evaluator NOT yet trusted for arcs."
   },
   "T2.0": {
    "status": "complete",
