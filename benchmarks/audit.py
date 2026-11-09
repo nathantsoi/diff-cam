@@ -548,6 +548,11 @@ def audit_runs(
             reconciliation["exact_id_reconciliation"]
             and not all_issue_codes
         ),
+        "complete_data": bool(
+            observed and reconciliation["exact_id_reconciliation"]
+            and all(run.complete_and_audited and all(not dialect.issues for dialect in (run.dialects or {}).values())
+                    for run in observed if run.expected)
+        ),
     }
     by_id = {run.run_id: run for run in observed if not run.duplicate_id}
     return reports, {
@@ -610,6 +615,19 @@ def _outcome_value(
     raise AuditInputError(f"unknown outcome {outcome}")
 
 
+def _recorded_noncomplete(expected: ExpectedRun, audits: Mapping[str, RunAudit]) -> bool:
+    """A real, unambiguous RunRecord explicitly says the run did not complete.
+
+    Malformed/missing/duplicate records stay unknown. Missing evaluation artifacts do
+    not erase a valid terminal status recorded before an interrupted or blocked run.
+    """
+    run = audits.get(expected.run_id)
+    return bool(
+        run is not None and run.expected and not run.duplicate_id
+        and run.record is not None and run.record.status != C.RunStatus.COMPLETE
+    )
+
+
 def _outcome_by_task(
     expected_runs: Sequence[ExpectedRun],
     audits: Mapping[str, RunAudit],
@@ -624,7 +642,12 @@ def _outcome_by_task(
             expected.task_id,
             {"known": [], "unknown_or_missing_observations": 0},
         )
-        value = None if evaluation is None else _outcome_value(evaluation, tasks[expected.task_id], outcome)
+        if evaluation is None:
+            recorded_failure = _recorded_noncomplete(expected, audits)
+            value = (False if recorded_failure and outcome in
+                     ("safety_pass", "completion_pass", "efficiency_eligible") else None)
+        else:
+            value = _outcome_value(evaluation, tasks[expected.task_id], outcome)
         if value is None:
             entry["unknown_or_missing_observations"] += 1
         else:
@@ -653,7 +676,8 @@ def _metric_by_task(
         for expected in runs:
             evaluation = _observation(expected, audits, dialect)
             if evaluation is None:
-                reasons["missing_invalid_failed_or_blocked"] += 1
+                reason = "recorded_noncomplete" if _recorded_noncomplete(expected, audits) else "missing_or_invalid_evidence"
+                reasons[reason] += 1
                 continue
             if evaluation.coverage != C.Coverage.COMPLETE:
                 reasons["incomplete_or_unsupported_coverage"] += 1
@@ -681,6 +705,15 @@ def _rng(seed: int, key: str) -> np.random.Generator:
     return np.random.default_rng(int.from_bytes(digest[:8], "big"))
 
 
+def _bootstrap_design(values: np.ndarray, families: Sequence[str]) -> tuple[list[np.ndarray], str]:
+    groups = [values[np.asarray(families) == family] for family in sorted(set(families))]
+    if any(len(group) < 2 for group in groups):
+        # A singleton stratum contributes no resampling variation. Pooling preserves
+        # independent task-level resampling while making that limitation explicit.
+        return [values], "pooled_tasks_due_to_singleton_stratum"
+    return groups, "family_stratified"
+
+
 def _resampled_mean_distribution(
     values: Sequence[float],
     families: Sequence[str],
@@ -688,7 +721,7 @@ def _resampled_mean_distribution(
     replicates: int,
 ) -> np.ndarray:
     values_array = np.asarray(values, dtype=np.float64)
-    groups = [values_array[np.asarray(families) == family] for family in sorted(set(families))]
+    groups, _design = _bootstrap_design(values_array, families)
     distribution = np.empty(replicates, dtype=np.float64)
     for index in range(replicates):
         parts = [group[rng.integers(0, len(group), len(group))] for group in groups]
@@ -719,19 +752,19 @@ def _sign_flip_p_value(differences: np.ndarray, key: str, seed: int,
     else:
         rng = _rng(seed, f"{key}|sign-flip")
         signs = rng.choice((-1.0, 1.0), size=(replicates, task_count))
-        signs[0, :] = 1.0  # identity is always included in numerator and denominator.
-        if replicates > 1:
-            signs[1, :] = -1.0  # retain the mirrored extreme as well.
+        signs[0, :] = 1.0  # identity is included; all remaining draws are independent.
         total = replicates
         means = np.mean(signs * differences[None, :], axis=1)
         method = "seeded_monte_carlo_paired_sign_flip"
     observed = abs(float(np.mean(differences)))
-    extreme = int(np.count_nonzero(np.abs(means) >= observed - 1e-15))
+    tie_tolerance = 1e-9 * max(1.0, float(np.sum(np.abs(differences))))
+    extreme = int(np.count_nonzero(np.abs(means) >= observed - tie_tolerance))
     return {
         "bootstrap_p": extreme / total,
         "sign_flip_method": method,
         "sign_flip_extreme": extreme,
         "sign_flip_total": total,
+        "tie_tolerance_mm_or_metric_units": tie_tolerance,
     }
 
 
@@ -754,6 +787,7 @@ def _paired_stats(
             "mean_difference": None,
             "interval": None,
             "interval_null_reason": "no paired independent tasks",
+            "ci_resampling_method": None,
             "bootstrap_p": None,
             "sign_flip_method": None,
             "sign_flip_extreme": None,
@@ -767,10 +801,12 @@ def _paired_stats(
     observed = float(np.mean(differences))
     sufficient_tasks = len(method) >= 2
     interval = None
+    ci_resampling_method = None
     if sufficient_tasks:
         distribution = _resampled_mean_distribution(
             differences, families, _rng(seed, f"{key}|task-bootstrap-ci"), replicates)
         interval = _interval(distribution, confidence)
+        ci_resampling_method = _bootstrap_design(differences, families)[1]
     randomization = _sign_flip_p_value(differences, key, seed, replicates)
     return {
         "paired_tasks": len(method),
@@ -780,6 +816,7 @@ def _paired_stats(
         "interval": interval,
         "interval_null_reason": (
             None if sufficient_tasks else "insufficient independent tasks (need at least 2)"),
+        "ci_resampling_method": ci_resampling_method,
         **randomization,
         "small_n_warning": (
             "fewer than 5 independent tasks; treat inference as descriptive" if len(method) < 5 else None),
@@ -833,17 +870,21 @@ def _rate_summary(
         successes = int(round(sum(values)))
         interval = clopper_pearson(successes, len(values), confidence)
         method = "clopper_pearson_independent_tasks"
+        resampling_method = "clopper_pearson_exact_binomial"
     elif values:
         interval = _interval(
             _resampled_mean_distribution(values, families, _rng(seed, key), replicates),
             confidence,
         )
         method = "cluster_bootstrap_over_tasks"
+        resampling_method = _bootstrap_design(np.asarray(values), families)[1]
     else:
         interval = None
         method = "unavailable"
+        resampling_method = None
     return {
         "estimate_method": method,
+        "resampling_method": resampling_method,
         "expected_task_units": len(task_ids),
         "known_task_units": len(values),
         "unknown_or_missing_task_units": len(task_ids) - len(values),
@@ -866,6 +907,29 @@ def _apply_holm(rows: Iterable[Mapping[str, Any]]) -> None:
         adjusted = min(1.0, (count - rank) * row["bootstrap_p"])
         running = max(running, adjusted)
         row["holm_p"] = float(running)
+
+
+def _metric_drop_counts(task_ids: Sequence[str], method_values, baseline_values) -> dict[str, Any]:
+    failed_or_ineligible_reasons = {
+        "recorded_noncomplete", "incomplete_or_unsupported_coverage",
+        "not_efficiency_eligible", "efficiency_eligibility_unknown",
+    }
+    exclusions_by_side = {}
+    failed_total = 0
+    missing_total = 0
+    for side, values in (("method", method_values), ("baseline", baseline_values)):
+        counts: Counter[str] = Counter()
+        for task_id in task_ids:
+            counts.update(values[task_id]["exclusions"])
+        exclusions_by_side[side] = dict(sorted(counts.items()))
+        failed_total += sum(counts[reason] for reason in failed_or_ineligible_reasons)
+        missing_total += sum(count for reason, count in counts.items()
+                             if reason not in failed_or_ineligible_reasons)
+    return {
+        "dropped_because_side_failed_or_ineligible": failed_total,
+        "dropped_missing_or_null_evidence": missing_total,
+        "exclusions_by_side": exclusions_by_side,
+    }
 
 
 def _comparison_rows(
@@ -922,6 +986,7 @@ def _comparison_rows(
             seed, replicates, confidence,
         )
         summary["efficiency_eligibility_required"] = metric_name in EFFICIENCY_METRICS
+        summary.update(_metric_drop_counts(task_ids, method_values, baseline_values))
         summary["method_task_availability"] = {
             task_id: method_values[task_id] for task_id in task_ids
         }
@@ -988,7 +1053,7 @@ def aggregate_evaluations(
             {task.family for task in manifest.tasks.values()}
             if spec.families is None else set(spec.families)
         )
-        for family in [*families, None]:
+        for family in ([None] if len(families) == 1 else [*families, None]):
             row = _comparison_rows(
                 spec, family, manifest, audits, bootstrap_seed,
                 bootstrap_replicates, confidence,
@@ -1000,7 +1065,9 @@ def aggregate_evaluations(
         "independent_unit": "task",
         "seed_aggregation": "mean within each task/method before pairing",
         "pairing": "common task and dialect; method minus baseline",
-        "bootstrap": "percentile task-cluster bootstrap, resampled within family strata",
+        "bootstrap": "percentile task-cluster bootstrap; family-stratified only when every stratum has >=2 tasks, otherwise pooled over tasks (singleton strata cannot vary independently)",
+        "recorded_noncomplete": "a valid non-complete run is a known zero for safety, completion and efficiency eligibility; continuous metrics exclude it with explicit per-comparison drop counts",
+        "auditor_flags": "auditor_passed is mechanical validity only; complete_data additionally requires every expected run record and posted-evaluation artifact to be present, unique, and cleanly audited",
         "bootstrap_replicates": bootstrap_replicates,
         "bootstrap_seed": bootstrap_seed,
         "confidence": confidence,
@@ -1039,32 +1106,40 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "resample tasks within family strata; no-cut runs are not efficiency eligible. "
         "Missing/invalid/blocked/null evidence is not converted into success.",
         "",
+        f"Seeds are averaged within each task before pairing. Bootstrap intervals "
+        "resample tasks within family strata only when every stratum has at least two tasks; "
+        "otherwise they pool tasks. No-cut runs are not efficiency eligible. "
+        "Recorded failed/interrupted/blocked runs are known zero outcomes, never invisible successes. "
+        "Missing/invalid/blocked/null evidence is not converted into success.",
+        "",
         f"**Holm policy:** {report['policy']['p_value']}",
         "",
         "## Metric comparisons",
         "",
-        "| Comparison | Family | Dialect | Metric | Paired tasks | Method | Baseline | Δ | 95% CI | Holm p |",
-        "|---|---|---|---|---:|---:|---:|---:|---|---:|",
+        "| Comparison | Family | Dialect | Metric | Paired tasks | Method | Baseline | Δ | 95% CI | Failed/ineligible drops | Holm p |",
+        "|---|---|---|---|---:|---:|---:|---:|---|---:|---:|",
     ]
     for row in report["comparisons"]:
         for metric, summary in row["metrics"].items():
             lines.append(
-                "| {comparison} | {family} | {dialect} | {metric} | {n} | {method} | {baseline} | {delta:.6g} | {interval} | {p} |".format(
+                "| {comparison} | {family} | {dialect} | {metric} | {n} | {method} | {baseline} | {delta:.6g} | {interval} | {dropped} | {p} |".format(
                     comparison=str(row["comparison"]).replace("|", "\\|"),
                     family=row["family"], dialect=row["dialect"], metric=metric,
                     n=summary["paired_tasks"], method=_fmt(summary["method_mean"]),
                     baseline=_fmt(summary["baseline_mean"]),
                     delta=summary["mean_difference"] if summary["mean_difference"] is not None else float("nan"),
                     interval=_interval_text(summary["interval"]),
+                    dropped=summary["dropped_because_side_failed_or_ineligible"],
                     p=_fmt(summary["holm_p"]),
                 ).replace("nan", "NA") if summary["mean_difference"] is None else
-                "| {comparison} | {family} | {dialect} | {metric} | {n} | {method} | {baseline} | {delta} | {interval} | {p} |".format(
+                "| {comparison} | {family} | {dialect} | {metric} | {n} | {method} | {baseline} | {delta} | {interval} | {dropped} | {p} |".format(
                     comparison=str(row["comparison"]).replace("|", "\\|"),
                     family=row["family"], dialect=row["dialect"], metric=metric,
                     n=summary["paired_tasks"], method=_fmt(summary["method_mean"]),
                     baseline=_fmt(summary["baseline_mean"]),
                     delta=_fmt(summary["mean_difference"]),
                     interval=_interval_text(summary["interval"]),
+                    dropped=summary["dropped_because_side_failed_or_ineligible"],
                     p=_fmt(summary["holm_p"]),
                 )
             )
@@ -1099,6 +1174,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "",
             "## Evidence audit",
             "",
+            f"- auditor_passed (mechanical artifact validity, not a success requirement): {report['summary']['auditor_passed']}",
+            f"- complete_data (expected run/evaluation artifacts complete and clean; coverage limits still reported): {report['complete_data']}",
             f"- Expected IDs reconciled: {reconciliation['exact_id_reconciliation']}",
             f"- Missing expected run IDs: {', '.join(reconciliation['missing_run_ids']) or 'none'}",
             f"- Unexpected run IDs: {', '.join(reconciliation['unexpected_run_ids']) or 'none'}",
@@ -1136,6 +1213,7 @@ def generate_report(
         "expected_run_count": len(manifest.runs),
         "expected_vs_observed": audit["reconciliation"],
         "summary": audit["summary"],
+        "complete_data": audit["summary"]["complete_data"],
         "policy": policy,
         "runs": run_reports,
         "comparisons": comparisons,

@@ -5,6 +5,8 @@
 **Machine-readable evidence and reproduction commands:** [`configs/external_compatibility.json`](../configs/external_compatibility.json)
 **Earlier read-only survey:** `dispatch/diffcam/T5.0-recon-diffcam-worker-3.reply.md` (not a performance result).
 
+**Persisted modernized recipe (T5.0b):** use [`baselines/cncnet/README.md`](../baselines/cncnet/README.md) and its exact lock/build/run/check scripts for reproduction. A fresh venv and fresh output directory were built from that tracked recipe and reproduced the bounded native smoke (`valid_complete_smoke=true`, native IoU **0.423786**, both meshes read finite) with no tracked source edits. The earlier reference value was 0.423761; absolute delta is **0.000025**. New raw/smooth mesh hashes are `210cd06d08e34f1cca8c32fc4a6a934e9bcd0b92f511fb99e4be33efdcb878c7` and `9a9fdc7af30787644789e3d376f864bec527f36249429a7703f9ba88ebaf1bc7`. They differ from the earlier result (as do checkpoint/log hashes); this is an observed numerical/output difference, not an assertion of deterministic byte identity. The standalone `/tmp` recipe paths and artifact tables below are retained as historical provenance for the first smoke, not as the only way to reproduce it.
+
 ## Status at a glance
 
 This is a compatibility and provenance assessment, not a solver comparison. A source checkout, schema inspection, or stored QA pass is not a successful reconstruction or executable-task qualification.

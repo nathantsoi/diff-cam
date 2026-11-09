@@ -1,0 +1,61 @@
+{
+  "experiment": "t50-modern-smoke",
+  "sample": "samples/0.off",
+  "sample_sha256": "8e80d539b1c593501a55bd9f7b3c6b9099ce57fdb556e298b0bd3b744f690b7c",
+  "native_logged_iou_values": [
+    0.423761
+  ],
+  "native_artifacts": {
+    "output/t50-modern-smoke/0.obj": {
+      "path": "/tmp/diffcam-worker-3-t50.gKY5mr/runtime/cnc-net/output/t50-modern-smoke/0.obj",
+      "size_bytes": 34680789,
+      "sha256": "c2395ef6f83a22604989e7b2ed67e328100a732cc3fd6ac2b8c6b3fe00147e83",
+      "readable_mesh": true,
+      "vertices": 455374,
+      "triangles": 910748,
+      "finite_vertices": true,
+      "bbox_min": [
+        -0.3637160062789917,
+        -0.31475400924682617,
+        -0.10491800308227539
+      ],
+      "bbox_max": [
+        0.3637160062789917,
+        0.31475400924682617,
+        0.10491800308227539
+      ]
+    },
+    "output/t50-modern-smoke/0_smooth.obj": {
+      "path": "/tmp/diffcam-worker-3-t50.gKY5mr/runtime/cnc-net/output/t50-modern-smoke/0_smooth.obj",
+      "size_bytes": 34687452,
+      "sha256": "c9787b150a2978183557ae597effd27c648af3f68768826f52c434cecdbad930",
+      "readable_mesh": true,
+      "vertices": 455374,
+      "triangles": 910748,
+      "finite_vertices": true,
+      "bbox_min": [
+        -0.3637160062789917,
+        -0.31475400924682617,
+        -0.10491800308227539
+      ],
+      "bbox_max": [
+        0.3637160062789917,
+        0.31475400924682617,
+        0.10491800308227539
+      ]
+    },
+    "checkpoints/t50-modern-smoke/logfile.log": {
+      "path": "/tmp/diffcam-worker-3-t50.gKY5mr/runtime/cnc-net/checkpoints/t50-modern-smoke/logfile.log",
+      "size_bytes": 8543,
+      "sha256": "69dc4fff8d0a44ea72c67041c055d916b388973349fc2a467f0d5394f9955a73"
+    },
+    "checkpoints/t50-modern-smoke/best_checkpoint.pth": {
+      "path": "/tmp/diffcam-worker-3-t50.gKY5mr/runtime/cnc-net/checkpoints/t50-modern-smoke/best_checkpoint.pth",
+      "size_bytes": 139691301,
+      "sha256": "dbe446656cd1dc4399fd330cd128fb4c722bf0a22c4ce0e5008150e4da535169"
+    }
+  },
+  "inspected_at": "2026-11-09T01:24:41.932464+00:00",
+  "valid_complete_smoke": true,
+  "note": "Native IoU is the value emitted by CNC-Net's own logging. Mesh readability/finite vertices were checked independently from the downloaded model; this is not a quality or physical feasibility gate."
+}
