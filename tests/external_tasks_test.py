@@ -43,12 +43,17 @@ def _synthetic_task(tmp_path: Path) -> C.TaskSpec:
     """Schema fixture only, explicitly not real Titan geometry evidence."""
     grid = T.pilot_grid()
     original = np.full(grid.shape, -0.5, dtype=np.float64)
+    # Retain this original-air cell in T (genuine excluded stock), while a
+    # second cell stays outside both P and T as a nonzero removal target.
+    original[0, 0, 0] = 0.5
+    original[0, 0, 1] = 0.5
     operation = original.copy()
-    operation[0, 0, 0] = 0.5  # one synthetic, declared excluded cell
+    # Negative-inside: this original-air cell is retained in T as an exclusion.
+    operation[0, 0, 0] = -0.5
     return T.build_task(
         _source(tmp_path / "part.npy", original, grid),
         _source(tmp_path / "target.npy", operation, grid),
-        excluded_volume_mm3=grid.voxel_mm ** 3,
+        native_excluded_volume_mm3=None,
     )
 
 
@@ -172,6 +177,29 @@ def test_task_preserves_sampled_sources_and_unrecorded_provenance(tmp_path):
     assert "not certified accessible" in task.operation_target.exclusion_reason
 
 
+def test_exclusion_is_grid_resolved_with_native_volume_diagnostic_only(tmp_path):
+    grid = T.pilot_grid()
+    original = np.full(grid.shape, -0.5, dtype=np.float64)
+    original[0, 0, 0] = 0.5
+    original[0, 0, 1] = 0.5
+    target = original.copy()
+    target[0, 0, 0] = -0.5
+    task = T.build_task(
+        _source(tmp_path / "grid-original.npy", original, grid),
+        _source(tmp_path / "grid-target.npy", target, grid),
+        # Deliberately different synthetic diagnostic, not evidence of a native
+        # volume measurement. The task declaration must come from the masks.
+        native_excluded_volume_mm3=123.456,
+    )
+    expected = grid.voxel_mm ** 3
+    assert task.operation_target.excluded_volume_mm3 == pytest.approx(expected)
+    geometry = task.operation_target.geometry
+    assert geometry.params["grid_declared_excluded_volume_mm3"] == pytest.approx(expected)
+    assert geometry.params["native_excluded_volume_mm3_diagnostic"] == pytest.approx(123.456)
+    assert geometry.params["excluded_volume_convention"].endswith("tolerance 0")
+    assert "grid-resolved" in task.operation_target.exclusion_reason
+
+
 def test_nominal_line_motion_has_noncutting_rapids_and_vertical_retract(tmp_path):
     task = _synthetic_task(tmp_path)
     motion = T.nominal_motion(task)
@@ -212,7 +240,7 @@ def test_line_comparison_records_tags_but_does_not_waive_kind_or_geometry(tmp_pa
         T.compare_line_motion(motion, dataclasses.replace(motion, segments=tuple(segments)))
 
 
-def test_actual_production_evaluator_preserves_sampled_geometry_gap(tmp_path):
+def test_actual_production_evaluator_supports_exact_grid_sampled_geometry(tmp_path):
     task = _synthetic_task(tmp_path)
     motion = T.nominal_motion(task)
     for dialect in (C.Dialect.RS274, C.Dialect.HAAS):
@@ -226,13 +254,15 @@ def test_actual_production_evaluator_preserves_sampled_geometry_gap(tmp_path):
         result = evaluate_posted_gcode(task, nc.encode(), dialect, {
             "expected_nc_hash": C.nc_hash(nc.encode()), "subdivisions": 4,
         })
-        assert result.coverage == C.Coverage.UNSUPPORTED
-        assert result.coverage_reasons == (E.SAMPLED_EVALUATOR_REASON,)
-        assert result.geometry_pass is None
-        assert result.safety_pass is None
+        assert result.coverage == C.Coverage.COMPLETE
+        assert result.geometry_pass is False
+        assert result.metrics["residual_volume_mm3"].value is not None
+        assert result.metrics["residual_volume_mm3"].value > 0
+        assert result.metrics["gouge_volume_mm3"].value is not None
+        assert result.metrics["excluded_volume_mm3"].value == pytest.approx(
+            task.grid.voxel_mm ** 3
+        )
         assert result.efficiency_eligible is False
-        assert result.metrics["residual_volume_mm3"].value is None
-        assert E.SAMPLED_EVALUATOR_REASON in result.metrics["residual_volume_mm3"].null_reason
         if dialect == C.Dialect.RS274:
             assert "G0 X-20.32 Y0 Z5" in nc
             assert "G1 X-20.32 Y0 Z-9.525 F150" in nc
@@ -299,7 +329,11 @@ def test_real_step_sampling_nominal_and_actual_evaluator_outcomes(tmp_path):
     assert inspection["reference_dimension"]["max_abs_error_mm"] < 1e-6
     assert not result["native"]["environment"]["std_path_has_repository"]
     geometry = result["native"]["operation_geometry"]
-    assert geometry["exclusion"]["native_excluded_volume_mm3"] > 0
+    declared = result["task"].operation_target
+    assert declared.excluded_volume_mm3 == pytest.approx(139.290044)
+    diagnostic = geometry["exclusion"]["native_excluded_volume_mm3"]
+    assert declared.geometry.params["native_excluded_volume_mm3_diagnostic"] == pytest.approx(diagnostic)
+    assert declared.geometry.params["grid_declared_excluded_volume_mm3"] == pytest.approx(139.290044)
     assert geometry["target"]["brep_valid"] is True
     sweep = result["native"]["native_nominal_sweep"]
     assert sweep["start_source_mm"][:2] == pytest.approx([30.48, 24.13])
@@ -310,8 +344,14 @@ def test_real_step_sampling_nominal_and_actual_evaluator_outcomes(tmp_path):
     assert result["sampled"]["excluded_cells_initial_and_T_not_P"] > 0
     for name in ("rs274", "haas"):
         record = result["evaluations"][name]
-        assert record["production"].coverage == C.Coverage.UNSUPPORTED
-        assert E.SAMPLED_EVALUATOR_REASON in record["production"].coverage_reasons
+        assert record["production"].coverage == C.Coverage.COMPLETE
+        assert record["production"].geometry_pass is False
+        assert record["production"].safety_pass is None
+        assert record["production"].efficiency_eligible is False
+        assert record["production"].metrics["residual_volume_mm3"].value > 0
+        assert record["production"].metrics["gouge_volume_mm3"].value == 0
+        assert record["production"].metrics["original_part_gouge_volume_mm3"].value == 0
+        assert record["production"].metrics["excluded_volume_mm3"].value == pytest.approx(139.290044)
         assert record["reference"].result.coverage == C.Coverage.COMPLETE
         # Stock-chronology safety is intentionally retained whether true, false
         # or null; it is never converted into a physical safety certificate.

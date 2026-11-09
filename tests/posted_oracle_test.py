@@ -8,6 +8,7 @@ from task coordinates, independent swept volumes, and hand-enumerated rings.
 
 from dataclasses import replace
 import math
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -591,3 +592,210 @@ def test_station_summary_is_compact_by_default():
     seg = result.discretization["segments"][0]
     assert "stations_work_mm" not in seg
     assert seg["station_count"] >= 2 and seg["stations_sha256"].startswith("sha256:")
+
+
+def _manual_box_mask(grid, lower, upper):
+    """Hand-indexed box membership; no production geometry helper used."""
+    axes = [
+        grid.origin_mm[axis]
+        + (np.arange(grid.shape[axis], dtype=np.float64) + 0.5) * grid.voxel_mm
+        for axis in range(3)
+    ]
+    xyz = np.meshgrid(*axes, indexing="ij")
+    result = np.ones(grid.shape, dtype=bool)
+    for axis in range(3):
+        result &= (xyz[axis] >= lower[axis]) & (xyz[axis] <= upper[axis])
+    return result
+
+
+def _sampled_source(path, mask, grid):
+    # This is a unit-only occupancy-like signed field, not CAD evidence or a
+    # claim of a continuous Euclidean SDF. The production loader needs a mask.
+    values = np.where(mask, -1.0, 1.0).astype(np.float64)
+    np.save(path, values, allow_pickle=False)
+    return C.GeometrySource(
+        kind="sampled", path=str(path), sha256=C.sha256_bytes(Path(path).read_bytes()),
+        grid=grid, frame=C.Frame.WORK,
+        params={"test_provenance": "hand-indexed synthetic occupancy-like field, mm"},
+    )
+
+
+def _small_sampled_task(tmp_path, *, expanded_target=False, empty=False):
+    task, motion = machine_fixture(F.plunge_above())
+    grid = task.grid
+    # F.plunge_above uses 60 x 40 x 12 mm stock at 2 mm (30,20,6), not a cube.
+    assert grid.shape == (30, 20, 6) and grid.voxel_mm == 2.0
+    part = _manual_box_mask(grid, (26, 26, 0), (30, 30, 12))
+    target = _manual_box_mask(grid, (16, 16, 0), (30, 30, 12)) if expanded_target else part
+    if empty:
+        part = np.zeros(grid.shape, dtype=bool)
+        target = np.zeros(grid.shape, dtype=bool)
+    excluded = int(np.count_nonzero(target & ~part)) * grid.voxel_mm ** 3
+    task = replace(
+        task,
+        original_part=_sampled_source(tmp_path / "sampled-part.npy", part, grid),
+        operation_target=C.OperationTarget(
+            geometry=_sampled_source(tmp_path / "sampled-target.npy", target, grid),
+            excluded_volume_mm3=float(excluded),
+            exclusion_reason="hand-counted exclusion at the task grid" if excluded else "",
+        ),
+    )
+    motion.validate_for_task(task)
+    return task, motion
+
+
+def _rewrite_sampled_original(task, values, *, refresh_hash=True):
+    source = task.original_part
+    np.save(source.path, values, allow_pickle=bool(getattr(values.dtype, "hasobject", False)))
+    source_hash = (
+        C.sha256_bytes(Path(source.path).read_bytes()) if refresh_hash else source.sha256
+    )
+    updated = replace(source, sha256=source_hash)
+    return replace(task, original_part=updated)
+
+
+def _require_sampled_unsupported(result, expected):
+    assert result.coverage == C.Coverage.UNSUPPORTED
+    assert result.safety_pass is None and result.geometry_pass is None
+    assert any(expected in reason for reason in result.coverage_reasons), result.coverage_reasons
+
+
+def test_sampled_fields_real_rs274_and_haas_with_distinct_pt_metrics(tmp_path):
+    task, motion = _small_sampled_task(tmp_path, expanded_target=True)
+    expected_excluded = (7 * 7 * 6 - 2 * 2 * 6) * 8.0
+    for dialect in (C.Dialect.RS274, C.Dialect.HAAS):
+        nc = post_motion_plan(motion, task, dialect=dialect).encode("utf-8")
+        parsed = parse_motion_plan(nc.decode("utf-8"), task, dialect=dialect)
+        parsed.validate_for_task(task)
+        result = PostedEvaluator().evaluate_posted_gcode(
+            task, nc, dialect, {"subdivisions": 8, "expected_nc_hash": C.nc_hash(nc)},
+        )
+        assert result.coverage == C.Coverage.COMPLETE
+        assert result.nc_hash == C.nc_hash(nc) and result.dialect == dialect
+        assert metric(result, "removed_volume_mm3") > 0
+        assert metric(result, "residual_volume_mm3") > 0
+        assert metric(result, "gouge_volume_mm3") > 0
+        # The cutter is away from the smaller P corner but cuts the expanded T.
+        assert metric(result, "original_part_gouge_volume_mm3") == 0.0
+        assert metric(result, "excluded_volume_mm3") == expected_excluded
+        assert result.geometry_pass is False  # a real partial operation, not a fabricated pass
+        assert result.efficiency_eligible is False
+
+
+def test_exact_sampled_masks_agree_with_unchanged_analytic_geometry(tmp_path):
+    fixture = F.plunge_above()
+    analytic_task, analytic_motion = machine_fixture(fixture)
+    box = C.GeometrySource(kind="analytic", params={
+        "primitive": "box", "min_mm": [26, 26, 0], "max_mm": [30, 30, 12],
+    })
+    analytic_task = replace(
+        analytic_task, original_part=box, operation_target=C.OperationTarget(geometry=box),
+    )
+    sampled_task, sampled_motion = _small_sampled_task(tmp_path)
+    assert sampled_task.initial_state == analytic_task.initial_state
+    assert sampled_motion == analytic_motion
+    analytic = PostedEvaluator().evaluate_candidate(analytic_task, analytic_motion, {})
+    sampled = PostedEvaluator().evaluate_candidate(sampled_task, sampled_motion, {})
+    assert analytic.coverage == sampled.coverage == C.Coverage.COMPLETE
+    assert analytic.geometry_pass == sampled.geometry_pass
+    assert analytic.safety_pass == sampled.safety_pass
+    for name in (
+        "removed_volume_mm3", "residual_volume_mm3", "gouge_volume_mm3",
+        "original_part_gouge_volume_mm3", "excluded_volume_mm3", "max_surface_error_mm",
+        "min_clearance_lower_bound_mm", "rapid_cutter_penetration_upper_bound_mm",
+    ):
+        if analytic.metrics[name].value is None:
+            assert sampled.metrics[name].value is None
+        else:
+            assert metric(sampled, name) == pytest.approx(metric(analytic, name), abs=1e-9), name
+    assert sampled.discretization["volume_bound"] == analytic.discretization["volume_bound"]
+
+
+@pytest.mark.parametrize("kind", ["source_frame", "grid_frame", "origin", "voxel", "shape"])
+def test_sampled_grid_and_frame_mismatch_stay_unsupported(tmp_path, kind):
+    task, motion = _small_sampled_task(tmp_path)
+    source = task.original_part
+    if kind == "source_frame":
+        source = replace(source, frame=C.Frame.MACHINE)
+        expected = "work frame"
+    else:
+        grid = source.grid
+        if kind == "grid_frame":
+            grid = replace(grid, frame=C.Frame.MACHINE)
+            expected = "work frame"
+        elif kind == "origin":
+            grid = replace(grid, origin_mm=(1, 0, 0))
+            expected = "exactly match task grid"
+        elif kind == "voxel":
+            grid = replace(grid, voxel_mm=grid.voxel_mm / 2)
+            expected = "exactly match task grid"
+        else:
+            grid = replace(grid, shape=(24, 24, 7))
+            expected = "exactly match task grid"
+        source = replace(source, grid=grid)
+    invalid = replace(task, original_part=source)
+    result = PostedEvaluator().evaluate_candidate(invalid, motion, {})
+    _require_sampled_unsupported(result, expected)
+
+
+@pytest.mark.parametrize("defect", ["tamper", "nan", "infinity", "dtype", "shape", "archive", "missing"])
+def test_sampled_payload_integrity_and_numeric_validation(tmp_path, defect):
+    task, motion = _small_sampled_task(tmp_path)
+    source = task.original_part
+    values = np.load(source.path, allow_pickle=False).copy()
+    expected = {
+        "tamper": "SHA-256 mismatch", "nan": "non-finite", "infinity": "non-finite",
+        "dtype": "real numeric scalar", "shape": "payload shape", "archive": "NPZ/archive",
+        "missing": "cannot read sampled geometry payload",
+    }[defect]
+    if defect == "tamper":
+        values[0, 0, 0] = 123.0
+        invalid = _rewrite_sampled_original(task, values, refresh_hash=False)
+    elif defect in ("nan", "infinity"):
+        values[0, 0, 0] = np.nan if defect == "nan" else np.inf
+        invalid = _rewrite_sampled_original(task, values)
+    elif defect == "dtype":
+        values = np.full(task.grid.shape, "-1", dtype="<U1")
+        invalid = _rewrite_sampled_original(task, values)
+    elif defect == "shape":
+        invalid = _rewrite_sampled_original(task, np.ones((2, 2, 2), dtype=np.float64))
+    elif defect == "archive":
+        archive = Path(source.path).with_suffix(".npz")
+        np.savez(archive, part=values)
+        updated = replace(source, path=str(archive), sha256=C.sha256_bytes(archive.read_bytes()))
+        invalid = replace(task, original_part=updated)
+    else:
+        path = Path(source.path)
+        assert path.is_file()  # this test owns this newly generated unit fixture
+        path.unlink()
+        invalid = task
+    result = PostedEvaluator().evaluate_candidate(invalid, motion, {})
+    _require_sampled_unsupported(result, expected)
+
+
+def test_sampled_original_part_must_be_inside_operation_target(tmp_path):
+    task, motion = _small_sampled_task(tmp_path)
+    values = np.load(task.original_part.path, allow_pickle=False).copy()
+    outside = tuple(np.argwhere(values > 0)[0])
+    values[outside] = -1.0
+    invalid = _rewrite_sampled_original(task, values)
+    result = PostedEvaluator().evaluate_candidate(invalid, motion, {})
+    _require_sampled_unsupported(result, "subset of operation_target")
+
+
+def test_sampled_excluded_volume_must_match_grid_at_zero_tolerance(tmp_path):
+    task, motion = _small_sampled_task(tmp_path, expanded_target=True)
+    task = replace(task, operation_target=replace(
+        task.operation_target, excluded_volume_mm3=task.operation_target.excluded_volume_mm3 + 1,
+    ))
+    result = PostedEvaluator().evaluate_candidate(task, motion, {})
+    _require_sampled_unsupported(result, "excluded volume mismatch")
+
+
+def test_empty_sampled_part_retains_explicit_null_surface_metrics(tmp_path):
+    task, motion = _small_sampled_task(tmp_path, empty=True)
+    result = PostedEvaluator().evaluate_candidate(task, motion, {})
+    assert result.coverage == C.Coverage.COMPLETE
+    assert result.metrics["max_surface_error_mm"].value is None
+    assert "nonempty" in result.metrics["max_surface_error_mm"].null_reason
+    assert result.geometry_pass is None
