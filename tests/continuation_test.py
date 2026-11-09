@@ -115,25 +115,44 @@ def assert_same_state(left, right):
     assert left.optimizer_step == right.optimizer_step
 
 
-def stock_field_fixture(*, epoch=None, offset=0.0, soft=None, fill=1e6,
-                        target=None, remaining=None):
-    """Known Boolean hard geometry => real signed EDT, plus an optional soft field."""
-    if epoch is None:
-        epoch = context()
-    if remaining is None:
-        remaining = np.ones(GRID.shape, dtype=bool)
-        remaining[0, 0, 0] = False  # finite exterior support for the EDT
-    if target is None:
-        target = np.zeros(GRID.shape, dtype=bool)
-        target[1:3, 1:3, 1:3] = True
-    probe = M.StockFieldPair(
-        epoch, remaining.copy(), np.zeros(GRID.shape, dtype=float), target.copy(),
-        np.zeros((3, 3)), np.zeros((3, 3)),
-    )
-    field = fill if soft is not None else probe.hard_phi_voxels + offset
+_FIELD_SOURCE = None
+
+
+def field_source():
+    """One actual hard-forward field, shared as immutable unit fixture data."""
+    global _FIELD_SOURCE
+    if _FIELD_SOURCE is None:
+        evaluator = prototype()
+        theta = unit_theta()
+        result = evaluator.evaluate_candidate(theta, "field-source-hard", "hard")
+        assert result.valid
+        grid = evaluator.task.grid
+        _FIELD_SOURCE = {
+            "grid": grid,
+            "hard": evaluator.sim.stock.to_numpy()[
+                evaluator.parameterization.num_steps
+            ].copy(),
+            "target": evaluator.sim.target.to_numpy().copy(),
+            "path": evaluator.sim.tool_pos.to_numpy().copy(),
+            "value_hash": result.theta_hash,
+            "context": M.EvaluationContext(
+                grid, 20.0, 0.0, "prototype-hard-stock-d-field/1",
+                {"actual_source": "forward_hard.stock_d[T]", "theta_hash": result.theta_hash},
+            ),
+        }
+    return _FIELD_SOURCE
+
+
+def stock_field_fixture(*, epoch=None, offset=0.0, soft=None, target=None, hard=None):
+    """Actual hard stock_d, with only the declared nonmask field offset."""
+    source = field_source()
+    epoch = source["context"] if epoch is None else epoch
+    raw_hard = source["hard"] if hard is None else hard
+    selected_soft = source["hard"] + offset if soft is None else soft
+    target_sdf = source["target"] if target is None else target
     return M.StockFieldPair(
-        epoch, remaining.copy(), np.broadcast_to(field, GRID.shape).copy(), target.copy(),
-        np.zeros((3, 3)), np.zeros((3, 3)),
+        epoch, raw_hard, selected_soft, target_sdf,
+        source["path"], source["path"],
     )
 
 
@@ -150,10 +169,10 @@ def test_true_distance_field_recovers_uniform_quarter_voxel_offset():
     assert result.median_delta == pytest.approx(-0.25, abs=1e-12)
     assert result.clipped_delta == pytest.approx(-0.25, abs=1e-12)
     assert result.shift == pytest.approx(-0.25, abs=1e-12)
-    assert result.delta_mm == pytest.approx(-0.25 * GRID.voxel_mm)
-    assert result.shift_mm == pytest.approx(-0.25 * GRID.voxel_mm)
-    assert result.band["maximum_voxels"] == pytest.approx(2.0 / GRID.voxel_mm)
-    assert result.hard_distance_definition.startswith("signed_edt_voxels:")
+    assert result.delta_mm == pytest.approx(-0.25 * field.context.grid.voxel_mm)
+    assert result.shift_mm == pytest.approx(-0.25 * field.context.grid.voxel_mm)
+    assert result.band["maximum_voxels"] == pytest.approx(2.0 / field.context.grid.voxel_mm)
+    assert result.hard_distance_definition.startswith("forward_hard.stock_d")
     with pytest.raises(ValueError, match="0.5 voxel"):
         M.SignedFieldCalibrator(0.25, 0.6, 1e-6)
     overcut = calibration.update([stock_field_fixture(offset=0.8)], band("stock"), 0.2)
@@ -175,6 +194,28 @@ def test_over_erosion_sign_is_negative_in_both_gouge_and_residual_bands():
         assert measured.selected_count == int(field.selection(selected).sum())
 
 
+def test_target_sign_regions_and_both_sided_aliases_match_exact_band_predicate():
+    field = stock_field_fixture()
+    pitch = field.context.grid.voxel_mm
+    lo, hi = 0.0 / pitch, 3.0 / pitch
+    common = (
+        (np.abs(field.target_sdf) >= lo)
+        & (np.abs(field.target_sdf) <= hi)
+        & (np.abs(field.hard_phi_voxels) <= hi)
+    )
+    signs = {"gouge": field.target_sdf < 0, "residual": field.target_sdf > 0}
+    for region, sign in signs.items():
+        expected = common & sign
+        np.testing.assert_array_equal(field.selection(band(region, 0.0, 3.0)), expected)
+    either = common & ((field.target_sdf < 0) | (field.target_sdf > 0))
+    for region in ("stock", "both", "surface"):
+        np.testing.assert_array_equal(field.selection(band(region, 0.0, 3.0)), either)
+    assert np.any(either & (field.hard_phi_voxels < 0))
+    assert np.any(either & (field.hard_phi_voxels > 0))
+    assert np.any(signs["gouge"] & common)
+    assert np.any(signs["residual"] & common)
+
+
 def test_physical_surface_band_uses_mm_distances_and_rejects_empty_regions():
     field = stock_field_fixture(offset=0.15)
     selected_band = band("stock", 0.5, 1.0)
@@ -188,27 +229,35 @@ def test_physical_surface_band_uses_mm_distances_and_rejects_empty_regions():
     assert updated.selected_count == int(selected.sum())
     assert updated.median_delta == pytest.approx(-0.15)
     assert updated.shift < 0
-    empty = calibration.update([field], band("stock", 0.0, 0.0), 0.4)
-    assert not empty.updated and empty.shift == 0.4
-    assert empty.selected_count == 0
+    between = np.indices(field.context.grid.shape, dtype=float)[2] - 0.5
+    narrow_field = stock_field_fixture(target=between)
+    with pytest.raises(ValueError, match="empty selected surface band"):
+        calibration.update([narrow_field], band("stock", 0.0, 0.49), 0.4)
     with pytest.raises(ValueError, match="surface band region"):
         M.SurfaceBand("signed_dice_gap", 0.0, 0.0, "not a physical region")
 
 
 def test_field_types_reject_indicators_and_mismatched_coordinates():
-    with pytest.raises(TypeError, match="dtype=bool"):
-        stock_field_fixture(remaining=np.ones(GRID.shape, dtype=float))
-    with pytest.raises(ValueError, match="exterior hard-stock"):
-        stock_field_fixture(remaining=np.ones(GRID.shape, dtype=bool))
-    with pytest.raises(ValueError, match="target and outside"):
+    with pytest.raises(TypeError, match="forward_hard stock_d"):
+        stock_field_fixture(hard=np.ones(GRID.shape, dtype=bool))
+    with pytest.raises(TypeError, match="soft phi"):
+        stock_field_fixture(soft=np.ones(GRID.shape, dtype=bool))
+    with pytest.raises(TypeError, match="target phi"):
         stock_field_fixture(target=np.zeros(GRID.shape, dtype=bool))
+    with pytest.raises(ValueError, match="shape"):
+        stock_field_fixture(hard=np.ones((1, 1, 1), dtype=float))
+    with pytest.raises(ValueError, match="material and removal"):
+        stock_field_fixture(target=np.zeros(field_source()["grid"].shape, dtype=float))
     ordinary = stock_field_fixture()
     with pytest.raises(ValueError, match="not identical"):
         dataclasses.replace(ordinary, hard_path=np.ones((3, 3)))
     with pytest.raises(TypeError, match="scalar losses are not phi"):
         M.SignedFieldCalibrator(0.5, 0.5, 1e-8).update([pair()], band(), 0.0)
-    other_grid = C.GridSpec((4, 4, 4), (-1.0, -2.0, -2.0), 1.0)
-    other_context = M.EvaluationContext(other_grid, 20.0, 0.0, "synthetic-hard-revision/1")
+    origin = ordinary.context.grid.origin_mm
+    other_grid = dataclasses.replace(
+        ordinary.context.grid, origin_mm=(origin[0] + 1.0, origin[1], origin[2]),
+    )
+    other_context = dataclasses.replace(ordinary.context, grid=other_grid)
     with pytest.raises(ValueError, match="identical k/shift/grid/validator"):
         M.SignedFieldCalibrator(0.5, 0.5, 1e-8).update(
             [ordinary, stock_field_fixture(epoch=other_context)], band(), 0.0,
@@ -216,19 +265,56 @@ def test_field_types_reject_indicators_and_mismatched_coordinates():
 
 
 def test_nonzero_normalized_disagreement_uses_median_fields_not_mean_gap_over_zero():
-    point = np.zeros(GRID.shape, dtype=bool)
-    point[0, 0, 0] = True
-    field = stock_field_fixture(remaining=point, target=point, offset=0.6)
+    field = stock_field_fixture(offset=0.6)
     calibration = M.SignedFieldCalibrator(1.0, 0.5, 1e-6)
-    result = calibration.update([field], band("stock"), 0.0)
-    assert result.median_hard_voxels == pytest.approx(-1.0)
-    assert result.median_soft_voxels == pytest.approx(-0.4)
+    selected_band = band("stock")
+    selected = field.selection(selected_band)
+    hard_median = float(np.median(field.hard_phi_voxels[selected]))
+    soft_median = float(np.median(field.soft_phi_voxels[selected]))
+    result = calibration.update([field], selected_band, 0.0)
+    assert result.median_hard_voxels == pytest.approx(hard_median)
+    assert result.median_soft_voxels == pytest.approx(soft_median)
     assert result.median_delta == pytest.approx(-0.6)
     assert result.clipped_delta == -0.5
-    assert result.shift == -0.5
-    # Independent arithmetic: -0.6 / (|-1|+|-0.4|) = -3/7, not a saturated ±1.
-    assert result.disagreement["bounded_gap"] == pytest.approx(-3.0 / 7.0)
-    assert result.disagreement["raw_gap"] == pytest.approx(-0.6)
+    expected = (
+        (hard_median - soft_median)
+        / (abs(hard_median) + abs(soft_median) + 1e-6)
+    )
+    assert result.disagreement["bounded_gap"] == pytest.approx(expected)
+    assert result.disagreement["raw_gap"] == pytest.approx(hard_median - soft_median)
+    assert abs(expected) < 1.0
+    assert M.bounded_disagreement(-1.0, -0.4, 1e-6)["bounded_gap"] == pytest.approx(-3.0 / 7.0)
+
+
+def test_large_k_near_equality_does_not_bind_clip():
+    evaluator = prototype()
+    evaluator.set_evaluation_k(256.0)
+    theta = unit_theta()
+    soft = evaluator.evaluate_candidate_with_gradient(theta, "t3.4b:large-k-soft")
+    soft_path = evaluator.sim.tool_pos.to_numpy().copy()
+    soft_field = evaluator.sim.stock.to_numpy()[evaluator.parameterization.num_steps].copy()
+    hard = evaluator.evaluate_candidate(theta, "t3.4b:large-k-hard", "hard")
+    hard_path = evaluator.sim.tool_pos.to_numpy().copy()
+    hard_field = evaluator.sim.stock.to_numpy()[evaluator.parameterization.num_steps].copy()
+    assert soft.result.valid and hard.valid
+    np.testing.assert_array_equal(soft_path, hard_path)
+    epoch = M.EvaluationContext(evaluator.task.grid, 256.0, 0.0, "large-k-matching-stock-fields/1")
+    field = M.StockFieldPair(
+        epoch, hard_field, soft_field, evaluator.sim.target.to_numpy(), hard_path, soft_path,
+    )
+    selected = band("stock", 0.0, 3.0)
+    reconcile = M.SignedFieldCalibrator(1.0, 0.5, 1e-8).update([field], selected, 0.0)
+    assert reconcile.updated and reconcile.selected_count > 0
+    actual_gap = float(np.median(
+        field.hard_phi_voxels[field.selection(selected)]
+        - field.soft_phi_voxels[field.selection(selected)]
+    ))
+    assert reconcile.median_delta == pytest.approx(actual_gap, abs=1e-6)
+    assert abs(actual_gap) < 0.15
+    assert abs(reconcile.clipped_delta) < 0.5
+    assert reconcile.shift == pytest.approx(actual_gap, abs=1e-6)
+    evaluator.clear_evaluation_loss_shift()
+    evaluator.clear_evaluation_k()
 
 
 def test_zero_loss_gap_and_bounded_disagreement_avoid_zero_dice_denominator():
@@ -458,8 +544,8 @@ def test_calibration_is_separate_from_k_and_does_not_charge_a_second_evaluation(
     _ = mechanism._observe(np.array([0.25]), start.context, False)
     before = mechanism.budget_snapshot()
     band = M.SurfaceBand("stock", 0.0, 2.0, "whole declared near-surface fixture domain")
-    field_a = stock_field_fixture(offset=0.25, epoch=start.context)
-    field_b = stock_field_fixture(epoch=start.context)
+    field_a = stock_field_fixture(offset=0.25)
+    field_b = stock_field_fixture()
     result = mechanism.calibrate([field_a, field_b], band, 0.0)
     assert result.updated
     assert result.median_delta == pytest.approx((-0.25 + 0.0) / 2)
@@ -588,9 +674,9 @@ def test_merged_stock_fields_and_raw_hard_are_actual_measurements():
     soft_stock = evaluator.sim.stock.to_numpy()[evaluator.parameterization.num_steps].copy()
     hard_result = evaluator.evaluate_candidate(theta, "t3.4b:raw-hard", "hard")
     hard_path = evaluator.sim.tool_pos.to_numpy().copy()
-    hard_remaining = evaluator.sim.stock.to_numpy()[evaluator.parameterization.num_steps] < 0
+    hard_stock = evaluator.sim.stock.to_numpy()[evaluator.parameterization.num_steps].copy()
     field = M.StockFieldPair(
-        epoch, hard_remaining, soft_stock, evaluator.sim.target.to_numpy() < 0,
+        epoch, hard_stock, soft_stock, evaluator.sim.target.to_numpy(),
         hard_path, soft_path,
     )
     assert field.identical_executed_path
@@ -647,8 +733,12 @@ def test_shift_changes_gradient_not_hard_and_neutral_reset_restores_baseline():
     shifted_repeat = evaluator.evaluate_candidate_with_gradient(theta, "t3.4b:shifted-repeat")
     evaluator.clear_evaluation_loss_shift()
     restored = evaluator.evaluate_candidate_with_gradient(theta, "t3.4b:neutral-restored")
+    # Eight repeated neutral CPU forwards measured 1.1e-9--4.0e-9 maximum
+    # elementwise replay variation; the shifted/cleanup return was 1.9e-9.
+    # Retain a tight float32 replay tolerance, not a claim of bitwise gradients.
     np.testing.assert_allclose(restored.gradient_theta, baseline.gradient_theta,
-                               rtol=1e-5, atol=1e-9)
+                               rtol=2e-5, atol=1e-8)
+    assert np.linalg.norm(restored.gradient_theta - baseline.gradient_theta) < 1e-7
     hard_neutral = evaluator.evaluate_candidate(theta, "t3.4b:hard-neutral", "hard")
     evaluator.set_evaluation_loss_shift(0.4)
     hard_shifted = evaluator.evaluate_candidate(theta, "t3.4b:hard-shifted", "hard")

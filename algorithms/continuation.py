@@ -6,10 +6,11 @@ local quadratic model is implemented. It separates two mechanisms:
 * ``SignedLossCalibrator`` measures the median per-voxel signed-stock-field
   difference ``phi_hard - phi_soft`` in VOXEL SDF units on an identical
   executed path/grid, in a physical band around the operation-target surface.
-  ``phi_hard`` is a signed EDT of hard remaining-stock membership. Soft phi is
-  the simulator's ``stock_d`` BEFORE the occupancy-only shift. Scalar loss
-  components are never substituted for these signed spatial fields. The
-  resulting signed bounded EMA shifts the smooth iso-level, not the objective.
+  ``phi_hard`` and ``phi_soft`` are the matching hard and differentiable
+  forward ``stock_d[T]`` fields, with phi soft before the occupancy-only
+  shift; there is no EDT reconstruction. Scalar loss components are never
+  substituted for these signed spatial fields. The resulting signed bounded
+  EMA shifts the smooth iso-level, not scalar objectives.
 * ``BacktrackingMechanism`` evaluates a proposed optimizer state against its
   incumbent under identical k, shift, grid and hard-validator identity. It
   enforces explicit constraints, retries with bounded learning rates, and
@@ -43,7 +44,6 @@ from enum import Enum
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 import numpy as np
-from scipy.ndimage import distance_transform_edt
 
 from algorithms.blackbox import OptimizationBudget
 from benchmarks import contracts as C
@@ -263,13 +263,21 @@ class PairedObservation:
 
 @dataclass(frozen=True)
 class SurfaceBand:
-    """An inclusive physical band around the operation-target surface.
+    """A physical near-surface band in declared millimetres/target-voxel pitch.
 
-    ``gouge`` selects remaining hard stock inside operation target T;
-    ``residual`` selects remaining hard stock outside T (the removal target).
-    ``stock`` includes both regions. Distances are unsigned EDT distances to the
-    opposite target-membership region on the declared cell-centre grid, not an
-    exact continuous CAD Hausdorff distance or a signed Dice gap.
+    ``gouge`` means target SDF < 0 (inside retained target T), ``residual``
+    means target SDF > 0 (the removal region), and ``stock``/``surface``/
+    ``both`` include either sign. Selection additionally requires the stacked
+    magnitudes of target SDF and executed hard stock_d to be in the bands.
+    Remaining-stock Boolean gates do not remove the opposite side of that
+    executed surface. The distances remain grid-sampled fields, not an exact
+    continuous CAD Hausdorff guarantee.
+
+    Band resolution matters: at a 1 mm pitch, a maximum distance of 1 mm may
+    select only exact on-surface cells or no cells at all, depending on grid
+    phase. Empty selections are rejected rather than automatically widened.
+    If off-surface samples are needed, declare a physically justified band at
+    least wide enough to contain the grid's sampled surface-crossing cells.
     """
     region: str
     minimum_mm: float
@@ -277,8 +285,8 @@ class SurfaceBand:
     rationale: str
 
     def __post_init__(self):
-        if self.region not in ("gouge", "residual", "stock"):
-            raise ValueError("surface band region must be gouge, residual or stock")
+        if self.region not in ("gouge", "residual", "stock", "both", "surface"):
+            raise ValueError("surface band region must be gouge, residual, stock, both or surface")
         if not self.rationale.strip():
             raise ValueError("physical surface-band rationale is required")
         for name in ("minimum_mm", "maximum_mm"):
@@ -288,31 +296,21 @@ class SurfaceBand:
             raise ValueError("surface-band millimetre bounds must be ordered")
 
 
-def _frozen_mask(value: Any, name: str, shape: tuple[int, ...]) -> np.ndarray:
-    result = np.asarray(value)
-    if result.dtype != np.dtype(bool):
-        raise TypeError(f"{name} requires a dtype=bool membership array; indicators are not signed distances")
-    if result.shape != shape:
-        raise ValueError(f"{name} shape {result.shape} does not match declared grid {shape}")
-    result = result.copy()
-    result.flags.writeable = False
-    return result
-
-
 @dataclass(frozen=True)
 class StockFieldPair:
-    """One paired execution with a true hard signed EDT and an unshifted soft field.
+    """Matching simulator stock fields and actual executed tool coordinates.
 
-    Soft phi is supplied from the raw simulator stock field after forward
-    execution, before apply-cut loss occupancy shifts. Hard phi is always
-    derived here from its explicit Boolean remaining-stock mask. This prevents
-    the old error of treating scalar weighted losses or +/-1 indicators as phi.
-    Paths are compared exactly, in the coordinates returned by the executor.
+    Phi hard is copied directly from forward_hard's own ``stock_d[T]``; phi
+    soft is the differentiable forward ``stock_d[T]`` before terminal occupancy
+    shifts. Distance values may be truncated by the underlying geometry, but
+    they share the simulator's voxel definition. A Boolean-mask EDT is NOT
+    substituted: it uses a different boundary convention and introduces bias.
+    ``target_sdf`` is the baked operation-target field on the same grid.
     """
     context: EvaluationContext
-    hard_remaining_stock: np.ndarray
+    hard_stock_sdf: np.ndarray
     soft_stock_sdf: np.ndarray
-    operation_target: np.ndarray
+    target_sdf: np.ndarray
     hard_path: np.ndarray
     soft_path: np.ndarray
     hard_phi_voxels: np.ndarray = field(init=False)
@@ -328,66 +326,61 @@ class StockFieldPair:
         grid = self.context.grid
         if grid.sign_convention != "negative_inside":
             raise ValueError("stock-field calibration expects negative_inside stock convention")
+        if np.asarray(self.hard_stock_sdf).dtype == np.dtype(bool):
+            raise TypeError("hard phi must be forward_hard stock_d, not a Boolean mask")
+        if np.asarray(self.soft_stock_sdf).dtype == np.dtype(bool):
+            raise TypeError("soft phi must be pre-shift differentiable stock_d, not a Boolean mask")
+        if np.asarray(self.target_sdf).dtype == np.dtype(bool):
+            raise TypeError("target phi must be the signed target field, not a Boolean occupancy indicator")
         hard_path = _frozen_array(self.hard_path, "executed hard path", ndim=2)
         soft_path = _frozen_array(self.soft_path, "executed soft path", ndim=2)
         if hard_path.shape != soft_path.shape or hard_path.shape[1] != 3:
             raise _ContextMismatch("hard/soft executed path dimensions differ")
         if not np.array_equal(hard_path, soft_path):
             raise _ContextMismatch("hard/soft executed paths are not identical")
-        remaining = _frozen_mask(self.hard_remaining_stock, "hard remaining stock", grid.shape)
-        target = _frozen_mask(self.operation_target, "operation target", grid.shape)
-        if not remaining.any():
-            raise ValueError("no remaining hard stock in represented grid: finite hard EDT unavailable")
-        if remaining.all():
-            raise ValueError("no exterior hard-stock cell in represented grid: finite hard EDT unavailable")
-        if not target.any() or target.all():
-            raise ValueError("operation-target band requires both target and outside region on the grid")
-        soft = _frozen_array(self.soft_stock_sdf, "soft stock signed field")
-        if soft.shape != grid.shape:
-            raise ValueError("soft stock field shape does not match declared grid")
-        hard_distance = distance_transform_edt(~remaining) - distance_transform_edt(remaining)
-        # abs(unsigned region distance) is the distance to the closest target
-        # boundary on this cell-centre grid. min(EDT(~T), EDT(T)) would be zero
-        # on the outside and would not measure distance to the target surface.
-        surface_distance = np.abs(
-            distance_transform_edt(~target) - distance_transform_edt(target)
-        )
-        if not np.all(np.isfinite(hard_distance)) or not np.all(np.isfinite(surface_distance)):
-            raise ValueError("non-finite field distance on the declared representation")
-        hard_distance.flags.writeable = False
-        surface_distance = surface_distance * grid.voxel_mm
-        surface_distance.flags.writeable = False
-        object.__setattr__(self, "hard_remaining_stock", remaining)
-        object.__setattr__(self, "operation_target", target)
+        hard = _frozen_array(self.hard_stock_sdf, "forward hard stock signed field")
+        soft = _frozen_array(self.soft_stock_sdf, "forward soft stock signed field")
+        target = _frozen_array(self.target_sdf, "operation-target signed field")
+        for name, field in (("hard stock", hard), ("soft stock", soft), ("target", target)):
+            if field.shape != grid.shape:
+                raise ValueError(f"{name} shape does not match declared grid {grid.shape}")
+        if not (np.any(target < 0) and np.any(target > 0)):
+            raise ValueError("operation-target band needs both material and removal regions on the grid")
+        surface_distance = np.abs(target) * grid.voxel_mm
+        if not np.all(np.isfinite(surface_distance)):
+            raise ValueError("non-finite target-surface distances on declared representation")
+        for array in (hard, soft, target, surface_distance):
+            array.flags.writeable = False
+        object.__setattr__(self, "hard_stock_sdf", hard)
+        object.__setattr__(self, "target_sdf", target)
         object.__setattr__(self, "soft_stock_sdf", soft)
         object.__setattr__(self, "hard_path", hard_path)
         object.__setattr__(self, "soft_path", soft_path)
-        object.__setattr__(self, "hard_phi_voxels", hard_distance)
+        object.__setattr__(self, "hard_phi_voxels", hard)
         object.__setattr__(self, "soft_phi_voxels", soft)
         object.__setattr__(self, "surface_distance_mm", surface_distance)
-        object.__setattr__(
-            self, "hard_distance_definition",
-            "signed_edt_voxels: distance_transform_edt(~remaining_stock) - distance_transform_edt(remaining_stock)",
-        )
-        object.__setattr__(
-            self, "soft_field_definition",
-            "simulator.stock_d_before_terminal_sigmoid/stock_d_shift_in_voxels",
-        )
+        object.__setattr__(self, "hard_distance_definition",
+                           "forward_hard.stock_d[T] in voxel SDF units (possibly truncated by execution geometry)")
+        object.__setattr__(self, "soft_field_definition",
+                           "differentiable forward stock_d[T], pre-occupancy-shift, voxel SDF units")
         object.__setattr__(self, "identical_executed_path", True)
 
     def selection(self, band: SurfaceBand) -> np.ndarray:
         if band.region == "gouge":
-            region = self.operation_target & self.hard_remaining_stock
+            region = self.target_sdf < 0
         elif band.region == "residual":
-            region = ~self.operation_target & self.hard_remaining_stock
-        elif band.region == "stock":
-            region = self.hard_remaining_stock
+            region = self.target_sdf > 0
+        elif band.region in ("stock", "both", "surface"):
+            region = np.ones(self.target_sdf.shape, dtype=bool)
         else:
             raise ValueError("unknown physical band region")
+        pitch = self.context.grid.voxel_mm
         return (
             region
-            & (self.surface_distance_mm >= band.minimum_mm)
-            & (self.surface_distance_mm <= band.maximum_mm)
+            & (np.abs(self.target_sdf) >= band.minimum_mm / pitch)
+            & (np.abs(self.target_sdf) <= band.maximum_mm / pitch)
+            # Both sides of the executed surface, not only remaining stock.
+            & (np.abs(self.hard_phi_voxels) <= band.maximum_mm / pitch)
         )
 
 
@@ -554,8 +547,10 @@ class SignedLossCalibrator:
 
         masks = [item.selection(band) for item in observations]
         if any(not np.any(mask) for mask in masks):
-            return self._unchanged(current_shift, "selected_surface_band_has_no_field_cells",
-                                   len(observations))
+            raise ValueError(
+                "empty selected surface band on declared grid: "
+                f"region={band.region}, min_mm={band.minimum_mm}, max_mm={band.maximum_mm}"
+            )
         hard_parts = [item.hard_phi_voxels[mask] for item, mask in zip(observations, masks)]
         soft_parts = [item.soft_phi_voxels[mask] for item, mask in zip(observations, masks)]
         hard_values = np.concatenate(hard_parts)
@@ -1055,7 +1050,7 @@ def dev_ablation_plan() -> dict[str, Any]:
              "schedule": "same bounded pilot-selected annealed k schedule for both",
              "configuration_sha256": shared_hash},
         ],
-        "shift_policy": "candidate-only signed EMA over median(hard signed-EDT - raw simulator stock_d) on the identical executed path/grid in a declared millimetre target-surface band; in_stock_d voxels with <=0.5_voxel clip and recorded mm equivalent",
+        "shift_policy": "candidate-only signed EMA over median(forward_hard stock_d - raw differentiable stock_d) on the identical executed path/grid in a declared millimetre target-SDF-sign and absolute-distance surface band; in_stock_d voxels with <=0.5_voxel clip and recorded mm equivalent",
         "hard_acceptance": "raw hard-validation objectives, without scalar shift addition or changed-k comparison",
         "outcomes": ["retain", "no_useful_advantage_omit", "inconclusive_unknown_coverage", "implementation_reject"],
         "actual_execution": None,
