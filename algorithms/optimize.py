@@ -194,6 +194,11 @@ class AdamResult:
     checkpoint_path: Optional[str] = None
     previous_evaluations: int = 0
 
+    @property
+    def deterministic_replicates(self) -> int:
+        """One deterministic run, not multiple independent per-tasks seeds."""
+        return 1
+
 
 @dataclasses.dataclass
 class _AdamState:
