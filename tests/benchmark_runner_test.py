@@ -794,10 +794,11 @@ def test_refinement_driver_bounds_two_independent_workers(tmp_path, monkeypatch)
     def subprocess_stub(config_path, root, run_id, aux_root, timeout):
         seen.append(threading.get_ident())
         barrier.wait(timeout=10)
-        return runner._refinement_worker(
+        result = runner._refinement_worker(
             json.loads((root / "frozen_config.json").read_text())["raw_config"], root, run_id, aux_root,
             evaluator_override=lambda task, nc, dialect, settings:
             _typed_evaluation(task, nc, geometry_pass=False, step=0.125))
+        return runner._refinement_jsonable(result)
 
     monkeypatch.setattr(runner, "_refine_process", subprocess_stub)
     aux_root = tmp_path / "collective-refined"
@@ -806,6 +807,38 @@ def test_refinement_driver_bounds_two_independent_workers(tmp_path, monkeypatch)
     assert len(seen) == 2
     assert result["audit"]["baseline_and_refined_records"] == 4
     assert result["audit"]["manifest"]["auditor_passed"] is True
+
+
+def test_refinement_process_serializes_paths_and_preserves_attempt_logs(tmp_path):
+    root, config, record, _, _ = _pilot_refinement_fixture(tmp_path / "primary")
+    auxiliary_root = tmp_path / "refined"
+    runner._refinement_worker(
+        config, root, record.run_id, auxiliary_root,
+        evaluator_override=lambda task, nc, dialect, settings:
+        _typed_evaluation(task, nc, step=settings["max_step_mm"]))
+    config_path = tmp_path / "fixture-config.json"
+    config_path.write_text(json.dumps(config), encoding="utf-8")
+    first = runner._refine_process(str(config_path), root, record.run_id, auxiliary_root, timeout=180)
+    first_log = Path(first["log"])
+    first_bytes = first_log.read_bytes()
+    second = runner._refine_process(str(config_path), root, record.run_id, auxiliary_root, timeout=180)
+    assert first["status"] == second["status"] == "skipped_complete"
+    assert first_log != Path(second["log"])
+    assert first_log.read_bytes() == first_bytes
+    for result in (first, second):
+        assert result["auxiliary_link_path"] == str(
+            auxiliary_root / f"{record.run_id}-refinement-link.json")
+        assert result["auxiliary_directory"] == str(auxiliary_root / f"{record.run_id}-refined")
+        lines = Path(result["log"]).read_text().splitlines()
+        result_line = next(line for line in reversed(lines) if line.startswith("REFINEMENT_RESULT="))
+        decoded = json.loads(result_line.removeprefix("REFINEMENT_RESULT="))
+        assert decoded["status"] == "skipped_complete"
+        assert decoded["auxiliary_link_path"] == result["auxiliary_link_path"]
+    driven = runner._refinement_driver(config, str(config_path), [root], None, auxiliary_root)
+    assert driven["status_counts"] == {"skipped_complete": 1}
+    assert driven["audit"]["baseline_and_refined_records"] == 2
+    assert driven["audit"]["manifest"]["auditor_passed"] is True
+    assert driven["audit"]["manifest"]["all_runs_completed"] is True
 
 
 def test_refinement_timing_is_separate_from_primary_and_parallel_forecast(tmp_path, monkeypatch):

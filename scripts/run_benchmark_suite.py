@@ -1418,14 +1418,14 @@ def _refine_process(config_path, source_root, run_id, auxiliary_root, timeout):
     """Own exactly one exact-PID refinement worker; no process-pattern kills."""
     auxiliary_log = Path(auxiliary_root) / "logs"
     auxiliary_log.mkdir(parents=True, exist_ok=True)
-    log_path = auxiliary_log / f"{run_id}.log"
+    log_path = auxiliary_log / f"{run_id}.{time.time_ns()}.log"
     env = dict(os.environ)
     env["DIFFCAM_RUNNER_SIMULATOR"] = "0"
     command = [sys.executable, str(Path(__file__).resolve()), "--config", str(config_path),
                "--output-dir", str(source_root), "--split", "dev", "--experiment", "pilot",
                "--only", run_id, "--aux-root", str(auxiliary_root), "--refinement-worker-run"]
     started = time.perf_counter()
-    with log_path.open("w") as stream:
+    with log_path.open("x") as stream:
         process = subprocess.Popen(command, cwd=REPOSITORY, env=env, stdout=stream, stderr=subprocess.STDOUT)
         try:
             code = process.wait(timeout=timeout)
@@ -1508,8 +1508,10 @@ def _refinement_driver(config, config_path, primary_roots, only, auxiliary_root)
                 raise RunnerError("refinement children must use one declared auxiliary root")
             item["manifest"] = planned["manifest"]
         for item in scheduled:
-            if item["auxiliary_directory"] != aux_root / item["refined_run_id"]:
+            if Path(item["auxiliary_directory"]).resolve() != aux_root / item["refined_run_id"]:
                 raise RunnerError("refinement result points outside the declared audit root")
+            for key in ("root", "auxiliary_root", "auxiliary_directory", "auxiliary_link_path"):
+                item[key] = Path(item[key])
         audited = _audit_refinement_root(scheduled, aux_root)
     else:
         audited = None
@@ -1565,10 +1567,8 @@ def _refinement_worker_main(config, root: Path, args) -> int:
     if not args.aux_root:
         raise RunnerError("refinement worker requires an explicit auxiliary root")
     result = _refinement_worker(config, root, args.only, args.aux_root)
-    serialized = {key: value for key, value in result.items()
-                  if key not in ("primary_config", "source_config")}
-    for key in ("root", "auxiliary_root", "auxiliary_directory"):
-        serialized[key] = str(serialized[key])
+    serialized = _refinement_jsonable({key: value for key, value in result.items()
+                                       if key not in ("primary_config", "source_config")})
     print("REFINEMENT_RESULT=" + json.dumps(serialized, sort_keys=True))
     return 0
 
