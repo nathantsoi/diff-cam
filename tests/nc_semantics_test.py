@@ -34,6 +34,102 @@ M2
 """
 
 
+def _arc_case(*, radius=3.333, centre=(0.123, 0.765, -2.0), a0=0.37, a1=2.1, plane=C.ArcPlane.XY):
+    """Build a geometrically consistent arc without using the post's formatter."""
+    transform = TASK.work_to_machine
+    centre_mm = transform.apply(centre)
+    in_plane = {C.ArcPlane.XY: (0, 1), C.ArcPlane.XZ: (2, 0), C.ArcPlane.YZ: (1, 2)}[plane]
+    p0 = list(centre)
+    p1 = list(centre)
+    p0[in_plane[0]] += radius * math.cos(a0)
+    p0[in_plane[1]] += radius * math.sin(a0)
+    p1[in_plane[0]] += radius * math.cos(a1)
+    p1[in_plane[1]] += radius * math.sin(a1)
+    start = TASK.initial_state.position_mm
+    lead = C.Segment(id="lead", kind=C.SegmentKind.RAPID,
+                     start_mm=start, end_mm=transform.apply(p0),
+                     duration_s=math.dist(start, transform.apply(p0)) / 200.0)
+    arc = C.ArcData(centre_mm=centre_mm, plane=plane, direction=C.ArcDirection.CCW)
+    segment = C.Segment(id="curve", kind=C.SegmentKind.ARC,
+                        start_mm=transform.apply(p0), end_mm=transform.apply(p1),
+                        duration_s=radius * (a1 - a0) / 10.0,
+                        feed_mm_s=10.0, arc=arc)
+    return C.MotionPlan(frame=C.Frame.MACHINE, initial_state=TASK.initial_state,
+                        segments=(lead, segment), timing_rule=TASK.motion_semantics.timing_rule)
+
+
+def _assert_arc_roundtrip(plan, units, precision):
+    text = post_motion_plan(plan, TASK, config=MachineConfig(units=units, precision=precision))
+    reparsed = parse_motion_plan(text, TASK)
+    assert len(reparsed.segments) == 2
+    expected_arc = plan.segments[1]
+    actual_arc = reparsed.segments[1]
+    assert actual_arc.arc is not None
+    assert actual_arc.arc.plane == expected_arc.arc.plane
+    assert actual_arc.arc.direction == expected_arc.arc.direction
+    planes = {C.ArcPlane.XY: (0, 1), C.ArcPlane.XZ: (2, 0), C.ArcPlane.YZ: (1, 2)}
+    a, b = planes[actual_arc.arc.plane]
+    r_start = math.hypot(actual_arc.start_mm[a] - actual_arc.arc.centre_mm[a],
+                         actual_arc.start_mm[b] - actual_arc.arc.centre_mm[b])
+    r_end = math.hypot(actual_arc.end_mm[a] - actual_arc.arc.centre_mm[a],
+                       actual_arc.end_mm[b] - actual_arc.arc.centre_mm[b])
+    assert abs(r_start - r_end) <= C.ARC_RADIUS_TOL_MM + 1e-12
+    quantum = (25.4 if units == "inch" else 1.0) * 10.0 ** (-precision)
+    # Rounded offset repair is bounded to a documented neighbouring grid step.
+    component_tolerance = 2 * math.sqrt(3) * quantum + 1e-9
+    np.testing.assert_allclose(actual_arc.end_mm, expected_arc.end_mm,
+                               atol=component_tolerance, rtol=0)
+    np.testing.assert_allclose(actual_arc.arc.centre_mm, expected_arc.arc.centre_mm,
+                               atol=component_tolerance, rtol=0)
+    return actual_arc
+
+
+@pytest.mark.parametrize("units", ["mm", "inch"])
+@pytest.mark.parametrize("precision", [6, 4, 3])
+def test_reviewed_arc_quantization_and_roundtrip(units, precision):
+    plan = _arc_case()
+    if units == "inch" and precision == 3:
+        # The measured nearest-grid error is 0.00610844 mm > the frozen
+        # 1e-3mm contract tolerance. It must be rejected, not silently posted.
+        with pytest.raises(UnsupportedPostError, match="no nearest-grid arc offset preserves radii"):
+            post_motion_plan(plan, TASK, config=MachineConfig(units=units, precision=precision))
+        return
+    _assert_arc_roundtrip(plan, units, precision)
+
+
+def test_arc_offset_nearest_grid_property_across_planes():
+    accepted = []
+    declined = []
+    for plane in (C.ArcPlane.XY, C.ArcPlane.XZ, C.ArcPlane.YZ):
+        rng = np.random.default_rng(1447)
+        cases = []
+        for _ in range(3):
+            start, end = sorted(rng.uniform(-math.pi, math.pi, 2))
+            cases.append(dict(radius=float(rng.uniform(2.0, 7.0)), centre=tuple(rng.uniform(-1.0, 1.0, 3)),
+                              a0=float(start), a1=float(end), plane=plane))
+        for units in ("mm", "inch"):
+            for precision in (6, 4, 3):
+                for index, kwargs in enumerate(cases):
+                    plan = _arc_case(**kwargs)
+                    try:
+                        _assert_arc_roundtrip(plan, units, precision)
+                    except UnsupportedPostError as error:
+                        assert "not emitted" in str(error)
+                        declined.append((plane, units, precision, index))
+                    else:
+                        accepted.append((plane, units, precision, index))
+    # Rejection is genuine coverage, not a skip. Seen outcomes are printed for
+    # provenance when running this property with -s; exact counts are seed-dependent.
+    print("ARC_PROPERTY_ACCEPTED", len(accepted), "ARC_PROPERTY_DECLINED", len(declined))
+    assert len(accepted) + len(declined) == 3 * 2 * 3 * 3
+    assert accepted  # arbitrary-path arcs must not be indiscriminately rejected
+
+
+def test_extremely_coarse_arc_is_rejected_without_returning_nc():
+    with pytest.raises(UnsupportedPostError, match="partial arc that would become a full turn"):
+        post_motion_plan(_arc_case(), TASK, config=MachineConfig(units="inch", precision=0))
+
+
 def task_at(start_work, *, transform=None):
     transform = transform or TASK.work_to_machine
     initial = replace(
