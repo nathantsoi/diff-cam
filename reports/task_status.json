@@ -256,6 +256,14 @@
    "blocker": null,
    "next": "resume T1.3a",
    "note": "discriminator NC/param review: N1 inch arc I/J rounding (HIGH), N3 G49 ignored (HIGH), N2 KeyError, N5 nan post, N6 comment ';', N4 bounds; legacy G18 lead. CAM lease transferred worker-1 -> worker-3."
+  },
+  "T4.0c": {
+   "status": "ready",
+   "owner": "diffcam-worker-2",
+   "branch": "task/T4.0c-audit-flags",
+   "blocker": "after T1.0c",
+   "next": null,
+   "note": "split complete_data -> evidence_complete (T4.1 gate) + all_runs_completed; stale labels R1/R2 (discriminator re-review)"
   }
  }
 }
