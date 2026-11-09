@@ -334,14 +334,17 @@ def test_final_protocol_requires_linked_qualified_production_refinement(tmp_path
 def auxiliary_fixture(tmp_path):
     """Metadata-only schema fixture; NO refined production evaluation is executed."""
     source = clone_run(tmp_path, "primary")
-    auxiliary = tmp_path / "auxiliary"
-    auxiliary.mkdir()
+    primary = C.loads((source / "eval_posted_rs274.json").read_text())
+    run_id = C.loads((source / "run.json").read_text()).run_id
+    refined_run_id = f"{run_id}-refined"
+    auxiliary = tmp_path / "auxiliary" / refined_run_id
+    auxiliary.mkdir(parents=True)
     primary_hashes = load(source / "hashes.json")
     refined = load(source / "eval_posted_rs274.json")
     # Synthetic declaration changes exercise transport/audit semantics only.
     # They are NOT a re-execution, measured improvement or physical packet.
     refined["record"]["discretization"]["settings"]["max_step_mm"] = 0.5
-    refined["record"]["discretization"]["settings"]["unit_metadata_only_not_reexecuted"] = True
+    refined["record"]["discretization"]["unit_metadata_only_not_reexecuted"] = True
     refined_path = auxiliary / "eval_posted_rs274_refined.json"
     write_json(refined_path, refined)
     outcome = {
@@ -352,34 +355,52 @@ def auxiliary_fixture(tmp_path):
         "excluded_from_efficiency": False,
         "rule": "synthetic unit contract only; no actual refinement or physical qualification claimed",
     }
+    details = {
+        name: {"primary": getattr(primary, name), "refined": getattr(primary, name), "changed": False}
+        for name in ("safety_pass", "geometry_pass")
+    }
+    details["coverage"] = {"primary": primary.coverage.value,
+                           "refined": primary.coverage.value, "changed": False}
+    details["efficiency_eligible"] = {
+        "primary": primary.efficiency_eligible,
+        "refined": primary.efficiency_eligible, "changed": False,
+    }
+    for name in ("residual_volume_mm3", "gouge_volume_mm3", "max_surface_error_mm"):
+        metric = primary.metrics[name]
+        details[name] = {
+            "primary": metric.value, "refined": metric.value, "delta": 0.0, "unit": metric.unit,
+        }
+    details["completion_pass"] = {"primary": True, "refined": True, "changed": False}
+    details["any_outcome_verdict_change"] = False
     comparison = {
-        "primary_run_id": C.loads((source / "run.json").read_text()).run_id,
-        "refined_run_id": "synthetic-metadata-fixture-not-a-real-refined-run",
-        "comparison": {"unit_metadata_fixture": True, "not_a_simulation_result": True},
+        "primary_run_id": run_id,
+        "refined_run_id": refined_run_id,
+        "comparison": details,
         "conservative_outcome": outcome,
     }
     comparison_path = auxiliary / "comparison.json"
     write_json(comparison_path, comparison)
-    auxiliary_path = auxiliary / "auxiliary-record.json"
+    auxiliary_path = auxiliary / "run.json"
     write_json(auxiliary_path, {"unit_metadata_fixture": True, "not_a_physical_run": True})
     link = {
         "schema": "diffcam-refinement-link/3",
-        "primary_run_id": C.loads((source / "run.json").read_text()).run_id,
-        "primary_run_path": source.name,
+        "primary_run_id": run_id,
+        "primary_run_path": run_id,
         "primary_metrics_sha256": primary_hashes["metrics.json"],
         "primary_rs274_evaluation_sha256": primary_hashes["eval_posted_rs274.json"],
         "primary_haas_evaluation_sha256": primary_hashes["eval_posted_haas.json"],
         "primary_run_json_sha256": primary_hashes["run.json"],
-        "refined_run_id": comparison["refined_run_id"],
-        "refined_artifact_path": refined_path.name,
+        "refined_run_id": refined_run_id,
+        "refined_artifact_path": f"{refined_run_id}/{refined_path.name}",
         "refined_evaluation_sha256": digest(refined_path.read_bytes()),
-        "auxiliary_record": {"path": auxiliary_path.name, "sha256": digest(auxiliary_path.read_bytes())},
-        "comparison_path": comparison_path.name,
+        "auxiliary_record": {"path": f"{refined_run_id}/{auxiliary_path.name}",
+                             "sha256": digest(auxiliary_path.read_bytes())},
+        "comparison_path": f"{refined_run_id}/comparison.json",
         "comparison_sha256": digest(comparison_path.read_bytes()),
         "conservative_outcome": outcome,
-        "comparison": comparison["comparison"],
+        "comparison": details,
     }
-    link_path = auxiliary / "CAM-Base-dev-pocket-island-000-v2-refinement-link.json"
+    link_path = auxiliary.parent / f"{run_id}-refinement-link.json"
     write_json(link_path, link)
     return source, link_path, auxiliary
 
@@ -422,6 +443,36 @@ def test_refinement_link_primary_hash_and_conservative_outcome_fail_closed(tmp_p
     write_json(link_path, link)
     with pytest.raises(P.PacketError, match="conservative outcome safety_pass is not true"):
         export(tmp_path / "unsafe-outcome", source=source, refinement_link=link_path)
+
+
+def test_self_consistent_hashes_cannot_substitute_for_actual_comparison_verdict(tmp_path):
+    source, link_path, _ = auxiliary_fixture(tmp_path)
+    link = load(link_path)
+    # Regenerate the linked comparison hash so this reaches semantic validation:
+    # a copied immutable file with mutually consistent hashes is still dishonest.
+    link["comparison"]["coverage"] = {"primary": "complete", "refined": "complete", "changed": True}
+    comparison_path = link_path.parent / link["comparison_path"]
+    comparison_file = load(comparison_path)
+    comparison_file["comparison"] = link["comparison"]
+    write_json(comparison_path, comparison_file)
+    link["comparison_sha256"] = digest(comparison_path.read_bytes())
+    write_json(link_path, link)
+    with pytest.raises(P.PacketError, match="comparison row coverage differs"):
+        export(tmp_path / "out", source=source, refinement_link=link_path)
+    link = load(link_path)
+    link["comparison"]["coverage"] = {"primary": "complete", "refined": "complete", "changed": False}
+    # A separate inconsistent eligibility claim is rejected too.
+    outcome = dict(link["conservative_outcome"], efficiency_eligible=False,
+                   refinement_disagreement=True, disagreement_fields=["coverage"],
+                   excluded_from_efficiency=True)
+    comparison_file["comparison"] = link["comparison"]
+    link["conservative_outcome"] = outcome
+    comparison_file["conservative_outcome"] = outcome
+    write_json(comparison_path, comparison_file)
+    link["comparison_sha256"] = digest(comparison_path.read_bytes())
+    write_json(link_path, link)
+    with pytest.raises(P.PacketError, match="conservative outcome efficiency_eligible differs"):
+        export(tmp_path / "bad-outcome", source=source, refinement_link=link_path)
 
 
 def test_unknown_refined_coverage_is_rejected_even_with_qualified_comparison_claim(tmp_path):
@@ -486,6 +537,10 @@ def test_cli_writes_same_payload_and_refuses_existing_output(tmp_path):
     packet = P.verify_packet(tmp_path / "packet")
     (tmp_path / "packet" / "setup.json").write_text("{}\n", encoding="utf-8")
     with pytest.raises(P.PacketError, match="packet payload hash mismatch"):
+        P.verify_packet(tmp_path / "packet")
+    (tmp_path / "packet" / "setup.json").write_bytes(setup_path.read_bytes())
+    write_json(tmp_path / "packet" / "hashes.json", {})
+    with pytest.raises(P.PacketError, match="hashes.json differs from packet.json"):
         P.verify_packet(tmp_path / "packet")
 
 

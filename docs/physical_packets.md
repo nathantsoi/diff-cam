@@ -170,9 +170,14 @@ The runner link's key is `schema: diffcam-refinement-link/3`. The exporter check
 - primary `run.json`, `metrics.json`, RS274 evaluation and Haas evaluation hashes;
 - refined run ID and RS274-only `eval_posted_rs274_refined.json` relative path
   and hash;
-- the auxiliary `run.json` path/hash and comparison path/hash;
+- the auxiliary `run.json` path/hash and comparison path/hash, in the distinct
+  `<primary-run-id>-refined` auxiliary directory;
 - the comparison wrapper's primary/refined identities, comparison object and
   conservative outcome against the link;
+- recomputed boolean and metric comparison rows from both typed evaluations;
+  self-consistent hashes alone cannot establish a conservative outcome;
+- preservation of every primary sampling control except a strictly smaller
+  numeric `max_step_mm` on the refined RS274 replay;
 - matching refined RS274 raw-NC/task/tool/setup/parsed-motion identities,
   complete coverage, passing local geometry/safety and conservative bounds;
 - explicit `refinement_disagreement` as a boolean, unique declared disagreement

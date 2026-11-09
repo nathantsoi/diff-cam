@@ -545,6 +545,79 @@ def _selection(root: Path, role: str, selected_dialect: str,
     return task, payload_names, details, external_files
 
 
+def _verify_refinement_comparison(*, role: str, task: C.TaskSpec,
+                                  primary: C.EvaluationResult, refined: C.EvaluationResult,
+                                  actual: Mapping[str, Any], outcome: Mapping[str, Any]) -> None:
+    """Recompute schema-3 rows; hashes alone cannot prove a verdict's meaning."""
+    expected: dict[str, Any] = {}
+    for name in ("safety_pass", "geometry_pass"):
+        left, right = getattr(primary, name), getattr(refined, name)
+        expected[name] = {"primary": left, "refined": right, "changed": left != right}
+    expected["coverage"] = {
+        "primary": primary.coverage.value, "refined": refined.coverage.value,
+        "changed": primary.coverage is not refined.coverage,
+    }
+    expected["efficiency_eligible"] = {
+        "primary": primary.efficiency_eligible, "refined": refined.efficiency_eligible,
+        "changed": primary.efficiency_eligible != refined.efficiency_eligible,
+    }
+    for name in ("residual_volume_mm3", "gouge_volume_mm3", "max_surface_error_mm"):
+        left, right = primary.metrics[name].value, refined.metrics[name].value
+        unit = "mm" if name.endswith("_mm") else "mm^3"
+        _require(left is not None and right is not None,
+                 f"{role} refinement metric {name} must remain explicit")
+        left = _number(left, f"{role}.primary.{name}")
+        right = _number(right, f"{role}.refined.{name}")
+        expected[name] = {
+            "primary": left, "refined": right, "delta": right - left, "unit": unit,
+        }
+
+    def completion(result: C.EvaluationResult) -> bool | None:
+        if result.coverage is not C.Coverage.COMPLETE:
+            return None
+        removed = result.metrics.get("removed_volume_mm3")
+        residual = result.metrics.get("residual_volume_mm3")
+        if removed is None or residual is None or removed.value is None or residual.value is None:
+            return None
+        if removed.value <= 0.0:
+            return False
+        return residual.value <= task.tolerances.completion_residual_mm3
+
+    left, right = completion(primary), completion(refined)
+    expected["completion_pass"] = {"primary": left, "refined": right, "changed": left != right}
+    verdict_names = ("safety_pass", "geometry_pass", "completion_pass", "coverage", "efficiency_eligible")
+    expected["any_outcome_verdict_change"] = any(expected[name]["changed"] for name in verdict_names)
+    _require(set(actual) == set(expected), f"{role} refinement comparison rows do not match schema 3")
+    for name, row in expected.items():
+        _require(actual.get(name) == row,
+                 f"{role} refinement comparison row {name} differs from typed primary/refined evidence")
+
+    def combined(left, right):
+        if left is False or right is False:
+            return False
+        if left is None or right is None:
+            return None
+        return True
+
+    disagree = [name for name in ("safety_pass", "geometry_pass", "completion_pass", "coverage")
+                if expected[name]["changed"]]
+    complete = combined(left, right)
+    eligible = bool(primary.efficiency_eligible and refined.efficiency_eligible
+                    and complete is True and not disagree)
+    expected_outcome = {
+        "safety_pass": combined(primary.safety_pass, refined.safety_pass),
+        "geometry_pass": combined(primary.geometry_pass, refined.geometry_pass),
+        "completion_pass": complete,
+        "efficiency_eligible": eligible,
+        "refinement_disagreement": bool(disagree),
+        "disagreement_fields": disagree,
+        "excluded_from_efficiency": not eligible,
+    }
+    for name, value in expected_outcome.items():
+        _require(outcome.get(name) == value,
+                 f"{role} conservative outcome {name} differs from recomputed typed evidence")
+
+
 def _production_refinement(*, role: str, link_path: str | Path | None,
                            final_for_protocol: bool, run: C.RunRecord, task: C.TaskSpec,
                            motion: C.MotionPlan, primary_hashes: Mapping[str, str],
@@ -572,6 +645,10 @@ def _production_refinement(*, role: str, link_path: str | Path | None,
              f"{role} refinement link primary_run_id differs from selected run")
     primary_path = _text(link, "primary_run_path", f"{role}.refinement_link")
     _safe_path(link_file.parent, primary_path)  # relative metadata, never trusted absolute/traversal input.
+    _require(PurePosixPath(primary_path).name == run.run_id,
+             f"{role} refinement link primary path does not name the selected primary run")
+    _require(link.get("refined_run_id") == f"{run.run_id}-refined",
+             f"{role} refined run ID does not name the selected primary's distinct auxiliary refinement")
     for field, filename in (
         ("primary_metrics_sha256", "metrics.json"),
         ("primary_rs274_evaluation_sha256", "eval_posted_rs274.json"),
@@ -584,6 +661,8 @@ def _production_refinement(*, role: str, link_path: str | Path | None,
     refined_relative = _text(link, "refined_artifact_path", f"{role}.refinement_link")
     _require(PurePosixPath(refined_relative).name == "eval_posted_rs274_refined.json",
              f"{role} refinement must point to the RS274 refined production record")
+    _require(PurePosixPath(refined_relative).parts[0] == link.get("refined_run_id"),
+             f"{role} refined evaluation must be in its distinct auxiliary run directory")
     refined_path = _safe_path(root, refined_relative)
     refined_bytes = _read_bytes(refined_path)
     _require(_digest(refined_bytes) == _hash_field(link.get("refined_evaluation_sha256"),
@@ -604,6 +683,18 @@ def _production_refinement(*, role: str, link_path: str | Path | None,
              refined.coverage is C.Coverage.COMPLETE,
              f"{role} production refinement is not complete production evaluation")
     settings = _mapping(refined.discretization.get("settings"), f"{role}.refined.settings")
+    primary_settings = _mapping(posted["rs274"].discretization.get("settings"),
+                                f"{role}.primary.settings")
+    _require(set(settings) == set(primary_settings),
+             f"{role} refinement must preserve every primary sampling-control name")
+    for name, primary_value in primary_settings.items():
+        if name != "max_step_mm":
+            _require(settings.get(name) == primary_value,
+                     f"{role} refinement changed sampling control {name} beyond max_step_mm")
+    refined_step = _number(settings.get("max_step_mm"), f"{role}.refined.max_step_mm", positive=True)
+    primary_step = _number(primary_settings.get("max_step_mm"), f"{role}.primary.max_step_mm", positive=True)
+    _require(refined_step < primary_step,
+             f"{role} refinement max_step_mm must be strictly smaller than primary")
     _require(settings.get("expected_nc_hash") == refined.nc_hash and
              settings.get("compute_bounds") is True and settings.get("safety_screen") is True,
              f"{role} refined production bounds/NC identity were not evaluated")
@@ -635,12 +726,20 @@ def _production_refinement(*, role: str, link_path: str | Path | None,
 
     auxiliary = _mapping(link.get("auxiliary_record"), f"{role}.auxiliary_record")
     auxiliary_relative = _text(auxiliary, "path", f"{role}.auxiliary_record")
+    auxiliary_relative_path = PurePosixPath(auxiliary_relative)
+    _require(auxiliary_relative_path.parent == PurePosixPath(link["refined_run_id"]) and
+             auxiliary_relative_path.name == "run.json",
+             f"{role} auxiliary_record must be the refined run's run.json")
     auxiliary_path = _safe_path(root, auxiliary_relative)
     auxiliary_bytes = _read_bytes(auxiliary_path)
     _require(_digest(auxiliary_bytes) == _hash_field(auxiliary.get("sha256"),
                                                       f"{role}.auxiliary_record.sha256"),
              f"{role} auxiliary record hash differs from refinement link")
     comparison_relative = _text(link, "comparison_path", f"{role}.refinement_link")
+    comparison_relative_path = PurePosixPath(comparison_relative)
+    _require(comparison_relative_path.parent == PurePosixPath(link["refined_run_id"]) and
+             comparison_relative_path.name == "comparison.json",
+             f"{role} comparison must be in the distinct refined run directory")
     comparison_bytes = _read_bytes(_safe_path(root, comparison_relative))
     _require(_digest(comparison_bytes) == _hash_field(link.get("comparison_sha256"),
                                                        f"{role}.comparison_sha256"),
@@ -652,6 +751,10 @@ def _production_refinement(*, role: str, link_path: str | Path | None,
              comparison.get("primary_run_id") == run.run_id and
              comparison.get("refined_run_id") == link.get("refined_run_id"),
              f"{role} comparison wrapper differs from refinement-link primary/refined/comparison identities")
+    _verify_refinement_comparison(
+        role=role, task=task, primary=posted["rs274"], refined=refined,
+        actual=_mapping(link.get("comparison"), f"{role}.comparison.payload"), outcome=outcome,
+    )
 
     prefix = f"programs/{role}/production_refinement"
     external = {
@@ -695,11 +798,12 @@ def verify_packet(root: Path) -> dict[str, Any]:
              "unreviewed physical packets must remain pending setup review")
     files = _mapping(manifest.get("payload_sha256"), "packet.payload_sha256")
     _require(files, "packet payload hash map is empty")
+    _require(_load(root / "hashes.json") == files,
+             "packet hashes.json differs from packet.json payload hashes")
     for name, expected in files.items():
         path = _safe_path(root, name)
         _require(_file_digest(path) == _hash_field(expected, f"payload[{name}]"),
                  f"packet payload hash mismatch: {name}")
-    _require((root / "hashes.json").is_file(), "packet hashes.json is missing")
     return manifest
 
 
