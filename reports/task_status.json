@@ -360,13 +360,14 @@
     },
     "T4.1b-L1": {
       "status": "in_progress",
-      "owner": "diffcam-worker-1",
+      "owner": "coordinator (all three workers stalled in API-timeout retries)",
       "branch": "task/T4.1b-L1-rss",
       "base": "553a7d2",
       "lease": [
         "scripts/run_benchmark_suite.py"
       ],
-      "note": "Reassigned from worker-2 (stalled in API-timeout retries). Per-child VmHWM peak RSS, cap checks on child peak, >=1GiB-parent regression, re-measure posted phases; D-07 to be amended from real peaks."
+      "note": "Reassigned from worker-2 (stalled in API-timeout retries). Per-child VmHWM peak RSS, cap checks on child peak, >=1GiB-parent regression, re-measure posted phases; D-07 to be amended from real peaks. Coordinator took L1 at 17:50; fix + 2 regressions committed e7c5b3b (runner tests 38 passed/6 skipped); full suite + posted-phase re-measure running.",
+      "tip": "e7c5b3b"
     }
   }
 }
