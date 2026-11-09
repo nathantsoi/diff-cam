@@ -156,6 +156,7 @@ class CSGSimulatorDelta:
             raise ValueError("precision must be 'f32' or 'f64'; partial/mixed precision is unsupported")
         self.precision = precision
         self._precision = {"f32": ti.f32, "f64": ti.f64}[precision]
+        self.numpy_dtype = np.dtype(np.float32 if precision == "f32" else np.float64)
         # Python's ``self.dtype`` cannot be used in ti.func/kernel annotations at
         # class-definition time. Scalar inputs therefore use ti.template(),
         # scalar casts use this declared dtype, and scalar return annotations
@@ -2659,7 +2660,7 @@ class CSGSimulatorDelta:
         ``stock_sdf``: (Nx, Ny, Nz) float array, the saved stock SDF.
         ``tool_pos``: (3,) float array, the saved tool position in [0,1]^3.
         """
-        self.saved_stock.from_numpy(np.asarray(stock_sdf, dtype=np.float32))
+        self.saved_stock.from_numpy(np.asarray(stock_sdf, dtype=self.numpy_dtype))
         self.use_saved_init[None] = 1
         # Prefix-only start; keep _configured_tool_start untouched so reset
         # cannot leak a staged, mid-cut candidate into a fresh evaluation.

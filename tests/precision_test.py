@@ -535,3 +535,26 @@ def test_bias_versus_physical_prefix_length(tmp_path):
         "titan": "four-segment nominal is shorter than pilot/T2.3; pinned CAD interpreter unavailable, with no fabricated longer substitute",
     }
     _write(root / "bias-curve.json", document)
+
+
+def test_f64_staged_stock_roundtrip_and_candidate_reset():
+    ti.init(arch=ti.cpu, offline_cache=False, default_fp=ti.f64)
+    sim = tiny("f64")
+    original = np.linspace(-2.0, 3.0, 64, dtype=np.float64).reshape(
+        sim.Nx, sim.Ny, sim.Nz,
+    )
+    assert np.any(original != original.astype(np.float32).astype(np.float64))
+
+    sim.load_saved_init(original, [.2, .3, .4])
+    restored = sim.saved_stock.to_numpy()
+    assert restored.dtype == np.float64
+    np.testing.assert_array_equal(restored, original)
+    assert int(sim.use_saved_init[None]) == 1
+    np.testing.assert_allclose(sim.tool_start.to_numpy(), [.2, .3, .4], rtol=0, atol=1e-15)
+
+    sim.reset_candidate_state()
+    assert int(sim.use_saved_init[None]) == 0
+    np.testing.assert_array_equal(sim.saved_stock.to_numpy(), np.zeros_like(original))
+    assert sim.saved_stock.dtype == ti.f64
+    np.testing.assert_allclose(sim.tool_start.to_numpy(), [.5, .5, 1.0], rtol=0, atol=1e-15)
+    assert sim.precision_metadata()["requested_precision"] == "f64"
