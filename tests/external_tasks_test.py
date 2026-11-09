@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import math
 import os
 from pathlib import Path
 import struct
@@ -240,6 +241,127 @@ def test_line_comparison_records_tags_but_does_not_waive_kind_or_geometry(tmp_pa
         T.compare_line_motion(motion, dataclasses.replace(motion, segments=tuple(segments)))
 
 
+def _bore_metadata():
+    """Synthetic runtime metadata only; no claim of a native CAD proof."""
+    return {
+        "operation_geometry": {
+            "source_to_work_mm": [0.0, 0.0, 0.0],
+            "hole_centre_source_xy_mm": [1.27, 1.27],
+            "exclusion": {
+                "plug_radius_mm": 3.175,
+                "plug_min_source_z_mm": -1.27,
+                "plug_max_source_z_mm": 1.905,
+                "nominal_void_profile": [
+                    {
+                        "radius_mm": 1.0287, "source_z_min_mm": -1.27,
+                        "source_opening_z_mm": 1.905,
+                        "face_z_range_mm": [-1.27, -0.0414],
+                        "nominal_cylinder_common_with_original_part_mm3": 0.0,
+                    },
+                    {
+                        "radius_mm": 2.38125, "source_z_min_mm": -0.0414,
+                        "source_opening_z_mm": 1.905,
+                        "face_z_range_mm": [-0.0414, 1.905],
+                        "nominal_cylinder_common_with_original_part_mm3": 0.0,
+                    },
+                ],
+            },
+        }
+    }
+
+
+def _bore_grid():
+    return C.GridSpec(shape=(2, 2, 4), origin_mm=(0.0, 0.0, -1.27), voxel_mm=1.27)
+
+
+def _bore_actual_fields():
+    # Independently declared actual masks: P is all air, T retains the three
+    # lower bore layers, and the fourth layer is outside T (removal region).
+    part = np.ones((2, 2, 4), dtype=np.float64)
+    target = part.copy()
+    target[:, :, :3] = -1.0
+    initial = np.full((2, 2, 4), -1.0, dtype=np.float64)
+    return initial, part, target
+
+
+def test_independent_nominal_bore_raster_matches_cell_locations():
+    grid = _bore_grid()
+    result = T.independent_bore_crosscheck(_bore_metadata(), grid, *_bore_actual_fields())
+    assert result["expected_cells"] == result["actual_cells"] == 12
+    assert result["mismatched_cells"] == 0
+    assert result["nominal_mask_match"] is True
+    assert result["expected_volume_mm3"] == pytest.approx(12 * grid.voxel_mm ** 3)
+    assert np.all(result["expected_mask"][:, :, :3])
+    assert not np.any(result["expected_mask"][:, :, 3])
+    expected_inside = np.zeros(grid.shape, dtype=bool)
+    expected_inside[:, :, :3] = True
+    assert np.array_equal(result["expected_mask"], expected_inside)
+    resolution = result["resolution"]
+    assert resolution["small_bore_cells_across_diameter"] == pytest.approx(2.0574 / 1.27)
+    assert resolution["small_bore_pitch_for_eight_cells_mm"] == pytest.approx(0.257175)
+    assert resolution["small_bore_under_resolved"] is True
+
+
+def test_nominal_bore_radius_perturbations_and_source_negative_guard():
+    grid = _bore_grid()
+    actual = _bore_actual_fields()
+    metadata = _bore_metadata()
+    result = T.independent_bore_crosscheck(metadata, grid, *actual, include_perturbations=True)
+    by_name = {item["name"]: item for item in result["perturbations"]}
+    assert by_name["primary_radius_0.875_mm"]["expected_cells"] == 8
+    assert by_name["primary_radius_0.875_mm"]["mismatched_cells"] == 4
+    assert by_name["primary_radius_0.875_mm"]["actual_mask_mismatch_rejected"] is True
+    expanded = by_name["primary_radius_times_1.25"]
+    assert expanded["expected_cells"] == 12
+    assert expanded["mismatched_cells"] == 0
+    assert expanded["detectable_at_this_pitch"] is False
+    invalid = _bore_metadata()
+    invalid["operation_geometry"]["exclusion"]["nominal_void_profile"][0][
+        "nominal_cylinder_common_with_original_part_mm3"
+    ] = 0.5
+    with pytest.raises(ValueError, match="not source-negative"):
+        T.independent_bore_crosscheck(invalid, grid, *actual)
+
+
+def test_relative_sampled_paths_resolve_from_repository_root(tmp_path, monkeypatch):
+    task = _synthetic_task(tmp_path)
+    motion = T.nominal_motion(task)
+    nc = post_motion_plan(motion, task, dialect=C.Dialect.RS274).encode("utf-8")
+    source = task.original_part
+    relative = os.path.relpath(source.path, PROJECT)
+    assert not os.path.isabs(relative)
+    other = tmp_path / "unrelated-working-directory"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    task = dataclasses.replace(task, original_part=dataclasses.replace(source, path=relative))
+    result = evaluate_posted_gcode(task, nc, C.Dialect.RS274, {
+        "expected_nc_hash": C.nc_hash(nc), "subdivisions": 4,
+    })
+    assert result.coverage == C.Coverage.COMPLETE
+    assert result.metrics["residual_volume_mm3"].value is not None
+    assert result.efficiency_eligible is False
+
+
+def test_relative_path_does_not_fall_back_to_process_cwd(tmp_path, monkeypatch):
+    task = _synthetic_task(tmp_path)
+    motion = T.nominal_motion(task)
+    nc = post_motion_plan(motion, task, dialect=C.Dialect.RS274).encode("utf-8")
+    relative = "payload-that-exists-only-under-cwd.npy"
+    candidate = tmp_path / relative
+    np.save(candidate, np.load(task.original_part.path, allow_pickle=False), allow_pickle=False)
+    assert candidate.is_file()  # the unit fixture created it
+    assert not (PROJECT / relative).exists()
+    source = dataclasses.replace(task.original_part, path=relative)
+    task = dataclasses.replace(task, original_part=source)
+    monkeypatch.chdir(tmp_path)
+    result = evaluate_posted_gcode(task, nc, C.Dialect.RS274, {
+        "expected_nc_hash": C.nc_hash(nc), "subdivisions": 4,
+    })
+    assert result.coverage == C.Coverage.UNSUPPORTED
+    assert result.safety_pass is None and result.geometry_pass is None
+    assert str(PROJECT / relative) in result.coverage_reasons[0]
+
+
 def test_actual_production_evaluator_supports_exact_grid_sampled_geometry(tmp_path):
     task = _synthetic_task(tmp_path)
     motion = T.nominal_motion(task)
@@ -271,6 +393,21 @@ def test_actual_production_evaluator_supports_exact_grid_sampled_geometry(tmp_pa
         assert "G43 H1" in nc
         assert "G21" in nc
     assert "G20" not in nc
+
+
+def test_fine_bore_sampling_cost_is_explicitly_bounded():
+    grid = T.pilot_grid(0.254)
+    cells = math.prod(grid.shape)
+    assert grid.shape == (430, 220, 75)
+    assert cells == 7_095_000
+    assert cells > 200_000  # current Native sampler's bounded cell cap
+    assert 2 * cells * 8 > 100_000_000  # two raw f64 fields before work arrays
+    source_seconds = 0.000926173501966332
+    target_seconds = 0.0009712408573250286
+    estimated_seconds = cells * (source_seconds + target_seconds)
+    assert estimated_seconds > 2 * 3600
+    assert T.GRID_PITCH_MM == 1.27
+    assert 2.0574 / 8 < T.GRID_PITCH_MM  # eight-cell fine pitch was not chosen
 
 
 def test_missing_cad_environment_is_explicitly_blocked(tmp_path):
@@ -330,6 +467,22 @@ def test_real_step_sampling_nominal_and_actual_evaluator_outcomes(tmp_path):
     assert not result["native"]["environment"]["std_path_has_repository"]
     geometry = result["native"]["operation_geometry"]
     declared = result["task"].operation_target
+    faces = geometry["hole_cylinders"]
+    assert len(faces) == 2
+    assert all(len(face["face_z_range_mm"]) == 2 for face in faces)
+    assert all(np.isfinite(face["face_z_range_mm"]).all() for face in faces)
+    bore = declared.geometry.params["independent_bore_verification"]
+    assert bore["expected_cells"] == bore["actual_cells"] == 68
+    assert bore["mismatched_cells"] == 0 and bore["nominal_mask_match"] is True
+    assert bore["resolution"]["small_bore_under_resolved"] is True
+    assert bore["resolution"]["small_bore_cells_across_diameter"] == pytest.approx(2.0574 / 1.27)
+    perturbations = {entry["name"]: entry for entry in bore["perturbations"]}
+    assert perturbations["primary_radius_0.875_mm"]["expected_cells"] == 12
+    assert perturbations["primary_radius_0.875_mm"]["mismatched_cells"] == 56
+    assert perturbations["primary_radius_times_1.25"]["mismatched_cells"] == 0
+    assert perturbations["primary_radius_times_1.25"]["detectable_at_this_pitch"] is False
+    assert all(face["nominal_cylinder_common_with_original_part_mm3"] == pytest.approx(0.0)
+               for face in geometry["exclusion"]["nominal_void_profile"])
     assert declared.excluded_volume_mm3 == pytest.approx(139.290044)
     diagnostic = geometry["exclusion"]["native_excluded_volume_mm3"]
     assert declared.geometry.params["native_excluded_volume_mm3_diagnostic"] == pytest.approx(diagnostic)
