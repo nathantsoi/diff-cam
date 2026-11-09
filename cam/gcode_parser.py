@@ -616,6 +616,28 @@ def parse_motion_plan(
             axis_present = any(axis in block for axis in ("X", "Y", "Z"))
             offsets_present = any(word in block for word in ("I", "J", "K"))
             arc_words_present = offsets_present or "R" in block or "P" in block
+            # G49 is emitted in a no-motion safety prologue even when the declared
+            # mode is G43; G43 re-establishes it before motion. A no-motion register
+            # declaration does not alter trajectory, but every MOTION block must
+            # match the task's single declared initial state.
+            if (axis_present or arc_words_present) and length_offset != task.initial_state.length_offset_applied:
+                raise _nc_error(
+                    line,
+                    f"G43/G49 changes tool-length state to {length_offset}, incompatible with "
+                    f"task.initial_state.length_offset_applied={task.initial_state.length_offset_applied}; "
+                    "intermediate register changes outside the single declared initial state are unsupported",
+                    True,
+                )
+            requested_offset_commands = {43.0, 49.0}.intersection(gcodes)
+            expected_offset_command = {43.0} if task.initial_state.length_offset_applied else {49.0}
+            if ((axis_present or arc_words_present) and requested_offset_commands
+                    and requested_offset_commands != expected_offset_command):
+                raise _nc_error(
+                    line,
+                    "tool-length-changing G43/G49 block with motion cannot represent the one declared initial state; "
+                    f"motion may contain only {sorted(expected_offset_command)} for this task",
+                    True,
+                )
             if not axis_present and not arc_words_present:
                 if 2 in mcodes or 30 in mcodes:
                     program_ended = True

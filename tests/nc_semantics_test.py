@@ -136,6 +136,23 @@ def test_bare_g43_has_a_specific_missing_register_error():
         parse_motion_plan("G21 G90 G43\nG0 X0 Y0 Z10\nM2\n", TASK)
 
 
+@pytest.mark.parametrize("statement,initial_offset", [("G43 H1", True), ("G49", False)])
+def test_tool_length_mode_must_agree_with_initial_state(statement, initial_offset):
+    state = replace(TASK.initial_state, length_offset_applied=initial_offset)
+    matching_task = replace(TASK, initial_state=state)
+    program = f"G21 G90 {statement}\nG1 X1 F600\nM2\n"
+    plan = parse_motion_plan(program, matching_task)
+    assert plan.initial_state.length_offset_applied is initial_offset
+    mismatch_task = replace(TASK, initial_state=replace(state, length_offset_applied=not initial_offset))
+    with pytest.raises(UnsupportedGCodeError, match="intermediate register changes"):
+        parse_motion_plan(program, mismatch_task)
+
+
+def test_offset_change_in_motion_is_rejected_even_if_cancelled_in_same_block():
+    with pytest.raises(GCodeError, match="conflicting modal modes"):
+        parse_motion_plan("G21 G90 G43 H1 G49 G1 X1 F600\nM2\n", TASK)
+
+
 def test_wrapper_matches_direct_typed_post():
     plan = parse_motion_plan(CANONICAL, TASK)
     assert motion_plan_to_gcode(plan, TASK) == post_motion_plan(plan, TASK)
