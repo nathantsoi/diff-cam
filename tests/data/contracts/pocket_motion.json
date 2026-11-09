@@ -1,0 +1,128 @@
+{
+ "record": {
+  "dt_s": null,
+  "frame": "machine",
+  "initial_state": {
+   "frame": "machine",
+   "known": true,
+   "length_offset_applied": true,
+   "position_mm": [
+    100.0,
+    80.0,
+    -140.0
+   ],
+   "work_offset": "G54"
+  },
+  "length_unit": "mm",
+  "provenance": "contracts:example_motion_plan@1",
+  "schema_version": "diffcam-contracts/1",
+  "segments": [
+   {
+    "arc": null,
+    "duration_s": 0.0282842712474619,
+    "end_mm": [
+     96.0,
+     76.0,
+     -140.0
+    ],
+    "feed_mm_s": null,
+    "id": "s0",
+    "kind": "rapid",
+    "source_line": null,
+    "start_mm": [
+     100.0,
+     80.0,
+     -140.0
+    ],
+    "tag": "approach"
+   },
+   {
+    "arc": null,
+    "duration_s": 2.4,
+    "end_mm": [
+     96.0,
+     76.0,
+     -152.0
+    ],
+    "feed_mm_s": 5.0,
+    "id": "s1",
+    "kind": "feed",
+    "source_line": null,
+    "start_mm": [
+     96.0,
+     76.0,
+     -140.0
+    ],
+    "tag": "plunge"
+   },
+   {
+    "arc": null,
+    "duration_s": 0.8,
+    "end_mm": [
+     104.0,
+     76.0,
+     -152.0
+    ],
+    "feed_mm_s": 10.0,
+    "id": "s2",
+    "kind": "feed",
+    "source_line": null,
+    "start_mm": [
+     96.0,
+     76.0,
+     -152.0
+    ],
+    "tag": ""
+   },
+   {
+    "arc": {
+     "centre_mm": [
+      104.0,
+      80.0,
+      -152.0
+     ],
+     "direction": "ccw",
+     "plane": "XY",
+     "turns": 0
+    },
+    "duration_s": 1.2566370614359172,
+    "end_mm": [
+     104.0,
+     84.0,
+     -152.0
+    ],
+    "feed_mm_s": 10.0,
+    "id": "s3",
+    "kind": "arc",
+    "source_line": null,
+    "start_mm": [
+     104.0,
+     76.0,
+     -152.0
+    ],
+    "tag": ""
+   },
+   {
+    "arc": null,
+    "duration_s": 0.06,
+    "end_mm": [
+     104.0,
+     84.0,
+     -140.0
+    ],
+    "feed_mm_s": null,
+    "id": "s4",
+    "kind": "rapid",
+    "source_line": null,
+    "start_mm": [
+     104.0,
+     84.0,
+     -152.0
+    ],
+    "tag": "retract"
+   }
+  ],
+  "timing_rule": "exact_stop_constant_speed"
+ },
+ "record_type": "MotionPlan"
+}
