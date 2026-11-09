@@ -202,11 +202,12 @@
    "next": null
   },
   "T6.1": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T6.1-packets",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "software-only exporter now; final packets after T4.2 freeze"
   },
   "T6.2": {
    "status": "planned",
