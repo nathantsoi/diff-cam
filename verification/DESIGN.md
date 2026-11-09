@@ -211,10 +211,21 @@ These requirements were sent to the coordinator during the read-only phase. Any 
 
 A vertical rapid retract through its own slot has exact zero nominal cutter clearance but a positive conservative uncertainty band, so a zero-penetration policy correctly yields `safety_pass=None` rather than certifying safety. Contracts 1.1 makes the allowed coverage bound explicit instead of hiding it:
 
-- for a rapid interval, the possible cutter-penetration upper bound is `max(0, rho+delta_t-min(d_cutter at both endpoints))` over remaining strict-stock cell centres; for a stationary rapid, `delta_t=0`;
+- for a rapid interval, the possible cutter-penetration upper bound is `max(0, rho+delta_t-min(d_cutter at both endpoints))` over candidate **stock-bearing whole cells** (`stock_d <= rho` and not wholly covered by a prior cutter); for a stationary rapid, `delta_t=0`;
 - a sampled rapid-cutter collision requires `d_cutter < -task.tolerances.rapid_penetration_mm`; non-cutting shank/holder collisions remain strict `d<0` independent of that tolerance;
 - rapid safety can certify only when no collision exists and every interval's penetration upper bound is within tolerance. Otherwise it remains false/unknown;
 - `min_clearance_mm` covers **non-cutting shank and holder only**, during both feeds and rapids. `min_rapid_cutter_clearance_mm` is reported separately. Tolerated grazing is not silently folded into collision volume/count/integrals;
 - `clearance_mm` is a reported qualification threshold for the non-cutting assembly, not a hard `safety_pass` threshold in this reference. This role and both threshold values are emitted in discretization metadata.
 
-The `retract_from_own_slot` fixture feeds down and retracts along exactly reversed poses. It is unknown at zero tolerance and safe at its measured upper bound (and at the scale-derived `rho+delta_t` band, including a fractional grid-phase variant). A separate long-flute, distant-holder rapid-through-solid control still fails at tolerances through 1.5 mm with direct cutter events and non-cutting clearance above 10 mm. The convergence report records these expectations under its own schema 1.1 and includes the shared contracts schema and task/motion hashes.
+The `retract_from_own_slot` fixture feeds down and retracts along exactly reversed poses. It is unknown at zero tolerance and safe at its measured upper bound, including at the maximum measured upper bound across fractional grid phases. A separate long-flute, distant-holder rapid-through-solid control still fails at tolerances through 1.5 mm with direct cutter events and non-cutting clearance above 10 mm. The convergence report records these expectations under its own schema 1.1 and includes the shared contracts schema and task/motion hashes.
+
+## 10. Whole-cell boundaries and zero-length motion (T1.0c)
+
+Two earlier certificate defects shared the same incorrect center-only assumption:
+
+- Boundary cells can contain stock even when their centre is outside the stock. Therefore `remaining & stock_interior` is not sufficient for a conservative safety bound. Use candidate material `stock_d <= rho`, excluding only cells for which some prior cutter has `d_cutter < -rho` (every point in that voxel is covered by that cutter). This guaranteed-removal mask is maintained even when the optional volume report has `compute_bounds=false`.
+- Zero-length feed and rapid segments use this same exact cell predicate with zero temporal increment. Non-cutting shank and holder cannot bypass the stationary bound. Disabling the safety screen explicitly yields unknown rather than certified safe.
+
+`min_clearance_mm` and `min_rapid_cutter_clearance_mm` remain centre-sampled diagnostics with an explicit non-bound label. New `min_clearance_lower_bound_mm` and `min_rapid_cutter_clearance_lower_bound_mm` provide conservative whole-cell interval bounds; rapid upper penetration is the non-negative negation of its lower bound. Stock outside the represented grid is unsupported rather than silently certified.
+
+Regressions require zero and `1e-9` feed motions to agree on safety and bound within `1e-7 mm`, phased rapid upper bound to cover at least the independently derived 0.99 mm intrusion at multiple grid phases, and holder lower bound to be negative when a phase-boundary holder reaches 0.99 mm into stock. T1.3 must inherit these whole-cell clearance semantics.

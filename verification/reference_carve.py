@@ -112,6 +112,8 @@ def _unsupported(task: C.TaskSpec, motion: C.MotionPlan,
         "max_surface_error_mm": unknown("mm"),
         "min_clearance_mm": unknown("mm"),
         "min_rapid_cutter_clearance_mm": unknown("mm"),
+        "min_rapid_cutter_clearance_lower_bound_mm": unknown("mm"),
+        "min_clearance_lower_bound_mm": unknown("mm"),
         "rapid_cutter_penetration_upper_bound_mm": unknown("mm"),
         "unique_contacted_volume_mm3": unknown("mm^3"),
         "collision_sample_count": unknown("count"),
@@ -223,6 +225,10 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
     hi = tuple(float(v) for v in task.stock.params["max_mm"])
     if len(lo) != 3 or len(hi) != 3 or any(not math.isfinite(v) for v in lo + hi) or any(a >= b for a, b in zip(lo, hi)):
         raise ValueError("analytic box stock requires finite min_mm < max_mm vectors")
+    grid_lo, grid_hi = task.grid.bounds_mm
+    if any(lo[a] < grid_lo[a] - 1e-9 or hi[a] > grid_hi[a] + 1e-9 for a in range(3)):
+        return _unsupported(task, motion, settings_dict,
+                            _precheck(task, motion) + ("stock extends beyond represented grid; safety cannot be bounded",))
 
     points = _centres(task.grid)
     stock_d = _box_distance(points, lo, hi)
@@ -236,6 +242,7 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
     definite = np.zeros(shape, dtype=bool)
     station_upper = np.zeros(shape, dtype=bool)
     continuous_upper = np.zeros(shape, dtype=bool)
+    guaranteed_removed = np.zeros(shape, dtype=bool)
     unique_by_component = {name: np.zeros(shape, dtype=bool)
                            for name in ("rapid_cutter", "cutter", "shank", "holder")}
 
@@ -244,7 +251,9 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
     collision_sample_count = 0
     integrated_overlap = 0.0
     min_clearance = math.inf
+    min_clearance_lower = math.inf
     min_rapid_cutter_clearance = math.inf
+    min_rapid_cutter_lower = math.inf
     rapid_penetration_upper = 0.0
     rapid_seen = False
     rapid_tolerance = task.tolerances.rapid_penetration_mm
@@ -282,8 +291,10 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
             if segment.kind == C.SegmentKind.FEED:
                 cutter_d = current_fields["cutter"]
                 assert cutter_d is not None
+                wholly_covered_cell = cutter_d < -rho
+                guaranteed_removed |= wholly_covered_cell
                 if config.compute_bounds:
-                    definite |= (stock_d < -rho) & (cutter_d < -rho)
+                    definite |= (stock_d < -rho) & wholly_covered_cell
                     station_upper |= (stock_d <= rho) & (cutter_d <= rho)
                     continuous_upper |= (stock_d <= rho) & (cutter_d <= rho + delta_t)
                 remaining[cutter_d <= 0.0] = False
@@ -310,13 +321,6 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
                 # Contracts 1.1: tolerated rapid-cutter grazing is not a collision.
                 threshold = -rapid_tolerance if rapid_cutter else 0.0
                 contact = material & (distance < threshold)
-                if rapid_cutter and config.safety_screen and zero_length and material.any():
-                    upper = max(0.0, float(rho - distance[material].min()))
-                    rapid_penetration_upper = max(rapid_penetration_upper, upper)
-                    if upper > rapid_tolerance:
-                        safety_uncertain = True
-                        if segment.id not in uncertainty_segments:
-                            uncertainty_segments.append(segment.id)
                 if not contact.any():
                     continue
                 any_contact |= contact
@@ -342,28 +346,42 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
             if noncutting_min is not None and material.any():
                 min_clearance = min(min_clearance, float(noncutting_min[material].min()))
 
-            if config.safety_screen and not zero_length and j < m:
-                next_s = (j + 1) / m
-                next_base = _work_point(task, _interpolate(segment, next_s), motion.frame)
-                next_fields = _body_distances(points, next_base, task.tool)
+            if config.safety_screen and (zero_length or j < m):
+                next_fields = None
+                if not zero_length:
+                    next_s = (j + 1) / m
+                    next_base = _work_point(task, _interpolate(segment, next_s), motion.frame)
+                    next_fields = _body_distances(points, next_base, task.tool)
                 possible_here = False
+                # Whole cells can contain stock even when their centre lies outside.
+                # Prior wholly cutter-covered cells are the only material cells that
+                # can safely be excluded. Never widen a centre-only stock predicate.
+                safety_material = (stock_d <= rho) & ~guaranteed_removed
                 for name in checked:
-                    now_d, next_d = current_fields[name], next_fields[name]
+                    now_d = current_fields[name]
                     if now_d is None:
                         continue
-                    assert next_d is not None
-                    # Every pose in [s_j,s_{j+1}] lies within delta_t of one endpoint.
-                    near = np.minimum(now_d, next_d)
+                    if zero_length:
+                        near = now_d
+                        interval_delta = 0.0
+                    else:
+                        next_d = next_fields[name]
+                        assert next_d is not None
+                        near = np.minimum(now_d, next_d)
+                        interval_delta = delta_t
+                    if not safety_material.any():
+                        continue
+                    lower = float(near[safety_material].min()) - rho - interval_delta
                     if segment.kind == C.SegmentKind.RAPID and name == "cutter":
-                        upper = 0.0
-                        if material.any():
-                            upper = max(0.0, float((rho + delta_t - near[material]).max()))
+                        min_rapid_cutter_lower = min(min_rapid_cutter_lower, lower)
+                        upper = max(0.0, -lower)
                         rapid_penetration_upper = max(rapid_penetration_upper, upper)
                         if upper > rapid_tolerance:
                             possible_here = True
-                    elif (material & (near <= rho + delta_t)).any():
-                        # Non-cutting assembly still uses strict-interior safety.
-                        possible_here = True
+                    else:
+                        min_clearance_lower = min(min_clearance_lower, lower)
+                        if lower <= 0:
+                            possible_here = True
                 if possible_here:
                     safety_uncertain = True
                     if segment.id not in uncertainty_segments:
@@ -387,25 +405,37 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
         unique |= contact
     by_component = {name: float(mask.sum()) * voxel_volume for name, mask in unique_by_component.items()}
     safety_pass = False if collision_sample_count else (None if safety_uncertain else True)
+    if not config.safety_screen and not collision_sample_count:
+        safety_pass = None
     coverage_reasons = ()
     if safety_uncertain and not collision_sample_count:
         coverage_reasons = (
             "assembly clearance remains uncertain under the pre-interval spatial/temporal bound on segments "
             + ",".join(uncertainty_segments),
         )
+    elif not config.safety_screen and not collision_sample_count:
+        coverage_reasons = ("safety_screen disabled; no conservative clearance certificate is available",)
 
     metrics = _null_target_metrics()
     metrics.update({
         "removed_volume_mm3": C.Metric(float(removed.sum()) * voxel_volume, "mm^3"),
-        "min_clearance_mm": (C.Metric(min_clearance, "mm", denominator="sampled non-cutting assembly vs remaining-stock voxel centres")
+        "min_clearance_mm": (C.Metric(min_clearance, "mm", denominator="centre-sampled only; non-cutting assembly vs remaining-stock voxel centres, not a continuous clearance bound")
                               if math.isfinite(min_clearance) else
                               C.Metric(None, "mm", null_reason="no non-cutting assembly station with remaining stock")),
         "min_rapid_cutter_clearance_mm": (C.Metric(
-            min_rapid_cutter_clearance, "mm", denominator="sampled rapid cutter vs remaining-stock voxel centres")
+            min_rapid_cutter_clearance, "mm", denominator="centre-sampled only; rapid cutter vs remaining-stock voxel centres, not a continuous clearance bound")
             if math.isfinite(min_rapid_cutter_clearance) else
             C.Metric(None, "mm", null_reason="no rapid station with remaining stock")),
+        "min_clearance_lower_bound_mm": (C.Metric(
+            min_clearance_lower, "mm", denominator="conservative non-cutting distance bound over stock-bearing whole cells and motion intervals")
+            if math.isfinite(min_clearance_lower) else
+            C.Metric(None, "mm", null_reason="no non-cutting clearance bound sample")),
+        "min_rapid_cutter_clearance_lower_bound_mm": (C.Metric(
+            min_rapid_cutter_lower, "mm", denominator="conservative rapid-cutter distance bound over stock-bearing whole cells and rapid intervals")
+            if math.isfinite(min_rapid_cutter_lower) else
+            C.Metric(None, "mm", null_reason="no rapid-cutter clearance bound sample")),
         "rapid_cutter_penetration_upper_bound_mm": (C.Metric(
-            rapid_penetration_upper, "mm", denominator="maximum over remaining strict-stock centres and rapid intervals")
+            rapid_penetration_upper, "mm", denominator="maximum penetration bound over stock-bearing whole cells and rapid intervals")
             if rapid_seen and config.safety_screen else
             C.Metric(None, "mm", null_reason="no rapid segments" if not rapid_seen else "safety_screen=false")),
         "unique_contacted_volume_mm3": C.Metric(float(unique.sum()) * voxel_volume, "mm^3"),
@@ -435,7 +465,8 @@ def run_reference(task: C.TaskSpec, motion: C.MotionPlan,
         "unique_by_component_mm3": by_component,
         "collision_samples_are_per_station": True,
         "collision_continuation": "complete_motion_diagnostics",
-        "safety_bound": "post-cut pre-interval stock; endpoint assembly union inflated by rho+ell/(2m)",
+        "safety_bound": "post-cut pre-interval stock-bearing whole cells (stock_d <= rho) excluding cells wholly covered by prior cutters; endpoint assembly bound rho+ell/(2m)",
+        "clearance_metrics": "min_clearance_mm and min_rapid_cutter_clearance_mm are centre-sampled; *_lower_bound_mm are conservative whole-cell bounds",
         "volume_bound": bounds.to_dict() if bounds else None,
     }
     result = C.EvaluationResult(
