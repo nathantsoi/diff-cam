@@ -69,11 +69,12 @@
    "note": "T1.3a resumed (worker-3): CAMotics adapter + metrics + bias; camsim STL non-manifold issue open; must inherit T1.0c whole-cell semantics"
   },
   "T2.0": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-1",
    "branch": "task/T2.0-custom-geometry",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "merged; sampled stock/target via contracts GeometrySource, trilinear cell-centre interp + clamp, all target consumers rerouted, position penalties full range, reset preserves sources. Baked target in runtime voxel units. No shank model."
   },
   "T2.1": {
    "status": "complete",
@@ -84,9 +85,9 @@
    "note": "merged; DeltaResidual/DeltaSpline(clamped cubic, 4<=K<=T)/AbsolutePositionResidual, T=segments, anchor_end option, exact pullbacks (45 tests; coordinator independently re-verified J^T)"
   },
   "T2.2": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T2.2-pilot-pocket",
    "blocker": null,
    "next": null
   },
@@ -118,7 +119,8 @@
    "owner": "diffcam-worker-2",
    "branch": "task/T3.2-adam",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "COMPLETE at 592b9e3 (fixed/annealed Adam, safety-first selection, fwd/bwd accounting, exact resume/replay); awaiting merge order"
   },
   "T4.0": {
    "status": "complete",
@@ -129,11 +131,12 @@
    "note": "merged; auditor + exact paired sign-flip test (n<=16 enumerated), CI null n<2, small-n warning <5, Holm, cluster bootstrap CIs; coordinator re-verified p by enumeration | REOPENED: discriminator review (3 reproduced defects: failed runs dropped from denominators [HIGH], abs tie tolerance, 1-task-family CI) -> T4.0b worker-2"
   },
   "T4.1": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-2 (runner T4.1a) / coordinator (real pilot T4.1b)",
+   "branch": "task/T4.1-runner",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "T4.1a paused for T3.xb"
   },
   "T3.4": {
    "status": "planned",
@@ -275,6 +278,19 @@
    "blocker": null,
    "next": null,
    "note": "merged; H1 hard holder checks inflated by cell half-diagonal (safe-case overlap 100->25->0 mm3 at n=1,2,3), H2 lifecycle charged after init, H3 max_steps>=1, H4 reset restores configured start. Reviewer repros pass."
+  },
+  "T3.xb": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-2",
+   "branch": "task/T3.2-adam",
+   "blocker": null,
+   "next": "resume T4.1a",
+   "note": "discriminator pre-merge review of T3 stack: O1 k leak across methods, O2 invalid best/inf crash, O3 Adam fake seeds, O4 budget-dependent anneal, O5 CMA final.json RNG advance, O6 ledger double count/no restore. O2-O6 reproduced."
+  },
+  "T1.4c": {
+   "status": "complete",
+   "owner": "diffcam-worker-3",
+   "note": "merged; T/H bound to task tool_number; later different H refused"
   }
  }
 }
