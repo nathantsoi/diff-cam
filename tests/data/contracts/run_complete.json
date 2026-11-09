@@ -1,0 +1,40 @@
+{
+ "record": {
+  "artifacts": [
+   "config.json",
+   "history.json",
+   "metrics.json",
+   "initial_trajectory.npy",
+   "trajectory.npy",
+   "trajectory_deltas.npy",
+   "motion_plan.json",
+   "eval_posted.json",
+   "rs274.nc",
+   "eval_posted_rs274.json"
+  ],
+  "dirty_patch_hash": null,
+  "failure_reason": null,
+  "posted": [
+   {
+    "dialect": "rs274",
+    "eval_file": "eval_posted_rs274.json",
+    "nc_hash": "sha256:2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+    "reason": null,
+    "status": "supported"
+   },
+   {
+    "dialect": "haas",
+    "eval_file": null,
+    "nc_hash": null,
+    "reason": "example: dialect cannot represent motion",
+    "status": "unsupported"
+   }
+  ],
+  "run_id": "example-complete",
+  "schema_version": "diffcam-contracts/1",
+  "source_commit": null,
+  "status": "complete",
+  "task_hash": "sha256:c9e3b06fab4b4221ef2636364e16cd676aa5fdd999804c8a9000a2bca373bbff"
+ },
+ "record_type": "RunRecord"
+}

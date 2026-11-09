@@ -1,0 +1,39 @@
+{
+ "record": {
+  "coverage": "incomplete",
+  "coverage_reasons": [
+   "G2 helical arc in YZ plane not modeled (line 12)"
+  ],
+  "dialect": "rs274",
+  "discretization": {
+   "max_step_mm": 0.1,
+   "voxel_mm": 0.25
+  },
+  "efficiency_eligible": false,
+  "evaluator_id": "posted_hard/production",
+  "evaluator_revision": "example",
+  "events": [],
+  "geometry_pass": null,
+  "metrics": {
+   "min_clearance_mm": {
+    "denominator": null,
+    "null_reason": "holder not evaluated after unsupported segment",
+    "unit": "mm",
+    "value": null
+   },
+   "removed_volume_mm3": {
+    "denominator": null,
+    "null_reason": null,
+    "unit": "mm^3",
+    "value": 410.2
+   }
+  },
+  "motion_hash": null,
+  "nc_hash": "sha256:8ab335a0f9d73b141ffe588d02919b921369992a3dfe04a443523d3d5965f639",
+  "safety_pass": null,
+  "schema_version": "diffcam-contracts/1",
+  "task_hash": "sha256:c9e3b06fab4b4221ef2636364e16cd676aa5fdd999804c8a9000a2bca373bbff",
+  "tool_setup_hash": "sha256:317a011cdd9ea88e4b0fd7082d74cc945134128790250cc73cd64c236584c142"
+ },
+ "record_type": "EvaluationResult"
+}
