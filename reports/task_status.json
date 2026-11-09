@@ -169,11 +169,12 @@
    "note": "merged: matrix + json. CNC-Net original stack BLOCKED (sm_120); 'CNC-Net @ba0652f on modernized stack' one-step smoke PASSED (IoU 0.424, 22.5s) \u2014 not faithful reproduction; executable NC mapping unsupported natively. Titan BLOCKED (no STEP backend, no provenance/license). CNCGEN preview descriptive only."
   },
   "T5.1": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-2",
    "branch": "task/T5.1-cncnet-adapter",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "merged 16299a6. Scope frozen before results: one dev box pocket w/ island, 80 mm/object unit isotropic transform, ONE per-instance native step on modernized stack (no pretraining/weights). Native 64^3 IoU 0.4668; DiffCAM-mapped IoU 0.4760, residual 36.6 mm3, gouge 1131 mm3. Executable NC: 'incompatible: executable NC mapping unsupported' (variable radii, learned rotations, no ordered path). Evidence in external/cncnet-t51-pilot-worker-2/native-4/comparison.json (sha256 f561430d...). For T4.2: CNC-Net baseline limited to native reconstruction route; claims must state this."
   },
   "T5.2": {
    "status": "in_progress",
