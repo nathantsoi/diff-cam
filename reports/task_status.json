@@ -117,7 +117,7 @@
    "next": null
   },
   "T4.0": {
-   "status": "ready",
+   "status": "in_progress",
    "owner": "diffcam-worker-2",
    "branch": "task/T4.0-auditor",
    "blocker": null,
@@ -216,12 +216,12 @@
    "next": null
   },
   "T1.0b": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-2",
    "branch": "task/T1.0b-rapid-tolerance",
    "blocker": null,
    "next": null,
-   "note": "reference adopts contracts 1.1 rapid_penetration_mm"
+   "note": "merged; certification needs evaluator band (sqrt3*v/2 + temporal) < rapid_penetration_mm \u2014 T1.3 must pick resolution accordingly (coordinator check: retract certifies at tol 0.5, unknown at 0.25 with v=0.25)"
   }
  }
 }
