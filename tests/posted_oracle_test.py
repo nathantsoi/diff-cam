@@ -510,7 +510,7 @@ def test_arc_planes_sample_real_midpoints(plane, center, start, end, expected_mi
     # Direct candidate is nonempty only on the curved station, never on a
     # straight chord. The cyclic XZ basis is (Z,X,Y), so this CCW half-circle
     # passes through x=14,z=4 rather than its chord (x=20,z=4) or opposite arc.
-    result = PostedEvaluator().evaluate_candidate(task, motion, {})
+    result = PostedEvaluator().evaluate_candidate(task, motion, {"record_stations": True})
     assert metric(result, "removed_volume_mm3") > 0
     station_record = result.discretization["segments"][0]
     midpoint = station_record["stations_work_mm"][len(station_record["stations_work_mm"]) // 2]
@@ -532,7 +532,7 @@ def test_rotated_workframe_arc_is_mapped_back_before_geometry():
     parsed = parse_motion_plan(raw.decode(), task)
     assert parsed.segments[0].arc.plane == C.ArcPlane.YZ
     assert parsed.segments[0].arc.direction == C.ArcDirection.CW
-    result = PostedEvaluator().evaluate_posted_gcode(task, raw, C.Dialect.RS274, {})
+    result = PostedEvaluator().evaluate_posted_gcode(task, raw, C.Dialect.RS274, {"record_stations": True})
     assert result.coverage == C.Coverage.COMPLETE
     assert metric(result, "removed_volume_mm3") > 0
     midpoint = result.discretization["segments"][0]["stations_work_mm"][32]
@@ -582,3 +582,12 @@ def test_sampling_budget_and_disabled_safety_screen_are_explicit():
     disabled = PostedEvaluator().evaluate_candidate(fixture.task, fixture.motion, {"safety_screen": False})
     assert disabled.safety_pass is None
     assert disabled.metrics["min_clearance_lower_bound_mm"].value is None
+
+
+def test_station_summary_is_compact_by_default():
+    # Review E2: discretization stores count/first/last/hash unless record_stations is requested.
+    fixture = F.horizontal_slot()
+    result = PostedEvaluator().evaluate_candidate(fixture.task, fixture.motion, {})
+    seg = result.discretization["segments"][0]
+    assert "stations_work_mm" not in seg
+    assert seg["station_count"] >= 2 and seg["stations_sha256"].startswith("sha256:")

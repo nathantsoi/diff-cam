@@ -486,10 +486,17 @@ def replay_adam_checkpoint(path: str | Path, evaluator: Any) -> dict[str, Any]:
     evaluator.ledger.start_validation()
     replayed = evaluator.evaluate_candidate(theta, f"{document['run_id']}:replay", "hard")
     expected = document["best"]["evaluation"]["objective"]
-    matches = bool(replayed.valid and replayed.objective is not None
-                   and replayed.objective == expected.__float__())
+    # Taichi CPU atomic reductions (e.g. holder_overlap_total) are reproducible only to ~1 float32 ulp
+    # (review R1), so replay agreement is checked against a declared tolerance and the difference recorded.
+    rel_tol, abs_tol = 1e-5, 1e-9
+    difference = (None if replayed.objective is None
+                  else abs(float(replayed.objective) - float(expected)))
+    matches = bool(replayed.valid and difference is not None
+                   and difference <= max(abs_tol, rel_tol * abs(float(expected))))
     return {"replayed": replayed, "expected_objective": expected,
-            "objective_matches_backend_equality": matches,
+            "objective_matches_within_tolerance": matches,
+            "objective_abs_difference": difference,
+            "replay_tolerance": {"rel": rel_tol, "abs": abs_tol},
             "checkpoint_theta": theta, "checkpoint_hash": document["payload_hash"]}
 
 

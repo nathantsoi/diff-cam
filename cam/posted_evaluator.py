@@ -44,6 +44,7 @@ class RefinementSettings:
     expected_nc_hash: Optional[str] = None
     max_samples_per_segment: int = 4096
     exclusion_tolerance_mm3: float = 0.0
+    record_stations: bool = False   # full per-station list in discretization (tests/debug; large)
 
     @classmethod
     def from_mapping(cls, settings: Optional[Mapping[str, Any]]) -> "RefinementSettings":
@@ -52,7 +53,7 @@ class RefinementSettings:
         if unknown:
             raise ValueError(f"unknown posted-evaluator settings: {sorted(unknown)}")
         result = cls(**raw)
-        for name in ("compute_bounds", "safety_screen"):
+        for name in ("compute_bounds", "safety_screen", "record_stations"):
             if not isinstance(getattr(result, name), bool):
                 raise ValueError(f"{name} must be boolean")
         if result.max_step_mm is not None and (
@@ -196,6 +197,17 @@ def _arc_interval_bound(segment, subdivisions: int, task, frame) -> float:
     angular_and_normal = math.hypot(
         max(r0, r1) * abs(geometry["sweep_rad"]), end[normal] - start[normal])
     return (angular_and_normal + abs(r1 - r0)) / (2 * subdivisions)
+
+
+def _station_summary(segment, m, zero_length, task, frame, record_all=False):
+    stations = [_base_at(segment, 0.0 if zero_length else j / m, task, frame)
+                for j in range(1 if zero_length else m + 1)]
+    rounded = [[round(float(c), 9) for c in p] for p in stations]
+    summary = {"station_count": len(rounded), "first_station_work_mm": rounded[0],
+               "last_station_work_mm": rounded[-1], "stations_sha256": C.content_hash(rounded)}
+    if record_all:
+        summary["stations_work_mm"] = [list(p) for p in stations]
+    return summary
 
 
 def _subdivisions(segment, task, cfg):
@@ -362,8 +374,8 @@ def _execute(task, motion, cfg):
             "id": segment.id, "kind": segment.kind.value, "length_mm": segment.path_length_mm,
             "subdivisions": m, "stations": 1 if zero_length else m + 1,
             "endpoints_included": True, "duration_s": segment.duration_s,
-            "stations_work_mm": [list(_base_at(segment, 0.0 if zero_length else j / m,
-                                                     task, motion.frame)) for j in range(1 if zero_length else m + 1)],
+            # Review E2: record a compact, verifiable summary instead of every station (up to 4096/segment).
+            **_station_summary(segment, m, zero_length, task, motion.frame, cfg.record_stations),
             "temporal_station_cover_bound_mm": delta_t,
             "motion_model": "contracts.arc_geometry" if segment.kind == C.SegmentKind.ARC else "linear",
         })
@@ -412,7 +424,7 @@ def _execute(task, motion, cfg):
                         "first sampled contact beyond the applicable tolerance; not an exact continuous first-contact time"))
             if contact_union.any():
                 collision_count += 1
-                weight = 0.0 if zero_length else segment.duration_s * (0.5 if j in (0, m) else 1.0) / m
+                weight = segment.duration_s if zero_length else segment.duration_s * (0.5 if j in (0, m) else 1.0) / m
                 integrated += weight * float(contact_union.sum()) * voxel_volume
             if min_noncutting is not None and material.any():
                 min_clearance = min(min_clearance, float(min_noncutting[material].min()))
