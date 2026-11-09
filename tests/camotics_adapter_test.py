@@ -114,6 +114,18 @@ def test_cube_volume_and_closed_surface_grid_queries(tmp_path):
     assert result.boundary_policy == "closed_include"
 
 
+def test_inconsistent_facet_winding_is_not_classified_watertight(tmp_path):
+    triangles = _write_cube(tmp_path / "cube.stl")
+    triangles[0] = triangles[0][::-1]
+    mesh = TriangleMesh(triangles, "binary")
+    facts = mesh_volume_mm3(mesh, require_watertight=False)
+    assert facts["watertight"] is False
+    assert facts["inconsistent_direction_edges"] > 0
+    # Each shared edge counts twice, but one shared direction no longer cancels.
+    with pytest.raises(AdapterError, match="consistent orientation"):
+        mesh_volume_mm3(mesh)
+
+
 def test_small_closed_mesh_ray_classification_uses_area_cutoff(tmp_path):
     mesh = TriangleMesh(_write_cube(tmp_path / "small.stl") * 5e-7, "binary")
     # Face projection area is 2.5e-13 mm^2. Mixing the old 1e-9 mm tolerance
@@ -333,6 +345,8 @@ def test_mocked_mesh_completion_has_paired_artifacts_not_external_evidence(tmp_p
     assert project["workpiece"]["bounds"] == {"min": [-1.0, -1.0, -3.0],
                                              "max": [1.0, 1.0, -1.0]}
     assert result.discretization["source_program_filename"] == "source_program.nc"
+    assert result.discretization["stl_topology"]["inconsistent_direction_edges"] == 0
+    assert result.discretization["stl_topology"]["self_intersection_check"].startswith("not performed")
     assert result.discretization["exclusion_tolerance_mm3"] == 0.0
     assert result.metrics["excluded_volume_mm3"].value == 0.0
     assert result.metrics["original_part_gouge_volume_mm3"].value == 0.0
@@ -366,6 +380,31 @@ def test_declared_exclusion_mismatch_and_bad_tolerance_are_blocked(tmp_path, mon
     assert bad_tolerance.coverage == C.Coverage.UNKNOWN
     assert "exclusion_tolerance_mm3" in " ".join(bad_tolerance.coverage_reasons)
     assert bad_tolerance.metrics["excluded_volume_mm3"].value is None
+
+
+def test_camsim_command_enforces_serial_mcubes_and_records_reason(tmp_path, monkeypatch):
+    """Command-construction unit test, not runtime evidence of corrected geometry."""
+    task = _cube_task()
+    adapter = CamoticsAdapter(scratch_root=tmp_path)
+    monkeypatch.setattr(adapter, "_image_facts", lambda: {
+        "image": "diffcam-camotics:1.2.0", "image_digest": DEFAULT_IMAGE_DIGEST,
+        "camsim_version": "1.2", "binary_release": "1.2.0"})
+    captured = []
+    def fake_call(arguments, timeout=None):
+        captured.append(arguments)
+        _write_cube(tmp_path / "cut_workpiece.stl")
+        return subprocess.CompletedProcess(arguments, 0, "", "")
+    monkeypatch.setattr(adapter, "_docker_call", fake_call)
+    facts = adapter._run_camsim(task, b"G21\n", build_camotics_project(task, 0.25),
+                                tmp_path, 3.0, source_nc_bytes=b"G21\n")
+    assert len(captured) == 1
+    index = captured[0].index("camsim")
+    assert captured[0][index + 1:] == ["--binary", "--render-mode", "0", "--threads", "1",
+                                      "project.camotics", "cut_workpiece.stl"]
+    assert facts["renderer_threads"] == 1
+    assert facts["render_mode"] == "MCUBES_MODE"
+    assert facts["render_mode_id"] == 0
+    assert "no general manifold or geometry-accuracy guarantee" in facts["render_policy"]
 
 
 def test_timeout_returns_blocked_and_stops_only_its_unique_named_container(tmp_path, monkeypatch):
@@ -489,6 +528,10 @@ def test_real_docker_control_and_plunge_are_executed_not_quality_certificates(tm
         assert result.discretization["camsim_version"] == "1.2"
         assert result.discretization["version_probe_stderr"] == "1.2\n"
         assert result.discretization["simulation_frame"] == "machine_mm - task.initial_state.position_mm"
+        assert result.discretization["renderer_threads"] == 1
+        assert result.discretization["render_mode"] == "MCUBES_MODE"
+        if result.discretization["stl_topology"]["watertight"]:
+            assert result.discretization["stl_topology"]["inconsistent_direction_edges"] == 0
         workdir = Path(result.discretization["workdir"])
         assert (workdir / "program.nc").read_bytes().endswith((workdir / "source_program.nc").read_bytes())
         assert result.nc_hash == result.discretization["source_nc_sha256"]

@@ -18,6 +18,16 @@ clearance, whole-cell bounds, fixtures and controller timing are not covered.
 ``evaluate_posted_gcode`` consumes actual NC bytes. Arbitrary sampled/STEP
 stock, rotated setups, unsupported tools, invalid source programs and malformed
 meshes fail closed. A successful camsim exit is not a machining-safety verdict.
+
+The invocation uses MCUBES rendering (mode 0) with one thread. In this
+release the alternate CMS mode has empty doSlice/doCell implementations and
+produces no facets, so it is not a supported alternative. Parallel emission
+also produced edge-incidence defects in the tested fixtures. Watertight means
+exact-vertex two-face incidence and consistent shared-edge orientation; this
+still does not prove global non-self-intersection or correct swept geometry.
+The ConicSweep endpoint behavior is not a faithful arbitrary closed cylinder
+union, and mandatory independent line-geometry checks must not use CAMotics as
+their only oracle.
 """
 from __future__ import annotations
 
@@ -168,19 +178,29 @@ def mesh_volume_mm3(mesh: TriangleMesh, *, require_watertight: bool = True) -> D
 
     Coordinate origin shift only reduces cancellation. Caller labels this STL
     diagnostic volume (possibly one-cell-padded), never exact task-stock volume.
+    ``watertight`` means closed two-face incidence with opposite directed
+    shared edges, not a global self-intersection or machining-validity proof.
     """
     vertices = mesh.vertices_mm
     if len(vertices) == 0:
-        return {"volume_mm3": 0.0, "watertight": True, "boundary_or_nonmanifold_edges": 0}
+        return {"volume_mm3": 0.0, "watertight": True, "boundary_or_nonmanifold_edges": 0,
+                "inconsistent_direction_edges": 0}
     flat = vertices.reshape(-1, 3)
     _, inverse = np.unique(flat, axis=0, return_inverse=True)
     faces = inverse.reshape(-1, 3)
-    edges = np.concatenate((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]), axis=0)
-    edges.sort(axis=1)
-    _, edge_counts = np.unique(edges, axis=0, return_counts=True)
-    defects = int(np.count_nonzero(edge_counts != 2))
+    directed = np.concatenate((faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]), axis=0)
+    ascending = directed[:, 0] <= directed[:, 1]
+    sorted_edges = np.sort(directed, axis=1)
+    _, inverse, edge_counts = np.unique(sorted_edges, axis=0, return_inverse=True, return_counts=True)
+    # Two incident facets must also have opposite directed shared edges. A
+    # count of two alone lets identically oriented shared edges look watertight.
+    direction_balance = np.bincount(inverse.reshape(-1),
+                                    weights=np.where(ascending, 1, -1))
+    inconsistent = (edge_counts == 2) & (direction_balance != 0)
+    inconsistent_count = int(inconsistent.sum())
+    defects = int(np.count_nonzero((edge_counts != 2) | inconsistent))
     if defects and require_watertight:
-        raise AdapterError(f"mesh is not a closed two-face manifold: {defects} unmatched/multiply-used edges")
+        raise AdapterError(f"mesh is not a closed two-face manifold with consistent orientation: {defects} incidence/direction defects")
     origin = vertices.reshape(-1, 3).mean(axis=0)
     signed = sum(np.dot(t[0] - origin, np.cross(t[1] - origin, t[2] - origin)) for t in vertices)
     signed /= 6.0
@@ -189,7 +209,8 @@ def mesh_volume_mm3(mesh: TriangleMesh, *, require_watertight: bool = True) -> D
     if signed < 0:
         raise AdapterError("mesh triangle winding produces a negative signed volume; not repaired with an absolute value")
     return {"volume_mm3": float(signed), "watertight": defects == 0,
-            "boundary_or_nonmanifold_edges": defects}
+            "boundary_or_nonmanifold_edges": defects,
+            "inconsistent_direction_edges": inconsistent_count}
 
 
 def points_in_mesh(mesh: TriangleMesh, points_mm: np.ndarray, *,
@@ -658,7 +679,8 @@ class CamoticsAdapter:
             "docker", "run", "--rm", "--name", name, "--network", "none", "--cap-drop", "ALL",
             "--security-opt", "no-new-privileges", "--read-only", "--tmpfs", "/tmp:rw,nosuid,size=64m",
             "--env", "HOME=/tmp", "--user", f"{os.getuid()}:{os.getgid()}",
-            "--volume", f"{workdir}:/work", self.image, "camsim", "--binary", "project.camotics", "cut_workpiece.stl",
+            "--volume", f"{workdir}:/work", self.image, "camsim", "--binary",
+            "--render-mode", "0", "--threads", "1", "project.camotics", "cut_workpiece.stl",
         ]
         started = time.monotonic()
         running = None
@@ -676,6 +698,8 @@ class CamoticsAdapter:
             "workdir": str(workdir), "simulation_nc_sha256": C.sha256_bytes(nc_bytes),
             "source_nc_sha256": C.sha256_bytes(source_nc_bytes),
             "project_sha256": C.sha256_bytes(spec.read_bytes()),
+            "renderer_threads": 1, "render_mode": "MCUBES_MODE", "render_mode_id": 0,
+            "render_policy": "single-thread MCUBES: eliminates the observed parallel-emission incidence defects; no general manifold or geometry-accuracy guarantee",
         })
         if running.returncode:
             raise AdapterError(f"camsim exited {running.returncode}: {running.stderr.strip() or running.stdout.strip()}")
@@ -765,7 +789,7 @@ class CamoticsAdapter:
                                    if "Tool Length Offset not supported" not in warning]
             if not stl_facts["watertight"]:
                 reasons.append(
-                    f"CAMotics exported non-watertight topology with {stl_facts['boundary_or_nonmanifold_edges']} unmatched/multiply-used STL edges; mesh comparisons are approximate and geometry_pass is null"
+                    f"CAMotics exported topology with {stl_facts['boundary_or_nonmanifold_edges']} incident/multiply-used/inconsistently-directed STL edges; mesh comparisons are approximate and geometry_pass is null"
                 )
             metadata = {
                 **facts, "resolution_mm": resolution, "stl_format": mesh.stl_format,
@@ -788,7 +812,9 @@ class CamoticsAdapter:
                 "stl_topology": {
                     "watertight": stl_facts["watertight"],
                     "unmatched_or_multiply_used_edges": stl_facts["boundary_or_nonmanifold_edges"],
-                    "geometry_pass_rule": "null unless watertight topology and all tolerances pass",
+                    "inconsistent_direction_edges": stl_facts["inconsistent_direction_edges"],
+                    "self_intersection_check": "not performed; closure is not a global geometric-validity certificate",
+                    "geometry_pass_rule": "null unless watertight two-face and coherently oriented topology and all tolerances pass",
                 },
                 "complete_stock_cell_count": int(initial.sum()),
                 "complete_stock_grid_volume_mm3": float(initial.sum()) * grid.voxel_mm**3,
