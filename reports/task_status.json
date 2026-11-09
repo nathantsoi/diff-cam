@@ -348,6 +348,14 @@
    "blocker": null,
    "next": null,
    "note": "SYSTEMATIC AD/FD mismatch: idx2 AD -0.4785 vs FD -0.4990 (4.1%, eps-independent), idx35 sign flip; per-component bisect (sigmoid clamp, ti.max carve, stop-gradients, f32 backward). Affects Adam/T3.4 step quality. | PRIORITY right after pilot launch; gates T3.4 ablations and any optimizer choice for T4.2. | INTERIM: index-2 bias is f32 field/adjoint accumulation (full f64: AD -0.3407647 vs FD -0.3407663); helper-only f64 does not fix; terminal block verified. Index-35 +0.00728 NOT reproduced (fresh AD -0.00296 \u2248 FD) -> investigating possible state leakage. Pending: precision-fix cost (f64 full vs narrow)."
+  },
+  "T3.3c": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T3.3c-sim-precision",
+   "blocker": null,
+   "next": "coordinator precision decision after T3.3b cost data",
+   "note": "declared simulator precision option (f32 default)"
   }
  }
 }
