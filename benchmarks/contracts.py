@@ -723,7 +723,10 @@ METRIC_UNITS: Dict[str, str] = {
     "iou": "1", "dice": "1",
     "removed_volume_mm3": "mm^3",
     "residual_volume_mm3": "mm^3",            # unremoved operation-target volume
-    "gouge_volume_mm3": "mm^3",               # removed volume inside the part
+    "gouge_volume_mm3": "mm^3",               # removed volume inside the operation target T (feeds geometry_pass)
+    "original_part_gouge_volume_mm3": "mm^3", # removed volume inside the original part P (diagnostic only)
+    "excluded_volume_mm3": "mm^3",            # initial ∧ T ∧ ¬P: stock the operation declares it will not remove
+    "removal_target_volume_mm3": "mm^3",      # initial ∧ ¬T: stock the operation should remove
     "max_surface_error_mm": "mm", "p99_surface_error_mm": "mm",
     "asd_mm": "mm", "hd95_mm": "mm",
     "min_clearance_mm": "mm",                 # non-cutting assembly (shank + holder) only

@@ -48,7 +48,7 @@ def test_material_counts_volumes_fractions_and_denominators():
         "residual_volume_mm3": 4 / 8,
         "gouge_volume_mm3": 1 / 8,
         "initial_stock_volume_mm3": 8 / 8,
-        "operation_target_removed_volume_mm3": 5 / 8,
+        "removal_target_volume_mm3": 5 / 8,
         "original_part_volume_mm3": 3 / 8,
         "residual_fraction": 4 / 5,
         "gouge_fraction": 1 / 3,
@@ -64,27 +64,98 @@ def test_material_counts_volumes_fractions_and_denominators():
     assert metrics["gouge_fraction"].denominator.endswith("0.375")
 
 
-def test_operation_target_and_original_part_have_separate_gouge_semantics():
+def test_operation_target_encloses_original_part_and_excluded_stock_is_distinct():
     initial = np.ones((2, 2, 2), dtype=bool)
-    original = np.zeros_like(initial)
-    original[0, 0, :2] = True                         # two original-part voxels
-    reachable = np.zeros_like(initial)
-    reachable[0, 0, 0] = True                        # one reachable part voxel
-    remaining = np.array([1, 0, 1, 0, 0, 0, 0, 0], dtype=bool).reshape(2, 2, 2)
-    metrics = compute_grid_metrics(remaining, reachable, initial, 0.5,
+    original = np.array([1, 1, 0, 0, 0, 0, 0, 0], dtype=bool).reshape(2, 2, 2)
+    target = np.array([1, 1, 1, 0, 0, 0, 0, 0], dtype=bool).reshape(2, 2, 2)
+    assert not np.any(original & ~target)           # P ⊆ T: T adds one excluded voxel
+    remaining = np.array([1, 0, 1, 0, 1, 1, 1, 1], dtype=bool).reshape(2, 2, 2)
+    metrics = compute_grid_metrics(remaining, target, initial, 0.5,
                                    original_part_mask=original)
-    # 1 of 7 removal-target cells is still residual; 6 of 7 were removed.
-    # Actual removed material inside the original part is cell 1 (one of 2 part cells).
-    assert metrics["residual_volume_mm3"].value == pytest.approx(1 / 8)
+    # Excluded = initial ∧ T ∧ ¬P is exactly voxel 2, not the other six cells.
+    assert metrics["excluded_volume_mm3"].value == pytest.approx(1 / 8)
+    assert metrics["removal_target_volume_mm3"].value == pytest.approx(5 / 8)
+    assert metrics["residual_volume_mm3"].value == pytest.approx(4 / 8)
     assert metrics["gouge_volume_mm3"].value == pytest.approx(1 / 8)
+    assert metrics["original_part_gouge_volume_mm3"].value == pytest.approx(1 / 8)
     assert metrics["original_part_volume_mm3"].value == pytest.approx(2 / 8)
-    assert metrics["excluded_from_operation_volume_mm3"].value == pytest.approx(6 / 8)
-    assert metrics["residual_fraction"].value == pytest.approx(1 / 7)
-    assert metrics["gouge_fraction"].value == pytest.approx(1 / 2)
-    assert metrics["operation_target_removed_fraction"].value == pytest.approx(6 / 7)
-    empty_original = compute_grid_metrics(remaining, reachable, initial, 1,
+    assert metrics["residual_fraction"].value == pytest.approx(4 / 5)
+    assert metrics["gouge_fraction"].value == pytest.approx(1 / 3)  # denominator |initial ∧ T| = 3/8
+    assert metrics["operation_target_removed_fraction"].value == pytest.approx(1 / 5)
+    empty_original = compute_grid_metrics(remaining, target, initial, 1,
                                            original_part_mask=np.zeros_like(initial))
-    assert empty_original["gouge_fraction"].value is None
+    # Empty P is allowed; the fraction is based on T, not on an empty P.
+    assert empty_original["gouge_fraction"].value == pytest.approx(1 / 3)
+    assert empty_original["original_part_gouge_volume_mm3"].value == 0.0
+    outside_target = np.zeros_like(initial)
+    outside_target[-1] = True
+    with pytest.raises(ValueError, match="subset"):
+        compute_grid_metrics(remaining, target, initial, 1, original_part_mask=outside_target)
+
+
+def test_excluded_volume_repro_perfect_default_and_36_voxel_layer():
+    # Default P=T, a perfect remaining stock: no excluded stock and no cut.
+    initial = np.ones((2, 2, 2), dtype=bool)
+    default = compute_grid_metrics(initial, initial.copy(), initial, 1.0,
+                                  declared_excluded_volume_mm3=0.0,
+                                  exclusion_tolerance_mm3=0.0)
+    assert default["excluded_volume_mm3"].value == 0.0
+    assert default["gouge_volume_mm3"].value == 0.0
+    assert default["original_part_gouge_volume_mm3"].value == 0.0
+
+    # T=initial, P=initial except a 6x6 middle Z layer. Removing only the
+    # excluded layer must count as target gouge, not original-part gouge.
+    initial = np.ones((6, 6, 3), dtype=bool)
+    target = initial.copy()
+    original = initial.copy()
+    original[:, :, 1] = False              # 36 excluded voxels: initial ∧ T ∧ ¬P
+    remaining = original.copy()
+    result = compute_grid_metrics(remaining, target, initial, 1.0,
+                                  original_part_mask=original,
+                                  declared_excluded_volume_mm3=36.0,
+                                  exclusion_tolerance_mm3=0.0)
+    assert result["excluded_volume_mm3"].value == 36.0
+    assert result["removed_volume_mm3"].value == 36.0
+    assert result["gouge_volume_mm3"].value == 36.0
+    assert result["original_part_gouge_volume_mm3"].value == 0.0
+    assert result["original_part_volume_mm3"].value == 72.0
+    assert result["gouge_fraction"].value == pytest.approx(36 / 108)
+    assert result["residual_volume_mm3"].value == 0.0
+    assert result["removal_target_volume_mm3"].value == 0.0
+    assert result["original_part_gouge_volume_mm3"].denominator.startswith(
+        "original_part_volume_mm3=72.0; diagnostic only")
+    # An explicit reported tolerance is required and retained as caller policy.
+    compute_grid_metrics(remaining, target, initial, 1.0, original_part_mask=original,
+                         declared_excluded_volume_mm3=35.0, exclusion_tolerance_mm3=1.0)
+    with pytest.raises(ValueError, match="excluded volume mismatch"):
+        compute_grid_metrics(remaining, target, initial, 1.0, original_part_mask=original,
+                             declared_excluded_volume_mm3=34.0, exclusion_tolerance_mm3=1.0)
+    with pytest.raises(ValueError, match="tolerance must be finite nonnegative"):
+        compute_grid_metrics(remaining, target, initial, 1.0, original_part_mask=original,
+                             declared_excluded_volume_mm3=36.0, exclusion_tolerance_mm3=-1.0)
+    with pytest.raises(ValueError, match="supplied together"):
+        compute_grid_metrics(remaining, target, initial, 1.0, original_part_mask=original,
+                             exclusion_tolerance_mm3=1.0)
+
+
+def test_cut_only_excluded_layer_uses_target_gouge_for_geometry_pass():
+    initial = np.array([1, 1, 1, 0, 0, 0, 0, 0], dtype=bool).reshape(2, 2, 2)
+    target = initial.copy()
+    original = np.array([1, 1, 0, 0, 0, 0, 0, 0], dtype=bool).reshape(2, 2, 2)
+    remaining = original.copy()              # remove only T∧¬P
+    result = compute_grid_metrics(remaining, target, initial, 0.5,
+                                  original_part_mask=original)
+    assert result["excluded_volume_mm3"].value == pytest.approx(1 / 8)
+    assert result["gouge_volume_mm3"].value == pytest.approx(1 / 8)
+    assert result["original_part_gouge_volume_mm3"].value == 0.0
+    assert result["gouge_fraction"].value == pytest.approx(1 / 3)
+    assert result["residual_volume_mm3"].value == 0.0
+    assert result["max_surface_error_mm"].value <= 1.0
+    allowed = C.Tolerances(0.0, 1.0, 1.0, 0.0)
+    strict = C.Tolerances(0.0, 0.0, 1.0, 0.0)
+    assert C.geometry_pass_from_metrics(result, allowed) is True
+    # P's diagnostic gouge is zero; geometry_pass still fails on removed T.
+    assert C.geometry_pass_from_metrics(result, strict) is False
 
 
 def test_empty_operation_target_denominators_are_not_fake_zero_or_one():
@@ -92,7 +163,7 @@ def test_empty_operation_target_denominators_are_not_fake_zero_or_one():
     metrics = compute_grid_metrics(np.zeros_like(initial), initial, initial, 2.0)
     for name in ("operation_target_removed_fraction", "residual_fraction"):
         assert metrics[name].value is None
-        assert "operation target volume is zero" in metrics[name].null_reason
+        assert "removal target volume is zero" in metrics[name].null_reason
     assert metrics["gouge_fraction"].value == 1  # all of the desired part is removed
     assert all(metrics[name].value is None for name in
                ("max_surface_error_mm", "p99_surface_error_mm", "asd_mm", "hd95_mm"))
@@ -198,3 +269,14 @@ def test_large_full_stock_surfaces_use_bounded_nearest_neighbour():
     assert result["initial_stock_volume_mm3"].value == 64**3
     assert result["remaining_volume_mm3"].value == 64**3
     assert result["iou"].value == pytest.approx(1.0)
+
+
+def test_surface_count_guard_precedes_argwhere(monkeypatch):
+    # A shallow (20001,500,1) sheet is cheap to hold, but has more than ten
+    # million boundary cells under the default zero-border erosion policy.
+    remaining = np.ones((20001, 500, 1), dtype=bool)
+    def forbidden_argwhere(*args, **kwargs):
+        raise AssertionError("argwhere must not be called before the count guard")
+    monkeypatch.setattr(np, "argwhere", forbidden_argwhere)
+    with pytest.raises(ValueError, match="surface sample count exceeds explicit 10M"):
+        surface_error_metrics(remaining, remaining.copy(), 1.0)

@@ -29,7 +29,8 @@ class ObjectiveSpec:
     holder_weight: float = 50.0
     holder_margin_mm: float = 0.0
     geometry_normalization: str = "1/N followed by squared per-voxel occupancy penalties"
-    hard_geometry_normalization: str = "w_gouge*gouge_fraction^2 + w_residual*residual_fraction^2"
+    hard_geometry_normalization: str = ("w_gouge*gouge_fraction^2 + w_residual*residual_fraction^2; "
+                                        "gouge over |initial∧T|, residual over |initial∧¬T| (csg_metrics parity)")
     hard_holder_normalization: str = "w_holder*hard_holder_overlap_fraction^2 (proxy)"
     prototype: str = "analytic_target_until_T2.0_custom_target_and_T1.2_chronology"
 
@@ -119,8 +120,10 @@ class CandidateEvaluator:
             raise ValueError("prototype grid must begin at the analytic stock min corner")
         if tuple(simulator.stock.shape[1:]) != tuple(task.grid.shape):
             raise ValueError("simulator and task voxel shapes differ")
-        kind = task.original_part.kind
-        primitive = task.original_part.params.get("primitive") if kind == "analytic" else kind
+        # The simulator's target field must be the OPERATION target T (⊇ original part P), per contracts 1.1.
+        target_geometry = task.operation_target.geometry
+        kind = target_geometry.kind
+        primitive = target_geometry.params.get("primitive") if kind == "analytic" else kind
         if primitive != simulator.target_shape:
             raise ValueError(
                 f"task target kind {primitive} and simulator target {simulator.target_shape} differ")
@@ -234,10 +237,17 @@ class CandidateEvaluator:
             else:
                 self.sim.forward_hard(steps + 1, clip_speeds=False)
                 target = self.sim.target.to_numpy() < 0
-                stock = self.sim.stock.to_numpy()[steps] < 0
-                n = stock.size
-                gouge_fraction = float(np.count_nonzero(target & ~stock) / n)
-                residual_fraction = float(np.count_nonzero(~target & stock) / n)
+                history = self.sim.stock.to_numpy()
+                initial = history[0] < 0
+                stock = history[steps] < 0
+                # Same definitions/denominators as simulator.csg_metrics (contracts 1.1, coordinator decision):
+                # gouge = removed ∧ T over |initial ∧ T|; residual = remaining ∧ ¬T over |initial ∧ ¬T|.
+                in_target = np.count_nonzero(initial & target)
+                removal_target = np.count_nonzero(initial & ~target)
+                gouge_fraction = (float(np.count_nonzero(initial & target & ~stock) / in_target)
+                                  if in_target else 0.0)
+                residual_fraction = (float(np.count_nonzero(~target & stock) / removal_target)
+                                     if removal_target else 0.0)
                 holder_fraction = float(self.sim.holder_overlap_total(steps))
                 geometry = (self.spec.gouge_weight * gouge_fraction ** 2
                             + self.spec.residual_weight * residual_fraction ** 2)

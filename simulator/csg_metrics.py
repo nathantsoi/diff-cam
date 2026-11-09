@@ -1,10 +1,11 @@
 """Grid-based geometric metrics with explicit physical units.
 
 Masks use ``True`` for material occupancy. The primary grid helper takes three
-same-shaped masks: initial stock, desired final part (operation target), and
-remaining material after motion. Residual is *unremoved removal target*
-``initial & ~part & remaining``; gouge is *removed desired part*
-``initial & part & ~remaining``. They are not interchangeable.
+same-shaped masks: initial stock, operation target ``T`` and remaining material.
+The optional original-part mask ``P`` must satisfy ``P ⊆ T``. Excluded stock is
+``initial & T & ~P``; removal target is ``initial & ~T``. Residual is unremoved
+removal target; **gouge is removed stock inside ``T``**. Original-part gouge
+``removed & P`` is reported separately as a diagnostic, not the score denominator.
 
 ``voxel_mm`` is one cubic cell's physical edge in millimetres. Volumes use
 ``voxel_mm**3`` regardless of the third-power exponent in their names. Surface
@@ -176,18 +177,22 @@ def surface_error_metrics(remaining_mask, target_mask, spacing_mm=1.0,
     remaining, target, _ = _same_masks(remaining_mask, target_mask, target_mask)
     remaining_surface = np.asarray(remaining & ~np.asarray(binary_erosion(remaining)), dtype=bool)
     target_surface = np.asarray(target & ~np.asarray(binary_erosion(target)), dtype=bool)
+    remaining_count = int(remaining_surface.sum())
+    target_count = int(target_surface.sum())
     reason = ("nearest-cell-centre surface distances require both surfaces to be nonempty; "
-              f"remaining_surface_voxels={int(remaining_surface.sum())}, "
-              f"operation_target_surface_voxels={int(target_surface.sum())}")
-    if not remaining_surface.any() or not target_surface.any():
+              f"remaining_surface_voxels={remaining_count}, "
+              f"operation_target_surface_voxels={target_count}")
+    if remaining_count == 0 or target_count == 0:
         return _unknown_surface_metrics(reason)
+    # Check counts BEFORE np.argwhere materializes a potentially huge N-by-3
+    # list. The guard is on actual eroded surface points, not grid dimensions.
+    if remaining_count > 10_000_000 or target_count > 10_000_000:
+        raise ValueError("surface sample count exceeds explicit 10M-point memory guard")
 
     spacing = _spacing(spacing_mm)
     origin = _origin(origin_mm)
     remaining_points = np.argwhere(remaining_surface).astype(np.float64) * spacing + origin
     target_points = np.argwhere(target_surface).astype(np.float64) * spacing + origin
-    if len(remaining_points) > 10_000_000 or len(target_points) > 10_000_000:
-        raise ValueError("surface sample count exceeds explicit 10M-point memory guard")
     # Large products take the bounded KD-tree path instead of allocating an
     # N-by-N matrix; neither surface's samples are discarded.
     remaining_to_target = _nearest_distances(remaining_points, target_points)
@@ -206,16 +211,26 @@ def surface_error_metrics(remaining_mask, target_mask, spacing_mm=1.0,
 
 
 def grid_material_metrics(remaining_mask, target_mask, initial_mask, voxel_mm,
-                          *, original_part_mask=None, surface_origin_mm=None) -> Dict[str, Metric]:
+                          *, original_part_mask=None, surface_origin_mm=None,
+                          declared_excluded_volume_mm3=None,
+                          exclusion_tolerance_mm3=None) -> Dict[str, Metric]:
     """Return volumes, fractions, overlap and sampled errors for a material grid.
 
     ``remaining_mask`` and ``initial_mask`` are actual material occupancy. The
-    second mask is the intended operation-target part. Its complement is the
-    desired removal target. Optional ``original_part_mask`` is the complete
-    original desired part; when it differs from the reachable operation target,
-    gouge is measured on the original part and the protected/excluded stock is
-    reported separately. Original-part defaults to the operation target,
-    preserving backwards-compatible semantics and zero-error surface alignment.
+    second mask is the operation target ``T``: stock that must not be removed
+    during this operation. ``initial & ~T`` is the removal target. The optional
+    original-part mask ``P`` is the original desired part and must be a subset
+    of ``T``; omitted P defaults to T. Excluded unreachable stock is
+    ``initial & T & ~P``. Cutting T (including excluded stock) is the gouge
+    score; removed original part is exposed only as a separate diagnostic.
+    ``excluded_volume_mm3`` is the computed grid quantity for comparison with
+    a TaskSpec's declared exclusion, never the whole removal target. Pass both
+    ``declared_excluded_volume_mm3`` and ``exclusion_tolerance_mm3`` to enforce
+    that comparison; zero tolerance permits only floating-point roundoff, not a
+    whole-cell error. Any coarser tolerance is an explicit caller-side grid
+    discretization policy, not a default invented by this helper.
+
+
 
     ``initial_mask`` is required: never infer stock from the final mask or from
     grid dimensions alone. A part-empty or removal-target-empty denominator is
@@ -231,6 +246,8 @@ def grid_material_metrics(remaining_mask, target_mask, initial_mask, voxel_mm,
         if np.any(np.asarray(original_part_mask, dtype=bool) & ~initial):
             raise ValueError("original part mask contains material outside the declared initial stock")
         _, _, original = _same_masks(remaining_mask, target_mask, original_part_mask)
+        if np.any(original & ~part):
+            raise ValueError("original part must be a subset of the operation target (P ⊆ T)")
         original = initial & original
     voxel = _spacing(voxel_mm)
     cell_volume = voxel ** 3
@@ -238,21 +255,25 @@ def grid_material_metrics(remaining_mask, target_mask, initial_mask, voxel_mm,
     removed = initial & ~remaining
     removal_target = initial & ~part
     residual = removal_target & remaining
-    gouge = removed & original
+    gouge = removed & part                # removed ∧ (initial ∧ T), since removed ⊂ initial
+    original_part_gouge = removed & original
+    excluded = initial & part & ~original
     intersection = remaining & part
     union = remaining | part
 
     removal_target_volume = float(removal_target.sum()) * cell_volume
-    part_volume = float(original.sum()) * cell_volume
+    target_volume = float((initial & part).sum()) * cell_volume
+    original_volume = float(original.sum()) * cell_volume
     numbers = {
         "remaining_volume_mm3": int(remaining.sum()),
         "removed_volume_mm3": int(removed.sum()),
         "residual_volume_mm3": int(residual.sum()),
         "gouge_volume_mm3": int(gouge.sum()),
+        "original_part_gouge_volume_mm3": int(original_part_gouge.sum()),
         "initial_stock_volume_mm3": int(initial.sum()),
-        "operation_target_removed_volume_mm3": int(removal_target.sum()),
+        "removal_target_volume_mm3": int(removal_target.sum()),
         "original_part_volume_mm3": int(original.sum()),
-        "excluded_from_operation_volume_mm3": int((initial & ~part & ~original).sum()),
+        "excluded_volume_mm3": int(excluded.sum()),
     }
     result = {
         "iou": Metric(float((intersection.sum() + 1e-12) / (union.sum() + 1e-12)), "1",
@@ -261,24 +282,47 @@ def grid_material_metrics(remaining_mask, target_mask, initial_mask, voxel_mm,
                        denominator=f"remaining_voxels+target_voxels={int(remaining.sum() + part.sum())}"),
     }
     for name, count in numbers.items():
-        result[name] = Metric(count * cell_volume, _MM_CUBE_UNIT,
-                              denominator=f"voxel_count={count}, voxel_mm={voxel}")
+        denominator = (f"original_part_volume_mm3={original_volume}; diagnostic only, not the gouge score denominator"
+                       if name == "original_part_gouge_volume_mm3" else
+                       f"voxel_count={count}, voxel_mm={voxel}")
+        result[name] = Metric(count * cell_volume, _MM_CUBE_UNIT, denominator=denominator)
     result.update({
         "voxel_volume_mm3": Metric(cell_volume, _MM_CUBE_UNIT),
         "operation_target_removed_fraction": (
             Metric(float((removal_target & removed).sum() / removal_target.sum()), "1",
-                   denominator=f"initial & ~part volume_mm3={removal_target_volume}")
+                   denominator=f"initial & ~operation_target volume_mm3={removal_target_volume}")
             if removal_target.any() else
-            Metric(None, "1", null_reason="operation target volume is zero (initial & ~part is empty)")),
+            Metric(None, "1", null_reason="removal target volume is zero (initial & ~operation_target is empty)")),
         "residual_fraction": (
             Metric(float(residual.sum() / removal_target.sum()), "1",
-                   denominator=f"initial & ~part volume_mm3={removal_target_volume}")
+                   denominator=f"initial & ~operation_target volume_mm3={removal_target_volume}")
             if removal_target.any() else
-            Metric(None, "1", null_reason="operation target volume is zero (initial & ~part is empty)")),
+            Metric(None, "1", null_reason="removal target volume is zero (initial & ~operation_target is empty)")),
         "gouge_fraction": (
-            Metric(float(gouge.sum() / original.sum()), "1", denominator=f"original_part_volume_mm3={part_volume}")
-            if original.any() else Metric(None, "1", null_reason="original part volume is zero"))
+            Metric(float(gouge.sum() / (initial & part).sum()), "1",
+                   denominator=f"initial & operation_target volume_mm3={target_volume}")
+            if (initial & part).any() else
+            Metric(None, "1", null_reason="stock inside operation target is zero (initial & T is empty)"))
     })
+    if (declared_excluded_volume_mm3 is not None) != (exclusion_tolerance_mm3 is not None):
+        raise ValueError("declared exclusion and its explicit tolerance must be supplied together")
+    if declared_excluded_volume_mm3 is not None:
+        try:
+            declared = float(declared_excluded_volume_mm3)
+            tolerance = float(exclusion_tolerance_mm3)
+        except (TypeError, ValueError) as error:
+            raise ValueError("declared exclusion and tolerance must be finite nonnegative mm^3 values") from error
+        if not np.isfinite(declared) or not np.isfinite(tolerance) or declared < 0 or tolerance < 0:
+            raise ValueError("declared exclusion and tolerance must be finite nonnegative mm^3 values")
+        measured = float((initial & part & ~original).sum()) * cell_volume
+        difference = abs(measured - declared)
+        roundoff = 1e-12 * max(1.0, abs(declared))
+        if difference > tolerance + roundoff:
+            raise ValueError(
+                f"excluded volume mismatch: grid initial&T&~P={measured:g} mm^3, "
+                f"declared={declared:g} mm^3, absolute_difference={difference:g} mm^3 "
+                f"exceeds explicit tolerance {tolerance:g} mm^3 plus roundoff {roundoff:g}"
+            )
     result.update(surface_error_metrics(remaining, part, spacing_mm=voxel,
                                         origin_mm=surface_origin_mm))
     return result
