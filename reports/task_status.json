@@ -136,7 +136,7 @@
    "status": "in_progress",
    "owner": "diffcam-worker-2 (runner T4.1a) / coordinator (real pilot T4.1b)",
    "branch": "task/T4.1-runner",
-   "blocker": "T2.2, T1.3",
+   "blocker": "T4.1b-wiring (D-04 rework) + T3.3c (f64 precision, D-05)",
    "next": null,
    "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts. | DECISION 2026-11-09: pilot launches as an infrastructure/cost pilot once w2 gates are green; fixed/annealed-Adam (gradient) rows are PROVISIONAL until T3.3b characterizes the systematic AD/FD mismatch; if T3.3b finds a real backward bug, Adam rows are rerun after the fix. | D-2026-11-09-04 (reports/decisions.md): pilot verdicts from 0.125 mm posted eval (both dialects); 1.0 mm = screen/diagnostic only; 0.25 mm RS274 convergence point recorded."
   },
@@ -215,8 +215,8 @@
    "owner": "diffcam-worker-1",
    "branch": "task/T6.2-measurements",
    "blocker": null,
-   "next": null,
-   "note": "software only; empirical status pending real trials"
+   "next": "real trial data (outside agent scope)",
+   "note": "software merged 749fc6f (packet/NC/setup gating, fiducial SVD registration, uncertainty, rejected/interrupted retention, force/load/proxy separation; synthetic-only empirical reports refused). Empirical conclusions PENDING real trial records (qualified operator)."
   },
   "T7.1": {
    "status": "planned",
@@ -226,11 +226,12 @@
    "next": null
   },
   "T7.2": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T7.2-artifacts",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "scaffold now; real tables after T4.3; never writes into manuscript/ (user's)"
   },
   "T1.0b": {
    "status": "complete",
@@ -342,12 +343,20 @@
    "note": "merged 2424699: shift via sim per-voxel stock field; phi_hard = hard stock_d[T]; two-sided band predicate; leak tests; C2. Coordinator real-sim gaps small and shrinking with k (k=20: +0.06/+0.17/+0.00 vox)."
   },
   "T3.3b": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-3",
    "branch": "task/T3.3b-adfd",
    "blocker": null,
    "next": null,
-   "note": "SYSTEMATIC AD/FD mismatch: idx2 AD -0.4785 vs FD -0.4990 (4.1%, eps-independent), idx35 sign flip; per-component bisect (sigmoid clamp, ti.max carve, stop-gradients, f32 backward). Affects Adam/T3.4 step quality. | PRIORITY right after pilot launch; gates T3.4 ablations and any optimizer choice for T4.2."
+   "note": "SYSTEMATIC AD/FD mismatch: idx2 AD -0.4785 vs FD -0.4990 (4.1%, eps-independent), idx35 sign flip; per-component bisect (sigmoid clamp, ti.max carve, stop-gradients, f32 backward). Affects Adam/T3.4 step quality. | PRIORITY right after pilot launch; gates T3.4 ablations and any optimizer choice for T4.2. | INTERIM: index-2 bias is f32 field/adjoint accumulation (full f64: AD -0.3407647 vs FD -0.3407663); helper-only f64 does not fix; terminal block verified. Index-35 +0.00728 NOT reproduced (fresh AD -0.00296 \u2248 FD) -> investigating possible state leakage. Pending: precision-fix cost (f64 full vs narrow). | Reviewer G2: f32 ADJOINT bias grows ~linearly with path length (prefix 8: 0.24%, 48: 2.5%, 75: 4.1%); f32 FORWARD accurate (f32 FD \u2248 f64 FD) -> CMA/hard rows unaffected; only gradient rows provisional. Precision choice must be validated on the longest suite path. | RESULT: full f64 fixes index-2 (AD -0.49917 vs FD -0.49916), 112 s/3.67 GB vs f32 93 s/1.94 GB; scalar-only f64 insufficient; idx-35 UNREPRODUCED on exact c955b60 (closed). -> D-2026-11-09-05. | MERGED 8320c05 with permanent AD-consistency regression (same \u03b8 / after other \u03b8 / fresh process)."
+  },
+  "T3.3c": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T3.3c-sim-precision",
+   "blocker": null,
+   "next": "implement precision='f64' per D-05; pilot waits for it",
+   "note": "declared simulator precision option (f32 default)"
   }
  }
 }
