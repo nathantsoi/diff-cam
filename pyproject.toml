@@ -19,6 +19,9 @@ include = ["simulator*", "algorithms*", "cam*", "benchmarks*", "verification*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: explicitly opted-in real-task benchmark smoke (skipped by default)",
+]
 
 [dependency-groups]
 dev = ["pytest>=8"]
