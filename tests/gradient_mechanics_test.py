@@ -320,6 +320,39 @@ def test_delta_ledger_is_numeric_and_mono_budget():
     assert "entries" not in delta and "memory_scope" not in delta
 
 
+def test_terminal_geometry_numpy_derivative_matches_central_differences():
+    from scripts.run_gradient_mechanics import terminal_geometry_loss_numpy
+
+    stock = np.array([-8.0, -3.0, -1.0, 0.0, 0.5, 1.0, 4.0, 9.0])
+    target = np.array([0.0, 1.0, -1.0, 0.5, -0.6, 1.5, -2.0, 2.0])
+    args = {"gouge_weight": 2.0, "residual_weight": 0.75, "loss_shift": 0.125}
+    exact = terminal_geometry_loss_numpy(stock, target, **args)
+    eps = 1e-5
+    for index in range(stock.size):
+        plus, minus = stock.copy(), stock.copy()
+        plus[index] += eps
+        minus[index] -= eps
+        central = (terminal_geometry_loss_numpy(plus, target, **args)["loss"]
+                   - terminal_geometry_loss_numpy(minus, target, **args)["loss"]) / (2 * eps)
+        assert exact["gradient"][index] == pytest.approx(central, rel=2e-8, abs=1e-10)
+    split = terminal_geometry_loss_numpy(stock, target, gouge_weight=1, residual_weight=0)
+    assert split["loss"] == pytest.approx(split["gouge"])
+    assert split["residual"] == 0
+
+
+def test_terminal_geometry_numpy_handles_clamps_and_bad_inputs():
+    from scripts.run_gradient_mechanics import terminal_geometry_loss_numpy
+
+    result = terminal_geometry_loss_numpy([-60.0, 60.0, 0.0], [-1.0, 1.0, 2.0],
+                                          gouge_weight=2, residual_weight=1)
+    assert result["gradient"][:2].tolist() == [0.0, 0.0]
+    assert not result["interior_to_clamp"][:2].any()
+    with pytest.raises(ValueError, match="finite"):
+        terminal_geometry_loss_numpy([np.nan], [0.0], gouge_weight=1, residual_weight=1)
+    with pytest.raises(ValueError, match="nonnegative"):
+        terminal_geometry_loss_numpy([0.0], [0.0], gouge_weight=-1, residual_weight=1)
+
+
 @pytest.mark.skipif(os.environ.get("DIFFCAM_REAL_PILOT_GRADIENT") != "1",
                     reason="real Taichi pocket smoke is opt-in with DIFFCAM_REAL_PILOT_GRADIENT=1")
 def test_real_taichi_reduced_pilot_smoke(tmp_path):

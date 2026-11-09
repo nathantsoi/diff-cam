@@ -84,6 +84,48 @@ def validate_config(config: CostConfig, dimension: int | None = None) -> None:
             raise ValueError(f"{name} must be finite and positive")
 
 
+def terminal_geometry_loss_numpy(stock, target, *, gouge_weight: float,
+                                  residual_weight: float, loss_shift: float = 0.0):
+    """Independent float64 terminal-loss/derivative reference for diagnostics.
+
+    This mirrors the CSG simulator's fixed-target terminal gouge and residual
+    terms on a declared grid. It is not a new production objective or a holder,
+    trajectory, or machining-safety evaluation. Gradients are with respect to
+    each voxel's stock SDF, before its sigmoid clamp. Clamp-tie coordinates are
+    returned separately rather than assigned a fabricated classical derivative.
+    """
+    stock = np.asarray(stock, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    if stock.shape != target.shape or stock.size == 0:
+        raise ValueError("terminal diagnostic requires matching nonempty stock/target Float64 fields")
+    if not np.isfinite(stock).all() or not np.isfinite(target).all():
+        raise ValueError("terminal diagnostic fields must be finite")
+    if not math.isfinite(loss_shift):
+        raise ValueError("loss_shift must be finite")
+    for name, weight in (("gouge_weight", gouge_weight), ("residual_weight", residual_weight)):
+        if not isinstance(weight, (int, float)) or not math.isfinite(weight) or weight < 0:
+            raise ValueError(f"{name} must be finite and nonnegative")
+    shifted = stock + loss_shift
+    stock_occ = 1.0 / (1.0 + np.exp(np.clip(shifted, -50.0, 50.0)))
+    target_occ = 1.0 / (1.0 + np.exp(np.clip(target, -50.0, 50.0)))
+    gouge = target_occ * (1.0 - stock_occ)
+    residual = (1.0 - target_occ) * stock_occ
+    g = np.sum(gouge_weight * gouge * gouge) / stock.size
+    r = np.sum(residual_weight * residual * residual) / stock.size
+    # Use the exact two weighted terms' chain rule; avoid hand-simplified factors.
+    apply_jacobian = np.divide(
+        (2.0 * gouge_weight * gouge * -target_occ
+         + 2.0 * residual_weight * residual * (1.0 - target_occ))
+        * (-stock_occ * (1.0 - stock_occ)), stock.size,
+    )
+    inside_clamp = (shifted > -50.0) & (shifted < 50.0)
+    gradient = np.where(inside_clamp, apply_jacobian, 0.0)
+    return {"loss": float(g + r), "gouge": float(g), "residual": float(r),
+            "gradient": gradient, "clamp_ties": (shifted == -50.0) | (shifted == 50.0),
+            "interior_to_clamp": inside_clamp,
+            "gouge_weight": float(gouge_weight), "residual_weight": float(residual_weight)}
+
+
 def _write_source(root: Path, name: str, values, grid: C.GridSpec,
                   params: dict[str, Any]) -> C.GeometrySource:
     path = root / f"{name}.npy"
