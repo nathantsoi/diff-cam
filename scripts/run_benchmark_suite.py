@@ -353,7 +353,7 @@ def _pilot_refinement_settings(task, config):
 
 
 def _refinement_policy(config):
-    """Fidelity roles and independent posted-worker resource limits (D-04)."""
+    """Fidelity roles and D-04/D-07 posted-worker resource limits."""
     if config.get("task_source", "pilot_pocket") != "pilot_pocket":
         return {"enabled": False}
     fields = {
@@ -374,8 +374,8 @@ def _refinement_policy(config):
     if jobs > 2:
         raise RunnerError("posted evaluation parallel_jobs must be bounded at 2")
     limit = _positive_int(policy["max_rss_bytes_per_job"], "refinement_check.max_rss_bytes_per_job")
-    if limit > 2 * 1024 ** 3:
-        raise RunnerError("posted evaluation memory ceiling may not exceed 2 GiB per job")
+    if limit > 8 * 1024 ** 3:
+        raise RunnerError("posted evaluation memory ceiling may not exceed the D-07 approved 8 GiB per job")
     for name in ("poll_interval_s", "timeout_s"):
         value = policy[name]
         if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
@@ -1094,12 +1094,10 @@ def _refinement_projection(config, entries, evidence, root):
                                   allow_test_override=bool(evidence.get("in_process_unit_override", False)))
         processes = sample["processes"]
         rows = {}
-        serial_program_seconds = 0.0
         for dialect in dialects:
             row = next(row for row in processes if row["dialect"] == dialect)
-            seconds = _finite_seconds(row["evaluator_wall_seconds"], f"{role}/{dialect}")
-            serial_program_seconds += seconds
-            rows[dialect] = seconds
+            rows[dialect] = _finite_seconds(row["evaluator_wall_seconds"], f"{role}/{dialect}")
+        serial_program_seconds = sum(rows.values())
         phase_wall = _finite_seconds(sample["phase_wall_seconds"], f"{role} phase")
         projected[role] = {
             "max_step_mm": policy[f"{role}_step_mm"], "dialects": dialects,
@@ -1115,16 +1113,13 @@ def _refinement_projection(config, entries, evidence, root):
         }
     refined_wall = sum(projected[role]["estimated_phase_wall_time_s"]
                        for role in ("verdict", "convergence"))
-    intervals = [sum(projected[role]["serial_evaluation_work_seconds"] for role in projected)
-                 for role in ("screen", "verdict", "convergence")]
-    if len(set(intervals)) != 1:
-        raise RunnerError("per-role estimator serial-work accounting is inconsistent")
     return {
         "enabled": True, "expected_program_count": len(entries),
         "parallel_jobs": policy["parallel_jobs"], "program_level_parallel_jobs": 1,
         "screen_in_primary_estimates": True,
         "levels": projected,
-        "serial_evaluation_work_seconds": intervals[0],
+        "serial_evaluation_work_seconds": sum(
+            projected[role]["serial_evaluation_work_seconds"] for role in projected),
         "estimated_phase_wall_time_s": refined_wall,
         "memory_per_posted_job_bytes": policy["max_rss_bytes_per_job"],
         "optimizer_parent_peak_rss_kib": evidence.get("optimizer_parent_peak_rss_kib"),
@@ -1687,6 +1682,16 @@ def _fidelity_deltas(left, right, task):
     return comparison
 
 
+def _screen_fidelity_diagnostics(screen, verdict, task):
+    comparisons = {
+        dialect.value: _fidelity_deltas(screen[dialect], verdict[dialect], task)
+        for dialect in C.Dialect
+    }
+    fields = sorted({name for comparison in comparisons.values()
+                     for name in comparison["changed_outcome_fields"]})
+    return comparisons, fields
+
+
 def _provided_typed_source(task, job, override):
     if override is None:
         return None
@@ -1822,7 +1827,9 @@ def _refinement_worker(config, root, run_id, auxiliary_root, *, evaluator_overri
                    if metadata["role"] == "verdict"}
         convergence = next(evaluation for evaluation, metadata in all_results
                            if metadata["role"] == "convergence")
-    screen_delta = _fidelity_deltas(screen[C.Dialect.RS274], verdict[C.Dialect.RS274], task)
+    screen_deltas, disagreement_fields = _screen_fidelity_diagnostics(screen, verdict, task)
+    screen_delta = screen_deltas[C.Dialect.RS274.value]
+    haas_delta = screen_deltas[C.Dialect.HAAS.value]
     convergence_delta = _fidelity_deltas(convergence, verdict[C.Dialect.RS274], task)
     if not auxiliary_dir.exists():
         aux_config = dict(parent_config, run_id=auxiliary_id, refinement_of=run_id,
@@ -1839,6 +1846,7 @@ def _refinement_worker(config, root, run_id, auxiliary_root, *, evaluator_overri
             "screen_outcomes": {d.value: _evaluation_outcome(value, task) for d, value in screen.items()},
             "verdict_outcomes": {d.value: _evaluation_outcome(value, task) for d, value in verdict.items()},
             "screen_to_verdict_rs274": screen_delta,
+            "screen_to_verdict_haas": haas_delta,
             "convergence_to_verdict_rs274": convergence_delta,
             "resource_record": resources, "refinement_of": run_id,
         }
@@ -1871,12 +1879,17 @@ def _refinement_worker(config, root, run_id, auxiliary_root, *, evaluator_overri
                          screen_copy=True, primary=primary)
     verdict = _read_phase(task, directory, config, "verdict", evaluated_dir=auxiliary_dir, primary=primary)
     convergence = _read_phase(task, directory, config, "convergence", evaluated_dir=auxiliary_dir)[C.Dialect.RS274]
-    screen_delta = _fidelity_deltas(screen[C.Dialect.RS274], verdict[C.Dialect.RS274], task)
+    screen_deltas, disagreement_fields = _screen_fidelity_diagnostics(screen, verdict, task)
+    screen_delta = screen_deltas[C.Dialect.RS274.value]
+    haas_delta = screen_deltas[C.Dialect.HAAS.value]
     convergence_delta = _fidelity_deltas(convergence, verdict[C.Dialect.RS274], task)
-    disagreement_fields = screen_delta["changed_outcome_fields"]
     comparison_document = {
         "schema": "diffcam-fidelity-comparison/1", "primary_run_id": run_id,
         "verdict_run_id": auxiliary_id, "screen_to_verdict_rs274": screen_delta,
+        "screen_to_verdict_haas": haas_delta,
+        "screen_disagreement_fields": disagreement_fields,
+        "screen_disagreement_fields_by_dialect": {
+            dialect: comparison["changed_outcome_fields"] for dialect, comparison in screen_deltas.items()},
         "convergence_to_verdict_rs274": convergence_delta,
         "role": "diagnostics only; 0.125 mm posted evaluations in both dialects are the sole verdict source",
     }
@@ -1924,7 +1937,8 @@ def _refinement_worker(config, root, run_id, auxiliary_root, *, evaluator_overri
         "auxiliary_root": auxiliary_root, "auxiliary_directory": auxiliary_dir,
         "auxiliary_link_path": link_path, "status": status,
         "screen_disagreement_fields": disagreement_fields,
-        "comparison": screen_delta, "convergence_comparison": convergence_delta,
+        "comparison": screen_delta, "haas_comparison": haas_delta,
+        "convergence_comparison": convergence_delta,
         "verdict_evaluations": {d.value: {"path": str(auxiliary_dir / C.DIALECT_ARTIFACTS[d][1]),
                                            "sha256": C.sha256_bytes(R.record_bytes(e))}
                                for d, e in verdict.items()},
@@ -2142,7 +2156,9 @@ def _verified_refinement_for_report(root, run_id, auxiliary_root, config):
                          screen_copy=True, primary=primary)
     verdict = _read_phase(task, directory, config, "verdict", evaluated_dir=auxiliary_dir, primary=primary)
     convergence = _read_phase(task, directory, config, "convergence", evaluated_dir=auxiliary_dir)[C.Dialect.RS274]
-    screen_delta = _fidelity_deltas(screen[C.Dialect.RS274], verdict[C.Dialect.RS274], task)
+    screen_deltas, disagreement_fields = _screen_fidelity_diagnostics(screen, verdict, task)
+    screen_delta = screen_deltas[C.Dialect.RS274.value]
+    haas_delta = screen_deltas[C.Dialect.HAAS.value]
     convergence_delta = _fidelity_deltas(convergence, verdict[C.Dialect.RS274], task)
     history = _json(auxiliary_dir / "history.json")
     if not isinstance(history, Mapping) or history.get("stage") != "fine-verdict-and-convergence-posted-evaluations":
@@ -2166,6 +2182,10 @@ def _verified_refinement_for_report(root, run_id, auxiliary_root, config):
     comparison_document = {
         "schema": "diffcam-fidelity-comparison/1", "primary_run_id": run_id,
         "verdict_run_id": auxiliary_id, "screen_to_verdict_rs274": screen_delta,
+        "screen_to_verdict_haas": haas_delta,
+        "screen_disagreement_fields": disagreement_fields,
+        "screen_disagreement_fields_by_dialect": {
+            dialect: comparison["changed_outcome_fields"] for dialect, comparison in screen_deltas.items()},
         "convergence_to_verdict_rs274": convergence_delta,
         "role": "diagnostics only; 0.125 mm posted evaluations in both dialects are the sole verdict source",
     }
@@ -2184,7 +2204,7 @@ def _verified_refinement_for_report(root, run_id, auxiliary_root, config):
                              "sha256": C.sha256_bytes((auxiliary_dir / "run.json").read_bytes())},
         "comparison_path": f"{auxiliary_id}/comparison.json",
         "comparison_sha256": C.sha256_bytes(comparison_payload),
-        "screen_disagreement_fields": screen_delta["changed_outcome_fields"], "roles": roles,
+        "screen_disagreement_fields": disagreement_fields, "roles": roles,
         "rule": "only 0.125 mm evaluations in both dialects determine pilot verdicts; screen is diagnostic",
         "resources": resources,
     }
@@ -2194,7 +2214,7 @@ def _verified_refinement_for_report(root, run_id, auxiliary_root, config):
         raise RunnerError(f"verdict links must use schema /4: {run_id}")
     if link != expected_link:
         raise RunnerError(f"fine verdict link does not match its actual typed evidence: {run_id}")
-    return verdict, screen_delta["changed_outcome_fields"], task, {
+    return verdict, disagreement_fields, task, {
         "path": os.path.relpath(link_path, root),
         "sha256": C.sha256_bytes(link_path.read_bytes()),
     }, resources

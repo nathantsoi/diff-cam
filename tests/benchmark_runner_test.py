@@ -101,7 +101,13 @@ def test_frozen_config_selects_real_grid_and_declared_zero_tolerance():
     assert {role: phases[f"{role}_step_mm"] for role in ("screen", "verdict", "convergence")} == {
         "screen": 1.0, "verdict": 0.125, "convergence": 0.25}
     assert phases["parallel_jobs"] == 2
-    assert phases["max_rss_bytes_per_job"] == 2 * 1024 ** 3
+    assert phases["max_rss_bytes_per_job"] == 8 * 1024 ** 3
+    original_limit = phases["max_rss_bytes_per_job"]
+    phases["max_rss_bytes_per_job"] = 9 * 1024 ** 3
+    with pytest.raises(runner.RunnerError, match="approved 8 GiB"):
+        runner._refinement_policy(config)
+    phases["max_rss_bytes_per_job"] = original_limit
+    assert config["posted_memory_evidence"]["observed_screen_peak_bytes_per_job"] == 3689144320
     assert config["precision"] == "f64"
 
     task = pilot_task.build_pilot_task()
@@ -930,6 +936,37 @@ def test_refinement_completion_flip_updates_primary_pilot_report(tmp_path):
     assert (root / record.run_id / "run.json").read_bytes() == immutable_run
 
 
+def test_haas_screen_verdict_disagreement_is_retained(tmp_path):
+    root, config, record, immutable_run, _ = _pilot_refinement_fixture(tmp_path / "primary")
+    auxiliary_root = tmp_path / "haas-diagnostic"
+
+    def evaluate(task, nc, dialect, settings):
+        return _typed_evaluation(
+            task, nc, dialect=dialect, geometry_pass=dialect is not C.Dialect.HAAS,
+            step=settings["max_step_mm"])
+
+    case = runner._refinement_worker(
+        config, root, record.run_id, auxiliary_root, evaluator_override=evaluate)
+    assert case["comparison"]["geometry_pass"]["changed"] is False
+    assert case["haas_comparison"]["geometry_pass"]["changed"] is True
+    assert set(case["screen_disagreement_fields"]) == {"efficiency_eligible", "geometry_pass"}
+    comparison = json.loads((case["auxiliary_directory"] / "comparison.json").read_text())
+    assert comparison["screen_to_verdict_haas"]["geometry_pass"]["changed"] is True
+    assert comparison["screen_disagreement_fields_by_dialect"]["rs274"] == []
+    assert comparison["screen_disagreement_fields_by_dialect"]["haas"] == [
+        "geometry_pass", "efficiency_eligible"]
+    case["manifest"] = A.load_manifest(root / "manifest.json")
+    runner._audit_refinement_root([case], auxiliary_root)
+    report = runner._pilot_report(config, root, auxiliary_root, bootstrap_replicates=100)
+    row = report["runs"][0]["verdict_evaluations"]
+    assert row["rs274"]["geometry_pass"] is True
+    assert row["haas"]["geometry_pass"] is False
+    assert set(report["refinement"]["screen_disagreements_by_run_id"][record.run_id]) == {
+        "efficiency_eligible", "geometry_pass"}
+    assert report["refinement"]["screen_disagreement_by_condition"]["fixed-adam"]["count"] == 1
+    assert (root / record.run_id / "run.json").read_bytes() == immutable_run
+
+
 def test_primary_pilot_report_uses_only_fine_dialects_and_fails_closed(tmp_path):
     import dataclasses
     import shutil
@@ -1180,6 +1217,17 @@ def test_refinement_timing_is_separate_from_primary_and_parallel_forecast(tmp_pa
         for item in projection["levels"][role]["artifacts"].values():
             assert (tmp_path / item["evaluation_path"]).is_file()
             assert C.sha256_bytes((tmp_path / item["evaluation_path"]).read_bytes()) == item["evaluation_sha256"]
+    changed_durations = json.loads(json.dumps(phases["screen"]["processes"]))
+    changed_durations[0]["evaluator_wall_seconds"] += 1.0
+    phases["screen"]["processes"] = changed_durations
+    changed_projection = runner._refinement_projection(config, entries, evidence, tmp_path)
+    # A changed measurement is not an invariant violation. The forecast must
+    # nevertheless derive every role and the total from its per-dialect rows.
+    for role, projection in changed_projection["levels"].items():
+        assert projection["serial_evaluation_work_seconds"] == pytest.approx(
+            sum(projection["per_program_seconds"].values()) * len(entries))
+    assert changed_projection["levels"]["screen"]["serial_evaluation_work_seconds"] == pytest.approx(14.0)
+    assert changed_projection["serial_evaluation_work_seconds"] == pytest.approx(42.0)
     damaged = dict(phases["verdict"]["artifacts"]["rs274"])
     damaged["evaluation_sha256"] = "sha256:" + "0" * 64
     phases["verdict"]["artifacts"]["rs274"] = damaged
@@ -1467,7 +1515,7 @@ def test_posted_children_have_independent_pids_and_bounded_rss(tmp_path):
     assert set(result) == set(C.Dialect)
     phase = evaluator.phase_records[-1]
     assert len(phase["processes"]) == 2
-    assert phase["job_policy"]["total_posted_rss_ceiling_bytes"] == 4 * 1024 ** 3
+    assert phase["job_policy"]["total_posted_rss_ceiling_bytes"] == 16 * 1024 ** 3
     assert phase["job_policy"]["parallel_jobs"] == 2
     for index, item in enumerate(phase["processes"]):
         assert item["worker_pid"] > 0
