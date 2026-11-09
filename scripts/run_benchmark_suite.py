@@ -608,6 +608,14 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None):
         "voxel_mm": task.grid.voxel_mm,
         "parameter_steps": parameterization.num_steps,
         "constructor_seconds": constructor_seconds,
+        "config_sha256": C.sha256_bytes(R.json_bytes(config)),
+        "code_sha256": {
+            "runner": C.sha256_bytes(Path(__file__).read_bytes()),
+            "posted_evaluator": C.sha256_bytes(Path(sys.modules[PostedEvaluator.__module__].__file__).read_bytes()),
+            "strict_parser": C.sha256_bytes(Path(sys.modules["cam.gcode_parser"].__file__).read_bytes()),
+            "post_writer": C.sha256_bytes(Path(sys.modules["cam.posts"].__file__).read_bytes()),
+            "task_builder": C.sha256_bytes(Path(sys.modules[pilot_io.__name__].__file__).read_bytes()),
+        },
         "candidate_seconds": records,
         "posted_seconds": posted_seconds,
         "posted_seconds_dialects": posted_times,
@@ -965,10 +973,16 @@ def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path)
             if elapsed is not None and elapsed > 7200.0:
                 costs_with_total["budget_review"] = {
                     "recommendation": "do not launch before a coordinator review of budget/grid choices and their fidelity costs",
+                    "current_execution_policy": [
+                        "one production evaluation per dialect only on each run's final selected motion, not per optimizer validation",
+                        "strict 0.25mm production geometry, sampling and posted-evaluation fidelity unchanged",
+                        "serial execution and one simulator per child process; GPU is not selected or validated here",
+                    ],
                     "options_to_discuss_not_applied": [
                         "reduce or stage sampling budgets with independently shown fidelity changes",
                         "profile a coarse analytic grid first, without relaxing the declared 0.25mm production target",
-                        "validate GPU execution separately before any GPU-configured run; no unvalidated performance claim",
+                        "profile/vectorise production-evaluation hot spots through the file owner, preserving semantics and independent oracles",
+                        "coordinator-approved bounded CPU subprocess parallelism with measured memory/contention effects and unchanged per-program evaluation settings",
                     ]}
         _atomic(root / "dry_run.json", costs_with_total)
         print(json.dumps(costs_with_total, indent=2, sort_keys=True))

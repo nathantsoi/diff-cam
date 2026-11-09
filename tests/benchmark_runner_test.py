@@ -352,6 +352,10 @@ def test_pilot_post_factory_is_task_bound_and_settings_are_frozen(tmp_path, monk
     assert set(report["candidate_seconds"]) == {"smooth_forward", "smooth_gradient", "hard_forward"}
     assert len(report["posted_seconds"]) == 2
     assert report["task_hash"] == task.task_hash
+    assert report["constructor_seconds"] >= 0.0
+    assert report["code_sha256"]["runner"] == C.sha256_bytes(Path(runner.__file__).read_bytes())
+    assert set(report["code_sha256"]) == {"runner", "posted_evaluator", "strict_parser", "post_writer", "task_builder"}
+    assert report["config_sha256"].startswith("sha256:")
     entries = runner._plan_entries(config, task, "dev", None)
     costs = runner._pecent(dict(config, timing_evidence=report), entries)
     assert len(costs) == 7
