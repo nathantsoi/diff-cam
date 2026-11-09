@@ -146,7 +146,7 @@
    "branch": "task/T3.4-continuation",
    "blocker": "T3.3b AD/FD characterization before dev ablations",
    "next": "dev ablations after pilot",
-   "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot."
+   "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot. | Reviewer verified T3.4b (K1/K2 closed). Ablation-driver requirement: catch empty-band ValueError and record an inconclusive calibration step (don't abort)."
   },
   "T3.3": {
    "status": "in_progress",
