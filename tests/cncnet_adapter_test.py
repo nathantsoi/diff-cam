@@ -170,3 +170,23 @@ def test_typed_prepared_task_record_hash_retained_for_auxiliary_readers():
     assert C.TaskSpec.from_dict(raw) == task
     assert json.loads(C.dumps(task))["record_type"] == "TaskSpec"
     assert C.TaskSpec.from_dict(raw).task_hash == task.task_hash
+
+
+def test_anisotropic_extents_map_a_single_marked_voxel_to_the_right_axis():
+    """Review X1: catches x/y/z transposes and per-axis extent mix-ups (pilot-like extents 0.25/0.2/0.1)."""
+    frame = A.ObjectUnitFrame((0, 0, 0), 1.0)          # 1 mm per object unit: native coords == work mm
+    dims = np.array([0.25, 0.2, 0.1]); n = 8
+    field = np.zeros((n, n, n)); field[3, 1, 2] = 1.0  # distinct (i, j, k)
+
+    def node(i, j, k):
+        return -dims / 2 + np.array([i, j, k]) * dims / n
+
+    def single_cell_at(point):
+        voxel = 1e-3
+        return C.GridSpec((1, 1, 1), tuple(point - voxel / 2), voxel, C.Frame.WORK)
+
+    assert A.map_native_occupancy(field, dims, frame, single_cell_at(node(3, 1, 2)))[0, 0, 0]
+    for other in [(1, 3, 2), (2, 1, 3), (3, 2, 1), (2, 3, 1), (1, 2, 3), (3, 1, 3), (4, 1, 2)]:
+        point = node(*other)
+        if np.all(np.abs(point) <= dims / 2):
+            assert not A.map_native_occupancy(field, dims, frame, single_cell_at(point))[0, 0, 0], other
