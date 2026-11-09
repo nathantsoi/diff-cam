@@ -1109,7 +1109,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "resample tasks within family strata only when every stratum has at least two tasks; "
         "otherwise they pool tasks. No-cut runs are not efficiency eligible. "
         "Recorded failed/interrupted/blocked runs are known zero outcomes, never invisible successes. "
-        "Missing/invalid/blocked/null evidence is not converted into success.",
+        "Missing/invalid/blocked/null evidence is not converted into success. "
+        "Δ = method − baseline. Negative differences are retained as reported.",
         "",
         f"**Holm policy:** {report['policy']['p_value']}",
         "",

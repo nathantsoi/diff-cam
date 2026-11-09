@@ -250,7 +250,7 @@
    "branch": "task/T1.0c-reference-safety",
    "blocker": null,
    "next": null,
-   "note": "merged; whole-cell stock bounds for safety, zero-length screen unified, conservative lower-bound clearance metrics; T1.3 must inherit whole-cell semantics"
+   "note": "merged; whole-cell stock bounds for safety, zero-length screen unified, conservative lower-bound clearance metrics; T1.3 must inherit whole-cell semantics | Optional tightness follow-up (discriminator L2): whole-cell slack also applied to aligned grids (retract upper 1.82->3.57 mm; one convergence row true->null). If T1.3/T4.1 sees too many 'uncertain' rapids, apply slack only to boundary-straddling cells."
   },
   "T1.4b": {
    "status": "in_progress",
