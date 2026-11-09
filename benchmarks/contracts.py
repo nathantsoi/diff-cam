@@ -577,6 +577,49 @@ class Segment:
     def chord_length_mm(self) -> float:
         return math.dist(self.start_mm, self.end_mm)
 
+    @property
+    def path_length_mm(self) -> float:
+        """Exact path length: chord for rapid/feed, helical arc length for arcs."""
+        if self.arc is None:
+            return self.chord_length_mm
+        return arc_geometry(self.start_mm, self.end_mm, self.arc)["length_mm"]
+
+
+_PLANE_AXES = {ArcPlane.XY: (0, 1, 2), ArcPlane.XZ: (2, 0, 1), ArcPlane.YZ: (1, 2, 0)}
+ARC_RADIUS_TOL_MM = 1e-3
+
+
+def arc_geometry(start, end, arc: ArcData, segment_id: str = "?") -> Dict[str, float]:
+    """RS274 arc semantics in the motion frame. Plane axes (a, b, normal): XY=(X,Y,Z) G17,
+    XZ=(Z,X,Y) G18, YZ=(Y,Z,X) G19; CCW is positive rotation about the plane normal.
+    Start == end in-plane means a full circle. ``turns`` adds full revolutions. Linear motion
+    along the normal makes a helix. Returns radius, signed sweep (rad) and length (mm)."""
+    a, b, n = _PLANE_AXES[arc.plane]
+    c = arc.centre_mm
+    r0 = math.hypot(start[a] - c[a], start[b] - c[b])
+    r1 = math.hypot(end[a] - c[a], end[b] - c[b])
+    if r0 <= ARC_RADIUS_TOL_MM:
+        raise ContractError(f"segment[{segment_id}].arc: zero radius")
+    if abs(r0 - r1) > ARC_RADIUS_TOL_MM:
+        raise ContractError(f"segment[{segment_id}].arc: start/end radii differ ({r0} vs {r1} mm, tol {ARC_RADIUS_TOL_MM})")
+    th0 = math.atan2(start[b] - c[b], start[a] - c[a])
+    th1 = math.atan2(end[b] - c[b], end[a] - c[a])
+    ccw = (th1 - th0) % (2 * math.pi)
+    if arc.direction == ArcDirection.CCW:
+        sweep = ccw if ccw > 1e-12 else 2 * math.pi
+        sweep += 2 * math.pi * arc.turns
+    else:
+        cw = (2 * math.pi - ccw) % (2 * math.pi)
+        sweep = -((cw if cw > 1e-12 else 2 * math.pi) + 2 * math.pi * arc.turns)
+    r = 0.5 * (r0 + r1)
+    dn = end[n] - start[n]
+    return {"radius_mm": r, "sweep_rad": sweep, "length_mm": math.hypot(r * sweep, dn)}
+
+
+def _check_duration(s: "Segment", expect: float, what: str) -> None:
+    if abs(expect - s.duration_s) > 1e-6 * max(1.0, expect):
+        raise ContractError(f"segment[{s.id}].duration_s: {s.duration_s} != {what} = {expect}")
+
 
 @dataclass(frozen=True)
 class MotionPlan:
@@ -626,12 +669,25 @@ class MotionPlan:
                 raise ContractError(f"segment[{s.id}].start_mm: discontinuous with previous end {prev} "
                                     "(insert an explicit rapid/feed segment)")
             prev = s.end_mm
+        for s in segs:
+            if s.arc is not None:
+                arc_geometry(s.start_mm, s.end_mm, s.arc, segment_id=s.id)   # radius consistency
         if self.timing_rule == TimingRule.EXACT_STOP_CONSTANT_SPEED:
             for s in segs:
-                if s.kind == SegmentKind.FEED:
-                    expect = s.chord_length_mm / s.feed_mm_s  # type: ignore[operator]
-                    if abs(expect - s.duration_s) > 1e-6 * max(1.0, expect):
-                        raise ContractError(f"segment[{s.id}].duration_s: {s.duration_s} != length/feed {expect}")
+                if s.kind != SegmentKind.RAPID:   # rapids need the task's rapid rate: validate_for_task
+                    _check_duration(s, s.path_length_mm / s.feed_mm_s, "path_length/feed")  # type: ignore[operator]
+
+    def validate_for_task(self, task: "TaskSpec") -> None:
+        """Task-aware checks every producer must pass before evaluation: rapid durations
+        (exact-stop: length / limits.rapid_mm_s), feed limits, and initial-state agreement."""
+        if self.initial_state != task.initial_state:
+            raise ContractError("motion.initial_state: differs from task.initial_state")
+        for s in self.segments:
+            if s.feed_mm_s is not None and s.feed_mm_s > task.limits.max_feed_mm_s * (1 + 1e-9):
+                raise ContractError(f"segment[{s.id}].feed_mm_s: {s.feed_mm_s} exceeds limits.max_feed_mm_s "
+                                    f"{task.limits.max_feed_mm_s}")
+            if self.timing_rule == TimingRule.EXACT_STOP_CONSTANT_SPEED and s.kind == SegmentKind.RAPID:
+                _check_duration(s, s.path_length_mm / task.limits.rapid_mm_s, "length/limits.rapid_mm_s")
 
     def to_dict(self) -> Dict[str, Any]:
         return _to_jsonable(self)

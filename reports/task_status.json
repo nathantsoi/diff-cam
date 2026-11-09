@@ -10,14 +10,15 @@
    "branch": "task/T0.0-contracts",
    "blocker": null,
    "next": "collect consumer acks",
-   "note": "v1 draft merged; 32 contract tests pass; awaiting consumer ack (T1.0 worker-2, T1.4, T2.1) before freeze"
+   "note": "v1 draft on core; ba97d6e adds arc/rapid timing checks + validate_for_task per worker-2 review; awaiting worker-2 ack"
   },
   "T0.1": {
-   "status": "in_progress",
+   "status": "complete",
    "owner": "diffcam-worker-1",
    "branch": "task/T0.1-references",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "merged; pycma 48a821b (BSD-3), CNC-Net ba0652f (license missing/unclear), CAMotics e84665f (GPL-2.0+); 11 network-free tests; repeat+offline verify exit 0. CAMotics binary unavailable (needs cbang/Qt5/SCons/V8 build) -> blocks T1.3 external cross-check."
   },
   "T0.2": {
    "status": "complete",
@@ -49,9 +50,9 @@
    "next": null
   },
   "T1.4": {
-   "status": "ready",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T1.4-nc-semantics",
    "blocker": null,
    "next": null
   },
@@ -60,7 +61,8 @@
    "owner": null,
    "branch": null,
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "CAMotics camsim 1.2.0 runs headless in Docker (docker/camotics); slot smoke converges with resolution (+594 -> +78 mm3 at 0.25 -> 0.1 mm), padding bias to be quantified in T1.3."
   },
   "T2.0": {
    "status": "planned",
@@ -147,11 +149,11 @@
    "next": null
   },
   "T5.0": {
-   "status": "blocked",
+   "status": "ready",
    "owner": "diffcam-worker-3",
    "branch": null,
-   "blocker": "T0.1 pins (CNC-Net/CAMotics) not merged",
-   "next": "formal T5.0: write reports/external_compatibility.md + configs/external_compatibility.json from dispatch/diffcam/T5.0-recon-diffcam-worker-3.reply.md; isolated CNC-Net native smoke",
+   "blocker": null,
+   "next": "formal T5.0 after T2.1 (worker-3)",
    "note": "early warnings (worker-3): CNC-Net ba0652f has no NC/waypoint export, no tracked checkpoints/LICENSE -> executable comparison likely an incompatible/adapted subset; native reconstruction viable. Titan-M1.step is inch AP214, no license/setup record; no STEP backend in env. CNCGEN payload verified; reference paths not predictions. | Read-only recon complete 2026-11-08 (reply file); Titan parts are local parts/Titan-M*.step with no source/license record; STEP backend unavailable."
   },
   "T5.1": {

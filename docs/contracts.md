@@ -41,6 +41,10 @@ initial_state, tool, limits, tolerances, motion_semantics, fixtures`.
 - Contiguous: each segment starts where the previous ended (≤ 1e-6 mm), the first at a known initial position.
 - Timing rules: `exact_stop_constant_speed` (feed duration = length / feed, checked) or `fixed_dt` (durations are multiples of `dt_s`).
   All compared solvers use the same rule for a given task.
+- Exact-stop durations: feed/arc = `path_length_mm / feed_mm_s` (checked on construction; arcs use helical arc length from
+  `arc_geometry`, plane axes XY=(X,Y), XZ=(Z,X), YZ=(Y,Z), CCW positive about the plane normal, start==end ⇒ full circle, radius
+  mismatch > 1e-3 mm rejected). Rapids = `length / limits.rapid_mm_s`, checked by `MotionPlan.validate_for_task(task)`, which also
+  checks feed ≤ `limits.max_feed_mm_s` and initial-state agreement. Producers call it; evaluators may rely on it.
 - Arcs carry centre/plane/direction. Consumers that can't sample arcs report `unsupported`/`incomplete` coverage — never silently chord them.
 - `waypoints_mm()` is an export only.
 

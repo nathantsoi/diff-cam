@@ -285,3 +285,47 @@ def test_loads_rejects_untagged_records():
         C.loads(json.dumps({"record": {}}))
     with pytest.raises(C.ContractError, match="invalid JSON"):
         C.loads("{")
+
+
+# ------------------------------------------------- timing (consumer review, worker-2)
+def test_arc_length_sweep_and_duration_checked():
+    m = _motion()
+    arc = m.segments[3]
+    g = C.arc_geometry(arc.start_mm, arc.end_mm, arc.arc)
+    assert math.isclose(g["radius_mm"], 4.0) and math.isclose(g["sweep_rad"], math.pi)
+    assert math.isclose(arc.path_length_mm, 4 * math.pi)
+    segs = list(m.segments)
+    segs[3] = dataclasses.replace(arc, duration_s=arc.chord_length_mm / arc.feed_mm_s)   # chord timing is wrong
+    with pytest.raises(C.ContractError, match="path_length/feed"):
+        dataclasses.replace(m, segments=tuple(segs))
+
+
+def test_arc_direction_full_circle_turns_and_helix():
+    A = lambda d, t=0: C.ArcData(centre_mm=(0, 0, 0), plane="XY", direction=d, turns=t)
+    s, e = (1, 0, 0), (0, 1, 0)
+    assert math.isclose(C.arc_geometry(s, e, A("ccw"))["sweep_rad"], math.pi / 2)
+    assert math.isclose(C.arc_geometry(s, e, A("cw"))["sweep_rad"], -3 * math.pi / 2)
+    assert math.isclose(C.arc_geometry(s, s, A("ccw"))["sweep_rad"], 2 * math.pi)
+    assert math.isclose(C.arc_geometry(s, s, A("cw", 1))["sweep_rad"], -4 * math.pi)
+    helix = C.arc_geometry(s, (1, 0, -3), A("ccw"))
+    assert math.isclose(helix["length_mm"], math.hypot(2 * math.pi, 3))
+    # G18 (XZ plane): axes (Z, X); CCW about +Y goes Z -> X
+    g = C.arc_geometry((0, 0, 1), (1, 0, 0), C.ArcData(centre_mm=(0, 0, 0), plane="XZ", direction="ccw"))
+    assert math.isclose(g["sweep_rad"], math.pi / 2)
+
+
+def test_arc_radius_mismatch_rejected():
+    with pytest.raises(C.ContractError, match="radii differ"):
+        C.arc_geometry((1, 0, 0), (0, 2, 0), C.ArcData(centre_mm=(0, 0, 0), plane="XY", direction="ccw"))
+
+
+def test_validate_for_task_checks_rapid_duration_and_feed_limit():
+    t, m = _task(), _motion()
+    m.validate_for_task(t)
+    segs = list(m.segments)
+    segs[0] = dataclasses.replace(segs[0], duration_s=segs[0].duration_s * 2)
+    with pytest.raises(C.ContractError, match="rapid_mm_s"):
+        dataclasses.replace(m, segments=tuple(segs)).validate_for_task(t)
+    slow = dataclasses.replace(t, limits=dataclasses.replace(t.limits, max_feed_mm_s=1.0))
+    with pytest.raises(C.ContractError, match="max_feed_mm_s"):
+        m.validate_for_task(slow)
