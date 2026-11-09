@@ -187,7 +187,8 @@
    "owner": null,
    "branch": null,
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "Protocol must state: real-simulator objectives reproduce only to ~1 float32 ulp (Taichi CPU atomics, e.g. holder_overlap_total); same-seed CMA runs are approximately (not bitwise) repeatable since ulp ties can flip rankings; replay agreement uses rel 1e-5. Option to make hard-path reductions deterministic (fixed-order f64) if exact repeatability is required."
   },
   "T4.3": {
    "status": "planned",
