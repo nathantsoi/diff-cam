@@ -50,7 +50,7 @@
    "branch": "task/T1.2-holder-chronology",
    "blocker": null,
    "next": null,
-   "note": "merged; pre-cut conservative whole-segment holder screen (false positive at 1 subdivision clears at >=2, matches reference); reset_candidate_state(); 13th-instance Taichi segfault -> guard at 12 instances/runtime (use one sim per process or reuse+reset); isotropic-grid rejection; T1.1 review findings fixed. GAP: no independent shank modeled (T1.3 must cover)."
+   "note": "merged; pre-cut conservative whole-segment holder screen (false positive at 1 subdivision clears at >=2, matches reference); reset_candidate_state(); 13th-instance Taichi segfault -> guard at 12 instances/runtime (use one sim per process or reuse+reset); isotropic-grid rejection; T1.1 review findings fixed. GAP: no independent shank modeled (T1.3 must cover). | REVIEW (discriminator): H1 holder screen centre-sampled not conservative (HIGH), H2 guard counts failed constructors, H3 max_steps=0, H4 reset keeps saved tool_start -> T1.2b folded into T2.0 branch (worker-1)"
   },
   "T1.4": {
    "status": "complete",
