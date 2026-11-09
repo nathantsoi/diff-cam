@@ -12,6 +12,7 @@ import argparse
 import dataclasses
 import fnmatch
 import importlib
+from functools import partial
 import json
 import math
 import os
@@ -137,7 +138,9 @@ def _context(config: Mapping[str, Any], repository: Path):
     if kind == "prototype_analytic":
         return (*_prototype(), _prototype_evaluator, None)
     if kind == "pilot_pocket":
-        return _pilot_context(config, repository)
+        # Builtin pilot source lives in the application repository, not the
+        # caller's artifact output directory. Preserve the legacy plugin argument.
+        return _pilot_context(config, REPOSITORY)
     if not config.get("allow_python_plugins", False):
         raise RunnerError("unregistered task_source and no allow_python_plugins=true opt-in")
     if not isinstance(kind, str) or ":" not in kind:
@@ -196,11 +199,14 @@ def _pilot_exclusion_tolerance(task, config):
     return float(declared)
 
 
-def _sampled_pilot_sources(task):
-    """Generate and verify immutable sampled geometry, without arbitrary files."""
+def _sampled_pilot_sources(task, repository=None):
+    """Generate and verify immutable sampled geometry in the explicit repository."""
     from cam.posted_evaluator import _centres
 
     stock_sdf, target_sdf, required, retained = pilot_io.source_fields(task)
+    if np.any(np.asarray(target_sdf, dtype=np.float32) == 0.0):
+        raise RunnerError("sampled operation target has zero-valued SDF cells: closed <=0 "
+                          "membership and simulator strict <0 interior would disagree")
     centres = _centres(task.grid)
     if not np.array_equal((stock_sdf <= 0), _analytic_mask(task.stock, centres)):
         raise RunnerError("simulator stock is not equivalent to analytic task stock")
@@ -211,7 +217,9 @@ def _sampled_pilot_sources(task):
         raise RunnerError("pilot required-retained cell sets are not disjoint")
     if not np.isfinite(stock_sdf).all() or not np.isfinite(target_sdf).all():
         raise RunnerError("sampled pilot geometry has non-finite SDF values")
-    directory = REPOSITORY / "external" / "benchmark-inputs" / task.task_hash[7:]
+    source_root = (REPOSITORY if repository is None else Path(repository)).resolve()
+    project_root = REPOSITORY.resolve()
+    directory = source_root / "external" / "benchmark-inputs" / task.task_hash[7:]
     directory.mkdir(parents=True, exist_ok=True)
     sources = {}
     for label, array in (("stock", stock_sdf), ("target", target_sdf)):
@@ -227,7 +235,7 @@ def _sampled_pilot_sources(task):
                 raise RunnerError(f"cached sampled payload is inconsistent: {path}")
         else:
             R.ArtifactWriter._replace_bytes(path, payload)
-        relative = path.relative_to(REPOSITORY).as_posix()
+        relative = path.relative_to(project_root).as_posix() if source_root == project_root else str(path)
         sources[label] = C.GeometrySource(kind="sampled", path=relative, sha256=expected,
                                           grid=task.grid, frame=C.Frame.WORK)
     return sources
@@ -244,12 +252,12 @@ def _pilot_context(config, repository):
     motion = pocket_with_island_seed(task)
     motion.validate_for_task(task)
     parameterization = pilot_io.fit_parameterization(motion, controls=12)
-    _sampled_pilot_sources(task)
+    _sampled_pilot_sources(task, repository)
     _pilot_exclusion_tolerance(task, config)
-    return task, motion, parameterization, _pilot_evaluator, _pilot_post_factory
+    return task, motion, parameterization, partial(_pilot_evaluator, repository=repository), _pilot_post_factory
 
 
-def _pilot_evaluator(task, motion, parameterization, config, seed):
+def _pilot_evaluator(task, motion, parameterization, config, seed, *, repository=None):
     guard = os.environ.get("DIFFCAM_RUNNER_SIMULATOR", "0")
     if guard != "0":
         raise RunnerError("each pilot child must own exactly one simulator")
@@ -258,7 +266,7 @@ def _pilot_evaluator(task, motion, parameterization, config, seed):
     ti.init(arch=ti.cpu, offline_cache=False, default_fp=ti.f32)
     if task.operation_target.geometry.kind != "analytic":
         raise RunnerError("pilot factory requires the original analytic operation target")
-    sources = _sampled_pilot_sources(task)
+    sources = _sampled_pilot_sources(task, repository)
     sampled_task = dataclasses.replace(
         task, operation_target=dataclasses.replace(task.operation_target, geometry=sources["target"]))
     target_work = sampled_task.operation_target.geometry
@@ -429,13 +437,10 @@ def _budget_sizes(config, method):
     candidates = 1 if method == "nominal-cam" else iterations
     if method.endswith("cmaes"):
         candidates *= (budget.population_size or 2)
-        # blackbox._run compares interval to evaluations (members), but permits
-        # at most one validation after each completed generation.
-        evaluated_for_validation = candidates
-    else:
-        evaluated_for_validation = iterations
-    validations = min(budget.max_validation_calls,
-                      evaluated_for_validation // budget.validation_interval if budget.validation_interval else 0)
+        # A generation evaluates members, but can trigger at most one validation.
+    # For Adam, candidates and iterations are the same count.
+    validations = min(budget.max_validation_calls, iterations,
+                      candidates // budget.validation_interval if budget.validation_interval else 0)
     if budget.max_validation_calls and not budget.validation_interval:
         raise RunnerError("validation_interval must be positive when validation is enabled")
     return candidates, validations
@@ -814,11 +819,6 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
             actual = evaluator_for_posts.evaluate_posted_gcode(task, files[nc_name], post.dialect, {})
             if actual.dialect != post.dialect or actual.nc_hash != post.nc_hash or actual.task_hash != task.task_hash:
                 raise RunnerError("posted evaluator returned a mismatched dialect/task/NC hash")
-            if not actual.efficiency_eligible:
-                raise RunnerError(
-                    f"posted {post.dialect.value} not eligible: coverage={actual.coverage.value}, "
-                    f"safety={actual.safety_pass}, geometry={actual.geometry_pass}, "
-                    f"reasons={actual.coverage_reasons}")
             evaluated[post.dialect] = actual
             files[eval_name] = R.record_bytes(actual)
     complete = posted_factory is not None and set(evaluated) == set(C.Dialect)

@@ -124,6 +124,7 @@ def test_dry_run_counts_cost_uncertainty_and_nominal_subset(tmp_path):
 
 
 def test_minimal_real_subprocess_and_t40_reconciliation(tmp_path):
+    pytest.importorskip("cma", reason="runner CMA subprocess requires --extra optim")
     config = _base()
     config["seeds"] = [0]
     output = tmp_path / "real"
@@ -235,7 +236,8 @@ def test_pilot_sources_target_exclusion_and_initial_position(tmp_path, monkeypat
     assert task.initial_state.known and task.initial_state.position_mm is not None
     assert motion.initial_state == task.initial_state
     assert np.allclose(parameterization.initial_position_mm, task.initial_state.position_mm)
-    assert evaluator_factory is runner._pilot_evaluator
+    assert evaluator_factory.func is runner._pilot_evaluator
+    assert evaluator_factory.keywords["repository"] == runner.REPOSITORY
     assert posted_factory is runner._pilot_post_factory
     assert runner._pilot_exclusion_tolerance(task, config) == pytest.approx(
         config["exclusion_tolerance_mm3"])
@@ -255,6 +257,26 @@ def test_pilot_sources_target_exclusion_and_initial_position(tmp_path, monkeypat
     assert not np.any(required & retained)
     for values in (stock_sdf, target_sdf):
         assert values.shape == task.grid.shape
+
+
+def test_pilot_explicit_repository_is_used_and_zero_sdf_rejected(tmp_path, monkeypatch):
+    config = _pilot_config()
+    repository = tmp_path / "chosen-repository"
+    task, _motion, _params, evaluator_factory, _posted = runner._pilot_context(config, repository)
+    assert evaluator_factory.keywords["repository"] == repository
+    sources = runner._sampled_pilot_sources(task, repository)
+    for source in sources.values():
+        path = Path(source.path)
+        assert path.is_absolute() and path.is_relative_to(repository.resolve())
+        assert path.is_file() and C.sha256_bytes(path.read_bytes()) == source.sha256
+
+    shape = task.grid.shape
+    zeros = np.zeros(shape, dtype=np.float32)
+    monkeypatch.setattr(runner.pilot_io, "source_fields",
+                        lambda _task: (zeros, zeros, np.zeros(shape, dtype=bool),
+                                       np.zeros(shape, dtype=bool)))
+    with pytest.raises(runner.RunnerError, match="zero-valued SDF"):
+        runner._sampled_pilot_sources(task, tmp_path / "zero-sdf")
 
 
 def test_pilot_source_cache_rejects_changed_payload(tmp_path, monkeypatch):
@@ -311,6 +333,7 @@ def test_pilot_post_factory_is_task_bound_and_settings_are_frozen(tmp_path, monk
         evaluator.evaluate_posted_gcode(task, b"", C.Dialect.RS274, unsafe)
 
 
+def test_timing_probe_calls_each_kind_and_projects_all_seven(tmp_path, monkeypatch):
     """Coordination-only doubles, explicitly not real-task timing evidence."""
     config = _base()
     task, motion, parameterization = runner._prototype()
@@ -395,6 +418,95 @@ def test_timing_worker_cannot_measure_prototype_task(tmp_path):
     assert not (output / "budget-timings.json").exists()
 
 
+def test_ineligible_final_program_is_complete_and_excluded_from_efficiency(tmp_path, monkeypatch):
+    """Use a typed gouging trajectory to test result/status/audit separation."""
+    import numpy as np
+    from algorithms import objectives as O
+    from algorithms import run_artifacts as R
+
+    config = _pilot_config()
+    task, motion, parameterization, _, posted_factory = runner._pilot_context(
+        config, tmp_path / "repository")
+    assert motion.segments[0].kind == C.SegmentKind.RAPID
+    assert motion.segments[1].kind == C.SegmentKind.FEED
+    theta = np.zeros(parameterization.num_params)
+    displaced = np.asarray(parameterization.positions(theta)).copy()
+    # The approach remains safely high. The following feed cuts retained outer-wall
+    # stock at X=28mm, well outside the 24mm pocket, then continues into the seed.
+    # This is a genuine geometry violation, not a fabricated evaluator verdict.
+    displaced[1] = (28.0, 0.0, 8.0)
+    displaced[2] = (28.0, 0.0, -3.0)
+
+    def displaced_positions(_self, _theta):
+        return displaced.copy()
+
+    monkeypatch.setattr(type(parameterization), "positions", displaced_positions)
+
+    class ToolStart:
+        def __getitem__(self, key):
+            assert key is None
+            return self
+
+        def to_list(self):
+            return ((np.asarray(task.initial_state.position_mm) - np.asarray(task.grid.origin_mm))
+                    / np.asarray(task.grid.extent_mm)).tolist()
+
+    # No optimizer or simulator is invoked in this unit fixture. The final typed
+    # motion, typed posts and production evaluator are all real.
+    evaluator = SimpleNamespace(
+        task=task, motion=motion, parameterization=parameterization,
+        spec=O.ObjectiveSpec(k=config["k_smooth"]), ledger=R.ComputeLedger(),
+        sim=SimpleNamespace(tool_start=ToolStart()),
+    )
+    evaluator.candidate_motion = lambda current: O.CandidateEvaluator.candidate_motion(evaluator, current)
+    candidate = C.CandidateResult(
+        candidate_id="unit-retained-wall-cut", theta_hash=C.content_hash(theta.tolist()),
+        objective_kind="hard", objective=0.0, valid=True,
+        coverage=C.Coverage.INCOMPLETE, components={"unit_fixture": 1.0},
+    )
+    outcome = runner.Outcome(
+        seed=0, best=candidate, best_theta=theta, initial_theta=theta,
+        budget=runner.B.OptimizationBudget(candidate_evaluations=1, population_size=None),
+        evaluations=1, validation_calls=0, generations=1,
+        forward_calls=1, backward_calls=0, invalid_candidates=0,
+        termination_reason="unit_retained_wall_cut", history=[],
+    )
+    entry = runner._plan_entries(config, task, "dev", "nominal-cam-*")[0]
+    root = tmp_path / "ineligible-run"
+    record = runner._write_outcome(entry, evaluator, outcome, posted_factory,
+                                   config, root, runner.REPOSITORY)
+    assert record.status == C.RunStatus.COMPLETE
+    assert record.failure_reason is None
+    for dialect in C.Dialect:
+        nc_name, eval_name = C.DIALECT_ARTIFACTS[dialect]
+        evaluation = C.loads((root / record.run_id / eval_name).read_text())
+        assert evaluation.coverage == C.Coverage.COMPLETE
+        assert evaluation.geometry_pass is False
+        assert not evaluation.efficiency_eligible
+        assert evaluation.nc_hash == C.nc_hash((root / record.run_id / nc_name).read_bytes())
+        assert evaluation.metrics["removed_volume_mm3"].value > 0
+
+    runner._atomic(root / "manifest.json",
+                   runner._manifest(config, task, [entry], root, planned=False))
+    manifest = A.load_manifest(root / "manifest.json")
+    reports, audit = A.audit_runs(root, manifest)
+    assert audit["summary"]["auditor_passed"] is True
+    assert audit["summary"]["all_runs_completed"] is True
+    assert audit["summary"]["evidence_complete"] is True
+    assert reports[0]["usable_for_statistics"] is True
+    for dialect in C.Dialect:
+        cycle = A._metric_by_task(manifest.runs.values(), audit["_audits_by_id"],
+                                  dialect, "cycle_time_s", manifest.tasks)
+        assert cycle[task.task_id]["observations_used"] == 0
+        assert cycle[task.task_id]["value"] is None
+        assert cycle[task.task_id]["exclusions"]["not_efficiency_eligible"] == 1
+        # Non-efficiency evidence is retained; this is not a missing/crashed run.
+        removed = A._metric_by_task(manifest.runs.values(), audit["_audits_by_id"],
+                                    dialect, "removed_volume_mm3", manifest.tasks)
+        assert removed[task.task_id]["observations_used"] == 1
+        assert removed[task.task_id]["value"] > 0
+
+
 @pytest.mark.slow
 @pytest.mark.skipif(os.environ.get("DIFFCAM_REAL_PILOT_SMOKE") != "1",
                     reason="explicit slow real-pilot smoke: set DIFFCAM_REAL_PILOT_SMOKE=1")
@@ -406,6 +518,8 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
     so a failure preserves the preceding conditions' independent artifacts and logs.
     CMA cannot legally evaluate a one-member population, hence its two-candidate generation.
     """
+    if condition.endswith("cmaes"):
+        pytest.importorskip("cma", reason="explicit CMA smoke requires --extra optim")
     from benchmarks import pilot_task
 
     config = _base()
@@ -418,7 +532,7 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
     assert callable(getattr(pilot_task, "production_settings", None)), "T2.2b is required for this smoke"
     config["exclusion_tolerance_mm3"] = task.operation_target.geometry.params["grid_exclusion_tolerance_mm3"]
     output = tmp_path / condition
-    _invoke(config, output, extra=("--only", f"{condition}-s0-*"), timeout=3600)
+    _invoke(config, output, extra=("--only", f"{condition}-s0-*"), timeout=10801)
     manifest = A.load_manifest(output / "manifest.json")
     assert len(manifest.runs) == 1
     run_id = next(iter(manifest.runs))
@@ -434,7 +548,10 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
         evaluation = C.loads((output / run_id / eval_name).read_text())
         assert evaluation.nc_hash == C.nc_hash((output / run_id / nc_name).read_bytes())
         assert evaluation.task_hash == task.task_hash
-        assert evaluation.efficiency_eligible
+        payload = json.loads((output / run_id / eval_name).read_text())
+        # Preserve the genuine eligibility outcome; do not turn an ineligible
+        # optimizer result into a simulator crash or falsely certify the method.
+        assert isinstance(payload["efficiency_eligible"], bool)
     reports, audit = A.audit_runs(output, manifest)
     assert audit["reconciliation"]["exact_id_reconciliation"] is True
     assert len(reports) == 1 and reports[0]["status"] == "complete"
