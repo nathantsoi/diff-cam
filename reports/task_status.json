@@ -1,0 +1,211 @@
+{
+ "schema": "diffcam-task-status/v1",
+ "updated": "2026-11-08",
+ "integration_branch": "core",
+ "coordinator": "diffcam-orchestrator",
+ "tasks": {
+  "T0.0": {
+   "status": "in_progress",
+   "owner": "diffcam-orchestrator",
+   "branch": "task/T0.0-contracts",
+   "blocker": null,
+   "next": null
+  },
+  "T0.1": {
+   "status": "in_progress",
+   "owner": "diffcam-worker-1",
+   "branch": "task/T0.1-references",
+   "blocker": null,
+   "next": null
+  },
+  "T0.2": {
+   "status": "in_progress",
+   "owner": "diffcam-orchestrator",
+   "branch": "task/T0.2-environment",
+   "blocker": null,
+   "next": null
+  },
+  "T1.0": {
+   "status": "planned",
+   "owner": "diffcam-worker-2",
+   "branch": null,
+   "blocker": null,
+   "next": "read-only fixture design (W0); implement once T0.0+T0.2 merge"
+  },
+  "T1.1": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T1.2": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T1.4": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T1.3": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T2.0": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T2.1": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T2.2": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T2.3": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T3.0": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T3.1": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T3.2": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T4.0": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T4.1": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T3.4": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T3.3": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T3.5": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T5.0": {
+   "status": "planned",
+   "owner": "diffcam-worker-3",
+   "branch": null,
+   "blocker": null,
+   "next": "read-only external reconnaissance (W0); formal card once T0.0 + T0.1 pins merge"
+  },
+  "T5.1": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T5.2": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T4.2": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T4.3": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T6.1": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T6.2": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T7.1": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  },
+  "T7.2": {
+   "status": "planned",
+   "owner": null,
+   "branch": null,
+   "blocker": null,
+   "next": null
+  }
+ }
+}
