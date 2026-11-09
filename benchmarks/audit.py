@@ -548,10 +548,15 @@ def audit_runs(
             reconciliation["exact_id_reconciliation"]
             and not all_issue_codes
         ),
-        "complete_data": bool(
+        "evidence_complete": bool(
             observed and reconciliation["exact_id_reconciliation"]
-            and all(run.complete_and_audited and all(not dialect.issues for dialect in (run.dialects or {}).values())
+            and all(run.record is not None and not run.issues and not run.duplicate_id
+                    and all(not dialect.issues for dialect in (run.dialects or {}).values())
                     for run in observed if run.expected)
+        ),
+        "all_runs_completed": bool(
+            observed and reconciliation["exact_id_reconciliation"]
+            and all(run.status == C.RunStatus.COMPLETE.value for run in observed if run.expected)
         ),
     }
     by_id = {run.run_id: run for run in observed if not run.duplicate_id}
@@ -961,7 +966,6 @@ def _comparison_rows(
         "baseline": spec.baseline,
         "dialect": spec.dialect.value,
         "family": family if family is not None else "overall",
-        "bootstrap_stratification": "within_family" if family is None else "single_family",
         "expected_paired_tasks": len(task_ids),
         "metrics": {},
         "outcomes": {},
@@ -1067,7 +1071,7 @@ def aggregate_evaluations(
         "pairing": "common task and dialect; method minus baseline",
         "bootstrap": "percentile task-cluster bootstrap; family-stratified only when every stratum has >=2 tasks, otherwise pooled over tasks (singleton strata cannot vary independently)",
         "recorded_noncomplete": "a valid non-complete run is a known zero for safety, completion and efficiency eligibility; continuous metrics exclude it with explicit per-comparison drop counts",
-        "auditor_flags": "auditor_passed is mechanical validity only; complete_data additionally requires every expected run record and posted-evaluation artifact to be present, unique, and cleanly audited",
+        "auditor_flags": "auditor_passed is mechanical validity only; evidence_complete means every expected run has a unique cleanly audited record including valid failed/blocked statuses; all_runs_completed additionally requires RunStatus.COMPLETE for every expected run",
         "bootstrap_replicates": bootstrap_replicates,
         "bootstrap_seed": bootstrap_seed,
         "confidence": confidence,
@@ -1101,16 +1105,12 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     lines = [
         "# Evaluation pilot table",
         "",
-        "Δ = method − baseline. Negative differences are retained as reported. "
         "Seeds are averaged within each task before pairing. Bootstrap intervals "
-        "resample tasks within family strata; no-cut runs are not efficiency eligible. "
-        "Missing/invalid/blocked/null evidence is not converted into success.",
-        "",
-        f"Seeds are averaged within each task before pairing. Bootstrap intervals "
         "resample tasks within family strata only when every stratum has at least two tasks; "
         "otherwise they pool tasks. No-cut runs are not efficiency eligible. "
         "Recorded failed/interrupted/blocked runs are known zero outcomes, never invisible successes. "
-        "Missing/invalid/blocked/null evidence is not converted into success.",
+        "Missing/invalid/blocked/null evidence is not converted into success. "
+        "Δ = method − baseline. Negative differences are retained as reported.",
         "",
         f"**Holm policy:** {report['policy']['p_value']}",
         "",
@@ -1175,7 +1175,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "## Evidence audit",
             "",
             f"- auditor_passed (mechanical artifact validity, not a success requirement): {report['summary']['auditor_passed']}",
-            f"- complete_data (expected run/evaluation artifacts complete and clean; coverage limits still reported): {report['complete_data']}",
+            f"- evidence_complete (valid expected records present, including recorded failures): {report['evidence_complete']}",
+            f"- all_runs_completed (every expected RunStatus is COMPLETE): {report['all_runs_completed']}",
             f"- Expected IDs reconciled: {reconciliation['exact_id_reconciliation']}",
             f"- Missing expected run IDs: {', '.join(reconciliation['missing_run_ids']) or 'none'}",
             f"- Unexpected run IDs: {', '.join(reconciliation['unexpected_run_ids']) or 'none'}",
@@ -1213,7 +1214,8 @@ def generate_report(
         "expected_run_count": len(manifest.runs),
         "expected_vs_observed": audit["reconciliation"],
         "summary": audit["summary"],
-        "complete_data": audit["summary"]["complete_data"],
+        "evidence_complete": audit["summary"]["evidence_complete"],
+        "all_runs_completed": audit["summary"]["all_runs_completed"],
         "policy": policy,
         "runs": run_reports,
         "comparisons": comparisons,

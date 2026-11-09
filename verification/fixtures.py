@@ -348,10 +348,11 @@ def generate_convergence_report() -> Dict[str, object]:
     baseline = run_reference(retract.task, retract.motion)
     upper = baseline.result.metrics["rapid_cutter_penetration_upper_bound_mm"].value
     assert upper is not None
-    band = baseline.result.discretization["cell_half_diagonal_mm"] + max(
-        record["temporal_hausdorff_mm"] for record in baseline.result.discretization["segments"]
-        if record["kind"] == "rapid")
     phased_retract = with_joint_phase(retract, (0.26, 0.58, 0.74))
+    phased_trace = run_reference(phased_retract.task, phased_retract.motion)
+    phased_upper = phased_trace.result.metrics["rapid_cutter_penetration_upper_bound_mm"].value
+    assert phased_upper is not None
+    band = max(upper, phased_upper)
 
     def rapid_tolerance_row(label, fixture, tolerance):
         adjusted = with_rapid_tolerance(fixture, tolerance)
@@ -363,7 +364,9 @@ def generate_convergence_report() -> Dict[str, object]:
             "removed_mm3": trace.result.metrics["removed_volume_mm3"].value,
             "collision_sample_count": trace.result.metrics["collision_sample_count"].value,
             "min_clearance_mm": trace.result.metrics["min_clearance_mm"].value,
+            "min_clearance_lower_bound_mm": trace.result.metrics["min_clearance_lower_bound_mm"].value,
             "min_rapid_cutter_clearance_mm": trace.result.metrics["min_rapid_cutter_clearance_mm"].value,
+            "min_rapid_cutter_clearance_lower_bound_mm": trace.result.metrics["min_rapid_cutter_clearance_lower_bound_mm"].value,
             "penetration_upper_bound_mm": trace.result.metrics["rapid_cutter_penetration_upper_bound_mm"].value,
         }
 
