@@ -15,6 +15,7 @@ from typing import Dict, Optional, Sequence
 
 import numpy as np
 from scipy.ndimage import binary_erosion
+from scipy.spatial import cKDTree
 from scipy.spatial.distance import cdist
 
 from benchmarks.contracts import Metric
@@ -142,6 +143,25 @@ def _unknown_surface_metrics(reason: str) -> Dict[str, Metric]:
             for name in ("max_surface_error_mm", "p99_surface_error_mm", "asd_mm", "hd95_mm")}
 
 
+def _nearest_distances(source: np.ndarray, target: np.ndarray) -> np.ndarray:
+    """Nearest Euclidean distances with bounded temporary memory.
+
+    Small cases keep the original direct cdist arithmetic. Larger cases use a
+    scipy float64 KD-tree in chunks; no surface pair is dropped and a full
+    64^3 stock grid therefore does not fail merely from a dense N-by-N matrix.
+    Returned index/tie choices do not affect the distance-valued metrics.
+    """
+    if len(source) * len(target) <= 20_000_000:
+        return cdist(source, target).min(axis=1)
+    tree = cKDTree(target)
+    rows_per_chunk = max(1, 20_000_000 // len(target))
+    result = np.empty(len(source), dtype=np.float64)
+    for start in range(0, len(source), rows_per_chunk):
+        distances, _ = tree.query(source[start:start + rows_per_chunk], k=1, workers=1)
+        result[start:start + rows_per_chunk] = distances
+    return result
+
+
 def surface_error_metrics(remaining_mask, target_mask, spacing_mm=1.0,
                           origin_mm=None) -> Dict[str, Metric]:
     """Nearest voxel-centre surface errors with defined empty-surface nulls.
@@ -168,11 +188,10 @@ def surface_error_metrics(remaining_mask, target_mask, spacing_mm=1.0,
     target_points = np.argwhere(target_surface).astype(np.float64) * spacing + origin
     if len(remaining_points) > 10_000_000 or len(target_points) > 10_000_000:
         raise ValueError("surface sample count exceeds explicit 10M-point memory guard")
-    if len(remaining_points) * len(target_points) > 20_000_000:
-        raise ValueError("surface distance matrix exceeds explicit 20M-entry memory guard; use a coarser grid or a chunked distance implementation")
-    distances = cdist(remaining_points, target_points)
-    remaining_to_target = distances.min(axis=1)
-    target_to_remaining = distances.min(axis=0)
+    # Large products take the bounded KD-tree path instead of allocating an
+    # N-by-N matrix; neither surface's samples are discarded.
+    remaining_to_target = _nearest_distances(remaining_points, target_points)
+    target_to_remaining = _nearest_distances(target_points, remaining_points)
     both = np.concatenate((remaining_to_target, target_to_remaining))
     maximum = float(both.max())
     return {
@@ -187,8 +206,16 @@ def surface_error_metrics(remaining_mask, target_mask, spacing_mm=1.0,
 
 
 def grid_material_metrics(remaining_mask, target_mask, initial_mask, voxel_mm,
-                          *, surface_origin_mm=None) -> Dict[str, Metric]:
+                          *, original_part_mask=None, surface_origin_mm=None) -> Dict[str, Metric]:
     """Return volumes, fractions, overlap and sampled errors for a material grid.
+
+    ``remaining_mask`` and ``initial_mask`` are actual material occupancy. The
+    second mask is the intended operation-target part. Its complement is the
+    desired removal target. Optional ``original_part_mask`` is the complete
+    original desired part; when it differs from the reachable operation target,
+    gouge is measured on the original part and the protected/excluded stock is
+    reported separately. Original-part defaults to the operation target,
+    preserving backwards-compatible semantics and zero-error surface alignment.
 
     ``initial_mask`` is required: never infer stock from the final mask or from
     grid dimensions alone. A part-empty or removal-target-empty denominator is
@@ -198,17 +225,25 @@ def grid_material_metrics(remaining_mask, target_mask, initial_mask, voxel_mm,
     remaining, part, initial = _same_masks(remaining_mask, target_mask, initial_mask)
     if np.any(remaining & ~initial):
         raise ValueError("remaining mask contains material outside the declared initial stock")
+    if original_part_mask is None:
+        original = part
+    else:
+        if np.any(np.asarray(original_part_mask, dtype=bool) & ~initial):
+            raise ValueError("original part mask contains material outside the declared initial stock")
+        _, _, original = _same_masks(remaining_mask, target_mask, original_part_mask)
+        original = initial & original
     voxel = _spacing(voxel_mm)
     cell_volume = voxel ** 3
+    original = initial & original
     removed = initial & ~remaining
     removal_target = initial & ~part
     residual = removal_target & remaining
-    gouge = removed & part
+    gouge = removed & original
     intersection = remaining & part
     union = remaining | part
 
     removal_target_volume = float(removal_target.sum()) * cell_volume
-    part_volume = float(part.sum()) * cell_volume
+    part_volume = float(original.sum()) * cell_volume
     numbers = {
         "remaining_volume_mm3": int(remaining.sum()),
         "removed_volume_mm3": int(removed.sum()),
@@ -216,7 +251,8 @@ def grid_material_metrics(remaining_mask, target_mask, initial_mask, voxel_mm,
         "gouge_volume_mm3": int(gouge.sum()),
         "initial_stock_volume_mm3": int(initial.sum()),
         "operation_target_removed_volume_mm3": int(removal_target.sum()),
-        "original_part_volume_mm3": int(part.sum()),
+        "original_part_volume_mm3": int(original.sum()),
+        "excluded_from_operation_volume_mm3": int((initial & ~part & ~original).sum()),
     }
     result = {
         "iou": Metric(float((intersection.sum() + 1e-12) / (union.sum() + 1e-12)), "1",
@@ -240,8 +276,8 @@ def grid_material_metrics(remaining_mask, target_mask, initial_mask, voxel_mm,
             if removal_target.any() else
             Metric(None, "1", null_reason="operation target volume is zero (initial & ~part is empty)")),
         "gouge_fraction": (
-            Metric(float(gouge.sum() / part.sum()), "1", denominator=f"original_part_volume_mm3={part_volume}")
-            if part.any() else Metric(None, "1", null_reason="original part volume is zero")),
+            Metric(float(gouge.sum() / original.sum()), "1", denominator=f"original_part_volume_mm3={part_volume}")
+            if original.any() else Metric(None, "1", null_reason="original part volume is zero"))
     })
     result.update(surface_error_metrics(remaining, part, spacing_mm=voxel,
                                         origin_mm=surface_origin_mm))

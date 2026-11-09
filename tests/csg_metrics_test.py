@@ -64,6 +64,29 @@ def test_material_counts_volumes_fractions_and_denominators():
     assert metrics["gouge_fraction"].denominator.endswith("0.375")
 
 
+def test_operation_target_and_original_part_have_separate_gouge_semantics():
+    initial = np.ones((2, 2, 2), dtype=bool)
+    original = np.zeros_like(initial)
+    original[0, 0, :2] = True                         # two original-part voxels
+    reachable = np.zeros_like(initial)
+    reachable[0, 0, 0] = True                        # one reachable part voxel
+    remaining = np.array([1, 0, 1, 0, 0, 0, 0, 0], dtype=bool).reshape(2, 2, 2)
+    metrics = compute_grid_metrics(remaining, reachable, initial, 0.5,
+                                   original_part_mask=original)
+    # 1 of 7 removal-target cells is still residual; 6 of 7 were removed.
+    # Actual removed material inside the original part is cell 1 (one of 2 part cells).
+    assert metrics["residual_volume_mm3"].value == pytest.approx(1 / 8)
+    assert metrics["gouge_volume_mm3"].value == pytest.approx(1 / 8)
+    assert metrics["original_part_volume_mm3"].value == pytest.approx(2 / 8)
+    assert metrics["excluded_from_operation_volume_mm3"].value == pytest.approx(6 / 8)
+    assert metrics["residual_fraction"].value == pytest.approx(1 / 7)
+    assert metrics["gouge_fraction"].value == pytest.approx(1 / 2)
+    assert metrics["operation_target_removed_fraction"].value == pytest.approx(6 / 7)
+    empty_original = compute_grid_metrics(remaining, reachable, initial, 1,
+                                           original_part_mask=np.zeros_like(initial))
+    assert empty_original["gouge_fraction"].value is None
+
+
 def test_empty_operation_target_denominators_are_not_fake_zero_or_one():
     initial = np.ones((2, 2, 2), dtype=bool)
     metrics = compute_grid_metrics(np.zeros_like(initial), initial, initial, 2.0)
@@ -164,9 +187,14 @@ def test_invalid_shape_spacing_origin_and_stock_containment_fail():
         grid_material_metrics(remaining, part, np.zeros_like(initial), 1)
 
 
-def test_nearest_surface_distance_memory_guard_is_explicit():
-    # Equal shapes are required. These point grids intentionally exceed the cap.
-    remaining = np.ones((100, 100, 1), dtype=bool)
-    target = np.ones((100, 100, 1), dtype=bool)
-    with pytest.raises(ValueError, match="20M-entry"):
-        surface_error_metrics(remaining, target, 1)
+def test_large_full_stock_surfaces_use_bounded_nearest_neighbour():
+    # 24,056 boundary points per side -> 578,691,136 pairs. This formerly
+    # exceeded the 20M-entry cdist guard even though the grid itself is modest.
+    remaining = np.ones((64, 64, 64), dtype=bool)
+    target = remaining.copy()
+    result = compute_grid_metrics(remaining, target, remaining, 1.0)
+    for name in ("max_surface_error_mm", "p99_surface_error_mm", "asd_mm", "hd95_mm"):
+        assert result[name].value == 0.0
+    assert result["initial_stock_volume_mm3"].value == 64**3
+    assert result["remaining_volume_mm3"].value == 64**3
+    assert result["iou"].value == pytest.approx(1.0)
