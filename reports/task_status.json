@@ -357,6 +357,16 @@
       "blocker": null,
       "next": null,
       "note": "merged de37d5a: precision='f32'|'f64' declared option (f32 default), all fields/kernels/adjoints follow dtype; f64 AD/FD < 1% (idx 2, 35) on 75-seg pilot path; f32 bias curve retained; cost f32 29.4 s/2.0 GB vs f64 37.0 s/3.7 GB per gradient."
+    },
+    "T4.1b-L1": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T4.1b-L1-rss",
+      "base": "553a7d2",
+      "lease": [
+        "scripts/run_benchmark_suite.py"
+      ],
+      "note": "Reassigned from worker-2 (stalled in API-timeout retries). Per-child VmHWM peak RSS, cap checks on child peak, >=1GiB-parent regression, re-measure posted phases; D-07 to be amended from real peaks."
     }
   }
 }
