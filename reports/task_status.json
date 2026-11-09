@@ -226,11 +226,12 @@
    "next": null
   },
   "T7.2": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
+   "status": "in_progress",
+   "owner": "diffcam-worker-3",
+   "branch": "task/T7.2-artifacts",
    "blocker": null,
-   "next": null
+   "next": null,
+   "note": "scaffold now; real tables after T4.3; never writes into manuscript/ (user's)"
   },
   "T1.0b": {
    "status": "complete",
