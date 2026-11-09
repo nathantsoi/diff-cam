@@ -13,10 +13,19 @@ trajectory-similarity metrics in ``cam.trajectory_metrics`` are
 parameterisation-invariant.
 """
 
+import math
+
 import numpy as np
 
+from benchmarks.contracts import (
+    Frame,
+    MotionPlan,
+    TaskSpec,
+    TimingRule,
+    arc_geometry,
+)
 from .config import MachineConfig
-from .gcode_parser import parse_gcode, _plane_axes
+from .gcode_parser import parse_gcode, _plane_axes, _typed_plane_axes
 
 
 def _trapezoid_distances(length, vmax, accel, dt):
@@ -163,3 +172,89 @@ def gcode_to_trajectory(text: str, config: MachineConfig = MachineConfig()):
     """Convenience: parse a G-code program and plan its executed trajectory."""
     segments = parse_gcode(text, config)
     return plan_trajectory(segments, config)
+
+
+# ---------------------------------------------------------------------------
+# Shared-contract exact-stop constant-speed sampling
+# ---------------------------------------------------------------------------
+
+
+def _sample_typed_segment(segment, local_times: np.ndarray) -> np.ndarray:
+    start = np.asarray(segment.start_mm, dtype=np.float64)
+    end = np.asarray(segment.end_mm, dtype=np.float64)
+    if segment.duration_s == 0.0:
+        fraction = np.zeros(1, dtype=np.float64)
+        local_times = np.zeros(1, dtype=np.float64)
+    else:
+        fraction = local_times / segment.duration_s
+
+    if segment.arc is None:
+        return start[None, :] + fraction[:, None] * (end - start)[None, :]
+
+    arc = segment.arc
+    a, b, normal = _typed_plane_axes(arc.plane)
+    centre = np.asarray(arc.centre_mm, dtype=np.float64)
+    r0 = math.hypot(start[a] - centre[a], start[b] - centre[b])
+    theta0 = math.atan2(start[b] - centre[b], start[a] - centre[a])
+    geometry = arc_geometry(start, end, arc, segment.id)
+    angles = theta0 + geometry["sweep_rad"] * fraction
+    points = np.repeat(start[None, :], len(fraction), axis=0)
+    points[:, a] = centre[a] + r0 * np.cos(angles)
+    points[:, b] = centre[b] + r0 * np.sin(angles)
+    points[:, normal] = start[normal] + fraction * (end[normal] - start[normal])
+    points[-1] = end
+    return points
+
+
+def plan_motion_samples(
+    plan: MotionPlan,
+    task: TaskSpec,
+    max_dt_s: float = 0.05,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Sample an exact-stop constant-speed MotionPlan in machine millimetres.
+
+    Each non-zero segment uses linear time along its true chord/helix and includes
+    its exact endpoint. At most ``max_dt_s`` elapses between samples. Junctions
+    are exact stops, but duplicate junction samples are omitted from this numeric
+    diagnostic export; evaluators must retain typed segments to model stationary
+    cuts and per-segment chronology. No acceleration/blending profile is added.
+
+    This deliberately does not alter the legacy normalized-array trapezoidal
+    planner above, which remains available for backwards compatibility only.
+    """
+    if not np.isfinite(max_dt_s) or max_dt_s <= 0.0:
+        raise ValueError("max_dt_s must be finite and positive")
+    if plan.frame != Frame.MACHINE:
+        raise ValueError("typed motion sampling requires a machine-frame MotionPlan")
+    if plan.timing_rule != TimingRule.EXACT_STOP_CONSTANT_SPEED:
+        raise ValueError("only exact_stop_constant_speed can use this sampler")
+    if task.motion_semantics.timing_rule != plan.timing_rule:
+        raise ValueError("plan and task timing rules differ")
+    plan.validate_for_task(task)
+    if not plan.segments:
+        if plan.initial_state.known:
+            return (
+                np.asarray([plan.initial_state.position_mm], dtype=np.float64),
+                np.zeros(1, dtype=np.float64),
+            )
+        return np.zeros((0, 3), dtype=np.float64), np.zeros(0, dtype=np.float64)
+
+    all_points: list[np.ndarray] = []
+    all_times: list[np.ndarray] = []
+    offset = 0.0
+    for index, segment in enumerate(plan.segments):
+        intervals = max(1, int(np.ceil(segment.duration_s / max_dt_s)))
+        local_times = (
+            np.zeros(1, dtype=np.float64)
+            if segment.duration_s == 0.0
+            else np.linspace(0.0, segment.duration_s, intervals + 1)
+        )
+        points = _sample_typed_segment(segment, local_times)
+        times = local_times + offset
+        if index:
+            points = points[1:]
+            times = times[1:]
+        all_points.append(points)
+        all_times.append(times)
+        offset += segment.duration_s
+    return np.concatenate(all_points), np.concatenate(all_times)

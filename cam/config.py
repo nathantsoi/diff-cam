@@ -99,7 +99,11 @@ class MachineConfig:
     @property
     def units_code(self) -> str:
         """Modal G-code for the configured units."""
-        return "G21" if self.units == "mm" else "G20"
+        if self.units == "mm":
+            return "G21"
+        if self.units == "inch":
+            return "G20"
+        raise ValueError(f"unsupported NC output units {self.units!r}; expected 'mm' or 'inch'")
 
     @property
     def safe_z_mm(self) -> float:
