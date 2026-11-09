@@ -1,0 +1,1 @@
+cadquery-ocp==7.7.2 --hash=sha256:7ac2d83b4f4b3d7c35421a1d9f8fec2adc73b6ed6cac50c1ffcede5552e38e9b
