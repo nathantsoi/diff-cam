@@ -158,6 +158,43 @@ def test_clopper_pearson_known_values():
         A.clopper_pearson(1, 0, confidence=1.0)
 
 
+def test_paired_sign_flip_one_task_null_ci_and_exact_counts():
+    single = A._paired_stats([-2.0], [0.0], ["pocket"], "single", 1, 100, 0.95)
+    assert single["paired_tasks"] == 1
+    assert single["interval"] is None
+    assert "insufficient independent tasks" in single["interval_null_reason"]
+    assert single["bootstrap_p"] == 1.0
+    assert single["sign_flip_method"] == "exact_paired_sign_flip"
+    assert (single["sign_flip_extreme"], single["sign_flip_total"]) == (2, 2)
+    assert "fewer than 5" in single["small_n_warning"]
+
+    # All eight sign assignments for [-2,-2,-2]: only the identity and its mirror
+    # attain |mean| >= 2, hence exactly 2/8 = 0.25, never 1/(B+1).
+    identical = A._paired_stats([-2.0] * 3, [0.0] * 3, ["pocket"] * 3,
+                                "identical", 1, 100, 0.95)
+    assert identical["bootstrap_p"] == 0.25
+    assert (identical["sign_flip_extreme"], identical["sign_flip_total"]) == (2, 8)
+
+    # [5,4,-1]: means 8/3,10/3,0,2/3 and their negatives. Four of the eight
+    # assignments reach |mean| >= 8/3, hence p = 4/8 = 1/2.
+    hand = A._paired_stats([5.0, 4.0, -1.0], [0.0] * 3, ["pocket"] * 3,
+                           "hand", 1, 100, 0.95)
+    assert hand["mean_difference"] == pytest.approx(8 / 3)
+    assert hand["bootstrap_p"] == 0.5
+    assert (hand["sign_flip_extreme"], hand["sign_flip_total"]) == (4, 8)
+
+
+def test_monte_carlo_sign_flip_above_enumeration_limit_is_seeded():
+    values = [float(index) for index in range(17)]
+    kwargs = (["pocket"] * 17, "over-limit", 42, 100, 0.95)
+    first = A._paired_stats(values, [0.0] * 17, *kwargs)
+    second = A._paired_stats(values, [0.0] * 17, *kwargs)
+    assert first["sign_flip_method"] == "seeded_monte_carlo_paired_sign_flip"
+    assert first["sign_flip_total"] == 100
+    assert first["bootstrap_p"] == second["bootstrap_p"]
+    assert first["sign_flip_extreme"] == second["sign_flip_extreme"]
+
+
 def test_clean_audit_paired_difference_and_markdown(tmp_path):
     tasks = _tasks(("task-a", "pocket"))
     _write_run(tmp_path, "cam-a", tasks["task-a"], cycle=5.0, residual=1.0, method="cam")
@@ -169,6 +206,9 @@ def test_clean_audit_paired_difference_and_markdown(tmp_path):
     assert report["summary"]["run_status_counts"] == {"complete": 2}
     assert _overall(report)["mean_difference"] == pytest.approx(-2.0)
     assert _overall(report)["paired_tasks"] == 1
+    assert _overall(report)["bootstrap_p"] == 1.0
+    assert _overall(report)["interval"] is None
+    assert _overall(report)["interval_null_reason"] == "insufficient independent tasks (need at least 2)"
     row = next(row for row in report["comparisons"] if row["family"] == "overall")
     assert row["outcomes"]["completion_pass"]["method"]["estimate_method"] == "clopper_pearson_independent_tasks"
     markdown = A.render_markdown(report)

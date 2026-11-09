@@ -22,6 +22,7 @@ from benchmarks import contracts as C
 
 
 REPORT_SCHEMA = "diffcam-eval-audit/1"
+EXACT_SIGN_FLIP_MAX_TASKS = 16
 EFFICIENCY_METRICS = frozenset(
     {"cycle_time_s", "air_fraction", "force_proxy", "mrr_mm3_s", "material_removal_rate_mm3_s"}
 )
@@ -704,6 +705,36 @@ def _interval(distribution: np.ndarray, confidence: float) -> dict[str, float]:
     }
 
 
+def _sign_flip_p_value(differences: np.ndarray, key: str, seed: int,
+                       replicates: int) -> dict[str, Any]:
+    """Two-sided paired sign-flip test over independent task differences."""
+    task_count = len(differences)
+    if task_count <= EXACT_SIGN_FLIP_MAX_TASKS:
+        total = 1 << task_count
+        assignments = np.arange(total, dtype=np.uint64)[:, None]
+        bits = (assignments >> np.arange(task_count, dtype=np.uint64)) & 1
+        signs = 1.0 - 2.0 * bits.astype(np.float64)
+        means = np.mean(signs * differences[None, :], axis=1)
+        method = "exact_paired_sign_flip"
+    else:
+        rng = _rng(seed, f"{key}|sign-flip")
+        signs = rng.choice((-1.0, 1.0), size=(replicates, task_count))
+        signs[0, :] = 1.0  # identity is always included in numerator and denominator.
+        if replicates > 1:
+            signs[1, :] = -1.0  # retain the mirrored extreme as well.
+        total = replicates
+        means = np.mean(signs * differences[None, :], axis=1)
+        method = "seeded_monte_carlo_paired_sign_flip"
+    observed = abs(float(np.mean(differences)))
+    extreme = int(np.count_nonzero(np.abs(means) >= observed - 1e-15))
+    return {
+        "bootstrap_p": extreme / total,
+        "sign_flip_method": method,
+        "sign_flip_extreme": extreme,
+        "sign_flip_total": total,
+    }
+
+
 def _paired_stats(
     method: Sequence[float],
     baseline: Sequence[float],
@@ -722,26 +753,36 @@ def _paired_stats(
             "baseline_mean": None,
             "mean_difference": None,
             "interval": None,
+            "interval_null_reason": "no paired independent tasks",
             "bootstrap_p": None,
+            "sign_flip_method": None,
+            "sign_flip_extreme": None,
+            "sign_flip_total": None,
+            "small_n_warning": "no paired independent tasks",
             "holm_p": None,
         }
     method_values = np.asarray(method, dtype=np.float64)
     baseline_values = np.asarray(baseline, dtype=np.float64)
     differences = method_values - baseline_values
     observed = float(np.mean(differences))
-    rng = _rng(seed, key)
-    distribution = _resampled_mean_distribution(differences, families, rng, replicates)
-    centred = differences - observed
-    null_distribution = _resampled_mean_distribution(centred, families, rng, replicates)
-    extreme = np.abs(null_distribution) >= abs(observed) - 1e-15
-    p_value = (1.0 + int(np.count_nonzero(extreme))) / (replicates + 1.0)
+    sufficient_tasks = len(method) >= 2
+    interval = None
+    if sufficient_tasks:
+        distribution = _resampled_mean_distribution(
+            differences, families, _rng(seed, f"{key}|task-bootstrap-ci"), replicates)
+        interval = _interval(distribution, confidence)
+    randomization = _sign_flip_p_value(differences, key, seed, replicates)
     return {
         "paired_tasks": len(method),
         "method_mean": float(np.mean(method_values)),
         "baseline_mean": float(np.mean(baseline_values)),
         "mean_difference": observed,
-        "interval": _interval(distribution, confidence),
-        "bootstrap_p": float(p_value),
+        "interval": interval,
+        "interval_null_reason": (
+            None if sufficient_tasks else "insufficient independent tasks (need at least 2)"),
+        **randomization,
+        "small_n_warning": (
+            "fewer than 5 independent tasks; treat inference as descriptive" if len(method) < 5 else None),
         "holm_p": None,
     }
 
@@ -963,7 +1004,9 @@ def aggregate_evaluations(
         "bootstrap_replicates": bootstrap_replicates,
         "bootstrap_seed": bootstrap_seed,
         "confidence": confidence,
-        "p_value": "two-sided sign-centred task bootstrap; Holm across every comparison/metric/outcome and family row",
+        "p_value": "two-sided paired sign-flip randomization (exact enumeration through 16 independent tasks, seeded Monte Carlo above including identity); Holm across every comparison/metric/outcome and family row",
+        "interval_rule": "task-cluster bootstrap CI with at least two independent tasks; one paired task yields null CI with insufficient-independent-tasks reason",
+        "small_sample_rule": "n < 5 paired tasks is labelled descriptive; no tight interval or minimum attainable randomization p is presented as strong evidence",
         "clopper_pearson": "only for observed binary outcomes with exactly one known observation per independent task; otherwise task-cluster bootstrap",
         "efficiency_metrics": sorted(EFFICIENCY_METRICS),
         "efficiency_rule": "efficiency metrics require declared eligibility plus established completion (and positive removal for removal tasks); both sides need a finite metric",
