@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import hashlib
+from io import BytesIO
 import json
 import math
 from pathlib import Path
@@ -210,11 +211,31 @@ def geometry_request(output_dir: Path, *, step_path: Path = SOURCE_STEP,
     }
 
 
+def _checked_sampled_values(source: C.GeometrySource) -> np.ndarray:
+    """Read the exact hash-declared array used for the grid exclusion count."""
+    data = Path(source.path).read_bytes()
+    if C.sha256_bytes(data) != source.sha256:
+        raise ValueError(f"sampled source {source.path} has a SHA-256 mismatch")
+    values = np.load(BytesIO(data), allow_pickle=False)
+    if not isinstance(values, np.ndarray) or values.dtype.kind not in "fiu":
+        raise ValueError("sampled task source must be one real numeric NumPy array")
+    if values.shape != source.grid.shape:
+        raise ValueError(
+            f"sampled source shape {values.shape} != declared GridSpec {source.grid.shape}"
+        )
+    values = np.ascontiguousarray(values, dtype=np.float64)
+    if not np.isfinite(values).all():
+        raise ValueError("sampled task source includes non-finite values")
+    return values
+
+
 def build_task(part_source: C.GeometrySource, target_source: C.GeometrySource,
-               excluded_volume_mm3: float) -> C.TaskSpec:
-    """Construct the external task from checked files, not analytic stand-ins."""
+               native_excluded_volume_mm3: Optional[float] = None) -> C.TaskSpec:
+    """Use grid-resolved exclusion; native continuous volume is diagnostic only."""
     if part_source.kind != "sampled" or target_source.kind != "sampled":
         raise ValueError("the real Titan pilot must retain its sampled native geometry")
+    if part_source.frame != C.Frame.WORK or target_source.frame != C.Frame.WORK:
+        raise ValueError("Titan sampled sources must use the work frame")
     if part_source.grid != target_source.grid:
         raise ValueError("original part and operation target must share one explicit physical grid")
     grid = part_source.grid
@@ -228,8 +249,22 @@ def build_task(part_source: C.GeometrySource, target_source: C.GeometrySource,
         for actual, expected in zip(*pair)
     ):
         raise ValueError("Titan grid bounds disagree with the declared top-centred stock")
-    if not math.isfinite(excluded_volume_mm3) or excluded_volume_mm3 <= 0:
-        raise ValueError("a positive native excluded volume is required for this pilot")
+    if (
+        native_excluded_volume_mm3 is not None
+        and (
+            not math.isfinite(native_excluded_volume_mm3)
+            or native_excluded_volume_mm3 <= 0
+        )
+    ):
+        raise ValueError("native excluded-volume diagnostic must be positive and finite when supplied")
+    part_values = _checked_sampled_values(part_source)
+    target_values = _checked_sampled_values(target_source)
+    grid_counts = E.field_statistics(
+        box_signed_field(grid, lower, upper), part_values, target_values, grid.voxel_mm,
+    )
+    # This exact cell count is the declared quantity under docs/contracts.md.
+    # The continuous Boolean volume never picks or broadens the zero tolerance.
+    excluded_volume_mm3 = float(grid_counts["excluded_volume_voxel_estimate_mm3"])
     source_params = {
         "backend": "cadquery-ocp==7.7.2 isolated native STEPControl_Reader",
         "source_model_unit": "mm",
@@ -244,6 +279,9 @@ def build_task(part_source: C.GeometrySource, target_source: C.GeometrySource,
         **source_params,
         "construction": "native B-rep P UNION selected small-hole cutter-radius exclusion plug",
         "not_an_analytic_part_replacement": True,
+        "grid_declared_excluded_volume_mm3": excluded_volume_mm3,
+        "native_excluded_volume_mm3_diagnostic": native_excluded_volume_mm3,
+        "excluded_volume_convention": "initial & T & ~P cell-count at task-grid pitch, tolerance 0",
     })
     stock = C.GeometrySource(kind="analytic", params={
         "primitive": "box", "min_mm": list(lower), "max_mm": list(upper),
@@ -273,7 +311,12 @@ def build_task(part_source: C.GeometrySource, target_source: C.GeometrySource,
                 "tool can reproduce it. Full-depth flutes exceed the stock depth; this "
                 "nominal setup keeps shank/holder above stock, and no fixture solids are "
                 "modelled. Only this declared feature is excluded; other features are not "
-                "certified accessible, and the nominal plunge is not a complete finishing path."
+                "certified accessible, and the nominal plunge is not a complete finishing path. "
+                f"Declared excluded volume is grid-resolved: "
+                f"{grid_counts['excluded_cells_initial_and_T_not_P']} cells × "
+                f"{grid.voxel_mm}³ = {excluded_volume_mm3} mm³, with zero tolerance. "
+                "The continuous/native excluded volume is diagnostic only and is not used "
+                "as the declared volume or as a reason to relax that tolerance."
             ),
         ),
         grid=grid, work_to_machine=transform,
@@ -376,7 +419,7 @@ def run_pilot(output_dir: Optional[Path] = None, *, interpreter: Optional[Path] 
         stock_field, fields["part"]["values"], fields["operation_target"]["values"],
         grid.voxel_mm,
     )
-    excluded = native["operation_geometry"]["exclusion"]["native_excluded_volume_mm3"]
+    native_excluded = native["operation_geometry"]["exclusion"]["native_excluded_volume_mm3"]
     task = build_task(
         C.GeometrySource(
             kind="sampled", path=str(fields["part"]["path"]),
@@ -386,9 +429,8 @@ def run_pilot(output_dir: Optional[Path] = None, *, interpreter: Optional[Path] 
             kind="sampled", path=str(fields["operation_target"]["path"]),
             sha256=fields["operation_target"]["sha256"], grid=grid,
         ),
-        excluded,
+        native_excluded,
     )
-    motion = nominal_motion(task)
     initial = stock_field <= 0
     original = fields["part"]["values"] <= 0
     target = fields["operation_target"]["values"] <= 0

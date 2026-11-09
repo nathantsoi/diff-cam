@@ -43,12 +43,17 @@ def _synthetic_task(tmp_path: Path) -> C.TaskSpec:
     """Schema fixture only, explicitly not real Titan geometry evidence."""
     grid = T.pilot_grid()
     original = np.full(grid.shape, -0.5, dtype=np.float64)
+    # Retain this original-air cell in T (genuine excluded stock), while a
+    # second cell stays outside both P and T as a nonzero removal target.
+    original[0, 0, 0] = 0.5
+    original[0, 0, 1] = 0.5
     operation = original.copy()
-    operation[0, 0, 0] = 0.5  # one synthetic, declared excluded cell
+    # Negative-inside: this original-air cell is retained in T as an exclusion.
+    operation[0, 0, 0] = -0.5
     return T.build_task(
         _source(tmp_path / "part.npy", original, grid),
         _source(tmp_path / "target.npy", operation, grid),
-        excluded_volume_mm3=grid.voxel_mm ** 3,
+        native_excluded_volume_mm3=None,
     )
 
 
@@ -170,6 +175,29 @@ def test_task_preserves_sampled_sources_and_unrecorded_provenance(tmp_path):
     assert "1.0287" in task.operation_target.exclusion_reason
     assert "3.175" in task.operation_target.exclusion_reason
     assert "not certified accessible" in task.operation_target.exclusion_reason
+
+
+def test_exclusion_is_grid_resolved_with_native_volume_diagnostic_only(tmp_path):
+    grid = T.pilot_grid()
+    original = np.full(grid.shape, -0.5, dtype=np.float64)
+    original[0, 0, 0] = 0.5
+    original[0, 0, 1] = 0.5
+    target = original.copy()
+    target[0, 0, 0] = -0.5
+    task = T.build_task(
+        _source(tmp_path / "grid-original.npy", original, grid),
+        _source(tmp_path / "grid-target.npy", target, grid),
+        # Deliberately different synthetic diagnostic, not evidence of a native
+        # volume measurement. The task declaration must come from the masks.
+        native_excluded_volume_mm3=123.456,
+    )
+    expected = grid.voxel_mm ** 3
+    assert task.operation_target.excluded_volume_mm3 == pytest.approx(expected)
+    geometry = task.operation_target.geometry
+    assert geometry.params["grid_declared_excluded_volume_mm3"] == pytest.approx(expected)
+    assert geometry.params["native_excluded_volume_mm3_diagnostic"] == pytest.approx(123.456)
+    assert geometry.params["excluded_volume_convention"].endswith("tolerance 0")
+    assert "grid-resolved" in task.operation_target.exclusion_reason
 
 
 def test_nominal_line_motion_has_noncutting_rapids_and_vertical_retract(tmp_path):
