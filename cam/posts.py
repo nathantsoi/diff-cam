@@ -52,8 +52,9 @@ def _feed_out(feed_mm_per_min: float, config: MachineConfig) -> float:
 # Formatting helpers (shared by all posts)
 # ---------------------------------------------------------------------------
 def _fmt(value: float, precision: int) -> str:
-    """Format one coordinate value, trimming trailing zeros but keeping it
-    unambiguous (``0`` stays ``0``)."""
+    """Format one finite coordinate value, trimming zeros without losing its meaning."""
+    if not np.isfinite(value):
+        raise ValueError(f"numeric G-code words must be finite; got {value!r}")
     s = f"{value:.{precision}f}"
     if "." in s:
         s = s.rstrip("0").rstrip(".")
@@ -87,6 +88,8 @@ class PostProcessor:
             raise ValueError(f"positions must be (T, 3); got {positions.shape}")
         if len(positions) == 0:
             raise ValueError("positions is empty")
+        if not np.isfinite(positions).all():
+            raise ValueError("positions must contain only finite values")
         return positions
 
 

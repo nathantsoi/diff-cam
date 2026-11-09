@@ -141,6 +141,15 @@ def parse_gcode(text: str, config: MachineConfig = MachineConfig()):
     Returns segments in execution order with all coordinates in the unit cube.
     """
     text = _strip_comments(text)
+    # The permissive legacy tokenizer intentionally ignores setup words it does
+    # not model, but it must never discard NaN/Inf numbers as if no move existed.
+    bad_number = re.search(
+        r"[A-Za-z]\s*(?:nan|[+-]?inf(?:inity)?)(?![0-9A-Za-z_])",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if bad_number:
+        raise ValueError(f"non-finite numeric NC word near: {bad_number.group(0)!r}")
 
     pos_mm = np.zeros(3, dtype=np.float64)   # current position, machine mm
     have_pos = False

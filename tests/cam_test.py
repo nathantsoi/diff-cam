@@ -124,6 +124,25 @@ def test_export_rejects_bad_shape():
         trajectory_to_gcode(np.zeros((0, 3)))
 
 
+def test_legacy_post_rejects_nonfinite_positions_and_numeric_words():
+    bad_positions = np.array([[0.0, 0.0, 0.0], [np.nan, 0.5, 0.5]])
+    with pytest.raises(ValueError, match="finite"):
+        trajectory_to_gcode(bad_positions, _cfg())
+    with pytest.raises(ValueError, match="finite"):
+        trajectory_to_gcode(np.array([[0, 0, 0], [np.inf, 0, 0]]), _cfg())
+    with pytest.raises(ValueError, match="finite"):
+        trajectory_to_gcode(np.array([[0, 0, 0], [-np.inf, 0, 0]]), _cfg())
+    with pytest.raises(ValueError, match="numeric G-code words must be finite"):
+        trajectory_to_gcode(_line(), _cfg(feed=np.nan))
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "NaN", "INFINITY"])
+def test_legacy_parser_does_not_silently_drop_nonfinite_motion(bad):
+    text = f"G21 G90\nG0 X0 Y0 Z0\nG1 X{bad} Y0 F600\nM2\n"
+    with pytest.raises(ValueError, match="non-finite numeric NC word"):
+        parse_gcode(text, _cfg())
+
+
 # ---------------------------------------------------------------------------
 # 2. Parser round-trip (waypoint recovery)
 # ---------------------------------------------------------------------------
