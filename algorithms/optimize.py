@@ -4,11 +4,18 @@ Run with ``uv run python -m algorithms.optimize --output runs/core-smoke``.
 Input trajectories and output positions use normalized stock coordinates.
 """
 import argparse
+import dataclasses
 import json
+import math
 from pathlib import Path
+from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
 import taichi as ti
+
+from benchmarks import contracts as C
+from . import blackbox as B
+from algorithms import run_artifacts as R
 
 from cam import MachineConfig, trajectory_to_gcode
 from simulator.csg_metrics import dice_score, sdf_to_mask
@@ -104,6 +111,376 @@ def main():
     p.add_argument('--k-end', type=float, default=120)
     p.add_argument('--cpu', action='store_true')
     optimize(p.parse_args())
+
+
+# ---------------------------------------------------------------------------
+# T3.2: shared-objective Adam with explicit budgets and checkpoint resumption.
+#
+# The legacy optimize(args) above remains the small smoke CLI. New integrations
+# should use solve_adam/resume_adam/replay_adam_checkpoint below. Candidate starts
+# should be configured with sim.set_tool_start(...), never direct writes followed
+# by reset_candidate_state(), because the current official reset restores the
+# configured baseline. Fixed-k and annealed schedules are declared up front;
+# hard selection is a finite-marker violation/residual ordering, not a Dice race.
+
+
+@dataclasses.dataclass(frozen=True)
+class HardSelectionPolicy:
+    max_gouge_fraction: float = 0.0
+    max_holder_overlap_fraction: float = 0.0
+
+    def __post_init__(self) -> None:
+        for value in (self.max_gouge_fraction, self.max_holder_overlap_fraction):
+            if not math.isfinite(value) or value < 0:
+                raise ValueError("hard selection thresholds must be finite and non-negative")
+
+
+@dataclasses.dataclass(frozen=True)
+class AdamConfig:
+    mode: str
+    learning_rate: float = 0.005
+    beta1: float = 0.9
+    beta2: float = 0.999
+    epsilon: float = 1e-8
+    max_gradient_norm: Optional[float] = 0.5
+    k_start: float = 20.0
+    k_end: float = 20.0
+    selection: HardSelectionPolicy = dataclasses.field(default_factory=HardSelectionPolicy)
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("fixed", "annealed"):
+            raise ValueError("mode must be fixed or annealed")
+        for name in ("learning_rate", "beta1", "beta2", "epsilon", "k_start", "k_end"):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite")
+        if self.learning_rate <= 0 or self.epsilon <= 0 or self.k_start <= 0 or self.k_end <= 0:
+            raise ValueError("learning rate, epsilon and k values must be positive")
+        if not 0 < self.beta1 < 1 or not 0 < self.beta2 < 1:
+            raise ValueError("Adam beta1/beta2 must be in (0,1)")
+        if self.max_gradient_norm is not None and self.max_gradient_norm <= 0:
+            raise ValueError("max_gradient_norm must be positive or None")
+        if self.mode == "fixed" and self.k_start != self.k_end:
+            raise ValueError("fixed mode requires k_start == k_end")
+
+
+def _required_budget(budget: B.OptimizationBudget) -> None:
+    if budget.population_size is not None:
+        raise ValueError("Adam uses one gradient candidate per iteration; population_size must be None")
+
+
+@dataclasses.dataclass
+class AdamResult:
+    run_id: str
+    seed: int
+    budget: B.OptimizationBudget
+    config: AdamConfig
+    best: Optional[C.CandidateResult]
+    best_theta: Optional[np.ndarray]
+    current_theta: np.ndarray
+    initial_theta: np.ndarray
+    moments: np.ndarray
+    velocities: np.ndarray
+    evaluations: int
+    forward_calls: int
+    backward_calls: int
+    validation_calls: int
+    gradient_updates: int
+    invalid_evaluations: int
+    termination_reason: str
+    history: list[dict[str, Any]]
+    checkpoint_path: Optional[str] = None
+    previous_evaluations: int = 0
+
+
+@dataclasses.dataclass
+class _AdamState:
+    config: AdamConfig
+    budget: B.OptimizationBudget
+    seed: int
+    run_id: str
+    config_hash: str
+    theta: np.ndarray
+    initial_theta: np.ndarray
+    moments: np.ndarray
+    velocities: np.ndarray
+    best: Optional[C.CandidateResult]
+    best_theta: Optional[np.ndarray]
+    best_rank: Any
+    evaluations: int
+    gradient_updates: int
+    forward_calls: int
+    backward_calls: int
+    validation_calls: int
+    next_validation: Optional[int]
+    invalid_evaluations: int
+    history: list[dict[str, Any]]
+    previous_evaluations: int = 0
+
+
+def _config_hash(config: AdamConfig) -> str:
+    return C.content_hash(dataclasses.asdict(config))
+
+
+def _initial_state(evaluator: Any, budget: B.OptimizationBudget, config: AdamConfig,
+                   seed: int, x0: Any, run_id: str) -> _AdamState:
+    theta, _, _ = B._options(evaluator, seed, 0.1, x0, None)
+    theta = np.asarray(theta, dtype=np.float64)
+    return _AdamState(
+        config, budget, seed, run_id, _config_hash(config), theta, theta.copy(),
+        np.zeros(theta.size), np.zeros(theta.size), None, None, None, 0, 0, 0, 0, 0,
+        budget.validation_interval if budget.max_validation_calls > 0 else None, 0, [],
+    )
+
+
+def _k_for_step(config: AdamConfig, step: int, budget: B.OptimizationBudget) -> float:
+    total = budget.max_generations if budget.max_generations is not None else budget.candidate_evaluations
+    fraction = 1.0 if total <= 1 else min(1.0, step / (total - 1))
+    if config.mode == "fixed":
+        return config.k_start
+    return config.k_start + fraction * (config.k_end - config.k_start)
+
+
+def _hard_rank(result: C.CandidateResult, policy: HardSelectionPolicy) -> tuple:
+    if not result.valid or result.objective is None:
+        return (1, math.inf, math.inf, math.inf)
+    required = {name: result.components.get(name)
+                for name in ("gouge_fraction", "residual_fraction", "holder_overlap_fraction")}
+    if any(value is None for value in required.values()):
+        # Do not quietly convert unavailable modeled safety information to success.
+        return (1, math.inf, math.inf, math.inf)
+    gouge = max(0.0, required["gouge_fraction"] - policy.max_gouge_fraction)
+    holder = max(0.0, required["holder_overlap_fraction"] - policy.max_holder_overlap_fraction)
+    violations = max(gouge, holder)
+    return (int(violations > 0), violations, required["residual_fraction"], result.objective)
+
+
+def _write_adam_checkpoint(path: Path, state: _AdamState, evaluator: Any) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "schema": "diffcam-adam-checkpoint/1", "contract_schema": C.SCHEMA_VERSION,
+        "run_id": state.run_id, "seed": state.seed, "optimizer_config": dataclasses.asdict(state.config),
+        "optimizer_config_hash": state.config_hash, "task_setup_hash": B._setup_signature(evaluator, "smooth"),
+        "budget": dataclasses.asdict(state.budget),
+        "theta": state.theta.tolist(), "moments": state.moments.tolist(), "velocities": state.velocities.tolist(),
+        "initial_theta": state.initial_theta.tolist(),
+        "best": B._best_candidate_dict(state.best, state.best_theta),
+        "best_rank": state.best_rank,
+        "evaluations": state.evaluations, "gradient_updates": state.gradient_updates,
+        "forward_calls": state.forward_calls, "backward_calls": state.backward_calls,
+        "validation_calls": state.validation_calls, "next_validation": state.next_validation,
+        "invalid_evaluations": state.invalid_evaluations,
+        "budget_at_checkpoint": _k_for_step(state.config, max(0, state.evaluations - 1), state.budget),
+        "next_k": _k_for_step(state.config, state.evaluations, state.budget),
+        "history": state.history, "previous_evaluations": state.previous_evaluations,
+    }
+    digest = C.content_hash(payload)
+    R.ArtifactWriter._replace_bytes(path, R.json_bytes(dict(payload, payload_hash=digest)))
+    return digest
+
+
+def _read_adam_checkpoint(path: Path, evaluator: Any) -> Mapping[str, Any]:
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise B.BlackBoxError(f"cannot read Adam checkpoint: {error}") from error
+    if document.get("schema") != "diffcam-adam-checkpoint/1":
+        raise B.BlackBoxError("unrecognized Adam checkpoint schema")
+    payload = dict(document)
+    expected_hash = payload.pop("payload_hash")
+    if expected_hash != C.content_hash(payload):
+        raise B.BlackBoxError("Adam checkpoint checksum mismatch")
+    if document["task_setup_hash"] != B._setup_signature(evaluator, "smooth"):
+        raise B.BlackBoxError("Adam checkpoint task/setup identity differs")
+    if document.get("seed") is None or not isinstance(document["seed"], int):
+        raise B.BlackBoxError("missing/invalid Adam seed record")
+    return document
+
+
+def _restore_state(document: Mapping[str, Any], evaluator: Any, *, budget=None,
+                   run_id=None) -> _AdamState:
+    old_budget = B.OptimizationBudget(**document["budget"])
+    budget = budget or old_budget
+    origin = int(document["evaluations"])
+    if budget.candidate_evaluations < origin:
+        raise B.BlackBoxError("resume budget cannot reduce prior evaluation count")
+    if (budget.validation_interval != old_budget.validation_interval
+            or budget.max_validation_calls < document["validation_calls"]):
+        raise B.BlackBoxError("resume cadence must be preserved and used validation budget not reduced")
+    raw_config = dict(document["optimizer_config"])
+    if isinstance(raw_config.get("selection"), Mapping):
+        raw_config["selection"] = HardSelectionPolicy(**raw_config["selection"])
+    config = AdamConfig(**raw_config)
+    if C.content_hash(dataclasses.asdict(config)) != document["optimizer_config_hash"]:
+        raise B.BlackBoxError("optimizer moment/config schedule hash mismatch")
+    state = _AdamState(config, budget, int(document["seed"]), run_id or document["run_id"],
+                       _config_hash(config), np.asarray(document["theta"], dtype=float).copy(),
+                       np.asarray(document["initial_theta"], dtype=float),
+                       np.asarray(document["moments"], dtype=float).copy(),
+                       np.asarray(document["velocities"], dtype=float).copy(), None, None,
+                       tuple(document["best_rank"]) if document["best_rank"] is not None else None,
+                       origin, int(document["gradient_updates"]), int(document["forward_calls"]),
+                       int(document["backward_calls"]), int(document["validation_calls"]),
+                       document["next_validation"], int(document["invalid_evaluations"]),
+                       list(document["history"]), previous_evaluations=origin)
+    if state.theta.shape != state.moments.shape or state.theta.shape != state.velocities.shape:
+        raise B.BlackBoxError("moment dimensions do not match theta")
+    if state.theta.size != evaluator.parameterization.num_params:
+        raise B.BlackBoxError("checkpoint theta dimension differs from parameterization")
+    if not np.all(np.isfinite(state.theta)) or not np.all(np.isfinite(state.moments)) or not np.all(np.isfinite(state.velocities)):
+        raise B.BlackBoxError("non-finite optimizer state rejected")
+    if document["best"] is not None:
+        state.best = C.CandidateResult(**document["best"]["evaluation"])
+        state.best_theta = np.asarray(document["best"]["theta"], dtype=float)
+    return state
+
+
+def _validation_and_hard_select(state: _AdamState, evaluator: Any) -> None:
+    state.validation_calls += 1
+    evaluator.ledger.count_validation(1)
+    before = evaluator.ledger.snapshot()
+    result = evaluator.evaluate_candidate(state.theta, f"{state.run_id}:validate:{state.validation_calls}", "hard")
+    after = evaluator.ledger.snapshot()
+    state.forward_calls += after["forward_calls"] - before["forward_calls"]
+    state.backward_calls += after["backward_calls"] - before["backward_calls"]
+    rank = _hard_rank(result, state.config.selection)
+    if state.best_rank is None or rank < state.best_rank:
+        state.best, state.best_theta, state.best_rank = result, state.theta.copy(), tuple(rank)
+    return result
+
+
+def _run_adam(state: _AdamState, evaluator: Any, checkpoint_dir: Optional[Path]) -> AdamResult:
+    reason = "budget_exhausted" if state.evaluations >= state.budget.candidate_evaluations else None
+    checkpoint_path = None
+    while state.evaluations < state.budget.candidate_evaluations:
+        if state.budget.max_generations is not None and state.evaluations >= state.budget.max_generations:
+            reason = "max_generations"
+            break
+        k = _k_for_step(state.config, state.evaluations, state.budget)
+        evaluator.sim.k[None] = k
+        candidate_id = f"{state.run_id}:iter:{state.evaluations}"
+        before = evaluator.ledger.snapshot()
+        evaluation = evaluator.evaluate_candidate_with_gradient(state.theta, candidate_id)
+        after = evaluator.ledger.snapshot()
+        forward_delta = after["forward_calls"] - before["forward_calls"]
+        backward_delta = after["backward_calls"] - before["backward_calls"]
+        state.forward_calls += forward_delta
+        state.backward_calls += backward_delta
+        state.evaluations += 1
+        gradient = evaluation.gradient_theta
+        clip_scale = None
+        if evaluation.result.valid and gradient is not None and np.all(np.isfinite(gradient)):
+            grad_norm = float(np.linalg.norm(gradient))
+            clip_scale = min(1.0, state.config.max_gradient_norm / max(grad_norm, 1e-30)) if state.config.max_gradient_norm is not None else 1.0
+            gradient = gradient * clip_scale
+            step = state.gradient_updates + 1
+            state.moments = state.config.beta1 * state.moments + (1.0 - state.config.beta1) * gradient
+            state.velocities = state.config.beta2 * state.velocities + (1.0 - state.config.beta2) * gradient ** 2
+            unbiased_m = state.moments / (1.0 - state.config.beta1 ** step)
+            unbiased_v = state.velocities / (1.0 - state.config.beta2 ** step)
+            theta = state.theta - state.config.learning_rate * unbiased_m / (np.sqrt(unbiased_v) + state.config.epsilon)
+            state.theta = np.asarray(evaluator.parameterization.clip(theta), dtype=float)
+            state.gradient_updates = step
+        else:
+            gradient = None
+            state.invalid_evaluations += 1
+        state.history.append({
+            "iteration": state.evaluations, "k": k, "theta": state.theta.tolist(),
+            "soft_objective": evaluation.result.objective, "clip_scale": clip_scale,
+            "valid": evaluation.result.valid,
+            "forward_calls": forward_delta, "backward_calls": backward_delta,
+        })
+        if (state.next_validation is not None
+                and state.validation_calls < state.budget.max_validation_calls
+                and state.evaluations >= state.next_validation):
+            selected = _validation_and_hard_select(state, evaluator)
+            state.next_validation += state.budget.validation_interval
+        if checkpoint_dir is not None:
+            checkpoint_path = checkpoint_dir / f"ckpt-{state.evaluations:06d}.json"
+            _write_adam_checkpoint(checkpoint_path, state, evaluator)
+    if reason is None:
+        reason = "budget_exhausted"
+    if checkpoint_dir is not None and state.evaluations > 0:
+        checkpoint_path = checkpoint_dir / "final.json"
+        _write_adam_checkpoint(checkpoint_path, state, evaluator)
+    return AdamResult(state.run_id, state.seed, state.budget, state.config,
+                      state.best, state.best_theta, state.theta.copy(),
+                      state.initial_theta.copy(), state.moments.copy(), state.velocities.copy(),
+                      state.evaluations, state.forward_calls, state.backward_calls,
+                      state.validation_calls, state.gradient_updates, state.invalid_evaluations,
+                      reason, state.history, str(checkpoint_path) if checkpoint_path else None,
+                      state.previous_evaluations)
+
+
+def solve_adam(evaluator: Any, budget: B.OptimizationBudget, config: AdamConfig, *, seed: int = 0,
+               x0: Any = None, run_id: Optional[str] = None, checkpoint_dir: Optional[str | Path] = None) -> AdamResult:
+    _required_budget(budget)
+    run_id = run_id or f"adam-{config.mode}-seed-{seed}"
+    state = _initial_state(evaluator, budget, config, seed, x0, run_id)
+    return _run_adam(state, evaluator, Path(checkpoint_dir) if checkpoint_dir is not None else None)
+
+
+def resume_adam(path: str | Path, evaluator: Any, *, budget: Optional[B.OptimizationBudget] = None,
+                run_id: Optional[str] = None, checkpoint_dir: Optional[str | Path] = None) -> AdamResult:
+    _required_budget(budget or B.OptimizationBudget(**json.loads(Path(path).read_text())["budget"]))
+    state = _restore_state(_read_adam_checkpoint(Path(path), evaluator), evaluator, budget=budget, run_id=run_id)
+    return _run_adam(state, evaluator, Path(checkpoint_dir) if checkpoint_dir is not None else None)
+
+
+def replay_adam_checkpoint(path: str | Path, evaluator: Any) -> dict[str, Any]:
+    """Re-score the saved hard-selected theta, without changing optimizer moments."""
+    document = _read_adam_checkpoint(Path(path), evaluator)
+    if document["best"] is None:
+        raise B.BlackBoxError("no hard-selected theta to replay")
+    if _restore_state(document, evaluator).config_hash != document["optimizer_config_hash"]:
+        raise B.BlackBoxError("replay optimizer configuration mismatch")
+    theta = np.asarray(document["best"]["theta"], dtype=float)
+    evaluator.ledger.count_validation(1)
+    replayed = evaluator.evaluate_candidate(theta, f"{document['run_id']}:replay", "hard")
+    expected = document["best"]["evaluation"]["objective"]
+    matches = bool(replayed.valid and replayed.objective is not None
+                   and replayed.objective == expected.__float__())
+    return {"replayed": replayed, "expected_objective": expected,
+            "objective_matches_backend_equality": matches,
+            "checkpoint_theta": theta, "checkpoint_hash": document["payload_hash"]}
+
+
+def emit_adam_artifacts(result: AdamResult, evaluator: Any, run_dir: str | Path,
+                        repository: str | Path) -> C.RunRecord:
+    if result.best_theta is None or result.best is None:
+        raise B.BlackBoxError("no hard-selected feasible candidate; not emitting a fake completed run")
+    task, motion = evaluator.task, evaluator.candidate_motion(result.best_theta)
+    posting = R.post_motion(task, motion)
+    config = R.build_run_config(result.run_id, task, motion, seed=result.seed,
+                                parameterization=evaluator.parameterization, objective=evaluator.spec,
+                                budgets={
+                                    "limits": dataclasses.asdict(result.budget),
+                                    "spent": {"candidate_evaluations": result.evaluations,
+                                              "forward_calls": result.forward_calls,
+                                              "backward_calls": result.backward_calls,
+                                              "validation_calls": result.validation_calls,
+                                              "gradient_updates": result.gradient_updates},
+                                }, repository=repository)
+    initial = evaluator.parameterization.positions(result.initial_theta)
+    best_positions = evaluator.parameterization.positions(result.best_theta)
+    files = dict(posting.files)
+    files.update({
+        "config.json": R.json_bytes(config),
+        "history.json": R.json_bytes({"history": result.history}),
+        "metrics.json": R.json_bytes({"best_candidate": B._candidate_dict(result.best),
+                                      "best_rank": None if result.best is None else _hard_rank(result.best, result.config.selection),
+                                      "termination_reason": result.termination_reason,
+                                      "invalid_evaluations": result.invalid_evaluations}),
+        "motion_plan.json": R.record_bytes(motion),
+        "initial_trajectory.npy": R.numpy_bytes(initial),
+        "trajectory.npy": R.numpy_bytes(best_positions),
+        "trajectory_deltas.npy": R.numpy_bytes(np.diff(best_positions, axis=0)),
+    })
+    record = R.assemble_record(result.run_id, task, C.RunStatus.INCOMPLETE, posting=posting,
+                               artifact_names=tuple(sorted(files)), source_commit=config["source_commit"],
+                               dirty_patch_hash=config["dirty_patch_hash"],
+                               failure_reason="Adam outputs pending posted evaluation (T1.3)")
+    R.ArtifactWriter().write(str(run_dir), record, files)
+    return record
 
 
 if __name__ == '__main__':
