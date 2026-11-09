@@ -215,8 +215,8 @@
    "owner": "diffcam-worker-1",
    "branch": "task/T6.2-measurements",
    "blocker": null,
-   "next": null,
-   "note": "software only; empirical status pending real trials"
+   "next": "real trial data (outside agent scope)",
+   "note": "software merged 749fc6f (packet/NC/setup gating, fiducial SVD registration, uncertainty, rejected/interrupted retention, force/load/proxy separation; synthetic-only empirical reports refused). Empirical conclusions PENDING real trial records (qualified operator)."
   },
   "T7.1": {
    "status": "planned",
