@@ -230,8 +230,8 @@
    "owner": "diffcam-worker-3",
    "branch": "task/T7.2-artifacts",
    "blocker": null,
-   "next": null,
-   "note": "scaffold now; real tables after T4.3; never writes into manuscript/ (user's)"
+   "next": "after T4.3",
+   "note": "scaffold merged f07c254 (claim-to-evidence per cell, failure/unavailable/refinement rows, precision + decision-ID matching, byte-identical regeneration; never writes manuscript/). Real tables after T4.3."
   },
   "T1.0b": {
    "status": "complete",
