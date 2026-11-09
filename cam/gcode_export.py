@@ -12,7 +12,7 @@ The actual G-code dialect is chosen by ``post`` (see :mod:`cam.posts`):
 """
 
 from .config import MachineConfig
-from .posts import get_post, _fmt, _axis_words  # noqa: F401  (re-exported helpers)
+from .posts import get_post, _fmt, _axis_words, post_motion_plan  # noqa: F401  (legacy helpers)
 
 
 def trajectory_to_gcode(positions, config: MachineConfig = MachineConfig(),
@@ -29,3 +29,13 @@ def save_gcode(positions, path, config: MachineConfig = MachineConfig(),
     with open(path, "w") as f:
         f.write(text)
     return text
+
+
+def motion_plan_to_gcode(plan, task, config: MachineConfig | None = None,
+                         post: str = "rs274") -> str:
+    """Convert a shared-contract MotionPlan using ``TaskSpec`` frame semantics.
+
+    This is the typed counterpart of :func:`trajectory_to_gcode`; it does not
+    derive a toolpath from normalized waypoints and never adds motion segments.
+    """
+    return post_motion_plan(plan, task, dialect=post, config=config)

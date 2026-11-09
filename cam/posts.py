@@ -17,6 +17,16 @@ CLI ``--post`` flag) picks them up automatically.
 
 import numpy as np
 
+from benchmarks.contracts import (
+    ArcDirection,
+    ArcPlane,
+    Dialect,
+    Frame,
+    MotionPlan,
+    SegmentKind,
+    TaskSpec,
+    TimingRule,
+)
 from .config import MachineConfig
 from .units import mm_to_inch, mm_per_min_to_ipm
 
@@ -206,6 +216,148 @@ class HaasPost(PostProcessor):
         lines.append("M30")
         lines.append("%")
         return "\n".join(lines) + "\n"
+
+
+# ---------------------------------------------------------------------------
+# Typed MotionPlan posting
+# ---------------------------------------------------------------------------
+
+
+class UnsupportedPostError(ValueError):
+    """A motion/task feature that the requested NC dialect cannot preserve."""
+
+
+def _validate_typed_post(plan: MotionPlan, task: TaskSpec, dialect: Dialect) -> None:
+    if dialect not in task.motion_semantics.dialects:
+        raise UnsupportedPostError(f"dialect {dialect.value!r} is disabled by this TaskSpec")
+    if plan.frame != Frame.MACHINE:
+        raise UnsupportedPostError("typed posting requires a machine-frame MotionPlan")
+    if not plan.initial_state.known:
+        raise UnsupportedPostError("cannot preserve an approach from an unknown initial state")
+    if plan.initial_state.work_offset != "G54":
+        raise UnsupportedPostError("only G54 is represented by TaskSpec.work_to_machine")
+    if plan.timing_rule != TimingRule.EXACT_STOP_CONSTANT_SPEED:
+        raise UnsupportedPostError(
+            "G61 NC posting preserves exact_stop_constant_speed, not fixed_dt or blending"
+        )
+    if task.motion_semantics.timing_rule != plan.timing_rule:
+        raise UnsupportedPostError("plan and task timing rules differ")
+    if not task.motion_semantics.arcs_supported and any(
+        segment.kind == SegmentKind.ARC for segment in plan.segments
+    ):
+        raise UnsupportedPostError("this TaskSpec disables arc output")
+    plan.validate_for_task(task)
+
+
+def _typed_motion_lines(plan: MotionPlan, task: TaskSpec, config: MachineConfig) -> list[str]:
+    # Imported lazily so the legacy post-only import path stays lightweight.
+    from .gcode_parser import _mapped_arc_orientation, _typed_plane_axes
+
+    inverse = task.work_to_machine.inverse()
+    output_plane = ArcPlane.XY
+    lines: list[str] = []
+    plane_codes = {ArcPlane.XY: "G17", ArcPlane.XZ: "G18", ArcPlane.YZ: "G19"}
+    offset_codes = {"X": "I", "Y": "J", "Z": "K"}
+    precision = config.precision
+
+    for segment in plan.segments:
+        home = segment.tag == "home"
+        if segment.kind == SegmentKind.ARC:
+            if home:
+                raise UnsupportedPostError("G53 does not support arc motion")
+            arc = segment.arc
+            try:
+                work_plane, work_direction = _mapped_arc_orientation(
+                    inverse, arc.plane, arc.direction
+                )
+            except ValueError as error:
+                raise UnsupportedPostError(str(error)) from error
+            if work_plane != output_plane:
+                lines.append(plane_codes[work_plane])
+                output_plane = work_plane
+            end_work = inverse.apply(segment.end_mm)
+            centre_work = inverse.apply(arc.centre_mm)
+            start_work = inverse.apply(segment.start_mm)
+            end_out = _len_out(np.asarray(end_work, dtype=np.float64), config)
+            words = [_axis_words(end_out, precision)]
+            a, b, _ = _typed_plane_axes(work_plane)
+            for axis_index in (a, b):
+                axis = "XYZ"[axis_index]
+                value = _len_out(centre_work[axis_index] - start_work[axis_index], config)
+                words.append(f"{offset_codes[axis]}{_fmt(value, precision)}")
+            if arc.turns:
+                words.append(f"P{arc.turns + 1}")
+            words.append(f"F{_fmt(_feed_out(segment.feed_mm_s * 60.0, config), precision)}")
+            code = "G2" if work_direction == ArcDirection.CW else "G3"
+            lines.append(f"{code} {' '.join(words)}")
+            continue
+
+        code = "G0" if segment.kind == SegmentKind.RAPID else "G1"
+        target = segment.end_mm if home else inverse.apply(segment.end_mm)
+        words = [
+            f"G53 {code}" if home else code,
+            _axis_words(_len_out(np.asarray(target, dtype=np.float64), config), precision),
+        ]
+        if segment.kind == SegmentKind.FEED:
+            words.append(f"F{_fmt(_feed_out(segment.feed_mm_s * 60.0, config), precision)}")
+        lines.append(" ".join(words))
+    return lines
+
+
+def post_motion_plan(
+    plan: MotionPlan,
+    task: TaskSpec,
+    dialect: Dialect | str = Dialect.RS274,
+    config: MachineConfig | None = None,
+) -> str:
+    """Post machine-frame typed motion without adding approach/retract moves.
+
+    Arcs are emitted in I/J/K centre-offset form (never chord approximations).
+    A segment tagged ``home`` is emitted as an absolute G53 G0/G1 block.  Any
+    other tag, including ``plunge``, remains a G1 feed with its own retained F
+    word.  Haas and RS274 differ only in non-motion prologue/epilogue words;
+    both use G61 exact-stop semantics and the same geometric motion sequence.
+    """
+    dialect = Dialect(dialect)
+    config = config or MachineConfig(units="mm")
+    _validate_typed_post(plan, task, dialect)
+    unit_code = config.units_code
+    motion_lines = _typed_motion_lines(plan, task, config)
+    offset_line = (
+        f"G43 H{config.h_register}"
+        if plan.initial_state.length_offset_applied
+        else "G49"
+    )
+
+    if dialect == Dialect.RS274:
+        lines = [
+            "(Generated by diff-cam typed MotionPlan RS274 post)",
+            unit_code,
+            "G17 G40 G49 G80 G90 G94",
+            "G54 G61",
+            offset_line,
+        ]
+        lines.extend(motion_lines)
+        lines.append("M2")
+    else:
+        lines = [
+            "%",
+            f"O{config.program_number:05d} ({config.program_name})",
+            "(Generated by diff-cam typed MotionPlan Haas post)",
+            "G17 G40 G49 G80 G90 G94",
+            unit_code,
+            "G54 G61",
+            f"T{config.tool_number} M06",
+            offset_line,
+            f"S{_fmt(config.spindle_rpm, 0)} M03",
+        ]
+        if config.coolant:
+            lines.append("M08")
+        lines.extend(motion_lines)
+        if config.coolant:
+            lines.append("M09")
+        lines.extend(("M05", "M30", "%"))
+    return "\n".join(lines) + "\n"
 
 
 # ---------------------------------------------------------------------------
