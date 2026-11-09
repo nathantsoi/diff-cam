@@ -72,8 +72,7 @@ spec.loader.exec_module(module)
 module._reference_prefix_child(sys.argv[2], pathlib.Path(sys.argv[3]), steps=int(sys.argv[4]))
 """
     environment = dict(os.environ)
-    environment["TI_OFFLINE_CACHE_FILE_PATH"] = "/tmp/diffcam-ti-worker1"
-    environment["UV_CACHE_DIR"] = "/tmp/diffcam-uv-worker1"
+    # Inherit the caller's isolated TI/UV caches. Never pin a peer worker's cache.
     environment["DIFFCAM_ADFD_SMOOTHMAX"] = "canonical"
     environment["DIFFCAM_ADFD_AXIS"] = "2"
     environment.pop("TI_ARCH", None)
@@ -478,9 +477,7 @@ spec.loader.exec_module(module)
 module._pilot_precision_child(sys.argv[2], pathlib.Path(sys.argv[3]))
 """
     environment = dict(os.environ)
-    environment["TI_OFFLINE_CACHE_FILE_PATH"] = "/tmp/diffcam-ti-worker1"
-    environment["UV_CACHE_DIR"] = "/tmp/diffcam-uv-worker1"
-    environment.pop("TI_ARCH", None)
+    # Inherit the caller's isolated TI/UV caches. Never pin a peer worker's cache.    environment.pop("TI_ARCH", None)
     completed = subprocess.run(
         [sys.executable, "-I", "-c", code, __file__, precision, str(output_dir)],
         cwd=ROOT, env=environment, capture_output=True, text=True, timeout=1200,
