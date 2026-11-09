@@ -8,6 +8,7 @@ end-to-end check carves both trajectories in the simulator and compares the
 resulting stock.
 """
 
+import math
 import os
 
 import numpy as np
@@ -124,6 +125,47 @@ def test_export_rejects_bad_shape():
         trajectory_to_gcode(np.zeros((0, 3)))
 
 
+def test_legacy_post_rejects_nonfinite_positions_and_numeric_words():
+    bad_positions = np.array([[0.0, 0.0, 0.0], [np.nan, 0.5, 0.5]])
+    with pytest.raises(ValueError, match="finite"):
+        trajectory_to_gcode(bad_positions, _cfg())
+    with pytest.raises(ValueError, match="finite"):
+        trajectory_to_gcode(np.array([[0, 0, 0], [np.inf, 0, 0]]), _cfg())
+    with pytest.raises(ValueError, match="finite"):
+        trajectory_to_gcode(np.array([[0, 0, 0], [-np.inf, 0, 0]]), _cfg())
+    with pytest.raises(ValueError, match="numeric G-code words must be finite"):
+        trajectory_to_gcode(_line(), _cfg(feed=np.nan))
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-inf", "NaN", "INFINITY"])
+def test_legacy_parser_does_not_silently_drop_nonfinite_motion(bad):
+    text = f"G21 G90\nG0 X0 Y0 Z0\nG1 X{bad} Y0 F600\nM2\n"
+    with pytest.raises(ValueError, match="non-finite numeric NC word"):
+        parse_gcode(text, _cfg())
+
+
+def test_semicolons_inside_parenthesised_comments_are_not_executable_tokens():
+    # Both parser routes must ignore the '; note, then )' substring correctly;
+    # the strict pathology path must still read the closing parenthesis.
+    text = "G21 G90 (note; this is only a comment) G0 X0 Y0 Z10\nM2\n"
+    assert parse_gcode(text, _cfg()) == []
+    from benchmarks import contracts as C
+    from cam.gcode_parser import parse_motion_plan
+    plan = parse_motion_plan(text, C.example_pocket_task())
+    assert len(plan.segments) == 1
+    assert plan.segments[0].end_mm == (100.0, 80.0, -140.0)
+    assert plan.segments[0].duration_s == 0.0
+
+
+def test_semicolon_outside_parentheses_still_starts_a_comment():
+    from benchmarks import contracts as C
+    from cam.gcode_parser import parse_motion_plan
+    text = "G21 G90 (intro) G0 X0 Y0 Z10 ; G1 Z-100 F1 (unmatched comment text\nM2\n"
+    plan = parse_motion_plan(text, C.example_pocket_task())
+    assert len(plan.segments) == 1
+    assert plan.segments[0].end_mm == (100.0, 80.0, -140.0)
+
+
 # ---------------------------------------------------------------------------
 # 2. Parser round-trip (waypoint recovery)
 # ---------------------------------------------------------------------------
@@ -184,6 +226,25 @@ def test_arc_radius_word():
     r_expected = np.linalg.norm(cfg.wcs_to_unit([60.0, 50.0, 0.0])[:2] - center)
     radii = np.linalg.norm(pts[:, :2] - center, axis=1)
     assert np.allclose(radii, r_expected, atol=1e-3)
+
+
+def test_g18_radius_center_and_sampling_use_shared_plane_convention():
+    cfg = _cfg()
+    radius = 3.3333333
+    # In the contract's XZ basis (Z,X), an angle theta gives (X,Z)=r(sin,cos).
+    # This general-position minor arc must be centered on the origin, not a
+    # mirror-image candidate circle from the legacy X,Z reversal.
+    p0 = np.array([radius * math.sin(0.3), 0.0, radius * math.cos(0.3)])
+    p1 = np.array([radius * math.sin(1.5), 0.0, radius * math.cos(1.5)])
+    text = (f"G21 G90 G18\nG0 X{p0[0]:.8f} Z{p0[2]:.8f}\n"
+            f"G3 X{p1[0]:.8f} Z{p1[2]:.8f} R{radius}\nM2\n")
+    segments = parse_gcode(text, cfg)
+    assert len(segments) == 1
+    assert np.linalg.norm(cfg.to_wcs(segments[0].center)) < 5e-5
+    sampled_mm, _ = plan_trajectory(segments, cfg)
+    midpoint = np.array([radius * math.sin(0.9), 0.0, radius * math.cos(0.9)])
+    nearest_error = np.min(np.linalg.norm(cfg.to_wcs(sampled_mm) - midpoint, axis=1))
+    assert nearest_error < 0.1
 
 
 # ---------------------------------------------------------------------------
