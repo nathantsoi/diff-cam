@@ -142,8 +142,12 @@ class CSGSimulatorDelta:
             ti.set_logging_level(ti.WARN)
 
         _guard_taichi_instance_lifecycle()
-        if max_steps < 0:
-            raise ValueError("max_steps must be non-negative")
+        if max_steps <= 0:
+            raise ValueError(
+                "max_steps must be positive (at least one segment); "
+                "Taichi cannot allocate zero-length tool_delta fields. "
+                "Use one zero-length segment for a stationary cut."
+            )
         self.max_steps = max_steps
 
         # ---- Stock box (the normalized cube) & machine work volume -----------
