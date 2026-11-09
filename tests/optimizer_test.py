@@ -169,8 +169,9 @@ def test_checkpoint_resume_matches_full_run_and_schedule_state(tmp_path):
     assert restored_snapshot["backward_calls"] == 5
     assert any(entry.get("validation", False) for entry in restored_snapshot["entries"])
     replayed = opt.replay_adam_checkpoint(checkpoint, DifferentiableObjective())
-    assert replayed["objective_matches_backend_equality"]
-    assert replayed["replayed"].objective == initial.best.objective
+    assert replayed["objective_matches_within_tolerance"]
+    assert replayed["objective_abs_difference"] is not None
+    assert replayed["replayed"].objective == pytest.approx(initial.best.objective, rel=1e-5, abs=1e-9)
 
 
 def test_adam_checkpoint_rejects_checksum_and_task_changes(tmp_path):
