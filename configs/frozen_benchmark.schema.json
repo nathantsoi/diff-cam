@@ -299,7 +299,7 @@
       "type": "object", "additionalProperties": false,
       "required": ["parameter_space", "distribution", "scale", "seed_derivation_rule"],
       "properties": {
-        "parameter_space": {"enum": ["theta", "delta"]},
+        "parameter_space": {"const": "delta", "description": "D-08 random initialization is only per-free-vertex MM displacement about the declared straight line."},
         "distribution": {
           "type": "object", "additionalProperties": false,
           "required": ["kind", "detail"],
@@ -317,9 +317,7 @@
               "type": "object", "additionalProperties": false,
               "required": ["kind", "description", "units"],
               "properties": {
-                "kind": {"enum": ["stock_xy_extent", "cam_delta_norm", "other_declared"]},
-                "description": {"$ref": "#/$defs/nonempty_text"},
-                "units": {"$ref": "#/$defs/nonempty_text"}
+                "units": {"const": "mm"}
               }
             }
           }
@@ -336,13 +334,43 @@
         }
       }
     },
+    "cam_perturbed_init": {
+      "$comment": "Separate attached exploratory CAM perturbation, never another D-08 init value or collapse evidence. Its normalized theta construction has its own scale/reference; invalid structural draws remain retained failures without retries.",
+      "type": "object", "additionalProperties": false,
+      "required": ["parameter_space", "distribution", "scale", "seed_derivation_rule", "exploratory", "excluded_from_init_axis_claims"],
+      "properties": {
+        "parameter_space": {"const": "theta"},
+        "distribution": {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "detail"],
+          "properties": {
+            "kind": {"enum": ["gaussian", "uniform"]},
+            "detail": {"$ref": "#/$defs/nonempty_text"}
+          }
+        },
+        "scale": {"$ref": "#/$defs/random_init/properties/scale"},
+        "seed_derivation_rule": {
+          "type": "object", "additionalProperties": false,
+          "required": ["algorithm", "root_seed", "input", "per_seed_rule"],
+          "properties": {
+            "algorithm": {"const": "sha256_v1"},
+            "root_seed": {"type": "integer", "minimum": 0},
+            "input": {"const": "task_hash,declaration_hash,root_seed,seed"},
+            "per_seed_rule": {"const": "first_8_bytes_little_endian_uint64"}
+          }
+        },
+        "exploratory": {"const": true},
+        "excluded_from_init_axis_claims": {"const": true},
+        "variant_suffix": {"type": "string", "default": "cam_perturbed", "pattern": "^cam_perturbed(?:[-_][A-Za-z0-9_.-]+)?$"}
+      }
+    },
     "straight_line_init": {
       "type": "object", "additionalProperties": false,
       "required": ["start", "end", "segment_placement", "feed_and_rapid_entry", "same_segment_count_and_k", "safe_rapid_entry", "respect_task_feed_limits", "efficiency_not_required"],
       "properties": {
-        "start": {"$ref": "#/$defs/nonempty_text"},
-        "end": {"$ref": "#/$defs/nonempty_text"},
-        "segment_placement": {"$ref": "#/$defs/nonempty_text"},
+        "start": {"const": "cam_start"},
+        "end": {"const": "cam_end"},
+        "segment_placement": {"const": "uniform"},
         "feed_and_rapid_entry": {"$ref": "#/$defs/nonempty_text"},
         "same_segment_count_and_k": {"const": true},
         "safe_rapid_entry": {"const": true},
@@ -351,7 +379,7 @@
       }
     },
     "collapse_criterion": {
-      "$comment": "Operational predicate for no-init runs; values are declared by the coordinator. It is not evaluated or passed as a valid no-init run by this tooling.",
+      "$comment": "Operational predicate for the D-08 no-init axis only. CAM-perturbed sidecars are excluded regardless of this predicate; values are declared by the coordinator. It is not evaluated by this tooling.",
       "type": "object", "additionalProperties": false,
       "required": ["geometry_or_completion_failure", "residual_multiplier", "residual_operator", "require_no_hard_loss_improvement_over_initial", "predicate", "collapse_and_infeasibility_are_valid_recorded_outcomes"],
       "properties": {
@@ -373,7 +401,8 @@
       "properties": {
         "condition": {"$ref": "#/$defs/condition"},
         "seeds": {"$ref": "#/$defs/seed_list"},
-        "init": {"$ref": "#/$defs/init"}
+        "init": {"$ref": "#/$defs/init"},
+        "cam_perturbed_init": {"$ref": "#/$defs/cam_perturbed_init"}
       }
     },
     "variant": {
@@ -386,7 +415,8 @@
         "seed": {"type": "integer", "minimum": 0},
         "k": {"$ref": "#/$defs/positive_number"},
         "rationale": {"$ref": "#/$defs/nonempty_text"},
-        "init": {"$ref": "#/$defs/init"}
+        "init": {"$ref": "#/$defs/init"},
+        "cam_perturbed_init": {"$ref": "#/$defs/cam_perturbed_init"}
       }
     },
     "evidence": {

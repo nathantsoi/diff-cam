@@ -155,6 +155,26 @@ def make_case(tmp_path):
     }
 
 
+def make_cam_perturbed_override():
+    return {
+        "parameter_space": "theta",
+        "distribution": {"kind": "gaussian", "detail": "iid"},
+        "scale": {"fraction": 0.05, "reference": {
+            "kind": "stock_xy_extent",
+            "description": "separate normalized CAM-perturbation reference for a synthetic sidecar, not D-08 no-init",
+            "units": "mm",
+        }},
+        "seed_derivation_rule": {
+            "algorithm": "sha256_v1", "root_seed": 101,
+            "input": "task_hash,declaration_hash,root_seed,seed",
+            "per_seed_rule": "first_8_bytes_little_endian_uint64",
+        },
+        "exploratory": True,
+        "excluded_from_init_axis_claims": True,
+        "variant_suffix": "cam_perturbed_probe",
+    }
+
+
 def make_init_case(tmp_path):
     """Structural D-08 fixture; these toy values are not coordinator decisions."""
     case = make_case(tmp_path)
@@ -169,6 +189,9 @@ def make_init_case(tmp_path):
         {"condition": "hard-cmaes", "init": "random", "seeds": [0, 1]},
         {"condition": "smooth-cmaes", "seeds": [0, 1]},
     ]
+    # One additional exploratory case shares the CAM parent's fixed budget;
+    # it is not an init-axis row or a native plain-CAM execution.
+    case["methods"][2]["cam_perturbed_init"] = make_cam_perturbed_override()
     case["dimensionality_subset"].append({
         "name": "straight-line-lower-k", "task_id": case["primary_task_id"],
         "condition": "annealed-adam", "init": "straight_line", "seed": 0, "k": 25.0,
@@ -180,7 +203,7 @@ def make_init_case(tmp_path):
         "scale": {"fraction": 0.05, "reference": {
             "kind": "cam_delta_norm",
             "description": "L2 norm of each CAM delta under the selected parameterization",
-            "units": "dimensionless fraction of that norm",
+            "units": "mm",
         }},
         "seed_derivation_rule": {
             "algorithm": "declared SeedSequence child streams",
@@ -189,9 +212,9 @@ def make_init_case(tmp_path):
         },
     }
     case["straight_line_init"] = {
-        "start": "CAM entry station after its safe rapid approach",
-        "end": "CAM final cutting station before its terminal retract",
-        "segment_placement": "uniform station resampling at the CAM segment count with unchanged K parameterization",
+        "start": "cam_start",
+        "end": "cam_end",
+        "segment_placement": "uniform",
         "feed_and_rapid_entry": "safe clearance-Z rapid entry, then feed bounded by the selected TaskSpec; no efficiency promise",
         "same_segment_count_and_k": True, "safe_rapid_entry": True,
         "respect_task_feed_limits": True, "efficiency_not_required": True,
@@ -208,9 +231,10 @@ def make_init_case(tmp_path):
         "baseline": "annealed-adam", "method_init": "straight_line", "baseline_init": "cam",
         "metrics": ["completion_pass"], "dialects": ["rs274", "haas"],
     })
-    # Seven no-init declarations are added to the eight native CAM cases.
-    case["estimates"].update({"run_count": 15, "candidate_evaluations": 57,
-                              "validation_calls": 28, "worker_seconds": 51.5})
+    # Seven no-init declarations plus one separate exploratory sidecar are
+    # added to the eight native CAM cases; only the eight perform native dry-runs.
+    case["estimates"].update({"run_count": 16, "candidate_evaluations": 61,
+                              "validation_calls": 30, "worker_seconds": 54.5})
     case["budget"]["total_wall_time_s"] = 60.0
     return case
 
@@ -253,7 +277,19 @@ def test_valid_schema_runs_every_primary_and_variant_case_with_exact_provenance(
         [{"task_id": R._prototype()[0].task_id, "task_hash": R._prototype()[0].task_hash}])
     assert not (out / "plan" / "manifest.json").exists()
     with (ROOT / "configs/frozen_benchmark.schema.json").open() as stream:
-        json.load(stream)
+        schema = json.load(stream)
+    definitions = schema["$defs"]
+    assert definitions["random_init"]["properties"]["parameter_space"]["const"] == "delta"
+    assert definitions["random_init"]["properties"]["scale"]["properties"]["reference"]["properties"]["units"]["const"] == "mm"
+    assert definitions["init"]["enum"] == ["cam", "straight_line", "random"]
+    for kind in ("method", "variant"):
+        assert definitions[kind]["properties"]["cam_perturbed_init"]["$ref"] == "#/$defs/cam_perturbed_init"
+    sidecar = definitions["cam_perturbed_init"]
+    assert sidecar["additionalProperties"] is False
+    assert sidecar["properties"]["exploratory"]["const"] is True
+    assert sidecar["properties"]["excluded_from_init_axis_claims"]["const"] is True
+    assert definitions["straight_line_init"]["properties"]["start"]["const"] == "cam_start"
+    assert definitions["straight_line_init"]["properties"]["end"]["const"] == "cam_end"
 
 
 def test_d08_init_axis_has_explicit_previews_not_cam_runner_evidence(tmp_path):
@@ -261,34 +297,164 @@ def test_d08_init_axis_has_explicit_previews_not_cam_runner_evidence(tmp_path):
     out = tmp_path / "validation-output"
     assert report["dry_run_performed"] is True
     assert report["validated_run_count"] == 8
-    assert report["declared_not_yet_runnable_count"] == 7
-    assert len(report["dry_runs"]) == 15
-    assert report["cost_accounting"]["jobs"] == 15
-    assert report["cost_accounting"]["candidate_evaluations"] == 57
-    assert report["cost_accounting"]["validation_calls"] == 28
-    assert report["cost_accounting"]["worker_seconds"] == 51.5
+    assert report["declared_not_yet_runnable_count"] == 8
+    assert report["exploratory_cam_perturbation_count"] == 1
+    assert len(report["dry_runs"]) == 16
+    assert report["cost_accounting"]["jobs"] == 16
+    assert report["cost_accounting"]["candidate_evaluations"] == 61
+    assert report["cost_accounting"]["validation_calls"] == 30
+    assert report["cost_accounting"]["worker_seconds"] == 54.5
     pending = [row for row in report["dry_runs"] if row["declared_not_yet_runnable"]]
-    assert len(pending) == 7
+    assert len(pending) == 8
     assert {row["seed"] for row in pending
             if row["condition"] == "annealed-adam" and row["init"] == "random"} == {2, 7}
     for row in pending:
         assert row["native_dry_run_performed"] is False
-        assert row["run_id"] is None and row["candidate_evaluations"] is None
+        assert row["candidate_evaluations"] is None
         assert row["validation_calls"] is None and row["planned_run_count"] == 0
         root = out / row["output_subdirectory"]
         assert not (root / "plan").exists()
         assert not (root / "runner-config.json").exists()
-        preview = read(root / "initialization-declaration.json")
-        assert preview["declared_not_yet_runnable"] is True
-        assert preview["schema"] == "diffcam-initialization-declaration/1"
+        preview = read(root / row["declaration_filename"])
+        if row["scope"] == "exploratory_cam_perturbation":
+            assert row["run_id"] and "cam_perturbed_probe" in row["run_id"]
+            assert preview["schema"] == "diffcam-exploratory-cam-perturbation-declaration/1"
+        else:
+            assert row["run_id"] is None
+            assert preview["schema"] == "diffcam-initialization-declaration/2"
         assert preview["random_init"] and preview["straight_line_init"]
         assert preview["collapse_criterion"]["require_no_hard_loss_improvement_over_initial"] is True
-        assert row["initialization_declaration_sha256"] == sha(root / "initialization-declaration.json")
+        assert row["initialization_declaration_sha256"] == sha(root / row["declaration_filename"])
     cam = next(row for row in report["dry_runs"] if not row["declared_not_yet_runnable"])
     config = read(out / cam["output_subdirectory"] / "runner-config.json")
     assert config["init"] == "cam" and config["init_implementation_available"] is True
     assert config["precision"] == "f64" and config["simulator_precision"] == "f64"
     assert (out / cam["output_subdirectory"] / "plan/manifest.json").is_file()
+
+
+def test_cam_perturbed_case_has_separate_identity_and_claim_exclusions(tmp_path):
+    case = make_init_case(tmp_path)
+    report = run_case(case, tmp_path)
+    sidecar = next(row for row in report["dry_runs"]
+                   if row["scope"] == "exploratory_cam_perturbation")
+    parent = next(row for row in report["dry_runs"]
+                  if row["scope"] == "primary" and row["condition"] == "annealed-adam"
+                  and row["init"] == "cam" and row["variant"] is None)
+    assert sidecar["run_id"] != parent["run_id"]
+    assert "-cam_perturbed_probe-" in sidecar["run_id"]
+    assert "cam_perturbed_probe" not in parent["run_id"]
+    assert sidecar["exploratory"] is True
+    assert sidecar["excluded_from_init_axis_claims"] is True
+    assert sidecar["included_in_d08_init_axis_comparisons"] is False
+    assert sidecar["included_in_collapse_criterion"] is False
+    assert sidecar["declared_not_yet_runnable"] is True
+    assert sidecar["candidate_evaluations"] is None
+    assert sidecar["validation_calls"] is None
+    assert sidecar["planned_run_count"] == 0
+    root = tmp_path / "validation-output" / sidecar["output_subdirectory"]
+    preview = read(root / "cam-perturbed-declaration.json")
+    assert preview["run_id"] == sidecar["run_id"]
+    assert preview["schema"] == "diffcam-exploratory-cam-perturbation-declaration/1"
+    assert preview["exploratory"] is True
+    assert preview["excluded_from_init_axis_claims"] is True
+    assert preview["included_in_d08_init_axis_comparisons"] is False
+    assert preview["included_in_collapse_criterion"] is False
+    assert preview["parent_scope"] == "primary"
+    assert preview["cam_perturbed_init"]["scale"] != case["random_init"]["scale"]
+    assert preview["cam_perturbed_init"]["scale"]["reference"]["units"] == "mm"
+    assert sidecar["initialization_declaration_sha256"] == sha(root / "cam-perturbed-declaration.json")
+    assert not (root / "plan").exists()
+    assert not (root / "runner-config.json").exists()
+    declaration = V.validate_declaration(case, tmp_path / "repo", tmp_path / "decisions.md")
+    cp_job = next(job for job in declaration["jobs"]
+                  if job["scope"] == "exploratory_cam_perturbation")
+    assert cp_job["parent_init"] == "cam"
+    with pytest.raises(V.ProtocolError, match="cannot be translated into a plain CAM"):
+        V.native_config(cp_job, case, "sha256:" + "0" * 64)
+    descriptor = next(row for row in report["initialization_declarations"]
+                      if row["scope"] == "exploratory_cam_perturbation")
+    assert descriptor["variant_suffix"] == "cam_perturbed_probe"
+    assert descriptor["exploratory"] is descriptor["excluded_from_init_axis_claims"] is True
+
+
+def test_sidecar_alone_does_not_invent_a_d08_random_axis(tmp_path):
+    case = make_case(tmp_path)
+    case["methods"][2]["cam_perturbed_init"] = make_cam_perturbed_override()
+    case["estimates"].update({"run_count": 9, "candidate_evaluations": 33,
+                              "validation_calls": 16, "worker_seconds": 33.5})
+    report = run_case(case, tmp_path)
+    assert [key for key in ("random_init", "straight_line_init", "collapse_criterion")
+            if key in case] == []
+    assert report["exploratory_cam_perturbation_count"] == 1
+    assert report["declared_not_yet_runnable_count"] == 1
+    assert report["validated_run_count"] == 8
+    assert report["cost_accounting"]["worker_seconds"] == 33.5
+
+
+def test_variant_sidecar_preserves_variant_k_and_parent_identity(tmp_path):
+    case = make_case(tmp_path)
+    case["dimensionality_subset"][0]["cam_perturbed_init"] = make_cam_perturbed_override()
+    case["estimates"].update({"run_count": 9, "candidate_evaluations": 33,
+                              "validation_calls": 16, "worker_seconds": 38.0})
+    declaration = V.validate_declaration(case, tmp_path / "repo", tmp_path / "decisions.md")
+    sidecar = next(job for job in declaration["jobs"]
+                   if job["scope"] == "exploratory_cam_perturbation")
+    assert sidecar["parent_scope"] == "dimensionality_subset"
+    assert sidecar["variant"] == "lower-k" and sidecar["k"] == 20.0
+    assert sidecar["init"] == sidecar["parent_init"] == "cam"
+    assert sidecar["variant_suffix"] == "cam_perturbed_probe"
+
+
+@pytest.mark.parametrize("flag", ["exploratory", "excluded_from_init_axis_claims"])
+def test_sidecar_exclusion_flags_are_not_optional(tmp_path, flag):
+    case = make_init_case(tmp_path)
+    spec = case["methods"][2]["cam_perturbed_init"]
+    spec[flag] = False
+    with pytest.raises(V.ProtocolError, match=flag + ".*true"):
+        V.validate_declaration(case, tmp_path / "repo", tmp_path / "decisions.md")
+    del spec[flag]
+    with pytest.raises(V.ProtocolError, match=flag):
+        V.validate_declaration(case, tmp_path / "repo", tmp_path / "decisions.md")
+
+
+def test_sidecar_cannot_be_an_init_selector_or_unregistered_recipe(tmp_path):
+    for field in ("method_init", "baseline_init"):
+        case = make_init_case(tmp_path)
+        case["comparisons"][0][field] = "cam_perturbed"
+        with pytest.raises(V.ProtocolError, match="must be cam, straight_line, or random"):
+            run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["tuning"]["rounds"][0]["init"] = "cam_perturbed"
+    with pytest.raises(V.ProtocolError, match="must be cam, straight_line, or random"):
+        run_case(case, tmp_path)
+    for invalid in (None, {}, True):
+        case = make_init_case(tmp_path)
+        case["methods"][2]["cam_perturbed_init"] = invalid
+        with pytest.raises(V.ProtocolError):
+            run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["methods"][2]["cam_perturbed_init"]["scale"]["units"] = "mm"  # scale units are on the reference
+    with pytest.raises(V.ProtocolError, match="unknown field"):
+        run_case(case, tmp_path)
+
+
+def test_sidecar_must_attach_to_cam_parent_with_independent_seed_reference(tmp_path):
+    case = make_init_case(tmp_path)
+    spec = copy.deepcopy(case["methods"][2]["cam_perturbed_init"])
+    random_parent = next(row for row in case["methods"] if row.get("init") == "random")
+    random_parent["cam_perturbed_init"] = spec
+    with pytest.raises(V.ProtocolError, match="must attach to a CAM-init parent"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    sidecar = case["methods"][2]["cam_perturbed_init"]
+    sidecar["scale"]["reference"]["kind"] = "cam_delta_norm"
+    case["random_init"]["scale"]["fraction"] = 0.04
+    assert sidecar["scale"]["fraction"] == 0.05
+    assert sidecar["scale"] is not case["random_init"]["scale"]
+    # Same registered kind is allowed only because its own explicitly declared
+    # scale object and own seed stream remain present, never a random_init fallback.
+    assert case["methods"][2]["cam_perturbed_init"]["seed_derivation_rule"]["root_seed"] == 101
+    V.validate_declaration(case, tmp_path / "repo", tmp_path / "decisions.md")
 
 
 @pytest.mark.parametrize("key", ["random_init", "straight_line_init", "collapse_criterion"])
@@ -335,8 +501,8 @@ def test_d08_placeholder_scale_and_collapse_rules_are_enforced(tmp_path):
     with pytest.raises(V.ProtocolError, match="scale.fraction.*> 0"):
         run_case(case, tmp_path)
     case = make_init_case(tmp_path)
-    case["random_init"]["parameter_space"] = "unspecified"
-    with pytest.raises(V.ProtocolError, match="parameter_space must be theta or delta"):
+    case["random_init"]["parameter_space"] = "theta"
+    with pytest.raises(V.ProtocolError, match="D-08 random_init.parameter_space must be delta"):
         run_case(case, tmp_path)
     case = make_init_case(tmp_path)
     case["collapse_criterion"]["residual_multiplier"] = 0.0

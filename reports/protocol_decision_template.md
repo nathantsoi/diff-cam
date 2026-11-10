@@ -94,7 +94,7 @@ The `init` axis is independent of solver selection, with enum `cam | straight_li
 
 ```json
 "random_init": {
-  "parameter_space": "TO-BE-FROZEN: theta or delta",
+  "parameter_space": "delta",
   "distribution": {
     "kind": "TO-BE-FROZEN: gaussian, uniform or other_declared",
     "detail": "TO-BE-FROZEN: complete sampling distribution and any antithetic/correlation rule"
@@ -104,7 +104,7 @@ The `init` axis is independent of solver selection, with enum `cam | straight_li
     "reference": {
       "kind": "TO-BE-FROZEN: stock_xy_extent, cam_delta_norm or other_declared",
       "description": "TO-BE-FROZEN: exactly which extent/norm and parameterization are used",
-      "units": "TO-BE-FROZEN: physical or dimensionless reference units"
+      "units": "mm"
     }
   },
   "seed_derivation_rule": {
@@ -118,9 +118,9 @@ The `init` axis is independent of solver selection, with enum `cam | straight_li
 
 ```json
 "straight_line_init": {
-  "start": "TO-BE-FROZEN: explicit CAM start/reference station or endpoints",
-  "end": "TO-BE-FROZEN: explicit CAM end/reference station or endpoints",
-  "segment_placement": "TO-BE-FROZEN: uniform resampling or other exact rule using CAM segment count and same K parameterization",
+  "start": "cam_start",
+  "end": "cam_end",
+  "segment_placement": "uniform",
   "feed_and_rapid_entry": "TO-BE-FROZEN: precise safe rapid-entry and feed handling for the selected task",
   "same_segment_count_and_k": true,
   "safe_rapid_entry": true,
@@ -129,7 +129,61 @@ The `init` axis is independent of solver selection, with enum `cam | straight_li
 }
 ```
 
-No-init runner seeds must produce valid task MotionPlans with the same segment count/K parameterization, a safe rapid entry, and feed at or below task limits. They need not be efficiency-eligible. The required booleans are policy predeclarations, **not** evidence that construction, rapid clearance, safe machining, task feasibility, or a numeric speed limit has already been verified. Worker-2's later `cam/seeds` implementation must construct and validate those plans; this tooling does not generate them.
+No-init seeds preserve T, the fitted-K behavior, per-segment kinds, exact-stop timing, allowed feeds, and the actual safe rapid-entry requirement. They need not be efficiency-eligible. `cam/seeds.py` constructs and validates MotionPlans; the protocol tooling validates declarations. A `SeedResult.valid`/`valid_plan` means only that construction and structural task validation succeeded. It is not safety, machining, completion, or efficiency evidence.
+
+The D-08 **random arm is delta-only**. `parameter_space="theta"` in `random_init` is rejected, not silently treated as no-init or CAM perturbation. `random_seed_sequence(...)` preserves the caller's declared seed positions even when a particular draw fails.
+
+### D-08 random geometry: local iid deviations and retained failures
+
+The straight line uses actual CAM start/end points and uniformly placed vertices at T+1 positions, not CAM interior stations in a purported no-init baseline. For T segments there are T−1 free interior vertices. If `L_j` is the straight-line position and `sigma_mm = fraction * selected_reference_mm`, each free-vertex coordinate receives one independent centered deviation `d_j[x,y,z]` in **physical mm**:
+
+- generated position is `P_j = L_j + d_j` only at free vertices; `P_0` and `P_T` are exactly the declared endpoints;
+- there is no cumulative displacement random walk or `sigma * sqrt(T)` bound growth;
+- Gaussian means standard deviation `sigma_mm`; uniform means independent draws on `[-sigma_mm, +sigma_mm]`;
+- accepted draws satisfy `abs(d_j[axis]) <= sigma_mm` for every free-vertex coordinate independently of T.
+
+The coordinate bound is **not a clipping rule**. A Gaussian realization exceeding it is a failed instance at the same requested seed and caller-provided sequence position. Record `status="failed_instance"`, `seed`, nonempty reason, derivation evidence, noise fingerprint, and observed bound fact. Never redraw, replace, reorder, drop, clip, or substitute another seed/path. Successful draws are therefore explicitly conditional on the retained rejection rule; they are not proof that every Gaussian draw yielded a usable line.
+
+Every valid random plan records maximum absolute **coordinate** deviation, maximum **Euclidean vertex** deviation `max_j ||d_j||₂`, and RMS **Euclidean vertex** deviation `sqrt(mean_j ||d_j||₂²)` over free vertices, in mm, with count/bound semantics. The Euclidean maximum is at most `sqrt(3) * sigma_mm` under the coordinate bound, not a function that increases with `sqrt(T)`. Both endpoints and realized deviations must match actual output rather than declared intent alone.
+
+Frozen random initialization requires strictly positive scale. Zero fraction is only an explicit diagnostic/test degenerate probe (`runner_allowed=false`), reproducible as the exact straight-line baseline. Ordinary `require_plan()` rejects it; only explicit `require_plan(diagnostic_only=True)` permits inspection. Canonical CAM start=end therefore yields a legitimate stationary/collapsed construction, not an efficiency success or permission to substitute nominal CAM.
+
+### Exploratory CAM perturbation: separate sidecar, not a D-08 initializer
+
+Normalized CAM-fit/theta perturbation is declared separately as `cam_perturbed_init`, attached as a per-method/per-variant **override on a CAM-init parent**. Its grammar has its own `parameter_space="theta"`, distribution, positive scale/reference, and seed-derivation rule. Reference magnitudes are in mm; theta-control coordinates are normalized and are not re-labelled as physical mm. Its existing CAM-fit convention fixes the initial position but does not impose the delta arm's pinned terminal point; that endpoint distinction and realized physical tool-position deviations are recorded separately from normalized controls. Invalid CAM construction remains a retained failed instance, without redraw or substitution. It must never fall back to `random_init` or disguise itself as the D-08 random arm. Both `exploratory: true` and `excluded_from_init_axis_claims: true` are mandatory and cannot be false. The D-08 `init` enum remains exactly `cam | straight_line | random`.
+
+Each attached sidecar adds a distinct `exploratory_cam_perturbation` case and declared run identity with a filename-safe suffix beginning `cam_perturbed` (default `cam_perturbed`). It cannot overwrite the plain CAM anchor or collide with its ordinary run. CAM-perturbed rows never enter D-08 init-axis comparisons, primary comparison/tuning selectors, or any collapse-criterion calculation. Their separate declaration/cost accounting is retained rather than hidden. Presence of the sidecar does not alter the CAM parent or imply a random no-init arm; no efficiency/completion/material-removal/no-init conclusion follows. Check scope and exclusion flags, not merely the parent `init="cam"` field.
+
+The following is a coordinator form for one attached override, not an agreed experimental scale or launch plan:
+
+```json
+"cam_perturbed_init": {
+  "parameter_space": "theta",
+  "distribution": {
+    "kind": "TO-BE-FROZEN: gaussian or uniform",
+    "detail": "TO-BE-FROZEN: independent centered draws and bound/rejection rule"
+  },
+  "scale": {
+    "fraction": "TO-BE-FROZEN: finite positive multiplier, separately selected from D-08 random",
+    "reference": {
+      "kind": "TO-BE-FROZEN: stock_xy_extent or CAM delta-norm reference",
+      "description": "TO-BE-FROZEN: exact normalized-CAM perturbation reference",
+      "units": "mm"
+    }
+  },
+  "seed_derivation_rule": {
+    "algorithm": "sha256_v1",
+    "root_seed": "TO-BE-FROZEN: separate nonnegative integer",
+    "input": "task_hash,declaration_hash,root_seed,seed",
+    "per_seed_rule": "first_8_bytes_little_endian_uint64"
+  },
+  "exploratory": true,
+  "excluded_from_init_axis_claims": true,
+  "variant_suffix": "TO-BE-FROZEN: cam_perturbed or an explicitly selected suffixed identity"
+}
+```
+
+### Collapse criteria and pending execution
 
 ```json
 "collapse_criterion": {
@@ -144,7 +198,7 @@ No-init runner seeds must produce valid task MotionPlans with the same segment c
 
 This is the operational predicate chosen **before** running the experiment, not a before-run expectation that it will pass. The frozen form must make the comparison's CAM-residual reference, multiplier X, comparison operator, selected clauses and any own-initial-path hard-loss test explicit. The residual X/operator supplies the residual comparison; the two clause booleans are explicit **coordinator choices**, with no validator-selected clause default. Keep the prose consistent with their true/false selections. The validator requires nonempty declarations, finite positive X and explicit boolean types, and preserves the chosen values; it does not parse natural-language logic or execute the predicate. The unchanged-segment/K, safe-rapid/feed declarations and valid-recorded-collapse outcome booleans are mandated D-08 policies and remain fixed true. Collapse or infeasibility is a recorded negative/inefficient scientific outcome, not a tooling failure, hidden exclusion, zero cost or successful efficiency result. Do not delete or edit it after observing the results without a versioned amendment and rerun policy.
 
-Current implementation status: no-init cases are **declared but not yet runnable**. For these cases the tool writes only `initialization-declaration.json`, carrying the exact initializer fields, task/K identities, budgets and hashes. Its report uses `declared_not_yet_runnable=true`, `native_dry_run_performed=false`, null run ID/candidate/validation values and `planned_run_count=0`. No runner invocation or optimizer/evaluator launch is made for these cases. Those rows must not be counted as native dry-runs or substituted for CAM evidence. Actual native CAM cases still run the real runner with `--dry-run`; `validated_run_count` includes only those, not pending declaration previews. A future task-source, experiment or initializer implementation requires its own registered integration and evidence; `--validate-only` cannot create execution capability.
+Current implementation status: D-08 initializer construction is implemented, but runner integration is pending. D-08 non-CAM declarations write `initialization-declaration.json`; exploratory sidecars write a separate `cam-perturbed-declaration.json`. Both carry exact fields, task/K identities, budgets and hashes. Reports use `declared_not_yet_runnable=true`, `native_dry_run_performed=false`, null candidate/validation values and `planned_run_count=0`. Ordinary non-CAM pending rows have null run ID; exploratory rows have an explicitly non-executed, suffixed declared identity and exclusion flags. No runner invocation or optimizer/evaluator launch is made for either pending category. They are not native dry-runs, valid machining outcomes, or substitutes for plain CAM evidence. Ordinary CAM parents still run the real adapter's `--dry-run`; `validated_run_count` includes only those. `--validate-only` cannot create execution capability.
 
 CEM is a declared **unavailable baseline**, not a condition or an alias for CMA-ES. The allowed literature statement is **zero-order (CMA-ES), not CEM**, under the explicit `external_baselines.cem` limitation record. Any later CEM implementation requires a protocol amendment and independent runner evidence.
 
