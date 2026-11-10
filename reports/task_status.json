@@ -231,7 +231,7 @@
       "owner": "diffcam-worker-1 (T7.2b)",
       "branch": "task/T7.2-artifacts",
       "blocker": null,
-      "next": "T7.2b real results package in reports/results from campaign + pilot2 + T3.3",
+      "next": "T7.2b builder merged (0e6cd8f); rebuild on final campaign + pilot2 + exp1",
       "note": "scaffold merged f07c254 (claim-to-evidence per cell, failure/unavailable/refinement rows, precision + decision-ID matching, byte-identical regeneration; never writes manuscript/). Real tables after T4.3."
     },
     "T1.0b": {
