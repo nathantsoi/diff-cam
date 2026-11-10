@@ -1,0 +1,295 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://diffcam.local/schemas/frozen_benchmark.schema.json",
+  "title": "DiffCAM frozen benchmark protocol — tooling schema only",
+  "description": "Declaration and integrity schema; does not choose campaign values. The coordinator supplies them after the pilot. Current dry-runs are explicitly prototype/dev/pilot-only. f64 is required by D-05; D-04 and D-07 fidelity/memory constraints are explicit. Only SHA-bound records are accepted, and test/external tuning artifacts are forbidden. No strict-improvement gate is allowed. Structural validation is implemented without a jsonschema dependency for this project environment.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "decision_ids", "task_manifest", "primary_task_id", "dimensionality_subset",
+    "methods", "objective", "thresholds", "posted_evaluation", "memory", "budget", "estimates",
+    "tuning", "comparisons", "multiplicity", "external_baselines",
+    "acceptance", "execution", "precision"
+  ],
+  "properties": {
+    "schema": {"const": "diffcam-frozen-benchmark/1"},
+    "decision_ids": {"$ref": "#/$defs/decision_ids"},
+    "task_manifest": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "split_hashes", "acquisition"],
+      "properties": {
+        "path": {"$ref": "#/$defs/repo_relative_path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "acquisition": {"$ref": "#/$defs/nonempty_text"},
+        "split_hashes": {
+          "type": "object", "additionalProperties": false,
+          "required": ["dev", "test", "external"],
+          "properties": {
+            "dev": {"$ref": "#/$defs/optional_hash"},
+            "test": {"$ref": "#/$defs/optional_hash"},
+            "external": {"$ref": "#/$defs/optional_hash"}
+          }
+        }
+      }
+    },
+    "primary_task_id": {"$ref": "#/$defs/nonempty_text"},
+    "dimensionality_subset": {
+      "type": "array", "minItems": 1, "maxItems": 3,
+      "items": {"$ref": "#/$defs/variant"}
+    },
+    "methods": {
+      "type": "array", "minItems": 1,
+      "items": {"$ref": "#/$defs/method"}
+    },
+    "objective": {
+      "type": "object", "additionalProperties": false,
+      "required": ["primary_k", "anneal_start", "anneal_end", "gouge_weight", "residual_weight", "holder_weight", "holder_margin_mm", "loss_shift_voxels"],
+      "properties": {
+        "primary_k": {"$ref": "#/$defs/positive_number"},
+        "anneal_start": {"$ref": "#/$defs/positive_number"},
+        "anneal_end": {"$ref": "#/$defs/positive_number"},
+        "gouge_weight": {"$ref": "#/$defs/nonnegative_number"},
+        "residual_weight": {"$ref": "#/$defs/nonnegative_number"},
+        "holder_weight": {"$ref": "#/$defs/nonnegative_number"},
+        "holder_margin_mm": {"$ref": "#/$defs/nonnegative_number"},
+        "loss_shift_voxels": {"type": "number"}
+      }
+    },
+    "thresholds": {
+      "type": "object", "additionalProperties": false,
+      "required": ["completion_residual_mm3", "gouge_volume_mm3", "local_surface_error_mm", "clearance_mm", "rapid_penetration_mm"],
+      "properties": {
+        "completion_residual_mm3": {"$ref": "#/$defs/nonnegative_number"},
+        "gouge_volume_mm3": {"$ref": "#/$defs/nonnegative_number"},
+        "local_surface_error_mm": {"$ref": "#/$defs/nonnegative_number"},
+        "clearance_mm": {"$ref": "#/$defs/nonnegative_number"},
+        "rapid_penetration_mm": {"$ref": "#/$defs/nonnegative_number"}
+      }
+    },
+    "posted_evaluation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["verdict_max_step_mm", "screen_max_step_mm", "convergence_max_step_rs274_mm", "screen_is_diagnostic_only", "convergence_is_rs274_only", "record_memory_by_phase_and_dialect"],
+      "properties": {
+        "verdict_max_step_mm": {"const": 0.125},
+        "screen_max_step_mm": {"const": 1.0},
+        "convergence_max_step_rs274_mm": {"const": 0.25},
+        "screen_is_diagnostic_only": {"const": true},
+        "convergence_is_rs274_only": {"const": true},
+        "record_memory_by_phase_and_dialect": {"const": true}
+      }
+    },
+    "memory": {
+      "type": "object", "additionalProperties": false,
+      "required": ["max_rss_bytes_per_job", "parallel_jobs", "stop_and_optimize_when_exceeded", "vram_estimate_bytes_per_job"],
+      "properties": {
+        "max_rss_bytes_per_job": {"const": 8589934592},
+        "parallel_jobs": {"type": "integer", "minimum": 1, "maximum": 2},
+        "stop_and_optimize_when_exceeded": {"const": true},
+        "vram_estimate_bytes_per_job": {"type": ["integer", "null"], "minimum": 0}
+      }
+    },
+    "budget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["candidate_evaluations", "population_size", "validation_interval", "max_validation_calls", "max_generations", "learning_rate", "max_gradient_norm", "sigma0", "timeout_s", "total_wall_time_s"],
+      "properties": {
+        "learning_rate": {"$ref": "#/$defs/positive_number"},
+        "max_gradient_norm": {"$ref": "#/$defs/positive_number"},
+        "sigma0": {"$ref": "#/$defs/positive_number"},
+        "candidate_evaluations": {"$ref": "#/$defs/positive_integer"},
+        "population_size": {"type": "integer", "minimum": 2},
+        "validation_interval": {"$ref": "#/$defs/positive_integer"},
+        "max_validation_calls": {"$ref": "#/$defs/nonnegative_integer"},
+        "max_generations": {
+          "type": ["integer", "null"], "exclusiveMinimum": 0
+        },
+        "timeout_s": {"$ref": "#/$defs/positive_number"},
+        "total_wall_time_s": {"$ref": "#/$defs/positive_number"}
+      }
+    },
+    "estimates": {
+      "type": "object", "additionalProperties": false,
+      "required": ["run_count", "candidate_evaluations", "validation_calls", "seconds_per_candidate_by_method", "worker_seconds", "cpu_rss_bytes_per_job", "uncertainty"],
+      "properties": {
+        "run_count": {"$ref": "#/$defs/positive_integer"},
+        "candidate_evaluations": {"$ref": "#/$defs/nonnegative_integer"},
+        "validation_calls": {"$ref": "#/$defs/nonnegative_integer"},
+        "seconds_per_candidate_by_method": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/condition"},
+          "additionalProperties": {"$ref": "#/$defs/positive_number"}
+        },
+        "worker_seconds": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "cpu_rss_bytes_per_job": {"$ref": "#/$defs/positive_integer"},
+        "uncertainty": {"$ref": "#/$defs/nonempty_text"}
+      }
+    },
+    "tuning": {
+      "type": "object", "additionalProperties": false,
+      "required": ["total_candidate_evaluations", "rounds", "only_dev"],
+      "properties": {
+        "total_candidate_evaluations": {"$ref": "#/$defs/nonnegative_integer"},
+        "only_dev": {"const": true},
+        "rounds": {
+          "type": "array",
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["split", "candidate_evaluations", "conditions", "changes", "evidence"],
+            "properties": {
+              "split": {"const": "dev"},
+              "candidate_evaluations": {"$ref": "#/$defs/positive_integer"},
+              "conditions": {
+                "type": "array", "minItems": 1,
+                "items": {"$ref": "#/$defs/condition"}
+              },
+              "changes": {"type": "array", "items": {"$ref": "#/$defs/nonempty_text"}},
+              "evidence": {
+                "type": "array", "minItems": 1,
+                "items": {"$ref": "#/$defs/evidence"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "comparisons": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["name", "method", "baseline", "metrics", "dialects"],
+        "properties": {
+          "name": {"$ref": "#/$defs/nonempty_text"},
+          "method": {"$ref": "#/$defs/condition"},
+          "baseline": {"$ref": "#/$defs/condition"},
+          "metrics": {
+            "type": "array", "minItems": 1, "uniqueItems": true,
+            "items": {"enum": [
+              "safety_pass", "geometry_pass", "completion_pass", "efficiency_eligible",
+              "cycle_time_s", "air_fraction", "force_proxy", "mrr_mm3_s",
+              "material_removal_rate_mm3_s", "residual_volume_mm3", "gouge_volume_mm3",
+              "max_surface_error_mm", "removed_volume_mm3"
+            ]}
+          },
+          "dialects": {
+            "type": "array", "uniqueItems": true, "minItems": 2, "maxItems": 2,
+            "items": {"enum": ["rs274", "haas"]}
+          }
+        }
+      }
+    },
+    "multiplicity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["independent_unit", "seed_aggregation", "sign_flip_two_sided", "holm_scope", "confidence", "bootstrap_replicates", "minimum_ci_tasks", "descriptive_below_tasks"],
+      "properties": {
+        "independent_unit": {"const": "task"},
+        "seed_aggregation": {"const": "within_task_before_pairing"},
+        "sign_flip_two_sided": {"const": true},
+        "holm_scope": {"const": "all_comparisons_metrics_outcomes_and_families"},
+        "confidence": {"type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1},
+        "bootstrap_replicates": {"type": "integer", "minimum": 100},
+        "minimum_ci_tasks": {"const": 2},
+        "descriptive_below_tasks": {"type": "integer", "minimum": 2}
+      }
+    },
+    "external_baselines": {
+      "type": "object", "additionalProperties": false,
+      "required": ["cnc_net_executable", "camotics", "physical_claims", "policy_claims"],
+      "properties": {
+        "cnc_net_executable": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "allow_success_claim"],
+          "properties": {
+            "status": {"const": "unsupported"},
+            "allow_success_claim": {"const": false}
+          }
+        },
+        "camotics": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "primary_oracle"],
+          "properties": {
+            "status": {"const": "supplementary"},
+            "primary_oracle": {"const": false}
+          }
+        },
+        "physical_claims": {"$ref": "#/$defs/nonempty_text"},
+        "policy_claims": {"$ref": "#/$defs/nonempty_text"}
+      }
+    },
+    "acceptance": {
+      "type": "object", "additionalProperties": false,
+      "required": ["strict_improvement_required", "allowed_conclusions"],
+      "properties": {
+        "strict_improvement_required": {"const": false},
+        "allowed_conclusions": {
+          "type": "array", "uniqueItems": true, "minItems": 1,
+          "items": {"enum": ["accept", "reject", "narrow"]}
+        }
+      }
+    },
+    "execution": {
+      "type": "object", "additionalProperties": false,
+      "required": ["task_source", "experiment", "split", "architecture", "output_root", "prototype_task_id", "prototype_task_hash"],
+      "properties": {
+        "task_source": {"const": "prototype_analytic"},
+        "experiment": {"enum": ["pilot", "initialization", "solvers", "mechanics", "all"]},
+        "split": {"enum": ["dev", "test", "external"]},
+        "architecture": {"enum": ["cpu", "gpu"]},
+        "output_root": {"$ref": "#/$defs/repo_relative_path"},
+        "prototype_task_id": {"$ref": "#/$defs/nonempty_text"},
+        "prototype_task_hash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "precision": {"const": "f64"},
+    "notes": {"type": "array", "items": {"type": "string"}}
+  },
+  "$defs": {
+    "nonempty_text": {"type": "string", "minLength": 1},
+    "repo_relative_path": {
+      "type": "string", "minLength": 1,
+      "description": "Relative POSIX-style path under the repository root. No absolute paths or .. traversal."
+    },
+    "sha256": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "optional_hash": {"type": ["string", "null"], "pattern": "^sha256:[0-9a-f]{64}$"},
+    "decision_ids": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^D-[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}$"}
+    },
+    "nonnegative_integer": {"type": "integer", "minimum": 0},
+    "positive_integer": {"type": "integer", "minimum": 1},
+    "nonnegative_number": {"type": "number", "minimum": 0},
+    "positive_number": {"type": "number", "exclusiveMinimum": 0},
+    "condition": {"enum": ["nominal-cam", "fixed-adam", "annealed-adam", "hard-cmaes", "smooth-cmaes"]},
+    "seed_list": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 0}
+    },
+    "method": {
+      "type": "object", "additionalProperties": false,
+      "required": ["condition", "seeds"],
+      "properties": {
+        "condition": {"$ref": "#/$defs/condition"},
+        "seeds": {"$ref": "#/$defs/seed_list"}
+      }
+    },
+    "variant": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "task_id", "condition", "seed", "k", "rationale"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]*$"},
+        "task_id": {"$ref": "#/$defs/nonempty_text"},
+        "condition": {"$ref": "#/$defs/condition"},
+        "seed": {"type": "integer", "minimum": 0},
+        "k": {"$ref": "#/$defs/positive_number"},
+        "rationale": {"$ref": "#/$defs/nonempty_text"}
+      }
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "sha256", "split"],
+      "properties": {
+        "path": {"$ref": "#/$defs/repo_relative_path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "split": {"const": "dev"}
+      }
+    }
+  }
+}
