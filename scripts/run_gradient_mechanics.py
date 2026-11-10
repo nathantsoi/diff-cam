@@ -1041,7 +1041,7 @@ def _run_fixed_case(case, path, base_evaluator, ledger, config: FixedStudyConfig
                 raise ValueError(f"FD epsilon shape {epsilon.shape} does not match fixed theta shape {theta.shape}")
             item = {"status": fd["status"], "epsilon_normalized_theta": epsilon[list(config.fd_indices)].tolist()}
             if fd["status"] == "ok":
-                item["gradient"] = fd["gradient"].tolist()
+                item["gradient"] = _finite_array_json(fd["gradient"])
                 item["coordinate_errors"] = _coordinate_errors(ad, fd["gradient"], config.fd_indices)
                 item["alignment_on_selected_coordinates"] = gm.gradient_alignment(
                     ad[list(config.fd_indices)], fd["gradient"][list(config.fd_indices)])

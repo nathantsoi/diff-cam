@@ -736,6 +736,14 @@ def test_coarse_fixed_case_reuse_and_epsilon_evidence(tmp_path):
     assert repeated["randomized_hard"]["source_probe"]["k_when_first_evaluated"] == 20.0
     assert len(ledger.entries) == 196
     for row in outcomes:
+        report_path = tmp_path / f"case-{row['case']['case_index']}.json"
+        R._new_json(report_path, row)
+        parsed = json.loads(report_path.read_text())
+        for fd_record in parsed["smooth_ad"]["fd_alignment_and_coordinate_errors"]:
+            gradient = fd_record["gradient"]
+            assert len(gradient) == 36
+            assert gradient[3] is None
+            assert all(gradient[index] is not None for index in (0, 1, 2, 35))
         slopes = row["smooth_ad"]
         assert slopes["complete_vector_dimension"] == 36
         assert all(f["is_float64"] for f in slopes["precision_fields_after_real_ad"].values())
