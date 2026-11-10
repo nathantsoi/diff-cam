@@ -246,6 +246,15 @@ def _station_time_weight(segment, subdivisions, index, zero_length):
                  / subdivisions)
 
 
+def _can_inherit_engagement(previous, current):
+    """Whether two adjoining cutting motions may share endpoint engagement."""
+    return (previous is not None
+            and previous.kind != C.SegmentKind.RAPID
+            and current.kind != C.SegmentKind.RAPID
+            and math.dist(previous.end_mm, current.start_mm)
+                <= C.MotionPlan.CONTIGUITY_TOL_MM)
+
+
 def _analytic_mask(geometry, points):
     if geometry.kind != "analytic" or geometry.frame != C.Frame.WORK:
         raise ValueError("only analytic operation/part geometry in the work frame is supported")
@@ -476,8 +485,11 @@ def _execute(task, motion, cfg):
     air_cut_time_s = 0.0
     rapid_time_s = sum(segment.duration_s for segment in motion.segments
                        if segment.kind == C.SegmentKind.RAPID)
+    previous_segment = None
+    last_station_engaged = None
 
     for segment in motion.segments:
+        contiguous_cut_join = _can_inherit_engagement(previous_segment, segment)
         m = _subdivisions(segment, task, cfg)
         zero_length = segment.path_length_mm == 0
         delta_t = (_arc_interval_bound(segment, m, task, motion.frame)
@@ -499,10 +511,14 @@ def _execute(task, motion, cfg):
                 current = _body_distances(points, _base_at(segment, s, task, motion.frame), task.tool)
             if segment.kind != C.SegmentKind.RAPID:
                 cutter = current["cutter"]
-                # Engagement is the cutter's removal of at least one still-occupied
-                # grid cell at this sampled feed/arc pose. Check before subtraction;
-                # rapids never enter air_cut_time_s even if they contact stock.
-                if not np.any(remaining & (cutter <= 0)):
+                # The shared endpoint of a contiguous cutting join inherits the
+                # preceding station's engagement instead of being re-tested against
+                # stock already removed at that pose. Other stations retain the
+                # exact-grid removal test before subtraction. Rapids reset the state.
+                engaged = (last_station_engaged if j == 0 and contiguous_cut_join
+                           else bool(np.any(remaining & (cutter <= 0))))
+                last_station_engaged = engaged
+                if not engaged:
                     air_cut_time_s += _station_time_weight(segment=segment,
                         subdivisions=m, index=j, zero_length=zero_length)
                 wholly_covered = cutter < -rho
@@ -514,6 +530,7 @@ def _execute(task, motion, cfg):
                 remaining[cutter <= 0] = False
                 checked = ("shank", "holder")
             else:
+                last_station_engaged = None
                 checked = ("cutter", "shank", "holder")
 
             material = remaining & stock_interior
@@ -576,6 +593,7 @@ def _execute(task, motion, cfg):
                     if segment.id not in uncertain_segments:
                         uncertain_segments.append(segment.id)
             current = following
+        previous_segment = segment
 
     cycle_time_s = sum(segment.duration_s for segment in motion.segments)
     # At configured exact-grid sampling, trapezoidal station weights partition
@@ -593,6 +611,7 @@ def _execute(task, motion, cfg):
     air_sampling_note = (
         "FEED/ARC cutter stations that remove zero remaining occupied stock cells; "
         "resolution-dependent exact-grid/trapezoidal station time at this evaluation; "
+        "a validated contiguous FEED/ARC join inherits its preceding engagement; rapids/discontinuities reset; "
         "rapids excluded from the numerator; the 0.125 mm verdict is authoritative under D-04")
 
     metrics = {
@@ -644,7 +663,10 @@ def _execute(task, motion, cfg):
         "air_cut_timing": {
             "engagement": "at least one remaining occupied cell removed by the cutter at a sampled FEED/ARC pose, checked before subtraction",
             "station_time_weighting": "whole duration for a zero-length pose; otherwise trapezoidal endpoint-half/interior-whole weights summing segment durations",
-            "rapid_handling": "rapid_time_s is included in cycle_time_s but excluded from air_cut_time_s",
+            "rapid_handling": "rapid_time_s is included in cycle_time_s but excluded from air_cut_time_s; rapids also reset carried engagement",
+            "join_engagement": "at j=0 of a validated contiguous FEED/ARC join, inherit the previous segment's final-station engagement instead of re-testing the shared endpoint",
+            "contiguity_tolerance_mm": C.MotionPlan.CONTIGUITY_TOL_MM,
+            "discontinuity_handling": "without a validated contiguous FEED/ARC join, engagement is recomputed from current remaining stock; no prior engagement is inherited",
             "resolution_dependent": True,
             "authoritative_verdict_max_step_mm": 0.125,
         },

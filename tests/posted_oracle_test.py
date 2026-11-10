@@ -15,7 +15,9 @@ import pytest
 
 from benchmarks import contracts as C
 from cam.gcode_parser import parse_motion_plan
-from cam.posted_evaluator import PostedEvaluator, _analytic_mask, _centres
+from cam.posted_evaluator import (
+    PostedEvaluator, _analytic_mask, _can_inherit_engagement, _centres,
+)
 from cam.posts import post_motion_plan
 from verification import fixtures as F
 from verification.reference_carve import run_reference
@@ -304,6 +306,115 @@ def test_air_metrics_deterministic_across_dialects_for_identical_motion():
         assert metric(rs274, name) == metric(haas, name)
     assert rs274.metrics["air_cut_time_s"].unit == "s"
     assert haas.metrics["rapid_time_s"].unit == "s"
+
+
+def test_only_contiguous_cutting_joins_can_inherit_engagement():
+    prior = F.feed("prior", (10, 10, 4), (14, 10, 4))
+    joined = F.feed("joined", (14, 10, 4), (16, 10, 4))
+    assert _can_inherit_engagement(prior, joined)
+    assert not _can_inherit_engagement(None, joined)
+    assert not _can_inherit_engagement(
+        prior, F.feed("gap", (14.01, 10, 4), (16, 10, 4)))
+    assert not _can_inherit_engagement(
+        prior, F.rapid("same-point-rapid", (14, 10, 4), (14, 10, 4)))
+    assert not _can_inherit_engagement(
+        F.rapid("prior-rapid", (10, 10, 4), (14, 10, 4)), joined)
+
+
+def test_contiguous_split_matches_unsplit_air_time_with_identical_stations():
+    points = [(10, 10, 4), (18, 10, 4)]
+    geometry = {"stock_lo": (0, 0, 0), "stock_hi": (30, 20, 12), "voxel": 1.0}
+    whole = F.make_fixture(
+        "whole-cut-join", [F.feed("whole", *points)], F.flat_tool(3, 20),
+        12 * (2 * 3 * 8 + math.pi * 3 ** 2), "full-depth continuous capsule",
+        **geometry)
+    split_points = [(x, 10, 4) for x in range(10, 19)]
+    split = F.make_fixture(
+        "split-cut-join",
+        [F.feed(f"piece-{x}", *pair) for x, pair in enumerate(zip(split_points, split_points[1:]))],
+        F.flat_tool(3, 20),
+        whole.removed_volume_mm3, "same physical capsule split at cutting joins",
+        **geometry)
+    # This is the same 1 mm stock/grid as the existing all-cutting fixture.
+    # Explicit 1 mm sampling gives identical stations in the whole and split paths.
+    settings = {"max_step_mm": 1.0}
+    whole_result = PostedEvaluator().evaluate_candidate(whole.task, whole.motion, settings)
+    split_result = PostedEvaluator().evaluate_candidate(split.task, split.motion, settings)
+    assert whole_result.coverage == split_result.coverage == C.Coverage.COMPLETE
+    assert metric(whole_result, "air_cut_time_s") == 0.0
+    assert metric(split_result, "air_cut_time_s") == pytest.approx(
+        metric(whole_result, "air_cut_time_s"), abs=1e-12)
+    assert metric(split_result, "removed_volume_mm3") == pytest.approx(
+        metric(whole_result, "removed_volume_mm3"))
+    assert metric(split_result, "cycle_time_s") == pytest.approx(
+        metric(whole_result, "cycle_time_s"))
+    timing = split_result.discretization["air_cut_timing"]
+    assert timing["contiguity_tolerance_mm"] == C.MotionPlan.CONTIGUITY_TOL_MM
+    assert "previous segment" in timing["join_engagement"]
+    assert "reset" in timing["rapid_handling"]
+
+
+def _tail_after_cut_fixture(name, with_rapid):
+    # The leading feed cuts a 5 mm-radius footprint through the full stock height.
+    # The next feed has the same XY footprint, already evacuated, and climbs out.
+    # It is therefore genuinely air after the shared cutting endpoint.
+    leading = F.feed("inside-cut", (10, 10, 4), (14, 10, 4))
+    between = []
+    if with_rapid:
+        between = [F.rapid("out", (14, 10, 4), (14, 10, 20)),
+                   F.rapid("back", (14, 10, 20), (14, 10, 4))]
+    after = [F.feed("after", (14, 10, 4), (14, 10, 20))]
+    fixture = F.make_fixture(name, [leading, *between, *after], F.flat_tool(5, 20),
+                             12 * (2 * 5 * 4 + math.pi * 5 ** 2),
+                             "cut capsule, then air over its already removed footprint")
+    result = PostedEvaluator().evaluate_candidate(fixture.task, fixture.motion, {"subdivisions": 2})
+    assert result.coverage == C.Coverage.COMPLETE
+    return result
+
+
+def test_split_tail_that_moves_into_air_still_counts_as_air():
+    result = _tail_after_cut_fixture("air-tail", with_rapid=False)
+    # The first tail station inherits a cutting predecessor, so only its
+    # second half-station and not the whole tail is air.
+    assert metric(result, "air_cut_time_s") == pytest.approx(1.6 * 0.75)
+    assert metric(result, "rapid_time_s") == 0.0
+    assert metric(result, "cycle_time_s") == pytest.approx(2.0)
+
+
+def test_rapid_reentry_resets_engagement_and_does_not_receive_free_cut_credit():
+    continuous = _tail_after_cut_fixture("air-tail-continuous", with_rapid=False)
+    rapid = _tail_after_cut_fixture("air-tail-rapid-reset", with_rapid=True)
+    assert metric(rapid, "air_cut_time_s") == pytest.approx(1.6)
+    assert metric(rapid, "air_cut_time_s") > metric(continuous, "air_cut_time_s")
+    assert metric(rapid, "rapid_time_s") == pytest.approx(3.2)
+    assert metric(rapid, "cycle_time_s") == pytest.approx(5.2)
+    assert metric(rapid, "air_fraction") == pytest.approx(1.6 / 5.2)
+
+
+def test_feed_to_arc_join_inherits_cut_before_above_stock_arc_endpoint():
+    # The last feed has just cut a 5 mm region at (9, 10, 4). The arc begins
+    # there and ends above stock. Its only other station is therefore air.
+    first = F.feed("arc-pre", (8, 10, 4), (9, 10, 4))
+    arc_data = C.ArcData((10, 10, 4), C.ArcPlane.XY, C.ArcDirection.CW)
+    arc = C.Segment(
+        "arc", C.SegmentKind.ARC, (9, 10, 4), (11, 10, 14),
+        C.arc_geometry((9, 10, 4), (11, 10, 14), arc_data)["length_mm"] / 10,
+        10, arc_data)
+    above = F.feed("arc-tail", (11, 10, 14), (11, 10, 18))
+    fixture = F.make_fixture(
+        "feed-to-arc-air", [first, arc, above], F.flat_tool(5, 20),
+        12 * (2 * 5 + math.pi * 5 ** 2),
+        "full-depth cutting feed, then a real above-stock arc endpoint",
+        stock_lo=(0, 0, 0), stock_hi=(30, 20, 12), voxel=2.0)
+    result = PostedEvaluator().evaluate_candidate(fixture.task, fixture.motion, {"subdivisions": 1})
+    assert result.coverage == C.Coverage.COMPLETE
+    assert metric(result, "removed_volume_mm3") > 0
+    assert result.discretization["segments"][1]["subdivisions"] == 1
+    # Exclude only the arc's shared first half-station; its above-stock final
+    # half-station and following feed remain air. The tail is never given a
+    # cutting flag merely because some earlier unrelated pose was cutting.
+    assert metric(result, "air_cut_time_s") == pytest.approx(arc.duration_s * 0.5 + above.duration_s)
+    assert metric(result, "rapid_time_s") == 0.0
 
 
 def test_real_posted_nc_uses_offset_and_retract_without_unplanned_cut():
