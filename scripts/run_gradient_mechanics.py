@@ -911,10 +911,21 @@ def scale_validity_sweep(task, config: FixedStudyConfig, *, generator=None) -> d
 def _coordinate_errors(first, second, indices, *, epsilon_abs=1e-12) -> list[dict[str, Any]]:
     """AD-vs-estimator differences; undefined zero-denominator relative errors are null."""
     first, second = np.asarray(first, dtype=np.float64), np.asarray(second, dtype=np.float64)
-    if first.shape != second.shape or first.ndim != 1 or not (np.isfinite(first).all() and np.isfinite(second).all()):
-        raise ValueError("coordinate-error rows require finite equal-sized gradients")
-    result = []
+    if first.shape != second.shape or first.ndim != 1:
+        raise ValueError("coordinate-error rows require equal-sized one-dimensional gradients")
+    selected = []
     for index in indices:
+        if (isinstance(index, (bool, np.bool_))
+                or not isinstance(index, (int, np.integer)) or not 0 <= int(index) < first.size):
+            raise ValueError(f"invalid comparison coordinate index {index!r}")
+        if index in selected:
+            raise ValueError(f"duplicate comparison coordinate index {index}")
+        selected.append(int(index))
+    for index in selected:
+        if not np.isfinite(first[index]) or not np.isfinite(second[index]):
+            raise ValueError(f"selected coordinate {index} has no finite gradient pair")
+    result = []
+    for index in selected:
         a, b = float(first[index]), float(second[index])
         difference = b - a
         result.append({"index": int(index), "first": a, "second": b,
@@ -1019,17 +1030,21 @@ def _run_fixed_case(case, path, base_evaluator, ledger, config: FixedStudyConfig
                                      indices=config.fd_indices, ledger=ledger,
                                      require_path_identity=True)
         ad = np.asarray(smooth["ad_gradient"], dtype=np.float64)
+        record["raw_smooth_ad_result"] = smooth
         observed_precision = _dtype_information(evaluator.sim)
         if not all(field["is_float64"] for field in observed_precision.values()):
             raise TypeError(f"study requires f64 primal and adjoint fields: {observed_precision}")
         fd_errors = []
         for fd in smooth["fd"]:
-            item = {"status": fd["status"], "epsilon_normalized_theta": fd["epsilon"][config.fd_indices].tolist()}
+            epsilon = np.asarray(fd["epsilon"], dtype=np.float64)
+            if epsilon.shape != theta.shape:
+                raise ValueError(f"FD epsilon shape {epsilon.shape} does not match fixed theta shape {theta.shape}")
+            item = {"status": fd["status"], "epsilon_normalized_theta": epsilon[list(config.fd_indices)].tolist()}
             if fd["status"] == "ok":
                 item["gradient"] = fd["gradient"].tolist()
                 item["coordinate_errors"] = _coordinate_errors(ad, fd["gradient"], config.fd_indices)
-                item["alignment_on_selected_coordinates"] = gm.gradient_alignment(ad[config.fd_indices],
-                                                                                     fd["gradient"][config.fd_indices])
+                item["alignment_on_selected_coordinates"] = gm.gradient_alignment(
+                    ad[list(config.fd_indices)], fd["gradient"][list(config.fd_indices)])
             else:
                 item["reason"] = fd.get("reason")
             fd_errors.append(item)
@@ -1325,7 +1340,7 @@ def run_fixed_gradient_study(output: Path, config_path: Path, *, mode="full") ->
                      "primary_pairs": primary.get("pairs"), "reference_pairs": reference.get("pairs"),
                      "cosine_ad_vs_reference": alignment.get("cosine"),
                      "relative_difference_norm_ad_vs_reference": alignment.get("relative_difference_norm"),
-                     "wall_time_s": result["wall_time_s"],
+                     "wall_time_s": result.get("wall_time_s"),
                      "candidate_evaluations": result["actual_candidate_evaluations"],
                      "memory_vmhwm_bytes": result.get("memory", {}).get("own_process_vmhwm_bytes")})
     _write_table(output / "results-table.csv", rows,

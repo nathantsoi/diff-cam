@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -570,6 +571,21 @@ def test_fixed_study_null_relative_errors_and_dtype_evidence():
     assert all(row["dtype"] == "<f8" for row in dtypes.values())
 
 
+def test_coordinate_errors_allow_unselected_fd_nan_slots():
+    from scripts import run_gradient_mechanics as R
+    ad = np.arange(36, dtype=np.float64)
+    fd = np.full(36, np.nan)
+    fd[[0, 1, 2, 35]] = [0.0, 2.0, 1.0, 70.0]
+    rows = R._coordinate_errors(ad, fd, [0, 1, 2, 35])
+    assert [row["index"] for row in rows] == [0, 1, 2, 35]
+    assert [row["relative_error"] for row in rows] == [None, 1.0, 0.5, 1.0]
+    unpicked = [index for index in range(36) if index not in (0, 1, 2, 35)]
+    assert np.isnan(fd[unpicked]).all()
+    fd[2] = np.nan
+    with pytest.raises(ValueError, match="selected coordinate 2"):
+        R._coordinate_errors(ad, fd, [2, 35])
+
+
 def test_scale_sweep_preserves_all_declared_indices_and_physical_failures():
     from scripts import run_gradient_mechanics as R
     from types import SimpleNamespace
@@ -679,3 +695,53 @@ def test_k_independent_hard_reuse_scope_and_evaluation_accounting():
     alt = paths[0], paths[1], paths[2], paths[3]
     alt[0]["status"] = "invalid_source_motion"
     assert R._expected_study_evaluations(reused, alt) is None
+
+
+def test_coarse_fixed_case_reuse_and_epsilon_evidence(tmp_path):
+    from dataclasses import replace
+    from scripts import run_gradient_mechanics as R
+    from algorithms.run_artifacts import ComputeLedger
+
+    config = replace(R.study_config_from_json(_declared_fixed_study_document()),
+                     voxel_mm=2.0, reuse_k_independent_hard=True)
+    task, motion, parameterization, evaluator, meta = R.build_pilot_evaluator(
+        tmp_path / "coarse-case", config=R.CostConfig(voxel_mm=2.0), precision="f64",
+        max_cpu_threads=8)
+    path = R._prepare_study_path(config.paths[0], task, evaluator, config)
+    assert path["status"] == "ready"
+    ledger = ComputeLedger()
+    probes = {}
+    outcomes = []
+    for index, k in enumerate((20.0, 40.0)):
+        case = {"case_index": index, "path_index": 0, "path_id": "cam", "k_index": index,
+                "k": k, "objective_mode": "geometry"}
+        outcomes.append(R._run_fixed_case(case, path, evaluator, ledger, config,
+                                          study_started=time.perf_counter(), hard_probes=probes))
+    assert all(row["status"] == "complete" for row in outcomes), [
+        (row["status"], row.get("reason"), row.get("traceback")) for row in outcomes]
+    first, repeated = outcomes
+    assert first["actual_candidate_evaluations"] == 178
+    assert repeated["actual_candidate_evaluations"] == 18
+    assert repeated["expected_complete_candidate_evaluations"] == 18
+    assert first["randomized_hard"]["reused_across_k"] is False
+    assert repeated["randomized_hard"]["reused_across_k"] is True
+    assert repeated["randomized_hard"]["new_hard_evaluations_this_case"] == 0
+    assert (first["randomized_hard"]["source_probe_hash"]
+            == repeated["randomized_hard"]["source_probe_hash"])
+    assert first["randomized_hard"]["exact_hard_evaluations_primary"] == 32
+    assert first["randomized_hard"]["exact_hard_evaluations_reference"] == 128
+    assert repeated["randomized_hard"]["exact_hard_evaluations_primary"] == 32
+    assert repeated["randomized_hard"]["exact_hard_evaluations_reference"] == 128
+    assert first["randomized_hard"]["source_probe"]["k_when_first_evaluated"] == 20.0
+    assert repeated["randomized_hard"]["source_probe"]["k_when_first_evaluated"] == 20.0
+    assert len(ledger.entries) == 196
+    for row in outcomes:
+        slopes = row["smooth_ad"]
+        assert slopes["complete_vector_dimension"] == 36
+        assert all(f["is_float64"] for f in slopes["precision_fields_after_real_ad"].values())
+        assert row["raw_smooth_ad_result"]["fixed_theta_execution"]["ad_vs_forward_only_same_theta"]
+        params = row["smooth_ad"]["fd_alignment_and_coordinate_errors"]
+        assert len(params) == 2
+        for item in params:
+            assert item["epsilon_normalized_theta"] == pytest.approx([item["epsilon_normalized_theta"][0]] * 4)
+            assert len(item["coordinate_errors"]) == 4
