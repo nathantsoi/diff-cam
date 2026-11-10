@@ -374,3 +374,65 @@ def test_experiment1_dev_dry_run_has_72_runs_and_exp2_still_has_312(tmp_path):
     assert all(job["config"]["time_weight"] == 0.01
                and job["config"]["air_time_weight"] == 0.01 for job in exp2["jobs"])
     assert "experiment" not in exp2["plan_core"]
+
+
+def test_experiment1_all_real_dev_initializer_slots_reconstruct_in_shared_space():
+    """Production seed construction only: no optimizer, physics or posted score claim."""
+    loaded = campaign._load(ROOT / "configs/campaign_exp1_dev.json")
+    assert len(campaign._task_rows(loaded)) == 9
+    checked = 0
+    for task_id in campaign._task_rows(loaded):
+        config = dict(loaded["template"], task_id=task_id)
+        task, cam_motion, cam_params, *_ = runner._context(config, ROOT)
+        arms = {}
+        hashes = set()
+        for method in ("annealed-adam", "continuation-adam"):
+            for init, seed in (("experiment1_cam", 0), ("straight_line", 0),
+                               ("random", 0), ("random", 1)):
+                entry = {"method": method, "init": init, "seed": seed, "scope": "optimizer"}
+                motion, params, seed_record = runner._initializer_motion(
+                    config, task, cam_motion, cam_params, entry)
+                assert motion is not None and params is not None
+                assert seed_record["experiment1"] == params.experiment1_metadata
+                raw_positions = np.asarray([motion.initial_state.position_mm]
+                                           + [segment.end_mm for segment in motion.segments])
+                work_positions = np.asarray([
+                    task.work_to_machine.inverse().apply(point) for point in raw_positions
+                ])
+                meta = params.experiment1_metadata
+                theta = np.asarray(meta["initial_theta"], dtype=np.float64)
+                steps = len(motion.segments)
+                assert params.num_control_points == params.num_steps == steps
+                assert params.num_params == steps * 3
+                assert params.scale_mm == 1.0 and params.bounds is None
+                assert params.anchor_end is False
+                assert raw_positions.shape == (steps + 1, 3)
+                np.testing.assert_allclose(theta.reshape(steps, 3),
+                                           np.diff(raw_positions, axis=0) / params.scale_mm,
+                                           rtol=0.0, atol=1e-12)
+                np.testing.assert_allclose(params.positions(theta), work_positions,
+                                           rtol=0.0, atol=1e-10)
+                np.testing.assert_allclose(params.positions(np.zeros(params.num_params)),
+                                           np.repeat(work_positions[:1], steps + 1, axis=0),
+                                           rtol=0.0, atol=1e-12)
+                assert meta["initial_theta_sha256"] == C.content_hash(theta.tolist())
+                assert meta["reference_start_mm_work"] == work_positions[0].tolist()
+                assert meta["source_motion_hash"] == motion.motion_hash
+                assert len(meta["feed_and_kind_template"]) == steps
+                for segment, item in zip(motion.segments, meta["feed_and_kind_template"]):
+                    assert item == {"id": segment.id, "kind": segment.kind.value,
+                                    "feed_mm_s": segment.feed_mm_s, "tag": segment.tag,
+                                    "source_line": segment.source_line}
+                common_hash = C.content_hash(R.parameterization_metadata(params))
+                assert meta["parameterization_sha256"] == common_hash
+                hashes.add(common_hash)
+                if method == "annealed-adam":
+                    arms[(init, seed)] = (motion.motion_hash, meta["initial_theta_sha256"])
+                else:
+                    assert arms[(init, seed)] == (motion.motion_hash, meta["initial_theta_sha256"])
+                checked += 1
+        assert len(hashes) == 1
+        assert set(arms) == {("experiment1_cam", 0), ("straight_line", 0),
+                             ("random", 0), ("random", 1)}
+        assert len(set(arms.values())) == 4
+    assert checked == 72
