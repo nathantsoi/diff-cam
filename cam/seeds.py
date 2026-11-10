@@ -552,35 +552,52 @@ def _nonempty_mapping_fields(value, required: Sequence[str], where: str) -> Mapp
 
 def _random_fields(declaration) -> Mapping[str, Any]:
     statement = declaration.get("random_init", declaration)
-    return _nonempty_mapping_fields(
+    result = _nonempty_mapping_fields(
         statement, ("parameter_space", "distribution", "scale", "seed_derivation_rule"),
         "random_init")
+    if result["parameter_space"] != "delta":
+        raise ValueError("D-08 random initialization uses delta space only; normalized CAM perturbation requires separate cam_perturbed_init")
+    return result
 
 
-def _scale_mm(task: C.TaskSpec, cam: C.MotionPlan, scale) -> tuple[float, dict[str, Any]]:
-    fields = _fields(scale, ("fraction", "reference"), "random_init.scale")
-    fraction = _finite_number(fields["fraction"], "random_init.scale.fraction")
+def _cam_perturbed_fields(declaration) -> Mapping[str, Any]:
+    statement = declaration.get("cam_perturbed_init")
+    required = ("parameter_space", "distribution", "scale", "seed_derivation_rule",
+                "exploratory", "excluded_from_init_axis_claims")
+    result = _nonempty_mapping_fields(statement, required, "cam_perturbed_init")
+    if result["parameter_space"] != "theta":
+        raise ValueError("cam_perturbed_init.parameter_space must be 'theta', the normalized CAM-fit residual space")
+    for name in ("exploratory", "excluded_from_init_axis_claims"):
+        _truth_flag(result, name)
+    return result
+
+
+def _scale_mm(task: C.TaskSpec, cam: C.MotionPlan, scale,
+              *, where: str = "random_init.scale") -> tuple[float, dict[str, Any]]:
+    fields = _fields(scale, ("fraction", "reference"), where)
+    fraction = _finite_number(fields["fraction"], where + ".fraction")
     reference = _fields(fields["reference"], ("kind", "description", "units"),
-                        "random_init.scale.reference")
+                        where + ".reference")
     kind = reference["kind"]
-    _nonempty_text(reference["description"], "random_init.scale.reference.description")
+    _nonempty_text(reference["description"], where + ".reference.description")
     if reference["units"] != "mm":
-        raise ValueError("random_init.scale.reference.units must be explicit 'mm' for registered references")
+        raise ValueError(where + ".reference.units must be explicit 'mm' for registered references")
     if kind == "stock_xy_extent":
         lo, hi = task.stock.params["min_mm"][:2], task.stock.params["max_mm"][:2]
         reference_value = float(math.hypot(hi[0] - lo[0], hi[1] - lo[1]))
     elif kind == "cam_delta_norm":
         reference_value = float(np.linalg.norm(np.asarray(seed_deltas_mm(cam), dtype=np.float64)))
     else:
-        raise ValueError(f"random_init.scale.reference.kind {kind!r} is not an executable registered reference")
+        raise ValueError(f"{where}.reference.kind {kind!r} is not an executable registered reference")
     if not math.isfinite(reference_value) or reference_value <= 0:
-        raise ValueError(f"random_init.scale.reference {kind} must resolve to a positive finite mm value")
-    return fraction * reference_value, {
+        raise ValueError(f"{where}.reference {kind} must resolve to a positive finite mm value")
+    effective_mm = _finite_number(fraction * reference_value, where + ".resolved_mm")
+    return effective_mm, {
         "fraction": fraction, "reference_kind": kind,
         "reference_value_mm": reference_value,
-        "scale_mm": fraction * reference_value,
+        "scale_mm": effective_mm,
         "fraction_zero_is_explicit_degenerate_probe": fraction == 0.0,
-        "runner_allowed": fraction > 0.0,
+        "runner_allowed": fraction > 0.0 and effective_mm > 0.0,
     }
 
 
@@ -589,9 +606,8 @@ def _seed_index(value) -> int:
 
 
 def _rng(task: C.TaskSpec, declaration, declaration_hash: str,
-         rule, seed: int) -> tuple[np.random.Generator, dict[str, Any]]:
-    rule = _fields(rule, ("algorithm", "root_seed", "input", "per_seed_rule"),
-                   "random_init.seed_derivation_rule")
+         rule, seed: int, *, where: str = "random_init.seed_derivation_rule") -> tuple[np.random.Generator, dict[str, Any]]:
+    rule = _fields(rule, ("algorithm", "root_seed", "input", "per_seed_rule"), where)
     if rule["algorithm"] != "sha256_v1":
         raise ValueError("seed_derivation_rule.algorithm must be 'sha256_v1'; no implicit fallback")
     if rule["input"] != "task_hash,declaration_hash,root_seed,seed":
@@ -650,6 +666,11 @@ class SeedResult:
     def valid(self) -> bool:
         return self.plan is not None
 
+    @property
+    def status(self) -> str:
+        """Explicit construction status, not safety or production eligibility."""
+        return "valid_plan" if self.valid else "failed_instance"
+
     def require_plan(self, *, diagnostic_only: bool = False) -> C.MotionPlan:
         """Return a valid plan, rejecting zero-scale probes for runners by default.
 
@@ -666,25 +687,11 @@ class SeedResult:
         return self.plan
 
     def to_record(self) -> dict[str, Any]:
-        return {"schema": "diffcam-noinit-seed-result/1", "valid": self.valid,
-                "declaration_hash": self.declaration_hash, "seed": self.seed,
+        return {"schema": "diffcam-initialization-seed-result/2", "valid": self.valid,
+                "status": self.status, "declaration_hash": self.declaration_hash, "seed": self.seed,
                 "derivation": json.loads(self.derivation),
                 "motion": None if self.plan is None else self.plan.to_dict(),
                 "invalid_reason": self.invalid_reason}
-
-
-def _invalid(declaration, seed, reason) -> SeedResult:
-    try:
-        declaration_hash = _declaration_hash(declaration)
-    except (TypeError, ValueError):
-        declaration_hash = ""
-    clean_seed = (seed if isinstance(seed, (int, np.integer))
-                  and not isinstance(seed, (bool, np.bool_)) and seed >= 0 else None)
-    return SeedResult(None, declaration_hash,
-                      _canonical_json({"schema": "diffcam-init-seed/1",
-                                       "status": "invalid", "reason": str(reason),
-                                       "requested_seed": clean_seed}).decode("utf-8"),
-                      clean_seed, str(reason))
 
 
 def _endpoint(cam: C.MotionPlan, value, where: str) -> Point:
@@ -704,10 +711,14 @@ def _endpoint(cam: C.MotionPlan, value, where: str) -> Point:
     raise ValueError(f"{where}: use 'cam_start', 'cam_end', or 'machine_mm:(x,y,z)'")
 
 
-def _line_positions(task: C.TaskSpec, cam: C.MotionPlan, declaration) -> np.ndarray:
+def _line_positions(task: C.TaskSpec, cam: C.MotionPlan, declaration,
+                   *, require_cam_endpoints: bool = False) -> np.ndarray:
     statement = _straight_fields(declaration)
     if statement["segment_placement"] != "uniform":
         raise ValueError("straight_line_init.segment_placement must be the registered 'uniform' placement")
+    if require_cam_endpoints and (statement["start"] != "cam_start" or
+                                  statement["end"] != "cam_end"):
+        raise ValueError("D-08 random initialization must use CAM start/end anchors; literal endpoints belong to separate straight_line_seed diagnostics")
     if len(cam.segments) < 4:
         raise ValueError("D-08 line-seed construction requires at least four CAM segments for the native K basis")
     start = _endpoint(cam, statement["start"], "straight_line_init.start")
@@ -807,104 +818,221 @@ def straight_line_seed(task: C.TaskSpec, declaration) -> SeedResult:
         return _invalid(declaration, None, str(error))
 
 
-def random_seed(task: C.TaskSpec, declaration, seed: int) -> SeedResult:
-    """Build a deterministic random initialization with recorded derivation.
+def _centered_noise(rng, kind: str, sigma: float, shape: tuple[int, ...]) -> np.ndarray:
+    if sigma == 0.0:
+        return np.zeros(shape, dtype=np.float64)
+    if kind == "gaussian":
+        result = rng.normal(0.0, sigma, size=shape)
+    else:
+        result = rng.uniform(-sigma, sigma, size=shape)
+    result = np.asarray(result, dtype=np.float64)
+    if result.shape != shape or not np.isfinite(result).all():
+        raise ValueError("random generator did not produce finite noise of the declared shape")
+    return result
 
-    ``theta`` samples independent normalized residual controls in the actual
-    CAM ``fit_parameterization`` map (zero => CAM). ``delta`` adds physical
-    centered displacement noise to the declared straight line (zero => that
-    straight line). Gaussian scale is its standard deviation; uniform scale is
-    its symmetric half-range. Each scale comes from the explicit mm reference.
-    No global-RNG state, arbitrary heuristic seed formula or clipping is used.
-    """
+
+def _deviation_statistics(deviations: np.ndarray) -> dict[str, Any]:
+    deviations = np.asarray(deviations, dtype=np.float64)
+    if deviations.ndim < 2 or deviations.shape[-1] != 3 or not np.isfinite(deviations).all():
+        raise ValueError("deviation statistics require finite (..., 3) coordinates")
+    norms = np.linalg.norm(deviations, axis=-1)
+    if not np.isfinite(norms).all():
+        raise ValueError("deviation statistics overflowed; no finite MM result is recorded")
+    return {
+        "count": int(norms.size),
+        "max_deviation_mm": float(np.max(norms)),
+        "rms_deviation_mm": float(np.sqrt(np.mean(norms * norms))),
+        "max_abs_coordinate_deviation_mm": float(np.max(np.abs(deviations))),
+    }
+
+
+def _invalid(declaration, seed, reason, evidence=None) -> SeedResult:
+    try:
+        declaration_hash = _declaration_hash(declaration)
+    except (TypeError, ValueError):
+        declaration_hash = ""
+    clean_seed = (int(seed) if isinstance(seed, (int, np.integer))
+                  and not isinstance(seed, (bool, np.bool_)) and seed >= 0 else None)
+    document = {"schema": "diffcam-initialization-seed-result/2", "status": "failed_instance",
+                "reason": str(reason), "requested_seed": clean_seed,
+                "failure_policy": "retain this requested seed; never redraw, replace, clip, or skip"}
+    if evidence is not None:
+        document["evidence"] = json.loads(_canonical_json(evidence))
+    return SeedResult(None, declaration_hash,
+                      _canonical_json(document).decode("utf-8"), clean_seed, str(reason))
+
+
+def _construct_random_seed(task, declaration, seed, *, exploratory: bool):
+    # These helpers construct positions only. They never initialize a simulator,
+    # start a runner, evaluate machinability, or retry an invalid random draw.
+    evidence = {"schema": "diffcam-init-seed/2", "status": "failed_instance"}
     try:
         if not isinstance(task, C.TaskSpec):
             raise ValueError("task must be a TaskSpec")
         requested_seed = _seed_index(seed)
         declaration_hash = _declaration_hash(declaration)
         _reject_placeholders(declaration)
-        spec = _random_fields(declaration)
+        spec = _cam_perturbed_fields(declaration) if exploratory else _random_fields(declaration)
+        name = "cam_perturbed_init" if exploratory else "random_init"
         cam = seed_for_task(task)
-        # Validate the shared declaration and obtain its reference-line points
-        # before generating random values. Delta's baseline is exactly this line.
-        base_points = _line_positions(task, cam, declaration)
-        space = spec["parameter_space"]
-        if space not in ("theta", "delta"):
-            raise ValueError("random_init.parameter_space must be 'theta' or 'delta'")
+        # D-08 validates its line anchors. The CAM sidecar instead validates
+        # common segment/exact-stop/safe-entry requirements on the actual CAM.
+        line_points = None if exploratory else _line_positions(
+            task, cam, declaration, require_cam_endpoints=True)
         distribution = _fields(spec["distribution"], ("kind", "detail"),
-                               "random_init.distribution")
+                               name + ".distribution")
         kind = distribution["kind"]
-        detail = _nonempty_text(distribution["detail"],
-                                "random_init.distribution.detail").casefold()
+        detail = _nonempty_text(distribution["detail"], name + ".distribution.detail").casefold()
         if kind not in ("gaussian", "uniform"):
             raise ValueError(f"distribution.kind {kind!r} has no registered executable implementation")
         known_details = {"iid", "independent", "uniform_symmetric",
                          "independent zero-mean normal draws per coordinate"}
         if detail not in known_details:
-            raise ValueError("random_init.distribution.detail must declare independent samples ('iid'), not an unregistered estimator")
-        scale_mm, scale_info = _scale_mm(task, cam, spec["scale"])
+            raise ValueError(name + ".distribution.detail must declare independent samples ('iid')")
+        scale_mm, scale_info = _scale_mm(task, cam, spec["scale"], where=name + ".scale")
         rng, derivation = _rng(task, declaration, declaration_hash,
-                               spec["seed_derivation_rule"], requested_seed)
-        shape = (len(cam.segments), 3)
-        sigma = scale_mm
-        if space == "theta":
+                               spec["seed_derivation_rule"], requested_seed,
+                               where=name + ".seed_derivation_rule")
+        if exploratory:
             from benchmarks.pilot_task import fit_parameterization
             parameterization = fit_parameterization(cam)
             shape = parameterization.parameter_shape
-            sigma = scale_mm / parameterization.scale_mm
-            basis_hash = "sha256:" + hashlib.sha256(
-                _canonical_json(parameterization.linear_map.tolist())).hexdigest()
-        if kind == "gaussian":
-            noise = rng.normal(0.0, sigma, size=shape)
-        else:
-            noise = rng.uniform(-sigma, sigma, size=shape)
-        if space == "theta":
-            points = parameterization.positions(noise)
+            sigma = _finite_number(scale_mm / parameterization.scale_mm,
+                                   "cam_perturbed_init normalized scale", allow_zero=True)
+            points0 = np.asarray([cam.initial_state.position_mm]
+                                 + [segment.end_mm for segment in cam.segments], dtype=np.float64)
             parameter_info = {
                 "mode": "delta_spline", "reference_motion": "cam",
                 "steps": parameterization.num_steps,
                 "control_points": parameterization.num_control_points,
                 "control_scale_mm_per_normalized_unit": parameterization.scale_mm,
-                "basis_sha256": basis_hash,
+                "basis_sha256": "sha256:" + hashlib.sha256(
+                    _canonical_json(parameterization.linear_map.tolist())).hexdigest(),
             }
         else:
-            if scale_mm == 0.0:
-                points = base_points.copy()
-            else:
-                residual = np.diff(base_points, axis=0) + noise
-                points = np.vstack((base_points[0], base_points[0] + np.cumsum(residual, axis=0)))
+            # Exactly one independent residual per FREE vertex, not a step
+            # increment whose errors accumulate through the remaining path.
+            shape = (len(cam.segments) - 1, 3)
+            sigma = scale_mm
+            points0 = line_points
             parameter_info = {
-                "mode": "raw_physical_deltas", "reference_motion": "straight_line",
-                "steps": len(cam.segments), "raw_displacement_parameters": 3 * len(cam.segments),
-                "raw_mm_per_displacement_unit": 1.0,
+                "mode": "iid_per_vertex_mm", "reference_motion": "straight_line",
+                "steps": len(cam.segments), "free_vertices": shape[0],
+                "noise_shape": list(shape), "raw_mm_per_delta_unit": 1.0,
             }
-        metadata = {
-            "schema": "diffcam-init-seed/1", "mode": "random",
+        noise = _centered_noise(rng, kind, sigma, shape)
+        noise_scale = {
+            "space": spec["parameter_space"],
+            "unit": "normalized_theta" if exploratory else "mm",
+            "per_coordinate_scale": sigma,
+            "max_abs_coordinate": float(np.max(np.abs(noise))),
+            "definition": (
+                "Gaussian scale is a normalized-theta standard deviation; uniform scale "
+                "is its symmetric half-range, not a physical-MM straight-line bound"
+                if exploratory else
+                "Gaussian scale is the per-coordinate standard deviation in mm; "
+                "uniform scale is its symmetric half-range in mm"),
+            "filter_applied": False,
+            "policy": (
+                "scale controls dispersion only; validity uses actual machine envelope/bounds, "
+                "feed limits, safe entry, contiguity, and validate_for_task; no redraw or clipping"),
+            "sqrt_T_growth": False,
+        }
+        evidence.update({
+            "mode": "cam_perturbed" if exploratory else "random",
+            "seed": requested_seed, "declaration_hash": declaration_hash,
             "task_hash": task.task_hash, "cam_motion_hash": cam.motion_hash,
-            "declaration_hash": declaration_hash, "parameter_space": space,
-            "parameter_map": parameter_info, "scale": scale_info,
+            "parameter_space": spec["parameter_space"], "parameter_map": parameter_info,
+            "scale": scale_info, "seed_derivation": derivation,
+            "noise_sha256": "sha256:" + hashlib.sha256(_canonical_json(noise.tolist())).hexdigest(),
+            "noise_scale": noise_scale, "exploratory": exploratory,
+            "excluded_from_init_axis_claims": exploratory,
+        })
+        if not exploratory:
+            # Retain actual deviations even if physical motion validation fails.
+            # Never compare a Gaussian sample to sigma as an acceptance test.
+            evidence["deviations"] = _deviation_statistics(noise)
+        if exploratory:
+            points = parameterization.positions(noise)
+            # Only resulting tool-position deviations have physical MM units;
+            # the theta coordinates above are normalized spline parameters.
+            measured = _deviation_statistics(points[1:-1] - points0[1:-1])
+        else:
+            # Assign endpoints explicitly: they are pinned even if a future
+            # noise implementation supplies nonzero boundary dummy entries.
+            points = points0.copy()
+            points[1:-1] += noise
+            points[0] = points0[0]
+            points[-1] = points0[-1]
+            measured = _deviation_statistics(noise)
+        if not np.array_equal(points[0], points0[0]):
+            raise ValueError("generated path did not preserve its declared initial endpoint exactly")
+        if not exploratory and not np.array_equal(points[-1], points0[-1]):
+            raise ValueError("D-08 delta path did not preserve its declared final endpoint exactly")
+        evidence.update({
+            "status": "generated_candidate", "deviations": measured,
+            "endpoint_start": list(map(float, points[0])),
+            "endpoint_end": list(map(float, points[-1])),
+            "final_endpoint_pinning_required": not exploratory,
+            "same_segment_count_as_cam": len(cam.segments),
+            "scope": "exploratory_cam_perturbation" if exploratory else "D-08_delta_random_initialization",
+        })
+        metadata = {
+            **evidence,
             "noise_kind": kind, "noise_detail": distribution["detail"],
             "noise_coordinate_semantics": (
-                "Gaussian: independent standard-normal draws times sigma; "
-                "uniform: independent draws on [-sigma, sigma]; both centered additive residuals"),
-            "seed_derivation": derivation,
+                "iid normalized CAM-fit/theta residuals, not physical MM straight-line offsets; "
+                "invalid CAM construction is retained at this seed"
+                if exploratory else
+                "iid per free vertex in physical MM about the straight line, with both endpoints pinned exactly"),
             "same_segment_count_as_cam": len(cam.segments),
             "feed_rule": "retain each original segment kind and limited feed; recompute duration from generated length/rate",
             "safe_entry": "actual first RAPID point pair must be above stock top; unsafe entries are invalid",
-            "scope": "structural seed validity only; generated gouges/collapses are not discarded or converted to passes",
+            "structural_scope": "valid_plan does not mean safe, completed, machinable, or efficiency-eligible",
+            "failure_policy": "an invalid draw remains at this seed; it is never redrawn, replaced, clipped, or skipped",
         }
         plan = _motion_from_positions(task, cam, points, metadata)
-        zero_length = sum(math.dist(segment.start_mm, segment.end_mm) == 0.0
-                          for segment in plan.segments)
-        metadata["zero_length_segments"] = zero_length
+        metadata["zero_length_segments"] = sum(
+            math.dist(segment.start_mm, segment.end_mm) == 0.0 for segment in plan.segments)
         metadata["validation"] = "validate_for_task passed"
+        metadata["status"] = "valid_plan"
         plan = _motion_from_positions(task, cam, points, metadata)
         return SeedResult(plan, declaration_hash,
-                          json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                          json.dumps(metadata, sort_keys=True, separators=(",", ":"), allow_nan=False),
                           requested_seed)
     except (TypeError, ValueError, C.ContractError) as error:
-        return _invalid(declaration, seed, str(error))
+        evidence["status"] = "failed_instance"
+        return _invalid(declaration, seed, str(error), evidence)
+
+
+def random_seed(task: C.TaskSpec, declaration, seed: int) -> SeedResult:
+    """Sample D-08 delta-only, iid free-vertex noise about the straight line.
+
+    The first/last positions are exactly the declared CAM endpoints. Gaussian
+    scale is a coordinate standard deviation; uniform scale is its half-range.
+    Neither is a validity cutoff. Actual motion constraints are checked at this
+    original seed, with no sigma-based rejection, clipping, or redraw.
+    """
+    return _construct_random_seed(task, declaration, seed, exploratory=False)
+
+
+def cam_perturbed_seed(task: C.TaskSpec, declaration, seed: int) -> SeedResult:
+    """Sample a separate exploratory CAM-fit/theta sidecar, not a D-08 arm.
+
+    Its scope and exclusion metadata keep it out of initialization comparisons
+    and collapse claims. This operation does not execute an optimizer or CAM.
+    """
+    return _construct_random_seed(task, declaration, seed, exploratory=True)
+
+
+def random_seed_sequence(task: C.TaskSpec, declaration, seeds) -> tuple[SeedResult, ...]:
+    """Preserve every requested seed position, including failed instances.
+
+    Duplicate seed values remain separate requested slots. There is no filter,
+    lookahead, retry, replacement, or renumbering of a failed draw.
+    """
+    return tuple(random_seed(task, declaration, seed) for seed in tuple(seeds))
 
 
 __all__ = ["IslandSeedSpec", "seed_spec_for_task", "pocket_with_island_seed", "seed_for_task", "seed_deltas_mm",
-           "SeedResult", "straight_line_seed", "random_seed"]
+           "SeedResult", "straight_line_seed", "random_seed", "cam_perturbed_seed", "random_seed_sequence"]

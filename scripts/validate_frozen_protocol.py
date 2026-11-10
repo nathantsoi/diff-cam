@@ -318,23 +318,77 @@ def init_mode(protocol: Mapping[str, Any], entry: Mapping[str, Any],
     return value
 
 
-def validate_initializations(protocol: Mapping[str, Any]) -> list[str]:
-    """Validate the three mandatory, immutable D-08 no-init declarations.
+def cam_perturbed_declaration(entry: Mapping[str, Any], condition: str,
+                              where: str) -> dict[str, Any] | None:
+    """Validate an attached CAM sidecar without making it an init-axis value."""
+    if "cam_perturbed_init" not in entry:
+        return None
+    unknown = entry["cam_perturbed_init"]
+    where += ".cam_perturbed_init"
+    required = ("parameter_space", "distribution", "scale", "seed_derivation_rule",
+                "exploratory", "excluded_from_init_axis_claims")
+    spec = object_fields(unknown, where, required, ("variant_suffix",))
+    require(spec["parameter_space"] == "theta",
+            where + ".parameter_space must be theta in the separate normalized CAM-fit sidecar")
+    boolean(spec["exploratory"], where + ".exploratory", True)
+    boolean(spec["excluded_from_init_axis_claims"],
+            where + ".excluded_from_init_axis_claims", True)
+    require(condition != "nominal-cam",
+            "a perturbed condition needs its own exploratory case; it may not overwrite the plain CAM anchor")
+    distribution = object_fields(spec["distribution"], where + ".distribution", ("kind", "detail"))
+    require(distribution["kind"] in ("gaussian", "uniform"),
+            where + ".distribution.kind must be gaussian or uniform")
+    require(text(distribution["detail"], where + ".distribution.detail").casefold() in
+            {"iid", "independent", "uniform_symmetric", "independent zero-mean normal draws per coordinate"},
+            where + ".distribution.detail must explicitly declare independent draws")
+    scale = object_fields(spec["scale"], where + ".scale", ("fraction", "reference"))
+    number(scale["fraction"], where + ".scale.fraction", 0, strict=True)
+    reference = object_fields(scale["reference"], where + ".scale.reference",
+                              ("kind", "description", "units"))
+    require(reference["kind"] in ("stock_xy_extent", "cam_delta_norm"),
+            where + ".scale.reference must name a registered scale, independently of random_init")
+    text(reference["description"], where + ".scale.reference.description")
+    require(reference["units"] == "mm", where + ".scale.reference.units must be explicit mm")
+    derivation = object_fields(spec["seed_derivation_rule"], where + ".seed_derivation_rule",
+                               ("algorithm", "root_seed", "input", "per_seed_rule"))
+    require(derivation["algorithm"] == "sha256_v1",
+            where + ".seed_derivation_rule.algorithm must be sha256_v1")
+    integer(derivation["root_seed"], where + ".seed_derivation_rule.root_seed")
+    require(derivation["input"] == "task_hash,declaration_hash,root_seed,seed" and
+            derivation["per_seed_rule"] == "first_8_bytes_little_endian_uint64",
+            where + " must preserve the declared SHA-256 per-seed derivation without substitution")
+    suffix = spec.get("variant_suffix", "cam_perturbed")
+    require(isinstance(suffix, str) and re.fullmatch(r"cam_perturbed(?:[-_][A-Za-z0-9_.-]+)?", suffix),
+            where + ".variant_suffix must begin cam_perturbed and be filename-safe")
+    return {"scope": "exploratory_cam_perturbation",
+            "exploratory": True, "excluded_from_init_axis_claims": True,
+            "variant_suffix": suffix,
+            "cam_perturbed_init": {key: spec[key] for key in required}}
 
-    These declarations define a future MotionPlan recipe; this tool neither
-    constructs a MotionPlan nor asserts geometric safety/efficiency eligibility.
-    """
+
+def validate_initializations(protocol: Mapping[str, Any]) -> list[str]:
+    """Validate D-08 declarations and separately excluded CAM sidecars."""
     explicit = [protocol.get("init", "cam")]
+    has_sidecar = False
     for key in ("methods", "dimensionality_subset"):
         rows = protocol.get(key, [])
         if isinstance(rows, list):
-            explicit.extend(row.get("init", protocol.get("init", "cam"))
-                            for row in rows if isinstance(row, Mapping))
-    if all(value == "cam" for value in explicit):
-        return []
+            for index, row in enumerate(rows):
+                if not isinstance(row, Mapping):
+                    continue
+                explicit.append(row.get("init", protocol.get("init", "cam")))
+                if "cam_perturbed_init" in row:
+                    has_sidecar = True
+                    cam_perturbed_declaration(row, row.get("condition", ""), f"{key}[{index}]")
     for value in explicit:
         require(value in INIT_VALUES, f"init must be one of {list(INIT_VALUES)}, got {value!r}")
-    return initializations(protocol)
+    warnings = (["CAM-perturbed cases are separately scoped, excluded from D-08 init comparisons and collapse; current runner wiring is pending."]
+                if has_sidecar else [])
+    if all(value == "cam" for value in explicit):
+        # An exploratory sidecar alone does not silently require or manufacture
+        # a D-08 random arm, its reference, or a collapse-criterion selection.
+        return warnings
+    return warnings + initializations(protocol)
 
 
 def initializations(protocol: Mapping[str, Any]) -> list[str]:
@@ -344,8 +398,8 @@ def initializations(protocol: Mapping[str, Any]) -> list[str]:
                 f"{key}: a nonempty predeclared object is required when any init != cam")
     random = object_fields(protocol["random_init"], "random_init",
                            ("parameter_space", "distribution", "scale", "seed_derivation_rule"))
-    require(random["parameter_space"] in ("theta", "delta"),
-            "random_init.parameter_space must be theta or delta")
+    require(random["parameter_space"] == "delta",
+            "D-08 random_init.parameter_space must be delta; normalized CAM perturbation is a separate excluded exploratory override")
     distribution = object_fields(random["distribution"], "random_init.distribution", ("kind", "detail"))
     require(distribution["kind"] in ("gaussian", "uniform", "other_declared"),
             "random_init.distribution.kind must be gaussian, uniform, or other_declared")
@@ -357,7 +411,7 @@ def initializations(protocol: Mapping[str, Any]) -> list[str]:
     require(reference["kind"] in ("stock_xy_extent", "cam_delta_norm", "other_declared"),
             "random_init.scale.reference.kind must name a scale reference explicitly")
     text(reference["description"], "random_init.scale.reference.description")
-    text(reference["units"], "random_init.scale.reference.units")
+    require(reference["units"] == "mm", "random_init.scale.reference.units must explicitly be mm")
     derivation = object_fields(random["seed_derivation_rule"], "random_init.seed_derivation_rule",
                                ("algorithm", "root_seed", "input", "per_seed_rule"))
     text(derivation["algorithm"], "random_init.seed_derivation_rule.algorithm")
@@ -370,6 +424,10 @@ def initializations(protocol: Mapping[str, Any]) -> list[str]:
                               "respect_task_feed_limits", "efficiency_not_required"))
     for key in ("start", "end", "segment_placement", "feed_and_rapid_entry"):
         text(straight[key], "straight_line_init." + key)
+    require(straight["start"] == "cam_start" and straight["end"] == "cam_end",
+            "D-08 line anchors must be CAM start/end, not substituted CAM interior geometry")
+    require(straight["segment_placement"] == "uniform",
+            "D-08 straight_line_init.segment_placement must preserve T with the registered uniform placement")
     boolean(straight["same_segment_count_and_k"], "straight_line_init.same_segment_count_and_k", True)
     boolean(straight["safe_rapid_entry"], "straight_line_init.safe_rapid_entry", True)
     boolean(straight["respect_task_feed_limits"], "straight_line_init.respect_task_feed_limits", True)
@@ -388,7 +446,7 @@ def initializations(protocol: Mapping[str, Any]) -> list[str]:
     text(collapse["predicate"], "collapse_criterion.predicate")
     boolean(collapse["collapse_and_infeasibility_are_valid_recorded_outcomes"],
             "collapse_criterion.collapse_and_infeasibility_are_valid_recorded_outcomes", True)
-    return ["D-08 initialization is declared but has no runner/seed implementation yet; pending rows are not executable or measured outcomes."]
+    return ["D-08 initializer construction exists, but current runner integration is pending; preview records are not executable plans or measured outcomes."]
 
 
 def validate_tuning(tuning: Mapping[str, Any], repo: Path,
@@ -639,9 +697,32 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
     primary_init_selections: set[tuple[str, str]] = set()
     run_selections: set[tuple[str, str, int]] = set()
     jobs = []
+    exploration_selections: set[tuple[str, str, str, int, str]] = set()
+
+    def append_case(scope, condition, selected_init, seed, *, variant=None, k=None):
+        base = {"scope": scope, "condition": condition, "init": selected_init,
+                "seed": seed, "task_id": primary_id, "task_hash": primary["task_hash"]}
+        if variant is not None:
+            base["variant"] = variant
+        if k is not None:
+            base["k"] = k
+        jobs.append(base)
+        sidecar = cam_perturbed_declaration(entry, condition, where)
+        if sidecar is not None:
+            require(selected_init == "cam",
+                    f"{where}.cam_perturbed_init must attach to a CAM-init parent, not {selected_init}")
+            selection = (scope, variant or "", condition, seed, sidecar["variant_suffix"])
+            require(selection not in exploration_selections,
+                    f"{where}: duplicate exploratory run selection {selection!r}")
+            exploration_selections.add(selection)
+            jobs.append({**base, **sidecar,
+                         "parent_scope": scope,
+                         "parent_variant": variant,
+                         "parent_init": "cam"})
+
     for index, entry in enumerate(methods):
         where = f"methods[{index}]"
-        method = object_fields(entry, where, ("condition", "seeds"), ("init",))
+        method = object_fields(entry, where, ("condition", "seeds"), ("init", "cam_perturbed_init"))
         condition = method["condition"]
         require(condition in runner.CONDITIONS, f"{where}.condition is not supported by the runner: {condition!r}")
         selected_init = init_mode(config, method, condition, where)
@@ -661,8 +742,7 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
             require(run_selection not in run_selections,
                     f"{where}: duplicate primary run (condition, init, seed) {run_selection!r}")
             run_selections.add(run_selection)
-            jobs.append({"scope": "primary", "condition": condition, "init": selected_init, "seed": seed,
-                         "task_id": primary_id, "task_hash": primary["task_hash"]})
+            append_case("primary", condition, selected_init, seed)
 
     variants = config["dimensionality_subset"]
     require(isinstance(variants, list) and 1 <= len(variants) <= 3,
@@ -670,7 +750,7 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
     variant_names: set[str] = set()
     for index, entry in enumerate(variants):
         where = f"dimensionality_subset[{index}]"
-        variant = object_fields(entry, where, ("name", "task_id", "condition", "seed", "k", "rationale"), ("init",))
+        variant = object_fields(entry, where, ("name", "task_id", "condition", "seed", "k", "rationale"), ("init", "cam_perturbed_init"))
         name = text(variant["name"], where + ".name")
         require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) is not None,
                 f"{where}.name must be a filename-safe variant label")
@@ -691,9 +771,7 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
         k = number(variant["k"], where + ".k", 0, strict=True)
         require(k != primary_k, f"{where}: variant repeats primary_k; it is not a distinct bounded ablation")
         text(variant["rationale"], where + ".rationale")
-        jobs.append({"scope": "dimensionality_subset", "variant": name,
-                     "condition": condition, "init": selected_init, "seed": seed,
-                     "task_id": primary_id, "task_hash": primary["task_hash"], "k": k})
+        append_case("dimensionality_subset", condition, selected_init, seed, variant=name, k=k)
 
     multiplicity = config["multiplicity"]
     object_fields(multiplicity, "multiplicity",
@@ -784,6 +862,8 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
 def native_config(job: Mapping[str, Any], declaration: Mapping[str, Any],
                   protocol_sha256: str) -> dict[str, Any]:
     """Translate one approved case into the existing runner's native schema."""
+    require(not job.get("exploratory", False),
+            "CAM-perturbed sidecar needs separately reviewed runner wiring; it cannot be translated into a plain CAM run")
     budget = declaration["budget"]
     objective = declaration["objective"]
     execution = declaration["execution"]
@@ -836,34 +916,65 @@ def execute_dry_runs(declaration: Mapping[str, Any], output: Path,
         label = f"{index:03d}-{job['scope']}-{job['condition']}-i{job['init']}-s{job['seed']}"
         root = destination / label
         root.mkdir(parents=True, exist_ok=False)
-        if job["init"] != "cam":
-            # D-08 runner/seeds belong to a separate downstream implementation.
-            # Do not call the CAM runner or imply that this declaration generated
-            # a valid MotionPlan, an executable configuration, or an outcome.
+        exploratory = job["scope"] == "exploratory_cam_perturbation"
+        if exploratory:
+            require(job.get("exploratory") is True and
+                    job.get("excluded_from_init_axis_claims") is True,
+                    f"{label}: exploratory/exclusion flags are mandatory for every CAM-perturbed row")
+        if job["init"] != "cam" or exploratory:
+            # New geometry and its runner wiring are separate downstream work.
+            # Do not turn a declaration into a native CAM execution or outcome.
+            protocol = declaration["protocol"]
+            suffix = job.get("variant_suffix") if exploratory else None
+            filename = "cam-perturbed-declaration.json" if exploratory else "initialization-declaration.json"
             preview = {
-                "schema": "diffcam-initialization-declaration/1",
+                "schema": ("diffcam-exploratory-cam-perturbation-declaration/1" if exploratory
+                           else "diffcam-initialization-declaration/2"),
                 "declared_not_yet_runnable": True,
                 "scope": job["scope"], "condition": job["condition"],
                 "init": job["init"], "seed": job["seed"],
                 "variant": job.get("variant"),
                 "task_id": job["task_id"], "task_hash": job["task_hash"],
-                "k": job.get("k", declaration["protocol"]["objective"]["primary_k"]),
-                "objective": dict(declaration["protocol"]["objective"]),
-                "budget": dict(declaration["protocol"]["budget"]),
-                "precision": declaration["protocol"]["precision"],
-                "random_init": dict(declaration["protocol"]["random_init"]),
-                "straight_line_init": dict(declaration["protocol"]["straight_line_init"]),
-                "collapse_criterion": dict(declaration["protocol"]["collapse_criterion"]),
+                "k": job.get("k", protocol["objective"]["primary_k"]),
+                "objective": dict(protocol["objective"]),
+                "budget": dict(protocol["budget"]),
+                "precision": protocol["precision"],
+                "random_init": protocol.get("random_init"),
+                "straight_line_init": protocol.get("straight_line_init"),
+                "collapse_criterion": protocol.get("collapse_criterion"),
                 "protocol_reference_sha256": protocol_sha256,
-                "reason": "D-08 initializer/runner seed construction is not implemented yet; this is neither a native configuration nor an execution plan",
+                "exploratory": exploratory,
+                "excluded_from_init_axis_claims": exploratory,
+                "reason": ("Exploratory CAM perturbation is excluded from D-08 init comparisons and collapse; it is not runnable by the current adapter"
+                           if exploratory else
+                           "D-08 initializer construction is implemented separately; current runner integration is pending, so this is neither a native configuration nor an execution plan"),
             }
-            preview_path = root / "initialization-declaration.json"
+            if exploratory:
+                # A declared identity is not an execution receipt. Because the
+                # sidecar scope/suffix is retained, it never aliases a plain CAM.
+                preview.update({
+                    "cam_perturbed_init": job["cam_perturbed_init"],
+                    "variant_suffix": suffix,
+                    "parent_scope": job["parent_scope"],
+                    "parent_variant": job.get("parent_variant"),
+                    "included_in_d08_init_axis_comparisons": False,
+                    "included_in_collapse_criterion": False,
+                    "run_id": f"{job['condition']}-s{job['seed']}-{job.get('variant') or 'primary'}-{suffix}-{job['task_hash'].removeprefix('sha256:')[:12]}",
+                })
+            preview_path = root / filename
             preview_path.write_bytes(canonical_json(preview) + b"\n")
             reports.append({
                 "scope": job["scope"], "condition": job["condition"], "init": job["init"],
-                "seed": job["seed"], "variant": job.get("variant"), "run_id": None,
+                "seed": job["seed"], "variant": job.get("variant"),
+                "run_id": preview.get("run_id"),
                 "task_hash": job["task_hash"],
+                "exploratory": exploratory,
+                "excluded_from_init_axis_claims": exploratory,
+                "included_in_d08_init_axis_comparisons": not exploratory,
+                "included_in_collapse_criterion": not exploratory,
+                "variant_suffix": suffix,
                 "initialization_declaration_sha256": file_sha(preview_path),
+                "declaration_filename": filename,
                 "declared_not_yet_runnable": True, "native_dry_run_performed": False,
                 "planned_run_count": 0, "candidate_evaluations": None, "validation_calls": None,
                 "estimated_wall_time_s": None, "planned_not_executed": True,
@@ -971,11 +1082,19 @@ def validate(config: Mapping[str, Any], *, repo_root: Path | None = None,
         "warnings": declaration["prototype_only_warnings"],
         "dry_run_performed": False,
         "dry_runs": [],
-        "declared_not_yet_runnable_count": sum(job["init"] != "cam" for job in declaration["jobs"]),
+        "declared_not_yet_runnable_count": sum(
+            job["init"] != "cam" or job["scope"] == "exploratory_cam_perturbation"
+            for job in declaration["jobs"]),
+        "exploratory_cam_perturbation_count": sum(
+            job["scope"] == "exploratory_cam_perturbation" for job in declaration["jobs"]),
         "initialization_declarations": [
             {"scope": job["scope"], "condition": job["condition"], "init": job["init"],
-             "seed": job["seed"], "variant": job.get("variant"), "task_hash": job["task_hash"]}
-            for job in declaration["jobs"] if job["init"] != "cam"
+             "seed": job["seed"], "variant": job.get("variant"), "task_hash": job["task_hash"],
+             "variant_suffix": job.get("variant_suffix"),
+             "exploratory": job.get("exploratory", False),
+             "excluded_from_init_axis_claims": job.get("excluded_from_init_axis_claims", False)}
+            for job in declaration["jobs"]
+            if job["init"] != "cam" or job["scope"] == "exploratory_cam_perturbation"
         ],
     }
     if dry_run and declaration["protocol"]["execution"]["experiment"] != "pilot":
