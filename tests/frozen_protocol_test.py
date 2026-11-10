@@ -106,11 +106,11 @@ def make_case(tmp_path):
             "timeout_s": 30.0, "total_wall_time_s": 50.0,
         },
         "estimates": {
-            "run_count": 8, "candidate_evaluations": 29, "validation_calls": 14,
+            "run_count": 8, "candidate_evaluations": 36, "validation_calls": 14,
             "seconds_per_candidate_by_method": {"nominal-cam": 0.5, "fixed-adam": 1.25,
                                                "annealed-adam": 0.5, "hard-cmaes": 0.5,
                                                "smooth-cmaes": 0.5},
-            "worker_seconds": 30.5,
+            "worker_seconds": 35.5,
             "cpu_rss_bytes_per_job": 1073741824,
             "uncertainty": "synthetic arithmetic estimates only; no universal timings or guaranteed phase-memory bound",
         },
@@ -209,9 +209,9 @@ def make_init_case(tmp_path):
         "metrics": ["completion_pass"], "dialects": ["rs274", "haas"],
     })
     # Seven no-init declarations are added to the eight native CAM cases.
-    case["estimates"].update({"run_count": 15, "candidate_evaluations": 57,
-                              "validation_calls": 28, "worker_seconds": 51.5})
-    case["budget"]["total_wall_time_s"] = 60.0
+    case["estimates"].update({"run_count": 15, "candidate_evaluations": 71,
+                              "validation_calls": 28, "worker_seconds": 60.0})
+    case["budget"]["total_wall_time_s"] = 75.0
     return case
 
 
@@ -235,17 +235,17 @@ def test_valid_schema_runs_every_primary_and_variant_case_with_exact_provenance(
     assert doc["declared_not_yet_runnable_count"] == 0
     assert all(row["init"] == "cam" and row["native_dry_run_performed"] for row in report["dry_runs"])
     assert len(report["dry_runs"]) == 8
-    assert doc["cost_accounting"]["candidate_evaluations"] == 29
+    assert doc["cost_accounting"]["candidate_evaluations"] == 36
     assert doc["cost_accounting"]["validation_calls"] == 14
-    assert doc["cost_accounting"]["worker_seconds"] == 30.5
+    assert doc["cost_accounting"]["worker_seconds"] == 35.5
     assert doc["prototype_adapter_compatible"] is True
     nominal = next(row for row in report["dry_runs"] if row["condition"] == "nominal-cam")
     assert nominal["candidate_evaluations"] == 1
     variant = next(row for row in report["dry_runs"] if row["scope"] == "dimensionality_subset")
     assert variant["variant"] == "lower-k"
     fixed = next(row for row in report["dry_runs"] if row["condition"] == "fixed-adam" and row["variant"] is None)
-    assert fixed["candidate_evaluations"] == 4 and fixed["validation_calls"] == 2
-    assert fixed["estimated_wall_time_s"] == 7.5
+    assert fixed["candidate_evaluations"] == 5 and fixed["validation_calls"] == 2
+    assert fixed["estimated_wall_time_s"] == 8.75
     assert variant["run_id"] != fixed["run_id"]
     assert doc["protocol_sha256"] == sha(tmp_path / "protocol.json")
     assert doc["primary_task_hash"] == R._prototype()[0].task_hash
@@ -264,9 +264,9 @@ def test_d08_init_axis_has_explicit_previews_not_cam_runner_evidence(tmp_path):
     assert report["declared_not_yet_runnable_count"] == 7
     assert len(report["dry_runs"]) == 15
     assert report["cost_accounting"]["jobs"] == 15
-    assert report["cost_accounting"]["candidate_evaluations"] == 57
+    assert report["cost_accounting"]["candidate_evaluations"] == 71
     assert report["cost_accounting"]["validation_calls"] == 28
-    assert report["cost_accounting"]["worker_seconds"] == 51.5
+    assert report["cost_accounting"]["worker_seconds"] == 60.0
     pending = [row for row in report["dry_runs"] if row["declared_not_yet_runnable"]]
     assert len(pending) == 7
     assert {row["seed"] for row in pending
@@ -289,6 +289,23 @@ def test_d08_init_axis_has_explicit_previews_not_cam_runner_evidence(tmp_path):
     assert config["init"] == "cam" and config["init_implementation_available"] is True
     assert config["precision"] == "f64" and config["simulator_precision"] == "f64"
     assert (out / cam["output_subdirectory"] / "plan/manifest.json").is_file()
+
+
+def test_worker_seconds_equal_total_wall_time_cap_is_allowed(tmp_path):
+    # The validator's boundary is estimated_worker_seconds <= total_wall_time_s,
+    # not a strict <. Equality is an allowed declared arithmetic boundary.
+    case = make_case(tmp_path)
+    case["budget"]["total_wall_time_s"] = case["estimates"]["worker_seconds"]
+    report = run_case(case, tmp_path)
+    assert report["cost_accounting"]["worker_seconds"] == 35.5
+    assert case["budget"]["total_wall_time_s"] == 35.5
+
+
+def test_worker_seconds_above_total_wall_time_cap_fails_closed(tmp_path):
+    case = make_case(tmp_path)
+    case["budget"]["total_wall_time_s"] = case["estimates"]["worker_seconds"] - 0.01
+    with pytest.raises(V.ProtocolError, match="total_wall_time_s is smaller"):
+        run_case(case, tmp_path)
 
 
 @pytest.mark.parametrize("key", ["random_init", "straight_line_init", "collapse_criterion"])
