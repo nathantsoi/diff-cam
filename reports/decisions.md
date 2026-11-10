@@ -140,3 +140,16 @@ D-10 note (T1.xs, 2026-11-10): the legacy w_air penalty (compute_air_penalty, cs
 so it charges productive cutting as air. The efficiency objective therefore uses **w_air_time**, which is based on the pre-cut
 seg_air/seg_engage volumes after the T1.xs sign fix. **w_air stays explicitly 0** until a separate fix (a stock[t] contract change)
 lands.
+
+## D-2026-11-10-11 — Efficiency time reference is a task constant; provisional pilot weights (review U1/U2)
+- **Reference:** `reference_cycle_time_s` is a per-task constant, the posted cycle time of that task's nominal CAM MotionPlan
+  (`seed_for_task(task)`). The runner computes it once per task and passes it explicitly to every arm (CAM-init and D-08 no-init
+  alike), so the effective weights are identical across arms. The objective rejects `reference_cycle_time_s=None` whenever
+  time_weight or air_time_weight > 0, except under an explicit test-only flag. The T4.2a validator requires the reference rule
+  `task_nominal_cam_cycle_time` whenever an efficiency weight is > 0.
+- **Provisional pilot weights (dev only, NOT protocol values):** time_weight = 0.01, air_time_weight = 0.01 (normalised by the task
+  reference). Rationale: a 1% change in cycle time then moves the objective by about 1e-4, the same order as the geometry penalty at
+  about 1% residual/gouge. Efficiency can therefore drive the search without overwhelming geometry, while selection stays
+  feasibility-first (D-10). The final weights are tuned on dev within the declared budget and frozen at T4.2.
+- **Routing:** T3.xd-wiring card (worker-1, right after T3.xc-runner merges). It covers runner/config wiring, the objectives.py
+  None-rejection and the validator rule. The pilot re-run is blocked on T3.xc-runner and T3.xd-wiring.
