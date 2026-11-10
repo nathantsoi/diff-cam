@@ -404,6 +404,10 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
     require(config["schema"] == PROTOCOL_SCHEMA,
             f"protocol.schema must be {PROTOCOL_SCHEMA}")
     forbid_improvement_gate(config)
+    if "notes" in config:
+        require(isinstance(config["notes"], list) and
+                all(isinstance(note, str) for note in config["notes"]),
+                "protocol.notes must be a list of strings when supplied")
     decision_ids, decision_hash = validate_decisions(decision_ids=config["decision_ids"],
                                                      decisions_path=decisions_path)
     proto_task, _, _ = runner._prototype()
@@ -445,9 +449,9 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
             f"prototype_task_id {execution['prototype_task_id']!r} does not match actual prototype {proto_task.task_id!r}")
     require(execution["prototype_task_hash"] == proto_task.task_hash,
             "prototype_task_hash differs from the actual constructible task")
-            f"current runner implements only pilot; {execution['experiment']!r} requires a reviewed runner upgrade")
     require(execution["split"] == task.split.value,
             "execution.split does not match the selected TaskSpec's split")
+    relative_file(repo, execution["output_root"], "execution.output_root")
 
     objective = object_fields(
         config["objective"], "objective",
@@ -647,6 +651,7 @@ def native_config(job: Mapping[str, Any], declaration: Mapping[str, Any],
         "schema": runner.RUNNER_SCHEMA,
         "experiment": execution["experiment"],
         "task_source": execution["task_source"],
+        "precision": declaration["precision"],
         "arch": execution["architecture"],
         "seeds": [job["seed"]],
         "candidate_evaluations": budget["candidate_evaluations"],
@@ -742,7 +747,8 @@ def execute_dry_runs(declaration: Mapping[str, Any], output: Path,
                 f"{label}: native per-run time estimate differs: {native_cost['estimated_run_wall_time_s']} != {expected_seconds}")
         require(not (root / "plan" / "nominal-cam").exists(),
                 f"{label}: a real nominal evaluation must not be launched during dry-run")
-        require(budget.get("raw_config", {}).get("simulator_precision") == "f64",
+        require(budget.get("raw_config", {}).get("simulator_precision") == "f64" and
+                budget.get("raw_config", {}).get("precision") == "f64",
                 f"{label}: frozen config lost f64 declaration")
         reports.append({
             "scope": job["scope"], "condition": job["condition"], "seed": job["seed"],
@@ -787,14 +793,14 @@ def validate(config: Mapping[str, Any], *, repo_root: Path | None = None,
         "dry_run_performed": False,
         "dry_runs": [],
     }
-    if dry_run and not declaration["prototype_task_matches"]:
-        raise ProtocolError(
-            "current dry-run adapter requires the actual prototype task identity; "
-            "use --validate-only for registered non-prototype task manifests or supply a matched task-source adapter")
     if dry_run and declaration["protocol"]["execution"]["experiment"] != "pilot":
         raise ProtocolError(
             f"current runner implements only pilot; {declaration['protocol']['execution']['experiment']!r} requires a reviewed runner upgrade")
     if dry_run and not declaration["prototype_task_matches"]:
+        raise ProtocolError(
+            "current dry-run adapter requires the actual prototype task identity; "
+            "use --validate-only for registered non-prototype task manifests or supply a matched task-source adapter")
+    if dry_run:
         report["dry_runs"] = execute_dry_runs(declaration, output_dir, source_sha)
         report["dry_run_performed"] = True
         require(len(report["dry_runs"]) == declaration["costs"]["jobs"],

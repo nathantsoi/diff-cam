@@ -375,3 +375,56 @@ def test_uncertainty_and_negative_counts_fail_closed(tmp_path):
     report = run_case(case, tmp_path)
     assert report["cost_accounting"]["worker_seconds"] is None
     assert report["cost_accounting"]["timing_unknown_jobs"]
+
+
+def test_memory_estimate_overrun_and_split_hash_tamper_fail_closed(tmp_path):
+    case = make_case(tmp_path)
+    case["estimates"]["cpu_rss_bytes_per_job"] = case["memory"]["max_rss_bytes_per_job"] + 1
+    with pytest.raises(V.ProtocolError, match="memory optimization"):
+        run_case(case, tmp_path)
+    case = make_case(tmp_path)
+    case["task_manifest"]["split_hashes"]["dev"] = "sha256:" + "0" * 64
+    with pytest.raises(V.ProtocolError, match="typed task selection"):
+        run_case(case, tmp_path)
+
+
+def test_validate_only_accepts_future_experiment_metadata_without_execution(tmp_path):
+    case = make_case(tmp_path)
+    case["execution"]["experiment"] = "all"
+    config_path = tmp_path / "protocol.json"
+    write(config_path, case)
+    report = V.validate(case, repo_root=tmp_path / "repo",
+                        decisions_path=tmp_path / "decisions.md", dry_run=False,
+                        protocol_sha256=sha(config_path))
+    assert "all" in V.runner.EXPERIMENTS
+    assert report["dry_run_performed"] is False
+    assert report["prototype_adapter_compatible"] is False
+
+
+def test_anneal_interval_and_evidence_file_constraints_are_checked(tmp_path):
+    case = make_case(tmp_path)
+    case["objective"]["anneal_end"] = case["objective"]["anneal_start"]
+    with pytest.raises(V.ProtocolError, match="anneal_end must exceed"):
+        run_case(case, tmp_path)
+    case = make_case(tmp_path)
+    evidence = tmp_path / "repo/dev/tuning-history.json"
+    assert evidence.is_file()
+    evidence.unlink()  # Exact created fixture artifact, not shared worktree data.
+def test_protocol_output_root_and_notes_are_validated(tmp_path):
+    case = make_case(tmp_path)
+    case["execution"]["output_root"] = "../escape"
+    with pytest.raises(V.ProtocolError, match="absolute/traversal path"):
+        run_case(case, tmp_path)
+    case = make_case(tmp_path)
+    case["notes"] = "not-a-list-of-strings"
+    with pytest.raises(V.ProtocolError, match="list of strings"):
+        run_case(case, tmp_path)
+
+
+def test_missing_tuning_evidence_file_fails_closed(tmp_path):
+    case = make_case(tmp_path)
+    evidence = tmp_path / "repo/dev/tuning-history.json"
+    assert evidence.is_file()
+    evidence.unlink()  # Exact fixture file created by make_case; safe to remove once.
+    with pytest.raises(V.ProtocolError, match="required evidence file"):
+        run_case(case, tmp_path)
