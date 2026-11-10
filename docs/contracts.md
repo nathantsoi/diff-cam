@@ -113,6 +113,8 @@ task.task_hash, task.tool_setup_hash, motion.motion_hash
 - **1.1, additive (2026-11-10, T1.3g)**: no schema bump. Known metric `air_fraction` is now defined (previously always null):
   FEED/ARC sampled-station time that removes zero remaining stock, divided by `cycle_time_s`. Rapids are excluded from the numerator.
   It is resolution-dependent, and the 0.125 mm verdict governs (D-04). New known metrics: `air_cut_time_s` (s) and `rapid_time_s` (s).
+  T1.3h: at the shared endpoint of a validated contiguous FEED/ARC join (within `MotionPlan.CONTIGUITY_TOL_MM`), the first station
+  inherits the preceding station's engagement; rapids and discontinuities reset it.
 - **1.1** (2026-11-08): T1.0 review showed that a conservative voxel screen cannot certify a rapid retract out of the cutter's own slot
   (true clearance is exactly 0), so every ordinary program would be `safety_pass=null`. Added `Tolerances.rapid_penetration_mm`
   (default 0.0 = v1 behaviour) and metric `min_rapid_cutter_clearance_mm`; `min_clearance_mm` is now non-cutting assembly only.
