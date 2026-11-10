@@ -202,7 +202,7 @@
       "branch": null,
       "blocker": null,
       "next": null,
-      "note": "Exp2 campaign launching from clean core: configs/campaign_suite.json sha256 460ae8d648dc2506c17556a9d7a98215d8c4e04da4f802cadf1b1bc01bfdd5c4; 39 tasks x 8 runs = 312; concurrency 6, TI_CPU_MAX_NUM_THREADS=4; verdict-only 0.125mm both dialects."
+      "note": "Exp2 campaign launching from clean core: configs/campaign_suite.json sha256 460ae8d648dc2506c17556a9d7a98215d8c4e04da4f802cadf1b1bc01bfdd5c4; 39 tasks x 8 runs = 312; concurrency 6, TI_CPU_MAX_NUM_THREADS=4; verdict-only 0.125mm both dialects. Exp1 launched: configs/campaign_exp1_dev.json sha256 206283fe...; 72 runs (9 dev tasks), concurrency 3."
     },
     "T6.1": {
       "status": "in_progress",
@@ -382,7 +382,7 @@
       "status": "complete",
       "owner": "diffcam-worker-3 (seeds); runner conditions later",
       "branch": "task/T4.0-noinit-seeds",
-      "note": "D-08: cam/seeds.py straight_line/random MotionPlans from T4.2a declarations; runner wiring after T3.xc-runner. Seeds merged (3ac95e6). Remaining: runner conditions/init axis wiring (runner lease, after T3.xc-runner). Runner conditions folded into T3.xd-wiring. Runner conditions merged with T3.xd-wiring."
+      "note": "D-08: cam/seeds.py straight_line/random MotionPlans from T4.2a declarations; runner wiring after T3.xc-runner. Seeds merged (3ac95e6). Remaining: runner conditions/init axis wiring (runner lease, after T3.xc-runner). Runner conditions folded into T3.xd-wiring. Runner conditions merged with T3.xd-wiring. Exp1 integration (D-13) merged 00ec0a6."
     },
     "T3.xc": {
       "status": "done",

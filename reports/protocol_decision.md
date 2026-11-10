@@ -2,7 +2,7 @@
 
 **Decision source:** coordinator-supplied T4.2 values, including the later clarifications on 2026-11-10.  
 **Values status:** frozen by the coordinator for the bound experiments.  
-**Implementation status:** Exp2 campaign config bound and launched (see §2); Exp1 config binding pending.  
+**Implementation status:** Exp2 campaign config bound and launched (see §2); Exp1 config bound and launched.  
 **No broader authorization:** this is not launch permission, an execution report, a physical machining certificate, or a claim that an external implementation exists.
 
 This document, together with the exact executable configurations and their hashes below, is the protocol of record. It does not create a half-valid `configs/frozen_benchmark.json`, does not extend the legacy T4.2a schema, and does not treat prototype execution as execution of the 39-task suite. No validator invocation is required by the coordinator's 2026-11-10 routing decision. Exact configurations shall be checked before launch by the coordinator.
@@ -23,7 +23,7 @@ These table entries are intentionally supplied at launch by the coordinator. The
 | Exact executable configuration | SHA-256 of the exact bytes to execute |
 |---|---|
 | `configs/campaign_suite.json`, including worker-2's `continuation-adam` addition | `sha256:460ae8d648dc2506c17556a9d7a98215d8c4e04da4f802cadf1b1bc01bfdd5c4` — launched 2026-11-10 ~11:55 from clean core f383839 (campaign plan sha256:36e66305…; output runs/campaign-exp2-20261110-run) |
-| The worker-2 Exp1 dev configuration for D-13, with its exact path supplied by that worker | `<to be supplied by the coordinator at launch>` |
+| `configs/campaign_exp1_dev.json` (worker-2, D-13) | `sha256:206283fe54e7699c8cfe4d7c658ab6c2cfe09550e6a307764856ced139f857a3` — launched 2026-11-10 from clean core (output runs/campaign-exp1-20261110-run; 72 runs) |
 
 - A launch occurs only after the actual bytes have been reviewed and these two placeholders replaced by real SHA-256 values.
 - Inspected implementation base for this declaration: `2a6024d274fc1e03c395120dd98b942e4ffd7db5`.
