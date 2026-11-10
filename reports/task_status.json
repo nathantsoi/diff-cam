@@ -3,6 +3,8 @@
   "updated": "2026-11-10",
   "integration_branch": "core",
   "coordinator": "diffcam-orchestrator",
+  "handoff_document": "docs/CAM-RUST-HANDOFF-20261110.md",
+  "handoff_override": "User requested worker wind-down and next-agent takeover. Active CAM-RUST implementation is deferred; no new tests, campaigns or merges are assigned by this orchestrator. Read the directory map and the preserved worker reports before resuming.",
   "tasks": {
     "T0.0": {
       "status": "complete",
@@ -486,7 +488,7 @@
       "note": "User (2026-11-10) has a separate project of CAM initializations to supply later. Plan: add as an extra seed source after the direct RustCNC ports integrate; none is available yet."
     },
     "CAM-RUST-1": {
-      "status": "in_progress",
+      "status": "deferred",
       "owner": "diffcam-worker-1",
       "branch": "task/CAM-RUST-1-face-contour",
       "blocker": "Actual lower-step Face residual 61.078125 mm3 >2.0 on procedural-facing_asymmetric-dev-case-00; follow-up CAM-RUST-1b assigned",
@@ -494,7 +496,7 @@
       "note": "ee560b6 implemented Face/Contour; all 13 Facing typed plans fit 23–72 segments with 2R pitch + sourced stay-down correction. Focused 14 passed. Full default 856p/11s/1f shared f32 precision; exact failure reproduced on integration base at 4 threads, not attributed to port, but full suite is not green. Merged as groundwork only through 08a7db3; no active seed or qualified cohort."
     },
     "CAM-RUST-2": {
-      "status": "in_progress",
+      "status": "deferred",
       "owner": "diffcam-worker-2",
       "branch": "task/CAM-RUST-2-pocket",
       "blocker": "Complete retained-pad emission, cap/coverage checks and final validation",
@@ -502,7 +504,7 @@
       "note": "Checkpoint 0c5b6e1 exists, but it is not a final accepted handoff or geometric qualification. Continue tests/all-pocket task attempts and record actual failures; no new experiments."
     },
     "CAM-RUST-3": {
-      "status": "in_progress",
+      "status": "deferred",
       "owner": "diffcam-worker-3",
       "branch": "task/CAM-RUST-3-adaptive",
       "blocker": "Large cap overruns, some retained-pad wave cuts, lower-cap frontier residue and serialized chunk continuity under correction",
@@ -510,7 +512,7 @@
       "note": "Interim writeup, not ready handoff. Entry/pad filtering, links and zero-material handling improved. First focused run 8 passed/6 failed with acknowledged fixture errors still being fixed; no full suite, no committed final tip, no activation."
     },
     "CAM-RUST-4": {
-      "status": "in_progress",
+      "status": "deferred",
       "owner": "diffcam-orchestrator",
       "branch": "core",
       "blocker": "CAM-RUST-1b lower-Face residual fix + final Pocket and Adaptive handoffs + complete nominal qualification",

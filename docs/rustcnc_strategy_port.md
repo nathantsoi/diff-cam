@@ -1,7 +1,9 @@
 # RustCNC strategy port — active implementation plan
 
-Status: **implementation and qualification in progress; the ported strategies are not activated** (2026-11-10).
+Status: **parked for the next agent at the user's wind-down request; the ported strategies are not activated** (2026-11-10).
 Authority: `tasks.md` CAM-RUST-1..4, the per-worker cards in `~/src/cnc/dispatch/diffcam/`, and decision D-2026-11-10-16 in `reports/decisions.md`.
+
+**Start here: [`CAM-RUST-HANDOFF-20261110.md`](CAM-RUST-HANDOFF-20261110.md), including its directory map.** The findings below describe the implementation state at the time the paused work was handed off; they are not claims that the takeover has independently verified or promoted any new nominal seed.
 
 ## Current integration state
 

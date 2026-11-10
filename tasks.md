@@ -270,6 +270,8 @@ Config includes source commit/dirty patch hash, dependencies, seed, task/split, 
 
 This section was added on 2026-11-10 at the user's direction. It pauses the old-start campaigns; it does not erase their completed historical records. Detailed implementation state and immutable inputs live in `docs/rustcnc_strategy_port.md`; the source ports retain reference provenance rather than becoming clean-room/MIT code by copying.
 
+**Handoff override:** later on 2026-11-10 the user requested winding down all implementation workers for a next-agent takeover. The cards below are **deferred, not complete**. No new work, campaign, or REAL_* validation is assigned by this section now. Begin with `docs/CAM-RUST-HANDOFF-20261110.md`, especially its directory map and the preserved worker reports named there.
+
 ### CAM-RUST-1 — Face and Contour 2D direct port
 
 - **Depends on:** RustCNC source pinned in `docs/rustcnc_strategy_port.md`; existing typed task/motion contracts.
