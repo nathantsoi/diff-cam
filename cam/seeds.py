@@ -8,9 +8,15 @@ of constant engagement, trochoidal motion, or optimality.
 
 from __future__ import annotations
 
+import ast
+import hashlib
+import json
 import math
+import re
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Mapping, Sequence
+
+import numpy as np
 
 from benchmarks import contracts as C
 
@@ -452,4 +458,453 @@ def seed_deltas_mm(plan: C.MotionPlan) -> Sequence[Point]:
     )
 
 
-__all__ = ["IslandSeedSpec", "seed_spec_for_task", "pocket_with_island_seed", "seed_for_task", "seed_deltas_mm"]
+# D-08 initialization-seed construction. These helpers deliberately use a
+# small, explicit grammar rather than interpreting arbitrary protocol prose.
+_PLACEHOLDER = re.compile(r"\b(?:TO[-_ ]BE[-_ ]FROZEN|TODO|TBD)\b", re.IGNORECASE)
+_SHA256 = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def _canonical_json(value) -> bytes:
+    return json.dumps(value, allow_nan=False, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=False).encode("utf-8")
+
+
+def _declaration_hash(declaration) -> str:
+    if not isinstance(declaration, Mapping):
+        raise ValueError("initialization declaration must be a mapping")
+    return "sha256:" + hashlib.sha256(_canonical_json(declaration)).hexdigest()
+
+
+def _reject_placeholders(value) -> None:
+    if isinstance(value, str) and (_PLACEHOLDER.search(value) or
+            (value.strip().startswith("<") and value.strip().endswith(">"))):
+        raise ValueError("initialization declaration contains an unresolved placeholder")
+    if isinstance(value, Mapping):
+        for child in value.values():
+            _reject_placeholders(child)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            _reject_placeholders(child)
+
+
+def _fields(value, required: Sequence[str], where: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{where} must be a mapping")
+    missing = sorted(set(required) - set(value))
+    if missing:
+        raise ValueError(f"{where}: missing required fields {missing}")
+    unknown = sorted(set(value) - set(required))
+    if unknown:
+        raise ValueError(f"{where}: unknown fields {unknown}; use a versioned declaration amendment")
+    return value
+
+
+def _nonempty_text(value, where: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{where}: expected nonempty text")
+    return value.strip()
+
+
+def _nonnegative_int(value, where: str) -> int:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, (int, np.integer)) or value < 0:
+        raise ValueError(f"{where}: expected a nonnegative integer")
+    return int(value)
+
+
+def _finite_number(value, where: str, *, allow_zero: bool = True) -> float:
+    if isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{where}: expected a finite number, not a boolean")
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ValueError(f"{where}: expected a finite number") from error
+    if not math.isfinite(result):
+        raise ValueError(f"{where}: expected a finite number")
+    if result < 0 or (not allow_zero and result == 0):
+        raise ValueError(f"{where}: scale must be {'positive' if not allow_zero else 'nonnegative'}")
+    return result
+
+
+def _truth_flag(mapping: Mapping[str, Any], key: str) -> None:
+    if mapping.get(key) is not True:
+        raise ValueError(f"{key}: declaration must explicitly require true")
+
+
+def _straight_fields(declaration) -> Mapping[str, Any]:
+    required = ("start", "end", "segment_placement", "feed_and_rapid_entry",
+                "same_segment_count_and_k", "safe_rapid_entry",
+                "respect_task_feed_limits", "efficiency_not_required")
+    statement = declaration.get("straight_line_init", declaration)
+    result = _nonempty_mapping_fields(statement, required, "straight_line_init")
+    for name in ("start", "end", "segment_placement", "feed_and_rapid_entry"):
+        _nonempty_text(result[name], "straight_line_init." + name)
+    for name in required[4:]:
+        _truth_flag(result, name)
+    return result
+
+
+def _nonempty_mapping_fields(value, required: Sequence[str], where: str) -> Mapping[str, Any]:
+    result = _fields(value, required, where)
+    if not result:
+        raise ValueError(f"{where}: declaration must not be empty")
+    return result
+
+
+def _random_fields(declaration) -> Mapping[str, Any]:
+    statement = declaration.get("random_init", declaration)
+    return _nonempty_mapping_fields(
+        statement, ("parameter_space", "distribution", "scale", "seed_derivation_rule"),
+        "random_init")
+
+
+def _scale_mm(task: C.TaskSpec, cam: C.MotionPlan, scale) -> tuple[float, dict[str, Any]]:
+    fields = _fields(scale, ("fraction", "reference"), "random_init.scale")
+    fraction = _finite_number(fields["fraction"], "random_init.scale.fraction")
+    reference = _fields(fields["reference"], ("kind", "description", "units"),
+                        "random_init.scale.reference")
+    kind = reference["kind"]
+    _nonempty_text(reference["description"], "random_init.scale.reference.description")
+    if reference["units"] != "mm":
+        raise ValueError("random_init.scale.reference.units must be explicit 'mm' for registered references")
+    if kind == "stock_xy_extent":
+        lo, hi = task.stock.params["min_mm"][:2], task.stock.params["max_mm"][:2]
+        reference_value = float(math.hypot(hi[0] - lo[0], hi[1] - lo[1]))
+    elif kind == "cam_delta_norm":
+        reference_value = float(np.linalg.norm(np.asarray(seed_deltas_mm(cam), dtype=np.float64)))
+    else:
+        raise ValueError(f"random_init.scale.reference.kind {kind!r} is not an executable registered reference")
+    if not math.isfinite(reference_value) or reference_value <= 0:
+        raise ValueError(f"random_init.scale.reference {kind} must resolve to a positive finite mm value")
+    return fraction * reference_value, {
+        "fraction": fraction, "reference_kind": kind,
+        "reference_value_mm": reference_value,
+        "scale_mm": fraction * reference_value,
+        "fraction_zero_is_explicit_degenerate_probe": fraction == 0.0,
+        "runner_allowed": fraction > 0.0,
+    }
+
+
+def _seed_index(value) -> int:
+    return _nonnegative_int(value, "requested seed")
+
+
+def _rng(task: C.TaskSpec, declaration, declaration_hash: str,
+         rule, seed: int) -> tuple[np.random.Generator, dict[str, Any]]:
+    rule = _fields(rule, ("algorithm", "root_seed", "input", "per_seed_rule"),
+                   "random_init.seed_derivation_rule")
+    if rule["algorithm"] != "sha256_v1":
+        raise ValueError("seed_derivation_rule.algorithm must be 'sha256_v1'; no implicit fallback")
+    if rule["input"] != "task_hash,declaration_hash,root_seed,seed":
+        raise ValueError("seed_derivation_rule.input must be 'task_hash,declaration_hash,root_seed,seed'")
+    if rule["per_seed_rule"] != "first_8_bytes_little_endian_uint64":
+        raise ValueError("seed_derivation_rule.per_seed_rule must be 'first_8_bytes_little_endian_uint64'")
+    root_seed = _nonnegative_int(rule["root_seed"], "random_init.seed_derivation_rule.root_seed")
+    payload = {
+        "algorithm": "sha256_v1",
+        "task_hash": task.task_hash,
+        "declaration_hash": declaration_hash,
+        "root_seed": root_seed,
+        "seed": seed,
+    }
+    digest = hashlib.sha256(_canonical_json(payload)).hexdigest()
+    derived = int.from_bytes(bytes.fromhex(digest)[:8], "little", signed=False)
+    return np.random.default_rng(np.random.SeedSequence(derived)), {
+        "algorithm": "sha256_v1",
+        "input": rule["input"], "per_seed_rule": rule["per_seed_rule"],
+        "root_seed": root_seed, "requested_seed": seed,
+        "payload": payload, "digest_sha256": "sha256:" + digest,
+        "derived_seed_u64": derived,
+        "generator": "numpy.default_rng(numpy.random.SeedSequence(derived_seed_u64))",
+    }
+
+
+@dataclass(frozen=True)
+class SeedResult:
+    """Typed outcome for an initialization plan; invalid never means clipped.
+
+    ``valid`` says the constructor returned a validated MotionPlan. It is not
+    safety, completion, efficiency-eligibility or machinability evidence.
+    """
+    plan: C.MotionPlan | None
+    declaration_hash: str
+    derivation: str
+    seed: int | None = None
+    invalid_reason: str | None = None
+
+    def __post_init__(self):
+        if self.plan is None and (not isinstance(self.invalid_reason, str)
+                                  or not self.invalid_reason.strip()):
+            raise ValueError("an invalid SeedResult requires a nonempty invalid_reason")
+        if self.plan is not None and self.invalid_reason is not None:
+            raise ValueError("a valid SeedResult cannot carry an invalid_reason")
+        if self.declaration_hash and _SHA256.fullmatch(self.declaration_hash) is None:
+            raise ValueError("declaration_hash must be empty or a sha256:<64 hex> value")
+        if self.seed is not None:
+            _nonnegative_int(self.seed, "SeedResult.seed")
+        if not isinstance(self.derivation, str):
+            raise ValueError("derivation must be a canonical JSON document")
+        if not isinstance(json.loads(self.derivation), Mapping):
+            raise ValueError("derivation must contain a JSON object")
+
+    @property
+    def valid(self) -> bool:
+        return self.plan is not None
+
+    def require_plan(self, *, diagnostic_only: bool = False) -> C.MotionPlan:
+        """Return a valid plan, rejecting zero-scale probes for runners by default.
+
+        ``diagnostic_only=True`` is the explicit test/probe opt-in. It is not
+        production caller context or permission to freeze zero as random scale.
+        """
+        if not isinstance(diagnostic_only, bool):
+            raise ValueError("diagnostic_only must be an explicit boolean")
+        if self.plan is None:
+            raise ValueError(self.invalid_reason)
+        if not diagnostic_only and json.loads(self.derivation).get(
+                "scale", {}).get("runner_allowed") is False:
+            raise ValueError("zero-scale is a diagnostic/test-only probe; frozen no-init scale must be positive")
+        return self.plan
+
+    def to_record(self) -> dict[str, Any]:
+        return {"schema": "diffcam-noinit-seed-result/1", "valid": self.valid,
+                "declaration_hash": self.declaration_hash, "seed": self.seed,
+                "derivation": json.loads(self.derivation),
+                "motion": None if self.plan is None else self.plan.to_dict(),
+                "invalid_reason": self.invalid_reason}
+
+
+def _invalid(declaration, seed, reason) -> SeedResult:
+    try:
+        declaration_hash = _declaration_hash(declaration)
+    except (TypeError, ValueError):
+        declaration_hash = ""
+    clean_seed = (seed if isinstance(seed, (int, np.integer))
+                  and not isinstance(seed, (bool, np.bool_)) and seed >= 0 else None)
+    return SeedResult(None, declaration_hash,
+                      _canonical_json({"schema": "diffcam-init-seed/1",
+                                       "status": "invalid", "reason": str(reason),
+                                       "requested_seed": clean_seed}).decode("utf-8"),
+                      clean_seed, str(reason))
+
+
+def _endpoint(cam: C.MotionPlan, value, where: str) -> Point:
+    text = _nonempty_text(value, where)
+    selector = text.casefold()
+    if selector == "cam_start":
+        return tuple(float(v) for v in cam.initial_state.position_mm)
+    if selector == "cam_end":
+        return tuple(float(v) for v in cam.segments[-1].end_mm)
+    if selector.startswith("machine_mm:"):
+        try:
+            raw = ast.literal_eval(text.split(":", 1)[1].strip())
+            if isinstance(raw, (list, tuple)) and len(raw) == 3:
+                return tuple(_finite_number(v, where + ".coordinate") for v in raw)
+        except (SyntaxError, ValueError) as error:
+            raise ValueError(f"{where}: malformed finite machine_mm coordinate") from error
+    raise ValueError(f"{where}: use 'cam_start', 'cam_end', or 'machine_mm:(x,y,z)'")
+
+
+def _line_positions(task: C.TaskSpec, cam: C.MotionPlan, declaration) -> np.ndarray:
+    statement = _straight_fields(declaration)
+    if statement["segment_placement"] != "uniform":
+        raise ValueError("straight_line_init.segment_placement must be the registered 'uniform' placement")
+    if len(cam.segments) < 4:
+        raise ValueError("D-08 line-seed construction requires at least four CAM segments for the native K basis")
+    start = _endpoint(cam, statement["start"], "straight_line_init.start")
+    end = _endpoint(cam, statement["end"], "straight_line_init.end")
+    count = len(cam.segments)
+    # This does not omit duplicate positions or zero-length segments: preserving
+    # T is more important than manufacturing a less degenerate-looking program.
+    return np.linspace(start, end, count + 1, dtype=np.float64)
+
+
+def _motion_from_positions(task: C.TaskSpec, cam: C.MotionPlan, positions,
+                           metadata: Mapping[str, Any]) -> C.MotionPlan:
+    # This routine only constructs/validates MotionPlans; it never enters the simulator.
+    if not cam.segments:
+        raise ValueError("a nonempty CAM anchor is required")
+    if any(segment.arc is not None for segment in cam.segments):
+        raise ValueError("D-08 line-seed construction does not replace CAM arcs with implicit chords")
+    if cam.timing_rule != C.TimingRule.EXACT_STOP_CONSTANT_SPEED:
+        raise ValueError("this initializer currently requires exact-stop constant-speed motion semantics")
+    points = np.asarray(positions, dtype=np.float64)
+    if points.shape != (len(cam.segments) + 1, 3) or not np.isfinite(points).all():
+        raise ValueError("generated motion positions must be finite (T+1, 3) coordinates")
+    if cam.initial_state.position_mm is None or cam.initial_state.known is False:
+        raise ValueError("a known safe CAM initial position is required")
+    if math.dist(points[0], cam.initial_state.position_mm) > C.MotionPlan.CONTIGUITY_TOL_MM:
+        raise ValueError("generated path does not start at the safe CAM/task initial position")
+    lo, hi = task.limits.envelope_min_mm, task.limits.envelope_max_mm
+    if np.any(points < lo) or np.any(points > hi):
+        raise ValueError("generated motion point is outside the machine envelope; refusing to clip it")
+    if cam.segments[0].kind != C.SegmentKind.RAPID:
+        raise ValueError("safe entry requires the CAM anchor's first segment to be RAPID")
+    inverse = task.work_to_machine.inverse().apply
+    stock_top = task.stock.params["max_mm"][2]
+    if any(inverse(point)[2] <= stock_top for point in (points[0], points[1])):
+        raise ValueError("generated first RAPID entry does not remain above the stock-top plane")
+    segments = []
+    for index, original in enumerate(cam.segments):
+        rapid = original.kind == C.SegmentKind.RAPID
+        if rapid:
+            feed = None
+        else:
+            feed = _finite_number(original.feed_mm_s, f"CAM segment {original.id}.feed_mm_s", allow_zero=False)
+            if feed > task.limits.max_feed_mm_s:
+                raise ValueError(f"feed {feed} mm/s exceeds the task limit in {original.id}")
+        start = tuple(float(v) for v in points[index])
+        end = tuple(float(v) for v in points[index + 1])
+        speed = task.limits.rapid_mm_s if rapid else feed
+        tag = original.tag or "motion"
+        segments.append(C.Segment(
+            id=original.id, kind=original.kind, start_mm=start, end_mm=end,
+            duration_s=math.dist(start, end) / speed, feed_mm_s=feed,
+            tag=tag + ":noinit", arc=None))
+    provenance = json.loads(json.dumps(metadata, allow_nan=False))
+    plan = C.MotionPlan(cam.frame, cam.initial_state, tuple(segments),
+                        cam.timing_rule, provenance=json.dumps(provenance, sort_keys=True,
+                                                               separators=(",", ":"), allow_nan=False))
+    plan.validate_for_task(task)
+    return plan
+
+
+def straight_line_seed(task: C.TaskSpec, declaration) -> SeedResult:
+    """Build D-08's declared uniform straight-line initialization.
+
+    ``cam_start``/``cam_end`` name CAM's initial/final positions. Between them,
+    T equal placements are used, with CAM's original segment kinds and rates.
+    Literal absolute MACHINE positions are available as ``machine_mm:(x,y,z)``.
+    No implicit endpoint, minimum-motion or efficiency criterion is invented.
+    """
+    try:
+        if not isinstance(task, C.TaskSpec):
+            raise ValueError("task must be a TaskSpec")
+        declaration_hash = _declaration_hash(declaration)
+        _reject_placeholders(declaration)
+        cam = seed_for_task(task)
+        points = _line_positions(task, cam, declaration)
+        metadata = {
+            "schema": "diffcam-init-seed/1", "mode": "straight_line",
+            "task_hash": task.task_hash, "cam_motion_hash": cam.motion_hash,
+            "declaration_hash": declaration_hash,
+            "segment_count": len(cam.segments),
+            "placement": "uniform", "endpoint_start": list(map(float, points[0])),
+            "endpoint_end": list(map(float, points[-1])),
+            "feed_rule": "retain each CAM feed_mm_s or task rapid_mm_s; never clamp speeds",
+            "safe_entry": "first RAPID endpoint pair strictly above the work-frame stock top",
+            "scope": "structural seed validity only; collapse/infeasibility is a valid later outcome",
+        }
+        plan = _motion_from_positions(task, cam, points, metadata)
+        zero_length = sum(math.dist(segment.start_mm, segment.end_mm) == 0.0
+                          for segment in plan.segments)
+        metadata["zero_length_segments"] = zero_length
+        metadata["validation"] = "validate_for_task passed"
+        plan = _motion_from_positions(task, cam, points, metadata)
+        return SeedResult(plan, declaration_hash,
+                          json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                          seed=None)
+    except (TypeError, ValueError, C.ContractError) as error:
+        return _invalid(declaration, None, str(error))
+
+
+def random_seed(task: C.TaskSpec, declaration, seed: int) -> SeedResult:
+    """Build a deterministic random initialization with recorded derivation.
+
+    ``theta`` samples independent normalized residual controls in the actual
+    CAM ``fit_parameterization`` map (zero => CAM). ``delta`` adds physical
+    centered displacement noise to the declared straight line (zero => that
+    straight line). Gaussian scale is its standard deviation; uniform scale is
+    its symmetric half-range. Each scale comes from the explicit mm reference.
+    No global-RNG state, arbitrary heuristic seed formula or clipping is used.
+    """
+    try:
+        if not isinstance(task, C.TaskSpec):
+            raise ValueError("task must be a TaskSpec")
+        requested_seed = _seed_index(seed)
+        declaration_hash = _declaration_hash(declaration)
+        _reject_placeholders(declaration)
+        spec = _random_fields(declaration)
+        cam = seed_for_task(task)
+        # Validate the shared declaration and obtain its reference-line points
+        # before generating random values. Delta's baseline is exactly this line.
+        base_points = _line_positions(task, cam, declaration)
+        space = spec["parameter_space"]
+        if space not in ("theta", "delta"):
+            raise ValueError("random_init.parameter_space must be 'theta' or 'delta'")
+        distribution = _fields(spec["distribution"], ("kind", "detail"),
+                               "random_init.distribution")
+        kind = distribution["kind"]
+        detail = _nonempty_text(distribution["detail"],
+                                "random_init.distribution.detail").casefold()
+        if kind not in ("gaussian", "uniform"):
+            raise ValueError(f"distribution.kind {kind!r} has no registered executable implementation")
+        known_details = {"iid", "independent", "uniform_symmetric",
+                         "independent zero-mean normal draws per coordinate"}
+        if detail not in known_details:
+            raise ValueError("random_init.distribution.detail must declare independent samples ('iid'), not an unregistered estimator")
+        scale_mm, scale_info = _scale_mm(task, cam, spec["scale"])
+        rng, derivation = _rng(task, declaration, declaration_hash,
+                               spec["seed_derivation_rule"], requested_seed)
+        shape = (len(cam.segments), 3)
+        sigma = scale_mm
+        if space == "theta":
+            from benchmarks.pilot_task import fit_parameterization
+            parameterization = fit_parameterization(cam)
+            shape = parameterization.parameter_shape
+            sigma = scale_mm / parameterization.scale_mm
+            basis_hash = "sha256:" + hashlib.sha256(
+                _canonical_json(parameterization.linear_map.tolist())).hexdigest()
+        if kind == "gaussian":
+            noise = rng.normal(0.0, sigma, size=shape)
+        else:
+            noise = rng.uniform(-sigma, sigma, size=shape)
+        if space == "theta":
+            points = parameterization.positions(noise)
+            parameter_info = {
+                "mode": "delta_spline", "reference_motion": "cam",
+                "steps": parameterization.num_steps,
+                "control_points": parameterization.num_control_points,
+                "control_scale_mm_per_normalized_unit": parameterization.scale_mm,
+                "basis_sha256": basis_hash,
+            }
+        else:
+            if scale_mm == 0.0:
+                points = base_points.copy()
+            else:
+                residual = np.diff(base_points, axis=0) + noise
+                points = np.vstack((base_points[0], base_points[0] + np.cumsum(residual, axis=0)))
+            parameter_info = {
+                "mode": "raw_physical_deltas", "reference_motion": "straight_line",
+                "steps": len(cam.segments), "raw_displacement_parameters": 3 * len(cam.segments),
+                "raw_mm_per_displacement_unit": 1.0,
+            }
+        metadata = {
+            "schema": "diffcam-init-seed/1", "mode": "random",
+            "task_hash": task.task_hash, "cam_motion_hash": cam.motion_hash,
+            "declaration_hash": declaration_hash, "parameter_space": space,
+            "parameter_map": parameter_info, "scale": scale_info,
+            "noise_kind": kind, "noise_detail": distribution["detail"],
+            "noise_coordinate_semantics": (
+                "Gaussian: independent standard-normal draws times sigma; "
+                "uniform: independent draws on [-sigma, sigma]; both centered additive residuals"),
+            "seed_derivation": derivation,
+            "same_segment_count_as_cam": len(cam.segments),
+            "feed_rule": "retain each original segment kind and limited feed; recompute duration from generated length/rate",
+            "safe_entry": "actual first RAPID point pair must be above stock top; unsafe entries are invalid",
+            "scope": "structural seed validity only; generated gouges/collapses are not discarded or converted to passes",
+        }
+        plan = _motion_from_positions(task, cam, points, metadata)
+        zero_length = sum(math.dist(segment.start_mm, segment.end_mm) == 0.0
+                          for segment in plan.segments)
+        metadata["zero_length_segments"] = zero_length
+        metadata["validation"] = "validate_for_task passed"
+        plan = _motion_from_positions(task, cam, points, metadata)
+        return SeedResult(plan, declaration_hash,
+                          json.dumps(metadata, sort_keys=True, separators=(",", ":")),
+                          requested_seed)
+    except (TypeError, ValueError, C.ContractError) as error:
+        return _invalid(declaration, seed, str(error))
+
+
+__all__ = ["IslandSeedSpec", "seed_spec_for_task", "pocket_with_island_seed", "seed_for_task", "seed_deltas_mm",
+           "SeedResult", "straight_line_seed", "random_seed"]
