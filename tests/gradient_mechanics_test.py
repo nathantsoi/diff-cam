@@ -7,11 +7,14 @@ physical evidence. The separate opt-in test runs real Taichi pocket execution.
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import math
 import os
 from pathlib import Path
 import subprocess
 import sys
+import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -490,3 +493,263 @@ print(report["status"])
         assert array.shape == (120, 80, 24)
         assert np.isfinite(array).all()
         assert report["task_and_geometry"][f"{side}_sha256"] == "sha256:" + hashlib.sha256(payload.read_bytes()).hexdigest()
+
+
+def _declared_fixed_study_document():
+    """Small explicit study declaration, not a frozen protocol or optimizer sweep."""
+    def path(identifier, kind, **values):
+        return {"id": identifier, "kind": kind, **values}
+    return {
+        "schema": "diffcam-fixed-path-gradient-study/1", "study_only": True,
+        "task_id": "dev-pocket-island-000-v2", "voxel_mm": 0.25, "precision": "f64",
+        "cpu_max_num_threads": 8, "k_values": [20.0, 40.0, 80.0, 160.0],
+        "paths": [
+            path("cam", "cam"),
+            path("cam-perturb-17", "cam_perturbed", scale_fraction=0.001, seed=17,
+                 reference_kind="cam_delta_norm", distribution="gaussian", exploratory=True),
+            path("cam-perturb-29", "cam_perturbed", scale_fraction=0.002, seed=29,
+                 reference_kind="cam_delta_norm", distribution="gaussian", exploratory=True),
+            path("delta-line", "delta", scale_fraction=0.0005, seed=11,
+                 reference_kind="stock_xy_extent", distribution="gaussian", exploratory=True),
+        ],
+        "gouge_weight": 2.0, "residual_weight": 1.0, "holder_weight": 50.0, "holder_margin_mm": 0.0,
+        "time_weight": 0.15, "air_time_weight": 0.025,
+        "efficiency_path_ids": ["cam"], "zero_weight_path_id": "cam", "study_only_efficiency": True,
+        "epsilon_theta": [0.025, 0.00625], "fd_indices": [0, 1, 2, 35], "sigma_theta": 0.05,
+        "pairs": 16, "reference_pairs": 64, "hard_root_seed": 2026, "path_root_seed": 101,
+        "scale_sweep": {"reference_kind": "stock_xy_extent",
+                        "fractions": [0.0005, 0.0025, 0.01, 0.05, 0.1],
+                        "seeds": list(range(30)), "root_seed": 303},
+        "max_wall_time_s": 7200.0,
+    }
+
+
+def test_fixed_study_config_and_minimal_case_partition():
+    from scripts import run_gradient_mechanics as R
+    config = R.study_config_from_json(_declared_fixed_study_document())
+    cases = R._fixed_cases(config)
+    assert config.pairs == 16 and config.reference_pairs == 64
+    assert config.k_values == (20.0, 40.0, 80.0, 160.0)
+    assert len(cases) == 18
+    regular = [case for case in cases if case["objective_mode"] == "geometry"]
+    assert len(regular) == 16
+    assert [(case["path_id"], case["k"]) for case in regular[:4]] == [
+        ("cam", 20.0), ("cam", 40.0), ("cam", 80.0), ("cam", 160.0)]
+    supplemental = [case for case in cases if case["objective_mode"] != "geometry"]
+    assert [(case["objective_mode"], case["k"]) for case in supplemental] == [
+        ("zero_weights", 40.0), ("study_efficiency", 40.0)]
+    expected = 2 + 2 * len(config.epsilon_theta) * len(config.fd_indices) + 2 * 16 + 2 * 64
+    assert expected == 178
+    zero = R._objective_spec(config, supplemental[0], 1.5)
+    assert zero.k == 40.0
+    assert zero.gouge_weight == zero.residual_weight == zero.holder_weight == 0.0
+    assert zero.time_weight == zero.air_time_weight == 0.0
+    efficient = R._objective_spec(config, supplemental[1], 231.5)
+    assert efficient.time_weight == 0.15 and efficient.air_time_weight == 0.025
+    for field, value in (("k_values", [10.0, 20.0, 40.0, 80.0, 160.0]),
+                         ("pairs", 8), ("cpu_max_num_threads", 9),
+                         ("voxel_mm", 0.5), ("precision", "f32")):
+        document = _declared_fixed_study_document()
+        document[field] = value
+        with pytest.raises(ValueError):
+            R.study_config_from_json(document)
+
+
+def test_fixed_study_null_relative_errors_and_dtype_evidence():
+    from scripts import run_gradient_mechanics as R
+    first, second = np.array([0.0, 1.0, 0.0, 4.0]), np.array([0.0, 3.0, 2.0, -4.0])
+    rows = R._coordinate_errors(first, second, [0, 1, 2, 3])
+    assert [row["relative_error"] for row in rows] == [None, 2.0, None, 2.0]
+    assert [row["absolute_error"] for row in rows] == [0.0, 2.0, 2.0, 8.0]
+    assert all(row["epsilon_abs"] == 1e-12 for row in rows)
+    with pytest.raises(ValueError):
+        R._coordinate_errors(np.array([np.nan]), np.array([0.0]), [0])
+    field = SimpleNamespace(dtype=np.dtype("<f8"), grad=SimpleNamespace(dtype=np.dtype("<f8")))
+    sim = SimpleNamespace(loss=field, stock=field, tool_delta=field)
+    dtypes = R._dtype_information(sim)
+    assert len(dtypes) == 6 and all(row["is_float64"] for row in dtypes.values())
+    assert all(row["dtype"] == "<f8" for row in dtypes.values())
+
+
+def test_coordinate_errors_allow_unselected_fd_nan_slots():
+    from scripts import run_gradient_mechanics as R
+    ad = np.arange(36, dtype=np.float64)
+    fd = np.full(36, np.nan)
+    fd[[0, 1, 2, 35]] = [0.0, 2.0, 1.0, 70.0]
+    rows = R._coordinate_errors(ad, fd, [0, 1, 2, 35])
+    assert [row["index"] for row in rows] == [0, 1, 2, 35]
+    assert [row["relative_error"] for row in rows] == [None, 1.0, 0.5, 1.0]
+    unpicked = [index for index in range(36) if index not in (0, 1, 2, 35)]
+    assert np.isnan(fd[unpicked]).all()
+    fd[2] = np.nan
+    with pytest.raises(ValueError, match="selected coordinate 2"):
+        R._coordinate_errors(ad, fd, [2, 35])
+
+
+def test_scale_sweep_preserves_all_declared_indices_and_physical_failures():
+    from scripts import run_gradient_mechanics as R
+    from types import SimpleNamespace
+    from benchmarks.pilot_task import build_pilot_task
+    config = R.study_config_from_json(_declared_fixed_study_document())
+    calls = []
+
+    def controlled(declaration, seed):
+        fraction = declaration["random_init"]["scale"]["fraction"]
+        calls.append((fraction, seed))
+        valid = not (fraction >= 0.05 and seed % 7 == 0)
+        sigma = fraction * 72.11102550927978
+        derivation = {
+            "scale": {"scale_mm": sigma},
+            "deviations": {"count": 74, "max_deviation_mm": 0.02, "rms_deviation_mm": 0.003,
+                           "max_abs_coordinate_deviation_mm": 0.01},
+            "parameter_map": {"steps": 75},
+            "noise_scale": {"filter_applied": False, "unit": "mm"},
+            "seed_derivation": {"requested_seed": seed, "unit_test_only": True},
+        }
+        return SimpleNamespace(valid=valid, plan=(None if not valid else
+                                                  SimpleNamespace(motion_hash=f"mock-{fraction}-{seed}")),
+                               invalid_reason=(None if valid else "machine envelope violation; no clipping"),
+                               declaration_hash="sha256:" + "a" * 64, derivation=json.dumps(derivation))
+
+    report = R.scale_validity_sweep(build_pilot_task(), config, generator=controlled)
+    assert len(report["rows"]) == len(calls) == 150
+    assert len(report["summaries"]) == 5
+    assert [(row["fraction"], row["seed"]) for row in report["rows"]] == [
+        (fraction, seed) for fraction in config.sweep_fractions for seed in config.sweep_seeds]
+    for summary in report["summaries"]:
+        assert summary["attempted"] == summary["valid"] + summary["failed"] == 30
+        assert 0 <= summary["valid_rate"] <= 1
+    failures = [row for row in report["rows"] if not row["valid"]]
+    assert failures and all("envelope" in row["invalid_reason"] for row in failures)
+    assert all(row["status"] == "failed_physical_constraint" for row in failures)
+    assert all(row["deviations"]["rms_deviation_mm"] == 0.003 for row in failures)
+    assert all(row["T"] == 75 for row in failures)
+    # This controlled generator is deliberately a unit oracle, not physics/e2e evidence.
+    assert report["physical_validity_only"] is True
+
+
+def test_fixed_path_source_and_fixed_theta_hashes_stay_distinct():
+    from scripts import run_gradient_mechanics as R
+    from benchmarks.pilot_task import build_pilot_task
+
+    class FixedPathFactory:
+        def __init__(self, task, motion, parameterization, sim, *, spec=None, ledger=None, seed=0, requested_precision=None):
+            self.motion = motion
+
+        def candidate_motion(self, theta):
+            assert np.asarray(theta).shape == (36,)
+            return SimpleNamespace(motion_hash="unit-fixed-theta-path",
+                                   waypoints_mm=self.motion.waypoints_mm)
+
+    config = R.study_config_from_json(_declared_fixed_study_document())
+    task = build_pilot_task()  # Analytic metadata only; no simulator/runtime started.
+    base = FixedPathFactory(task, None, None, object())
+    base.sim, base.spec, base.ledger, base.seed = object(), None, None, 0
+    nominal = R._prepare_study_path(config.paths[0], task, base, config)
+    assert nominal["status"] == "ready" and nominal["declaration"] is None
+    assert nominal["source_record"]["mode"] == "nominal_cam" and nominal["source_result"] is None
+    ready = R._prepare_study_path(config.paths[1], task, base, config)
+    assert ready["status"] == "ready"
+    assert ready["source_motion"].frame == C.Frame.MACHINE
+    assert ready["motion"].motion_hash == "unit-fixed-theta-path"
+    assert ready["segment_count"] == 75
+    assert ready["parameter_shape"] == [12, 3]
+    assert ready["theta"].shape == (36,) and np.all(ready["theta"] == 0)
+    assert ready["source_hash"] == ready["source_motion"].motion_hash
+    assert ready["fixed_motion_hash"] == "unit-fixed-theta-path"
+    assert ready["source_record"]["derivation"]["exploratory"] is True
+    assert ready["source_record"]["derivation"]["excluded_from_init_axis_claims"] is True
+    assert ready["declaration"]["noise_scale_metadata"]["unit"] == "normalized_theta"
+    assert ready["source_to_fixed_path_max_error_mm"] == 0.0
+
+
+def test_study_thread_cap_validation_happens_before_any_runtime_or_files(tmp_path):
+    from scripts.run_gradient_mechanics import build_pilot_evaluator, CostConfig
+    for maximum in (0, 9, 8.0):
+        output = tmp_path / f"invalid-{maximum}"
+        with pytest.raises(ValueError, match="max_cpu_threads"):
+            build_pilot_evaluator(output, config=CostConfig(voxel_mm=2.0),
+                                  precision="f64", max_cpu_threads=maximum)
+        assert not output.exists()
+
+
+def test_k_independent_hard_reuse_scope_and_evaluation_accounting():
+    from scripts import run_gradient_mechanics as R
+    from dataclasses import replace
+    config = R.study_config_from_json(_declared_fixed_study_document())
+    reused = replace(config, reuse_k_independent_hard=True)
+    paths = [{"status": "ready", "id": item["id"], "source_hash": f"{item['id']}-source",
+              "fixed_motion_hash": f"{item['id']}-fixed", "theta_hash": f"{item['id']}-theta",
+              "basis_sha256": f"{item['id']}-basis"} for item in config.paths]
+    cases = R._fixed_cases(config)
+    # Hard is independent of smoothing k: these two rows intentionally share a probe.
+    assert R._hard_probe_key(cases[0], paths[0], reused) == R._hard_probe_key(cases[1], paths[0], reused)
+    assert R._hard_probe_key(cases[0], paths[0], reused) != R._hard_probe_key(cases[4], paths[1], reused)
+    assert R._hard_probe_key(cases[0], paths[0], reused) != R._hard_probe_key(
+        dict(cases[0], objective_mode="study_efficiency"), paths[0], reused)
+    assert R._hard_probe_key(cases[0], paths[0], reused) != R._hard_probe_key(
+        cases[0], paths[0], replace(reused, sigma_theta=0.025))
+    assert R._expected_study_evaluations(config, paths) == 3204
+    assert R._expected_study_evaluations(reused, paths) == 1284
+    assert reused.reuse_k_independent_hard is True
+    alt = paths[0], paths[1], paths[2], paths[3]
+    alt[0]["status"] = "invalid_source_motion"
+    assert R._expected_study_evaluations(reused, alt) is None
+
+
+def test_coarse_fixed_case_reuse_and_epsilon_evidence(tmp_path):
+    from dataclasses import replace
+    from scripts import run_gradient_mechanics as R
+    from algorithms.run_artifacts import ComputeLedger
+
+    config = replace(R.study_config_from_json(_declared_fixed_study_document()),
+                     voxel_mm=2.0, reuse_k_independent_hard=True)
+    task, motion, parameterization, evaluator, meta = R.build_pilot_evaluator(
+        tmp_path / "coarse-case", config=R.CostConfig(voxel_mm=2.0), precision="f64",
+        max_cpu_threads=8)
+    path = R._prepare_study_path(config.paths[0], task, evaluator, config)
+    assert path["status"] == "ready"
+    ledger = ComputeLedger()
+    probes = {}
+    outcomes = []
+    for index, k in enumerate((20.0, 40.0)):
+        case = {"case_index": index, "path_index": 0, "path_id": "cam", "k_index": index,
+                "k": k, "objective_mode": "geometry"}
+        outcomes.append(R._run_fixed_case(case, path, evaluator, ledger, config,
+                                          study_started=time.perf_counter(), hard_probes=probes))
+    assert all(row["status"] == "complete" for row in outcomes), [
+        (row["status"], row.get("reason"), row.get("traceback")) for row in outcomes]
+    first, repeated = outcomes
+    assert first["actual_candidate_evaluations"] == 178
+    assert repeated["actual_candidate_evaluations"] == 18
+    assert repeated["expected_complete_candidate_evaluations"] == 18
+    assert first["randomized_hard"]["reused_across_k"] is False
+    assert repeated["randomized_hard"]["reused_across_k"] is True
+    assert repeated["randomized_hard"]["new_hard_evaluations_this_case"] == 0
+    assert (first["randomized_hard"]["source_probe_hash"]
+            == repeated["randomized_hard"]["source_probe_hash"])
+    assert first["randomized_hard"]["exact_hard_evaluations_primary"] == 32
+    assert first["randomized_hard"]["exact_hard_evaluations_reference"] == 128
+    assert repeated["randomized_hard"]["exact_hard_evaluations_primary"] == 32
+    assert repeated["randomized_hard"]["exact_hard_evaluations_reference"] == 128
+    assert first["randomized_hard"]["source_probe"]["k_when_first_evaluated"] == 20.0
+    assert repeated["randomized_hard"]["source_probe"]["k_when_first_evaluated"] == 20.0
+    assert len(ledger.entries) == 196
+    for row in outcomes:
+        report_path = tmp_path / f"case-{row['case']['case_index']}.json"
+        R._new_json(report_path, row)
+        parsed = json.loads(report_path.read_text())
+        for fd_record in parsed["smooth_ad"]["fd_alignment_and_coordinate_errors"]:
+            gradient = fd_record["gradient"]
+            assert len(gradient) == 36
+            assert gradient[3] is None
+            assert all(gradient[index] is not None for index in (0, 1, 2, 35))
+        slopes = row["smooth_ad"]
+        assert slopes["complete_vector_dimension"] == 36
+        assert all(f["is_float64"] for f in slopes["precision_fields_after_real_ad"].values())
+        assert row["raw_smooth_ad_result"]["fixed_theta_execution"]["ad_vs_forward_only_same_theta"]
+        params = row["smooth_ad"]["fd_alignment_and_coordinate_errors"]
+        assert len(params) == 2
+        for item in params:
+            assert item["epsilon_normalized_theta"] == pytest.approx([item["epsilon_normalized_theta"][0]] * 4)
+            assert len(item["coordinate_errors"]) == 4
