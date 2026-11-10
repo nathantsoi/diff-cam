@@ -73,15 +73,6 @@
   "generation_version": "t2.3/2",
   "generator_seed": 133742,
   "grid_pitch_mm": 0.25,
-  "pending_posted_qualification": {
-    "coordinator_batch": true,
-    "dialects": [
-      "rs274",
-      "haas"
-    ],
-    "grid_pitch_mm": 0.125,
-    "status": "pending"
-  },
   "per_family_counts": {
     "facing_asymmetric": {
       "dev": 3,
@@ -97,6 +88,630 @@
     }
   },
   "performance_based_exclusion": "none; geometry/setup/seed qualification only",
+  "posted_qualification_batch": {
+    "code_source_sha256": {
+      "benchmarks/contracts.py": "sha256:bc90641651b97f491864c19332e1debd74ce03f121b668126dd2a204d877b5f3",
+      "benchmarks/pilot_task.py": "sha256:fad4032f24a3e960f271852e0a3c2422b2b5927571a2f1af32e905f3dda1fbbe",
+      "cam/gcode_parser.py": "sha256:8166136830829376a0d3b9769ae7bfff5a1c4d5279d3507119fc5f50f9696e90",
+      "cam/posted_evaluator.py": "sha256:fefe9ee53e195ab61e5cfa42b0f4620039d9193077b69f6a52abee4afb8abb2a",
+      "cam/posts.py": "sha256:4b8d0b8b31fa86809e26be56a24b0632c9140783ea64b49d1a8b6e5563eb0970",
+      "cam/seeds.py": "sha256:153370ce0fbf15645c74fcf0824a10f4bd84bfa319229ef371ca11ea675abb58",
+      "scripts/qualify_task_suite.py": "sha256:c5f9b90affe19943780b7b3fb1c78ba347a5ac752dadfc051dd94fba793224fb",
+      "scripts/run_benchmark_suite.py": "sha256:d6bba765155f2b207decd8bc612608cdcc144e30eceff1396ab42e71e5f724c0",
+      "simulator/csg_simulator.py": "sha256:777610de7ae088004ebc3419f73b4fa0dd503ce7ccd88dcb02298e87144b7d0e",
+      "verification/reference_carve.py": "sha256:5446e7cadf8bc256da3e452e4ef4c15e704243e203bd83bd4e296f4b123f0b01"
+    },
+    "cohort_identity_sha256": "sha256:2adb91a43abac79536061cf5bdcddf8260133c49a4ca97ee36e58420fa4f1cab",
+    "concurrency": 8,
+    "controller_wall_seconds": 1474.8220839659916,
+    "counts_by_family_split": {
+      "facing_asymmetric/dev": {
+        "failed": 0,
+        "not_qualified": 0,
+        "qualified": 3,
+        "total": 3
+      },
+      "facing_asymmetric/test": {
+        "failed": 0,
+        "not_qualified": 0,
+        "qualified": 10,
+        "total": 10
+      },
+      "pocket_island/dev": {
+        "failed": 0,
+        "not_qualified": 0,
+        "qualified": 3,
+        "total": 3
+      },
+      "pocket_island/test": {
+        "failed": 0,
+        "not_qualified": 0,
+        "qualified": 10,
+        "total": 10
+      },
+      "variable_width_depth/dev": {
+        "failed": 0,
+        "not_qualified": 0,
+        "qualified": 3,
+        "total": 3
+      },
+      "variable_width_depth/test": {
+        "failed": 0,
+        "not_qualified": 0,
+        "qualified": 10,
+        "total": 10
+      }
+    },
+    "dirty_patch_hash": null,
+    "ended_utc": "2026-11-10T14:45:05.224146+00:00",
+    "evaluator_revision": "posted_evaluator/1+sha256:fefe9ee53e195ab61e5cfa42b0f4620039d9193077b69f6a52abee4afb8abb2a",
+    "memory_limit_bytes_per_job": 8589934592,
+    "per_job_process": {
+      "procedural-facing_asymmetric-dev-case-00-offset_square_lower_step_pad": {
+        "haas": {
+          "peak_rss_bytes": 232976384,
+          "process_wall_seconds": 222.46204313798808,
+          "worker_pid": 2500346,
+          "worker_wall_seconds": 221.15924056596123
+        },
+        "rs274": {
+          "peak_rss_bytes": 233230336,
+          "process_wall_seconds": 216.08308599097654,
+          "worker_pid": 2500341,
+          "worker_wall_seconds": 214.69955190096516
+        }
+      },
+      "procedural-facing_asymmetric-dev-case-01-centred_square_full_height_pad": {
+        "haas": {
+          "peak_rss_bytes": 231194624,
+          "process_wall_seconds": 165.72766920097638,
+          "worker_pid": 2500345,
+          "worker_wall_seconds": 164.6652043099748
+        },
+        "rs274": {
+          "peak_rss_bytes": 231337984,
+          "process_wall_seconds": 159.53204786102287,
+          "worker_pid": 2500342,
+          "worker_wall_seconds": 158.41458876302931
+        }
+      },
+      "procedural-facing_asymmetric-dev-case-02-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 223215616,
+          "process_wall_seconds": 110.08506771200337,
+          "worker_pid": 2500340,
+          "worker_wall_seconds": 108.77573590201791
+        },
+        "rs274": {
+          "peak_rss_bytes": 222916608,
+          "process_wall_seconds": 82.6101901329821,
+          "worker_pid": 2500339,
+          "worker_wall_seconds": 81.45604253199417
+        }
+      },
+      "procedural-facing_asymmetric-test-case-00-centred_square_full_height_pad": {
+        "haas": {
+          "peak_rss_bytes": 248844288,
+          "process_wall_seconds": 159.27458551200107,
+          "worker_pid": 2500344,
+          "worker_wall_seconds": 158.00827718095388
+        },
+        "rs274": {
+          "peak_rss_bytes": 248733696,
+          "process_wall_seconds": 181.03514458390418,
+          "worker_pid": 2500343,
+          "worker_wall_seconds": 179.9399165790528
+        }
+      },
+      "procedural-facing_asymmetric-test-case-01-offset_square_lower_step_pad": {
+        "haas": {
+          "peak_rss_bytes": 245407744,
+          "process_wall_seconds": 257.09351872000843,
+          "worker_pid": 2504004,
+          "worker_wall_seconds": 256.16371350106783
+        },
+        "rs274": {
+          "peak_rss_bytes": 245608448,
+          "process_wall_seconds": 218.0331851929659,
+          "worker_pid": 2504005,
+          "worker_wall_seconds": 217.08887687709648
+        }
+      },
+      "procedural-facing_asymmetric-test-case-02-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 248578048,
+          "process_wall_seconds": 138.46984975901432,
+          "worker_pid": 2505828,
+          "worker_wall_seconds": 137.48828801803757
+        },
+        "rs274": {
+          "peak_rss_bytes": 249171968,
+          "process_wall_seconds": 225.8655113640707,
+          "worker_pid": 2505827,
+          "worker_wall_seconds": 224.69860676897224
+        }
+      },
+      "procedural-facing_asymmetric-test-case-03-centred_square_full_height_pad": {
+        "haas": {
+          "peak_rss_bytes": 223350784,
+          "process_wall_seconds": 129.96443244197872,
+          "worker_pid": 2506416,
+          "worker_wall_seconds": 127.81413852493279
+        },
+        "rs274": {
+          "peak_rss_bytes": 223436800,
+          "process_wall_seconds": 100.50384876795579,
+          "worker_pid": 2506417,
+          "worker_wall_seconds": 99.55989104602486
+        }
+      },
+      "procedural-facing_asymmetric-test-case-04-centred_square_full_height_pad": {
+        "haas": {
+          "peak_rss_bytes": 224677888,
+          "process_wall_seconds": 74.30990687804297,
+          "worker_pid": 2508513,
+          "worker_wall_seconds": 73.20833510195371
+        },
+        "rs274": {
+          "peak_rss_bytes": 224710656,
+          "process_wall_seconds": 95.05514129705261,
+          "worker_pid": 2508514,
+          "worker_wall_seconds": 93.74211897701025
+        }
+      },
+      "procedural-facing_asymmetric-test-case-05-centred_square_full_height_pad": {
+        "haas": {
+          "peak_rss_bytes": 219152384,
+          "process_wall_seconds": 65.1951934020035,
+          "worker_pid": 2512333,
+          "worker_wall_seconds": 63.96758816903457
+        },
+        "rs274": {
+          "peak_rss_bytes": 219164672,
+          "process_wall_seconds": 71.73994234704878,
+          "worker_pid": 2512332,
+          "worker_wall_seconds": 70.54299565101974
+        }
+      },
+      "procedural-facing_asymmetric-test-case-06-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 228917248,
+          "process_wall_seconds": 36.63569514697883,
+          "worker_pid": 2512615,
+          "worker_wall_seconds": 35.79908866900951
+        },
+        "rs274": {
+          "peak_rss_bytes": 228978688,
+          "process_wall_seconds": 75.05295605689753,
+          "worker_pid": 2512614,
+          "worker_wall_seconds": 73.84919432201423
+        }
+      },
+      "procedural-facing_asymmetric-test-case-07-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 223637504,
+          "process_wall_seconds": 64.89164094405714,
+          "worker_pid": 2514640,
+          "worker_wall_seconds": 63.887937846942805
+        },
+        "rs274": {
+          "peak_rss_bytes": 223731712,
+          "process_wall_seconds": 70.1980492429575,
+          "worker_pid": 2514639,
+          "worker_wall_seconds": 69.08857825002633
+        }
+      },
+      "procedural-facing_asymmetric-test-case-08-offset_square_lower_step_pad": {
+        "haas": {
+          "peak_rss_bytes": 250167296,
+          "process_wall_seconds": 158.41428648808505,
+          "worker_pid": 2515474,
+          "worker_wall_seconds": 157.67649744602386
+        },
+        "rs274": {
+          "peak_rss_bytes": 250445824,
+          "process_wall_seconds": 208.7895166989183,
+          "worker_pid": 2515470,
+          "worker_wall_seconds": 207.6103453671094
+        }
+      },
+      "procedural-facing_asymmetric-test-case-09-centred_square_full_height_pad": {
+        "haas": {
+          "peak_rss_bytes": 245141504,
+          "process_wall_seconds": 169.0224781909492,
+          "worker_pid": 2516302,
+          "worker_wall_seconds": 167.7982991259778
+        },
+        "rs274": {
+          "peak_rss_bytes": 245305344,
+          "process_wall_seconds": 159.12281551898923,
+          "worker_pid": 2516301,
+          "worker_wall_seconds": 157.97529777500313
+        }
+      },
+      "procedural-pocket_island-dev-case-00-centred_square_full_height_pad": {
+        "haas": {
+          "peak_rss_bytes": 240812032,
+          "process_wall_seconds": 173.41660681797657,
+          "worker_pid": 2516472,
+          "worker_wall_seconds": 172.16367593000177
+        },
+        "rs274": {
+          "peak_rss_bytes": 240848896,
+          "process_wall_seconds": 127.12158831791021,
+          "worker_pid": 2516471,
+          "worker_wall_seconds": 125.92423156299628
+        }
+      },
+      "procedural-pocket_island-dev-case-01-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 226729984,
+          "process_wall_seconds": 160.6126576369861,
+          "worker_pid": 2518841,
+          "worker_wall_seconds": 159.34065838099923
+        },
+        "rs274": {
+          "peak_rss_bytes": 226856960,
+          "process_wall_seconds": 157.3061931829434,
+          "worker_pid": 2518842,
+          "worker_wall_seconds": 156.02518351201434
+        }
+      },
+      "procedural-pocket_island-dev-case-02-offset_square_lower_step_pad": {
+        "haas": {
+          "peak_rss_bytes": 215900160,
+          "process_wall_seconds": 80.00904295092914,
+          "worker_pid": 2523257,
+          "worker_wall_seconds": 78.95370338391513
+        },
+        "rs274": {
+          "peak_rss_bytes": 216174592,
+          "process_wall_seconds": 87.41388539900072,
+          "worker_pid": 2523258,
+          "worker_wall_seconds": 86.28392100299243
+        }
+      },
+      "procedural-pocket_island-test-case-00-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 208248832,
+          "process_wall_seconds": 40.83472621906549,
+          "worker_pid": 2523541,
+          "worker_wall_seconds": 39.603282780968584
+        },
+        "rs274": {
+          "peak_rss_bytes": 208211968,
+          "process_wall_seconds": 35.88347464997787,
+          "worker_pid": 2523542,
+          "worker_wall_seconds": 34.703712126007304
+        }
+      },
+      "procedural-pocket_island-test-case-01-offset_square_lower_step_pad": {
+        "haas": {
+          "peak_rss_bytes": 224620544,
+          "process_wall_seconds": 155.9330843220232,
+          "worker_pid": 2524311,
+          "worker_wall_seconds": 154.89628316496965
+        },
+        "rs274": {
+          "peak_rss_bytes": 224759808,
+          "process_wall_seconds": 138.22184299095534,
+          "worker_pid": 2524312,
+          "worker_wall_seconds": 137.0109207899077
+        }
+      },
+      "procedural-pocket_island-test-case-02-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 203849728,
+          "process_wall_seconds": 49.55867162998766,
+          "worker_pid": 2524620,
+          "worker_wall_seconds": 48.61220545996912
+        },
+        "rs274": {
+          "peak_rss_bytes": 203784192,
+          "process_wall_seconds": 61.00712346495129,
+          "worker_pid": 2524619,
+          "worker_wall_seconds": 59.70192139502615
+        }
+      },
+      "procedural-pocket_island-test-case-03-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 218144768,
+          "process_wall_seconds": 78.07460186688695,
+          "worker_pid": 2525097,
+          "worker_wall_seconds": 76.9757745990064
+        },
+        "rs274": {
+          "peak_rss_bytes": 218071040,
+          "process_wall_seconds": 110.96082041005138,
+          "worker_pid": 2525098,
+          "worker_wall_seconds": 109.77756491908804
+        }
+      },
+      "procedural-pocket_island-test-case-04-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 216018944,
+          "process_wall_seconds": 103.23076892097015,
+          "worker_pid": 2528210,
+          "worker_wall_seconds": 101.95106759003829
+        },
+        "rs274": {
+          "peak_rss_bytes": 215953408,
+          "process_wall_seconds": 102.83592254004907,
+          "worker_pid": 2528209,
+          "worker_wall_seconds": 101.80944148101844
+        }
+      },
+      "procedural-pocket_island-test-case-05-offset_square_lower_step_pad": {
+        "haas": {
+          "peak_rss_bytes": 263094272,
+          "process_wall_seconds": 437.9166781270178,
+          "worker_pid": 2529222,
+          "worker_wall_seconds": 436.80118581291754
+        },
+        "rs274": {
+          "peak_rss_bytes": 263307264,
+          "process_wall_seconds": 410.51012201805133,
+          "worker_pid": 2529221,
+          "worker_wall_seconds": 409.46809678093996
+        }
+      },
+      "procedural-pocket_island-test-case-06-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 215003136,
+          "process_wall_seconds": 80.6584730950417,
+          "worker_pid": 2531368,
+          "worker_wall_seconds": 79.63461402093526
+        },
+        "rs274": {
+          "peak_rss_bytes": 214888448,
+          "process_wall_seconds": 93.47210798005108,
+          "worker_pid": 2531369,
+          "worker_wall_seconds": 92.29712048301008
+        }
+      },
+      "procedural-pocket_island-test-case-07-centred_square_full_height_pad": {
+        "haas": {
+          "peak_rss_bytes": 238395392,
+          "process_wall_seconds": 163.46749071206432,
+          "worker_pid": 2532349,
+          "worker_wall_seconds": 162.29420120699797
+        },
+        "rs274": {
+          "peak_rss_bytes": 238350336,
+          "process_wall_seconds": 108.8019454939058,
+          "worker_pid": 2532348,
+          "worker_wall_seconds": 107.67113864398561
+        }
+      },
+      "procedural-pocket_island-test-case-08-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 226021376,
+          "process_wall_seconds": 108.74572844791692,
+          "worker_pid": 2532562,
+          "worker_wall_seconds": 107.57475232798606
+        },
+        "rs274": {
+          "peak_rss_bytes": 226050048,
+          "process_wall_seconds": 108.11437026108615,
+          "worker_pid": 2532560,
+          "worker_wall_seconds": 106.85490940802265
+        }
+      },
+      "procedural-pocket_island-test-case-09-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 222208000,
+          "process_wall_seconds": 85.99126002204139,
+          "worker_pid": 2534735,
+          "worker_wall_seconds": 84.98329687793739
+        },
+        "rs274": {
+          "peak_rss_bytes": 222273536,
+          "process_wall_seconds": 102.3503626139136,
+          "worker_pid": 2534734,
+          "worker_wall_seconds": 101.17906767502427
+        }
+      },
+      "procedural-variable_width_depth-dev-case-00-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 237457408,
+          "process_wall_seconds": 71.69213558000047,
+          "worker_pid": 2536624,
+          "worker_wall_seconds": 70.71779559599236
+        },
+        "rs274": {
+          "peak_rss_bytes": 237457408,
+          "process_wall_seconds": 79.84573268308304,
+          "worker_pid": 2536625,
+          "worker_wall_seconds": 78.88526049407665
+        }
+      },
+      "procedural-variable_width_depth-dev-case-01-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 200765440,
+          "process_wall_seconds": 25.7241051789606,
+          "worker_pid": 2538792,
+          "worker_wall_seconds": 24.76820899103768
+        },
+        "rs274": {
+          "peak_rss_bytes": 200249344,
+          "process_wall_seconds": 13.518358274013735,
+          "worker_pid": 2538793,
+          "worker_wall_seconds": 12.80813635198865
+        }
+      },
+      "procedural-variable_width_depth-dev-case-02-centred_square_full_height_pad": {
+        "haas": {
+          "peak_rss_bytes": 218107904,
+          "process_wall_seconds": 80.04253251000773,
+          "worker_pid": 2538979,
+          "worker_wall_seconds": 78.86587814707309
+        },
+        "rs274": {
+          "peak_rss_bytes": 219066368,
+          "process_wall_seconds": 91.26866994006559,
+          "worker_pid": 2538980,
+          "worker_wall_seconds": 89.96748457604554
+        }
+      },
+      "procedural-variable_width_depth-test-case-00-centred_square_full_height_pad": {
+        "haas": {
+          "peak_rss_bytes": 260845568,
+          "process_wall_seconds": 336.30996739305556,
+          "worker_pid": 2540580,
+          "worker_wall_seconds": 335.32192508596927
+        },
+        "rs274": {
+          "peak_rss_bytes": 260841472,
+          "process_wall_seconds": 341.66865250701085,
+          "worker_pid": 2540579,
+          "worker_wall_seconds": 340.44498526793905
+        }
+      },
+      "procedural-variable_width_depth-test-case-01-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 196222976,
+          "process_wall_seconds": 23.223795932950452,
+          "worker_pid": 2540868,
+          "worker_wall_seconds": 21.897438982035965
+        },
+        "rs274": {
+          "peak_rss_bytes": 195891200,
+          "process_wall_seconds": 22.47399642993696,
+          "worker_pid": 2540869,
+          "worker_wall_seconds": 21.179848980042152
+        }
+      },
+      "procedural-variable_width_depth-test-case-02-offset_square_lower_step_pad": {
+        "haas": {
+          "peak_rss_bytes": 249663488,
+          "process_wall_seconds": 173.5573286860017,
+          "worker_pid": 2542902,
+          "worker_wall_seconds": 172.64905174495652
+        },
+        "rs274": {
+          "peak_rss_bytes": 249737216,
+          "process_wall_seconds": 226.41941363899969,
+          "worker_pid": 2542903,
+          "worker_wall_seconds": 225.25945543404669
+        }
+      },
+      "procedural-variable_width_depth-test-case-03-offset_square_lower_step_pad": {
+        "haas": {
+          "peak_rss_bytes": 246067200,
+          "process_wall_seconds": 280.55450307705905,
+          "worker_pid": 2545004,
+          "worker_wall_seconds": 279.3657597010024
+        },
+        "rs274": {
+          "peak_rss_bytes": 246132736,
+          "process_wall_seconds": 271.77124851895496,
+          "worker_pid": 2545005,
+          "worker_wall_seconds": 270.42793547094334
+        }
+      },
+      "procedural-variable_width_depth-test-case-04-offset_square_lower_step_pad": {
+        "haas": {
+          "peak_rss_bytes": 270168064,
+          "process_wall_seconds": 367.11006335995626,
+          "worker_pid": 2549472,
+          "worker_wall_seconds": 366.16017381707206
+        },
+        "rs274": {
+          "peak_rss_bytes": 270299136,
+          "process_wall_seconds": 343.83891291101463,
+          "worker_pid": 2549471,
+          "worker_wall_seconds": 342.23739744198974
+        }
+      },
+      "procedural-variable_width_depth-test-case-05-offset_square_lower_step_pad": {
+        "haas": {
+          "peak_rss_bytes": 227262464,
+          "process_wall_seconds": 172.16687828896102,
+          "worker_pid": 2556393,
+          "worker_wall_seconds": 170.834276804002
+        },
+        "rs274": {
+          "peak_rss_bytes": 227315712,
+          "process_wall_seconds": 165.2089539540466,
+          "worker_pid": 2556394,
+          "worker_wall_seconds": 163.9108117459109
+        }
+      },
+      "procedural-variable_width_depth-test-case-06-offset_square_lower_step_pad": {
+        "haas": {
+          "peak_rss_bytes": 235085824,
+          "process_wall_seconds": 196.05413110100199,
+          "worker_pid": 2562829,
+          "worker_wall_seconds": 195.1525913469959
+        },
+        "rs274": {
+          "peak_rss_bytes": 235122688,
+          "process_wall_seconds": 170.09553408797365,
+          "worker_pid": 2562830,
+          "worker_wall_seconds": 168.97667291702237
+        }
+      },
+      "procedural-variable_width_depth-test-case-07-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 194125824,
+          "process_wall_seconds": 18.92530106101185,
+          "worker_pid": 2563497,
+          "worker_wall_seconds": 17.66653672105167
+        },
+        "rs274": {
+          "peak_rss_bytes": 194101248,
+          "process_wall_seconds": 19.72598135797307,
+          "worker_pid": 2563498,
+          "worker_wall_seconds": 18.33872720191721
+        }
+      },
+      "procedural-variable_width_depth-test-case-08-centred_square_full_height_pad": {
+        "haas": {
+          "peak_rss_bytes": 232771584,
+          "process_wall_seconds": 131.0416768080322,
+          "worker_pid": 2564829,
+          "worker_wall_seconds": 129.6465707240859
+        },
+        "rs274": {
+          "peak_rss_bytes": 232779776,
+          "process_wall_seconds": 125.98929317598231,
+          "worker_pid": 2564828,
+          "worker_wall_seconds": 124.9777184400009
+        }
+      },
+      "procedural-variable_width_depth-test-case-09-open_oblong_zero_retained_pads": {
+        "haas": {
+          "peak_rss_bytes": 218914816,
+          "process_wall_seconds": 96.22067030798644,
+          "worker_pid": 2567493,
+          "worker_wall_seconds": 95.04436853900552
+        },
+        "rs274": {
+          "peak_rss_bytes": 218624000,
+          "process_wall_seconds": 97.45907645893749,
+          "worker_pid": 2567494,
+          "worker_wall_seconds": 96.4221922189463
+        }
+      }
+    },
+    "poll_interval_seconds": 1.0,
+    "settings_sha256": "sha256:9d74b58fd795d1bcf998da9040ebe4507c0eb774a9b8c671ee83c9a346380f86",
+    "source_commit": "6c5773a3e944ea34ae3db7ec9c02632ab8cc5dd3",
+    "source_manifest_sha256": "sha256:d7ac631442e1db5f6f5c8c4b4d94324afbb55f7400a3b3d10184fbc72a57abe1",
+    "source_tree_clean": true,
+    "started_utc": "2026-11-10T14:20:30.402042+00:00",
+    "timeout_seconds_per_job": 7200.0,
+    "timing_varying_fields": [
+      "started_utc",
+      "ended_utc",
+      "controller_wall_seconds",
+      "phase_wall_seconds",
+      "worker_wall_seconds",
+      "process_wall_seconds"
+    ],
+    "verdict_step_mm": 0.125,
+    "workflow_version": "t2.3c-post-qualification/1"
+  },
   "predeclared_exclusion_reasons": [
     "unsupported or contradictory task/seed geometry",
     "unreachable original target or finite-cutter/shank/holder access violation",
@@ -171,7 +786,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 3.0,
       "motion_hash": "sha256:f2196fa207ed347f97ed0a66c944389ab7de5cf072cf67b3a4138604d581f10a",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6260016239889646,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-00-offset_square_lower_step_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:01df5b6bbf0558cad67b6f9d04225af4cb5c05c1e688683e0340dbeaba831f2f",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 232976384,
+            "original_worker_pid": 2500346,
+            "parsed_motion_hash": "sha256:43238f5bcb69a9bc47e37d8ecb8f6e845432b332025e5a7011d5fbf91773f3f6",
+            "process_wall_seconds": 222.46204313798808,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:c790427851c17355999fb3b0d5daaa0a5733fd62492ccbbe5cc6797f8764dcc7",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-00-offset_square_lower_step_pad/haas/attempt-0001/worker.1794320430665701797.log",
+            "worker_wall_seconds": 221.15924056596123
+          },
+          "rs274": {
+            "air_fraction": 0.6260016239889646,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-00-offset_square_lower_step_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:994e7335acc7ea3591d4b9b3176dad1ac0ac26b0f5a9d48e896c1dbdc00e84a0",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 233230336,
+            "original_worker_pid": 2500341,
+            "parsed_motion_hash": "sha256:23ae4edac16b087b864a8a725b99c93140dff5bca51fb4daecfecacc45246336",
+            "process_wall_seconds": 216.08308599097654,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:49413c91f8d7021d65cddf6c58e609ee4e0ec01e9def71c5d296e20cfa07a396",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-00-offset_square_lower_step_pad/rs274/attempt-0001/worker.1794320430657068714.log",
+            "worker_wall_seconds": 214.69955190096516
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:f2196fa207ed347f97ed0a66c944389ab7de5cf072cf67b3a4138604d581f10a",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:e8408e9f718aeb12542364a7e012b2c73e9ba42471d6692edcba4425dc417030"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -249,7 +932,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 4.5,
       "motion_hash": "sha256:bf772bb5d0af9f82b2a17a65b878c44f8eb1d6c7d62bbdce9e7f59782b92f453",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5452552220459773,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-01-centred_square_full_height_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:55e790dffab051746e6f74a79e9b075333ee718449962bdf66fc83d3db8c9f00",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 231194624,
+            "original_worker_pid": 2500345,
+            "parsed_motion_hash": "sha256:a1cd99675b6e6d4d61e4b4d6952fe36bde501972e40658e4326242c7d0682c6d",
+            "process_wall_seconds": 165.72766920097638,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:421e2098f8c9cd0c7353ca09cec50a234eaf74ec754a90ac256f2e3f93ac72d3",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-01-centred_square_full_height_pad/haas/attempt-0001/worker.1794320430664827141.log",
+            "worker_wall_seconds": 164.6652043099748
+          },
+          "rs274": {
+            "air_fraction": 0.5452552220459773,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-01-centred_square_full_height_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:7171d387bfa8d4a57c163b5024f3474463c00090aec7892cb7d22e06bc1866b5",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 231337984,
+            "original_worker_pid": 2500342,
+            "parsed_motion_hash": "sha256:d0042af7f44e6e58f2ba1b1c4022246c147c80013877e06ca161ec8d70fece3c",
+            "process_wall_seconds": 159.53204786102287,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:617dea2745a21e812ae58c6364d880a2ef05f9bec97280db4e1d491fb0d1b553",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-01-centred_square_full_height_pad/rs274/attempt-0001/worker.1794320430657471106.log",
+            "worker_wall_seconds": 158.41458876302931
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:bf772bb5d0af9f82b2a17a65b878c44f8eb1d6c7d62bbdce9e7f59782b92f453",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:d11139c4835f8f6f2a141121e9d3395aad86a9306b0b9732e93021a91074cdb2"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -327,7 +1078,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 3.0,
       "motion_hash": "sha256:91d20965791a85cedbfede1ce76140bdee8a269e38ac420a0096209428663024",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5896901652399825,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-02-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:868194a5c1c286e88c8ddfa7812ca884f199881e7d2e0a0321e51f74587eba1e",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 223215616,
+            "original_worker_pid": 2500340,
+            "parsed_motion_hash": "sha256:5b24dbc7b6c911ec64fb7fb5f6fb1c1da450e0c704c07b31658f2f57ce784d74",
+            "process_wall_seconds": 110.08506771200337,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:d4555a23099ffbf33fad7a3b6fafbd83a54ba53f248c7d3c2ebcbab28f800e33",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-02-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794320430652060018.log",
+            "worker_wall_seconds": 108.77573590201791
+          },
+          "rs274": {
+            "air_fraction": 0.5896901652399825,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-02-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:8bf0b0e2b5579178421d0290fb8e0b964b633798dd99ac12c59ea849be5a2396",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 222916608,
+            "original_worker_pid": 2500339,
+            "parsed_motion_hash": "sha256:df8308bb3b633c186032ccd6663f9e80cc5742fd0f75872315d4ceac8d06d06a",
+            "process_wall_seconds": 82.6101901329821,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:97b2ef8f5b9d9cd797461aa8e651fbc5a3f16b82a3a1f424c81a431b46e9ed1a",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-dev-case-02-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794320430648991090.log",
+            "worker_wall_seconds": 81.45604253199417
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:91d20965791a85cedbfede1ce76140bdee8a269e38ac420a0096209428663024",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:8f5c3576ed063875c163d7739865e188876d37c97bada65402226da402c8e451"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -405,7 +1224,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 1.5,
       "motion_hash": "sha256:1dbedb59d461d8796d37b9dec4658bfb554704f6974ae4a5142737ecba887b40",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5980102828248631,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-00-centred_square_full_height_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:6c59fd51e8a840b98814ea562658f1a3408bab309c5c88fd28503430dbac8d50",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 248844288,
+            "original_worker_pid": 2500344,
+            "parsed_motion_hash": "sha256:a01e949930ca28560725c6c675934e6ec22ea652a0e48555cf6ab6104d841f60",
+            "process_wall_seconds": 159.27458551200107,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:e6e2343ddaf5301af8cea8087ec4935dd839a9059f775d543076089bbd3b87b3",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-00-centred_square_full_height_pad/haas/attempt-0001/worker.1794320430664979766.log",
+            "worker_wall_seconds": 158.00827718095388
+          },
+          "rs274": {
+            "air_fraction": 0.5980102828248631,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-00-centred_square_full_height_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:58cfe22bf198a3c9cfaf624a859a9b217d8b46b970f570342b131e8534ea7cc8",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 248733696,
+            "original_worker_pid": 2500343,
+            "parsed_motion_hash": "sha256:7f495d89ecda72e954d985f1f059f6a19db1639bd801e760fc6cd1f6aea57c2f",
+            "process_wall_seconds": 181.03514458390418,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:8278f36c7612bb676e27dd4c8d67c73f1ee8075fa4b53acb5479638ee5120581",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-00-centred_square_full_height_pad/rs274/attempt-0001/worker.1794320430664356270.log",
+            "worker_wall_seconds": 179.9399165790528
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:1dbedb59d461d8796d37b9dec4658bfb554704f6974ae4a5142737ecba887b40",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:9d925091db9dd00b3f41f238c5b0d6d9bbd778eafb0f26e2c0f473b3391f95be"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -483,7 +1370,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 5.25,
       "motion_hash": "sha256:1c661b8918ffc343baa9a5a9a476a5138090170b2faab52f080db20eff3a3ade",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5967712827420256,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-01-offset_square_lower_step_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:b191e7797439a0d94714406a19ba8181da045ed7f29a41b4cb782ce845a8fa41",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 245407744,
+            "original_worker_pid": 2504004,
+            "parsed_motion_hash": "sha256:61ffad77694846e642ef324afc5466ac836f63160510b86e63c89dd85948e282",
+            "process_wall_seconds": 257.09351872000843,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:f7264fcdb5e3de7678193a5ae0b6fc29f113f6ad310e9f865c751200a151a12b",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-01-offset_square_lower_step_pad/haas/attempt-0001/worker.1794320540755243637.log",
+            "worker_wall_seconds": 256.16371350106783
+          },
+          "rs274": {
+            "air_fraction": 0.5967712827420256,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-01-offset_square_lower_step_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:6169bf0f7f75db8e4de1ed428c783ea4c6dce518e89c75eb72321adc0691f832",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 245608448,
+            "original_worker_pid": 2504005,
+            "parsed_motion_hash": "sha256:78c7111940076e5bd9608dc2bc5b513ee8ab27b65ed94307943f3d51ec44fb43",
+            "process_wall_seconds": 218.0331851929659,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:6d4df06a92efc83dd805819d635ad3fd0d4b6457353edbf8768cc534bd8b787b",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-01-offset_square_lower_step_pad/rs274/attempt-0001/worker.1794320540755287189.log",
+            "worker_wall_seconds": 217.08887687709648
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:1c661b8918ffc343baa9a5a9a476a5138090170b2faab52f080db20eff3a3ade",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:39aa220d6ce13ea690bfc03859503d0c83d4b98e4f3c154b21218b3536970dd0"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -561,7 +1516,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 3.0,
       "motion_hash": "sha256:9d004ca8a8bbe21fe099fd09d34e5a597f61151b8939d2c79ba21b8e9d11e783",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5284240959806157,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-02-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:a6a341353c178d7389a34f08a35db1b59a58ee9944051bdfb1588d1387e90f6a",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 248578048,
+            "original_worker_pid": 2505828,
+            "parsed_motion_hash": "sha256:47db267aed319a141cc9f5768b11d09dd3ff72cc98a7dd57d3ee3be283ee4841",
+            "process_wall_seconds": 138.46984975901432,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:271498154e5f38268ab5c0b3fa307fd4a2d58bbe99d98810c3ce71199d120379",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-02-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794320596414410359.log",
+            "worker_wall_seconds": 137.48828801803757
+          },
+          "rs274": {
+            "air_fraction": 0.5284240959806157,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-02-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:4b2be09416d0a6f2990da0f310bdeaa9016cc6bd9c9b159cd0fe592b3f58a786",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 249171968,
+            "original_worker_pid": 2505827,
+            "parsed_motion_hash": "sha256:4a46b25255c9f69ed3ee154a2be963624fd18ad51d8f38735310f6b64da22c83",
+            "process_wall_seconds": 225.8655113640707,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:1d37dba940fd721f0760d42a8c296c9f87702d4ecd723f3da8f91bb450b17f71",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-02-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794320596409970983.log",
+            "worker_wall_seconds": 224.69860676897224
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:9d004ca8a8bbe21fe099fd09d34e5a597f61151b8939d2c79ba21b8e9d11e783",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:fe94a31fc79df182b114ae7bbd23f7d957af998f87a94da7285915eac0bce48b"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -639,7 +1662,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 5.25,
       "motion_hash": "sha256:79a6e716c202afee73d040fb34e1855926aceee02dfdade3e9a5b5ac895d87c1",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6062855572771872,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-03-centred_square_full_height_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:6cc58166663ea28df31a67f63397b094cad36c82b8922cc1ff8724f8796dbb6d",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 223350784,
+            "original_worker_pid": 2506416,
+            "parsed_motion_hash": "sha256:01022ce5b76a06d7b686ac7a18aeb06f36a7b3d9654ab3d6099fc8ac4a3579e0",
+            "process_wall_seconds": 129.96443244197872,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:17f463c25325e2360e87842bdb480baf4f84dbff0a09f12d1312197611db540a",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-03-centred_square_full_height_pad/haas/attempt-0001/worker.1794320611717485672.log",
+            "worker_wall_seconds": 127.81413852493279
+          },
+          "rs274": {
+            "air_fraction": 0.6062855572771872,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-03-centred_square_full_height_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:fdcac9d7792b4fd2e3a99287c2b46b1404c70cd0ca3bd5fb0a34ccab34f691cc",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 223436800,
+            "original_worker_pid": 2506417,
+            "parsed_motion_hash": "sha256:98a612ae6b042ac3f34b10332c564d520b7e4a58180d194d54b552036e2bfaf3",
+            "process_wall_seconds": 100.50384876795579,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:c892730f2c67772fd69073d61edd0859207b139bf7d19411e4f29e787775d539",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-03-centred_square_full_height_pad/rs274/attempt-0001/worker.1794320611717529684.log",
+            "worker_wall_seconds": 99.55989104602486
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:79a6e716c202afee73d040fb34e1855926aceee02dfdade3e9a5b5ac895d87c1",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:ec6890faf04b439efca5589fbecb6580b5531303cad7ccdb0bdaa7734ec2859c"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -717,7 +1808,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 3.0,
       "motion_hash": "sha256:68573ee809d3a90a0d4c0b21aeaee27894750639cd418a164ca1808bb38cb46e",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6096197435297488,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-04-centred_square_full_height_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:ee9c0087e6be087c9c5ad3b80b69befca1b974206541d7365bc9d519e3f5d7f4",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 224677888,
+            "original_worker_pid": 2508513,
+            "parsed_motion_hash": "sha256:98a4aa28c84f11485c4052f286b0b293afd2b0b0cb2be4db5528269e7b8ff4c2",
+            "process_wall_seconds": 74.30990687804297,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:c467c266baf7e9e0a95861703022e8c61988a0649efe0e9538c391f6afea4807",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-04-centred_square_full_height_pad/haas/attempt-0001/worker.1794320653156145023.log",
+            "worker_wall_seconds": 73.20833510195371
+          },
+          "rs274": {
+            "air_fraction": 0.6096197435297488,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-04-centred_square_full_height_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:b9761040f60b905e0adc05a5471b997546c804c0a049ce038301235c9624f762",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 224710656,
+            "original_worker_pid": 2508514,
+            "parsed_motion_hash": "sha256:7bcc359f4079c9c4d87eb9a61347f04e784202274eaaa7960d0523b4c65bac10",
+            "process_wall_seconds": 95.05514129705261,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:f4168fb80d4db09f147d34c68127f1ab5265a22fc8dbe714b0b81302deafe951",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-04-centred_square_full_height_pad/rs274/attempt-0001/worker.1794320653156188664.log",
+            "worker_wall_seconds": 93.74211897701025
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:68573ee809d3a90a0d4c0b21aeaee27894750639cd418a164ca1808bb38cb46e",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:618c917d96d4f12d10f45f1ba42e18cba9826ea5e3ea5f08d336c50f9a794a4e"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -795,7 +1954,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 4.5,
       "motion_hash": "sha256:1cdf2e19c937616c0ff8590bdff8827f7a92dd384170503494886687c9527fbc",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5631122126733453,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-05-centred_square_full_height_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:e5745569901816479ddbfa68d0f655a7a4a2c0f2a6ae0738922b8c0a6e087a2b",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 219152384,
+            "original_worker_pid": 2512333,
+            "parsed_motion_hash": "sha256:18cfcf99177cd12d0b902772887b8aa23b215e4adea6bba597714943745eb45c",
+            "process_wall_seconds": 65.1951934020035,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:a33f7866e92065950a06d515335296b0cddc69cd8da0e15fdb3b9c55c3204c67",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-05-centred_square_full_height_pad/haas/attempt-0001/worker.1794320741705384383.log",
+            "worker_wall_seconds": 63.96758816903457
+          },
+          "rs274": {
+            "air_fraction": 0.5631122126733453,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-05-centred_square_full_height_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:65fa1d8f7e1620037033d01cb753ce34281884fe9a17e7e84bd014120c433b57",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 219164672,
+            "original_worker_pid": 2512332,
+            "parsed_motion_hash": "sha256:ca3a439d9b4fb79c5cdee3506222c34fe17f73381ab8f315d4572e5d81f6ebfb",
+            "process_wall_seconds": 71.73994234704878,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:25cb996564dd82940620f84d43f4e4ad2fad38bf848bb8f45b2d54080f76d5b3",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-05-centred_square_full_height_pad/rs274/attempt-0001/worker.1794320741700917131.log",
+            "worker_wall_seconds": 70.54299565101974
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:1cdf2e19c937616c0ff8590bdff8827f7a92dd384170503494886687c9527fbc",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:b49525f5663955aeba3fb8c76e54c4b554701c1623f08f589b763958ce5a40c1"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -873,7 +2100,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 2.25,
       "motion_hash": "sha256:d74efae57ca7a6d83d34f26800aea47839ff7a989ef244d4bad0afb687a87832",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6200416081328194,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-06-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:9c669cea8271ed711940b9313431db21fb0c482aabc349b30d87998d4826490b",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 228917248,
+            "original_worker_pid": 2512615,
+            "parsed_motion_hash": "sha256:5c90616c199fea3635e225eb6201fdb11799b7edc597e25d8b775fac06725906",
+            "process_wall_seconds": 36.63569514697883,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:bd566cadf3dec9feb26d3cbe0117ad316ce0e90cb187cfa7d39a56410d177a92",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-06-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794320748231730196.log",
+            "worker_wall_seconds": 35.79908866900951
+          },
+          "rs274": {
+            "air_fraction": 0.6200416081328194,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-06-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:9c11ad440db3ce885b06ad1c4b7d76b48700c491db353ba5e55f5ad8edf6ac57",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 228978688,
+            "original_worker_pid": 2512614,
+            "parsed_motion_hash": "sha256:e39281907708d9994679909fc7a3f65f353f3a7f894d176e0bc5fd5713045bfb",
+            "process_wall_seconds": 75.05295605689753,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:248891bcfa290d64a17b824473cec88a4c8ff9a83ee2336c782bbb9662298a1e",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-06-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794320748231676087.log",
+            "worker_wall_seconds": 73.84919432201423
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:d74efae57ca7a6d83d34f26800aea47839ff7a989ef244d4bad0afb687a87832",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:8af5392a0c588de1982ce5b3db6232a36f5ea34dcf5f0f604a1d8d49fddd919c"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -951,7 +2246,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 1.5,
       "motion_hash": "sha256:04533aaf1d828eed60e1c0bcc37c91a7b69a739c28e3eaf4033e7e2640783ac4",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6017286887739463,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-07-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:2a03ec4b237310518448c6307b9e55337104dfe71138955f8b4de0ab10453f60",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 223637504,
+            "original_worker_pid": 2514640,
+            "parsed_motion_hash": "sha256:9b87bc7829736ea782dc957400e2d40593859ebaf88b16abee68128bd4490233",
+            "process_wall_seconds": 64.89164094405714,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:750bfd005e1ce5cf4cbf567b73e436e5151bf43bf4c9b5b863628dd947c1a795",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-07-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794320797866513191.log",
+            "worker_wall_seconds": 63.887937846942805
+          },
+          "rs274": {
+            "air_fraction": 0.6017286887739463,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-07-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:8d8929637184cccb838137e7a143047bbf371f19e3accb7d6274d95cf4c33d59",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 223731712,
+            "original_worker_pid": 2514639,
+            "parsed_motion_hash": "sha256:3152d09a90fd62bba391c62f21c2a2580a561941586f89e79f0ac4b8cd92fd41",
+            "process_wall_seconds": 70.1980492429575,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:299b0d9dcac5ec7d308d93d559f0add1f52a848f85a86d30afb69c4a0a6be69d",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-07-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794320797866470752.log",
+            "worker_wall_seconds": 69.08857825002633
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:04533aaf1d828eed60e1c0bcc37c91a7b69a739c28e3eaf4033e7e2640783ac4",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:206168f7d6113b7cd2dc9a4d4f30a91af89389a74c52eb43b5daf9c9a53eec4e"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1029,7 +2392,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 5.25,
       "motion_hash": "sha256:470d6f4d90bb6d75696032cd6db4aa04bf33428e4f791cbf47796d2e861a6aba",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.62219133513901,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-08-offset_square_lower_step_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:2287453e36e49f35f69ee804bca8d9e4e02dbd6530f16e7be942acc18b512851",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 250167296,
+            "original_worker_pid": 2515474,
+            "parsed_motion_hash": "sha256:c9441ea8859dd6f85b137ab833d3c6bce66e3d7a892b10785f95579a3556653b",
+            "process_wall_seconds": 158.41428648808505,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:90a5b211bcd71fc82563d3a010149942d223601976f87c149ff7f38355daa751",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-08-offset_square_lower_step_pad/haas/attempt-0001/worker.1794320813468067027.log",
+            "worker_wall_seconds": 157.67649744602386
+          },
+          "rs274": {
+            "air_fraction": 0.62219133513901,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-08-offset_square_lower_step_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:1b7cfaf26e45afa2cff398e4481037ab4bca19ac00725782c6a62982230aa3e1",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 250445824,
+            "original_worker_pid": 2515470,
+            "parsed_motion_hash": "sha256:4a14c87dd745055762e1f65adeda2b1a847212f0f032324bbd6a47b13aedb575",
+            "process_wall_seconds": 208.7895166989183,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:555aa680534d1d0b71ef68dc06f0d2701925171c1251e2d8d84999f618e573be",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-08-offset_square_lower_step_pad/rs274/attempt-0001/worker.1794320813463505113.log",
+            "worker_wall_seconds": 207.6103453671094
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:470d6f4d90bb6d75696032cd6db4aa04bf33428e4f791cbf47796d2e861a6aba",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:f92289654950085c26f93276e7a7fc6cfc819b4f24afb8ee3b0546f290ca44c7"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1107,7 +2538,75 @@
       "family": "facing_asymmetric",
       "grid_excluded_volume_mm3": 3.0,
       "motion_hash": "sha256:01798d7dfbdbeff591f62c0b58e7ab97c71d9ed3cc66228ac037e22dac1cabd6",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5839872488222236,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-09-centred_square_full_height_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:ee78e59663a576f29d56865b4cf1518588f9131aa8315ae30873fd7ab70ddc98",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 245141504,
+            "original_worker_pid": 2516302,
+            "parsed_motion_hash": "sha256:3e634aaeca6027bb7e2e862b97b95c0d57c8a94dd1d568c92d31352f29960945",
+            "process_wall_seconds": 169.0224781909492,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:0fe7401a451fbd0c0a2a5c8c4ffcbc965eb54c16a8fb164b55fa81eebdef3da0",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-09-centred_square_full_height_pad/haas/attempt-0001/worker.1794320822305190962.log",
+            "worker_wall_seconds": 167.7982991259778
+          },
+          "rs274": {
+            "air_fraction": 0.5839872488222236,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-09-centred_square_full_height_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:3bc9ed6aa809d5751b9afe6fe40c16677de41f87d6a32eacddf9bd38adbbba60",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 245305344,
+            "original_worker_pid": 2516301,
+            "parsed_motion_hash": "sha256:d14601ab74c9a427b7aef5f0f9858a792667687540b0033cdeaeb51b123eff34",
+            "process_wall_seconds": 159.12281551898923,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:c4195a3231f2d31bc26439fc6e1b68738b7ff58b088782e6f8ed86ad242f7ed1",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-facing_asymmetric-test-case-09-centred_square_full_height_pad/rs274/attempt-0001/worker.1794320822299905492.log",
+            "worker_wall_seconds": 157.97529777500313
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:01798d7dfbdbeff591f62c0b58e7ab97c71d9ed3cc66228ac037e22dac1cabd6",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:7dd8703a6b15c6a2a90ce56b2b7f1e8a0848745db69ddcb6614eb28d0e9d07cf"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1185,7 +2684,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 12.0,
       "motion_hash": "sha256:26ca36e6ca4bd1fbae556f08ac3d717aa457860afe2c6a2d15b2f01efe918b42",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5575468734134706,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-00-centred_square_full_height_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:102f78a873955951d7c6d4b9d3f213e414efd464b2982236f18999b82b4efb1c",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 240812032,
+            "original_worker_pid": 2516472,
+            "parsed_motion_hash": "sha256:563b03777431c2b99d91823f9623c6dcc0dfa219067a29673020bd3caf589dab",
+            "process_wall_seconds": 173.41660681797657,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:7742d84f0995ba702ef198fe90c1eb3941465f388e4b3676c6f3797751aa9602",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-00-centred_square_full_height_pad/haas/attempt-0001/worker.1794320823311800692.log",
+            "worker_wall_seconds": 172.16367593000177
+          },
+          "rs274": {
+            "air_fraction": 0.5575468734134706,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-00-centred_square_full_height_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:b61bc8cdd6d55653710735e2e73af3e8afab6befe7adc7d50e3a87dcdff5073a",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 240848896,
+            "original_worker_pid": 2516471,
+            "parsed_motion_hash": "sha256:be6329ef92b3330be69344880a86b247697b95edb8c0cb5f2785f6a19675a591",
+            "process_wall_seconds": 127.12158831791021,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:ca5d78bcabc9867e51f4d7100c612bc71b4bf0901acfbf198ddb9ec2d2337861",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-00-centred_square_full_height_pad/rs274/attempt-0001/worker.1794320823307240389.log",
+            "worker_wall_seconds": 125.92423156299628
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:26ca36e6ca4bd1fbae556f08ac3d717aa457860afe2c6a2d15b2f01efe918b42",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:e742b91cf6db005e4fef6bc584d37f885c5125a329b6ab6e31dcaed5c21b2261"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1263,7 +2830,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 15.0,
       "motion_hash": "sha256:4ee27d354675b3cfd624a0b429cc3e8e6c11cb11ed86472a037ffbb921eb1ee2",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6007282348855505,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-01-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:9d0678c4fa15e91f6c4937bbaf5220b9c2dedf048ac0d64a91df579e4f08034c",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 226729984,
+            "original_worker_pid": 2518841,
+            "parsed_motion_hash": "sha256:9ef33743b7aeff6adf19ddb37ef11239259b292c283ccdd08b33b3de91bb067f",
+            "process_wall_seconds": 160.6126576369861,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:539e5f0953a8b1280937d7dbd98f455ce4263bdf54ef6dac8d8f9938ce403678",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-01-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794320868093976046.log",
+            "worker_wall_seconds": 159.34065838099923
+          },
+          "rs274": {
+            "air_fraction": 0.6007282348855505,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-01-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:342c6dbe99e9d1eb1141a5f6a8809118566e340f21c23fc845184f3e71071295",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 226856960,
+            "original_worker_pid": 2518842,
+            "parsed_motion_hash": "sha256:4362d80f15415f98e839775ba031a8c9e2137cd7b9bc05251176977a97cf9f15",
+            "process_wall_seconds": 157.3061931829434,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:48d00d8f5bd115488d0bf2b0eb79dc3be3409faff9ae8d9f84c9f046f882e825",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-01-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794320868098386041.log",
+            "worker_wall_seconds": 156.02518351201434
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:4ee27d354675b3cfd624a0b429cc3e8e6c11cb11ed86472a037ffbb921eb1ee2",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:6bdb681be3d3f0786598f6d57b4a6c36e0ca2b306d8aa212a9a8103fad29d7bb"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1341,7 +2976,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 15.0,
       "motion_hash": "sha256:59387541aed63d7503e125a25c5eefb2b1a6b91e1ac8a94dc4af02fad387dc87",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6547305139584945,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-02-offset_square_lower_step_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:713d04840cd5247cbac392350ea08993c7734abfe9f138c21e40a2a8c61d056d",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 215900160,
+            "original_worker_pid": 2523257,
+            "parsed_motion_hash": "sha256:9045744215de2aea617ff0c1d7751a8503c0a3e1dad3695cfa28b9a1a10f133e",
+            "process_wall_seconds": 80.00904295092914,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:4011551a4819bb6f4b26d4f3c1b08120da691ede419705f998f186572ae234a8",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-02-offset_square_lower_step_pad/haas/attempt-0001/worker.1794320991347323967.log",
+            "worker_wall_seconds": 78.95370338391513
+          },
+          "rs274": {
+            "air_fraction": 0.6547305139584945,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-02-offset_square_lower_step_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:8d4a2258fe193ed61f2ebbcfacddf6753163753eb7486026a282fbbc2bb21ca0",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 216174592,
+            "original_worker_pid": 2523258,
+            "parsed_motion_hash": "sha256:e3eb1bbe9b9930c54aa65e3a4fa731b7402cad8e84e93c477fd19ccf48aa73fc",
+            "process_wall_seconds": 87.41388539900072,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:f4f8c8b760e2ebcf033c22047310299f8612d6d5789a7940f3b958113f33382f",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-dev-case-02-offset_square_lower_step_pad/rs274/attempt-0001/worker.1794320991347369041.log",
+            "worker_wall_seconds": 86.28392100299243
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:59387541aed63d7503e125a25c5eefb2b1a6b91e1ac8a94dc4af02fad387dc87",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:2bd3288def40ef34aa5326596980dbf88ef056c72f257f2293de6b20faa34b7b"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1419,7 +3122,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 9.0,
       "motion_hash": "sha256:72344b44e705c5d76430880a0ad70ef31fed8c9a2e7b632ba8f65162398e61fe",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6334182672049355,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-00-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:4fa4cd7664c97e99840bb5b1f101459b52be9cae881bf3709f5c9c971e93fe1d",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 208248832,
+            "original_worker_pid": 2523541,
+            "parsed_motion_hash": "sha256:8cf44501a5d2da3d8035bed3cffc9a7fb077d133b33ff78821e69f42b15536dd",
+            "process_wall_seconds": 40.83472621906549,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:45244391cf9bcac50d40e2a46052b65810693718e1949b24a177136a32723fd8",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-00-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794320996754280733.log",
+            "worker_wall_seconds": 39.603282780968584
+          },
+          "rs274": {
+            "air_fraction": 0.6334182672049355,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-00-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:404b1dc4cc8d325db00fa0906e021df9eee3ab072febecb5f4591612b83bea3f",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 208211968,
+            "original_worker_pid": 2523542,
+            "parsed_motion_hash": "sha256:4108d777bdd659a155942d512194272279605d0c57dcc8c4edd38749ab3a85c2",
+            "process_wall_seconds": 35.88347464997787,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:4f4abfe0df30c809dfcf58a793e8b05a77ebb592bb28e1838c39411b83287caa",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-00-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794320996759947447.log",
+            "worker_wall_seconds": 34.703712126007304
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:72344b44e705c5d76430880a0ad70ef31fed8c9a2e7b632ba8f65162398e61fe",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:4eac98cd7489ca3b2698d66779ae6b3462eaf8dd2914c21163f7bb412bca8866"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1497,7 +3268,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 3.0,
       "motion_hash": "sha256:19fc1e3aab26965faef0dedef3c5575e47d13e8a4c70c6dece52bb7804d4cd77",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6310299510478712,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-01-offset_square_lower_step_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:81614f4717a7b37cbe2626d7e031254882823fefc73d26c9c6aa76a9ab72f4c6",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 224620544,
+            "original_worker_pid": 2524311,
+            "parsed_motion_hash": "sha256:d688a13a2d85a5642bb193afa1850231712d2828ec7cbb962fd17ad1b5b3ec93",
+            "process_wall_seconds": 155.9330843220232,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:4ed5279620086971cfd4c01daa3e2a8294e880fe30ecffbad98e4817b80bbe0c",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-01-offset_square_lower_step_pad/haas/attempt-0001/worker.1794321022278873158.log",
+            "worker_wall_seconds": 154.89628316496965
+          },
+          "rs274": {
+            "air_fraction": 0.6310299510478712,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-01-offset_square_lower_step_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:7419675eb0b715025f89f2fe01e4623f16beda4b049c66f3b36be0882c2fc8eb",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 224759808,
+            "original_worker_pid": 2524312,
+            "parsed_motion_hash": "sha256:4501c2d9bd9dbd57f515f732037716d58b4e02a8b5421030741e1ae81b306116",
+            "process_wall_seconds": 138.22184299095534,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:40da76dae45654b25ad67f86de1bb4f3d75c638dc438766c719f45d53145651b",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-01-offset_square_lower_step_pad/rs274/attempt-0001/worker.1794321022284416127.log",
+            "worker_wall_seconds": 137.0109207899077
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:19fc1e3aab26965faef0dedef3c5575e47d13e8a4c70c6dece52bb7804d4cd77",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:ac304fe66eeffbf5a63da7b96faeffe23108b73eeb91cfbeead8077b0dadda2f"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1575,7 +3414,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 24.0,
       "motion_hash": "sha256:41c30c4e30f68f4aae3f0d6a0520218666cfb6a463132faaf14bd624f8e006c7",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6502453964541425,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-02-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:cdf920b5270bba3f2ff5057552cfb22a41d0df38b2ec696c46271dc868c9c06e",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 203849728,
+            "original_worker_pid": 2524620,
+            "parsed_motion_hash": "sha256:fe69dbe91685a366074095099becd0c4ea8a9ba983e5f516a791c287703f649f",
+            "process_wall_seconds": 49.55867162998766,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:3a2421cd62e8809f8a242c1bff7df8adabf31947c1863762515fde298ff32908",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-02-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794321028728966544.log",
+            "worker_wall_seconds": 48.61220545996912
+          },
+          "rs274": {
+            "air_fraction": 0.6502453964541425,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-02-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:5e70fad2a44e42ef0aac65ed7b24756a37198ba96c87caa0daaa5735c85e09aa",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 203784192,
+            "original_worker_pid": 2524619,
+            "parsed_motion_hash": "sha256:7dd439e009d174c4df65d9778ac7fcf8fdb9f2f580cba5df27a327046b5356e3",
+            "process_wall_seconds": 61.00712346495129,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:0cb6dea34817046ea5deea017bd5c5a342eb16e57546e60c448208537087e148",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-02-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794321028728916711.log",
+            "worker_wall_seconds": 59.70192139502615
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:41c30c4e30f68f4aae3f0d6a0520218666cfb6a463132faaf14bd624f8e006c7",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:2ef654a58ea6fac2c6efcc2dd14d344c3530100e1ecfa22c461ad85929103e78"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1653,7 +3560,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 18.0,
       "motion_hash": "sha256:16cf2e00d5fa133aa3ff1005d935d8382872ec2ba0060027899b84e88795efc0",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5534690085090208,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-03-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:2217da47cf4e9706cb777c1218803f6838b9c0ab93434e1ec33e4ac2243f114a",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 218144768,
+            "original_worker_pid": 2525097,
+            "parsed_motion_hash": "sha256:80347563ee53befeaee0662edd046cbd3a093b80a40658705455d86744258526",
+            "process_wall_seconds": 78.07460186688695,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:55f0bf6232affb74557e2cf9101fb936e86e59af8dec8b18fe6ada443950e3ed",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-03-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794321037613818933.log",
+            "worker_wall_seconds": 76.9757745990064
+          },
+          "rs274": {
+            "air_fraction": 0.5534690085090208,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-03-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:8a3c1fbb2a6f39065c566b78cb45867ac61ce59585816e5961f698125ecc6f35",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 218071040,
+            "original_worker_pid": 2525098,
+            "parsed_motion_hash": "sha256:fb002f1f670358a76f7484cc1af54b2bd3dbdd76f113afe0bc072d375d36d6ea",
+            "process_wall_seconds": 110.96082041005138,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:051e5d94300c7d58dc132e77fd2680cb5ec8a6409fad3783042793a9ae8cb33d",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-03-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794321037619165882.log",
+            "worker_wall_seconds": 109.77756491908804
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:16cf2e00d5fa133aa3ff1005d935d8382872ec2ba0060027899b84e88795efc0",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:b296b0e17f222ce3452460e9150f04443c35aff55d9d40ebfde783592775abb3"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1731,7 +3706,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 4.5,
       "motion_hash": "sha256:cde37d6862b0a9d99bdc0d894802d04be28fd3d205b5e35774ff2671b9aeecd3",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5142684171819315,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-04-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:065290fd60335dde2d02aa18835602c2217e45875bb6d7f18149bf24fecbc4b6",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 216018944,
+            "original_worker_pid": 2528210,
+            "parsed_motion_hash": "sha256:4c3efc5a1f6f6cf84c2be829ede3660d66c5e19e439f45bd18ca8e924cc2a666",
+            "process_wall_seconds": 103.23076892097015,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:68dd9e6cd358b1096508f9d5a6e8b756c5d7fb22d69b25d86fcfca2a81f6fe30",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-04-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794321078783602623.log",
+            "worker_wall_seconds": 101.95106759003829
+          },
+          "rs274": {
+            "air_fraction": 0.5142684171819315,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-04-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:67dda10cb9255bd287b255f6d74f3ad2c56a546747955ae40066781eec868a04",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 215953408,
+            "original_worker_pid": 2528209,
+            "parsed_motion_hash": "sha256:4b0e2e61feac3050029a0f179e85d60be78a6f384316e1cbdefb4d9a61bf283b",
+            "process_wall_seconds": 102.83592254004907,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:6714061fcd7e3babf037fbbcb7342c6a200f54861435224fd8c952364f966ac1",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-04-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794321078779189900.log",
+            "worker_wall_seconds": 101.80944148101844
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:cde37d6862b0a9d99bdc0d894802d04be28fd3d205b5e35774ff2671b9aeecd3",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:c03b5b7ccd24b74781243523f5942eb67cf3ec04c457ebe792168e1dcba55766"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1809,7 +3852,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 24.0,
       "motion_hash": "sha256:70a31cbf21dc01beaa67396e1c7e085b1668d064d4a1d8f2516a54b7097f7932",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5928353941579331,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-05-offset_square_lower_step_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:e55064580c7c77401ea7b3016977f0f968419da0799db60abc7b70363105f8ed",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 263094272,
+            "original_worker_pid": 2529222,
+            "parsed_motion_hash": "sha256:08e465e424d4d3fa49e1ff1373fd7d6deb2087761be341b0d80511ba2ecd486b",
+            "process_wall_seconds": 437.9166781270178,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:cf24b33960d5083d1633d9476a0d190956e54f03e69a5664accaa64c759ce670",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-05-offset_square_lower_step_pad/haas/attempt-0001/worker.1794321089754370796.log",
+            "worker_wall_seconds": 436.80118581291754
+          },
+          "rs274": {
+            "air_fraction": 0.5928353941579331,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-05-offset_square_lower_step_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:de283267f9a28881d2339637355e6404f8de54e6ec5bbf3207331e6ccfafc07f",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 263307264,
+            "original_worker_pid": 2529221,
+            "parsed_motion_hash": "sha256:5b7fdceaef400bd77f8f5025dfddb5bf8ed60b9da8078b33e152bf905130af22",
+            "process_wall_seconds": 410.51012201805133,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:0595ffe9734986c3a5eee3b05c5ef0a8f1517b1c15cc25fcfe4a2cd1da16c426",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-05-offset_square_lower_step_pad/rs274/attempt-0001/worker.1794321089754232089.log",
+            "worker_wall_seconds": 409.46809678093996
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:70a31cbf21dc01beaa67396e1c7e085b1668d064d4a1d8f2516a54b7097f7932",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:6ba8c1d8444c3d27cf9e904091e929832c79a2a3cc87879fcc5a420802f32631"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1887,7 +3998,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 21.0,
       "motion_hash": "sha256:0a90ef48a9469810b37aac1f96b99409b9c5636bc72ca19c59f59351c72bacaf",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.620676569532628,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-06-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:326f73882c48179617da3f7e5afe6116391b755214692ffe933e5fd2c4962c12",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 215003136,
+            "original_worker_pid": 2531368,
+            "parsed_motion_hash": "sha256:b1b77911b53db17f89b03ed62f8ac18216f1c5b5998132a1af07e82b205bd734",
+            "process_wall_seconds": 80.6584730950417,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:71cb63619a8ebaf94ccbf2fac4cb55bc6660b3a431230744cb8b928d83ce28e1",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-06-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794321148605083451.log",
+            "worker_wall_seconds": 79.63461402093526
+          },
+          "rs274": {
+            "air_fraction": 0.620676569532628,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-06-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:bba86d03e777b44570fb3eb1d4e2cae2b0bcde11fae824904a374e88edff5aec",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 214888448,
+            "original_worker_pid": 2531369,
+            "parsed_motion_hash": "sha256:5599f618c55aab386208a3fd290bb3691bb5f6711e0861667f637ca82759d898",
+            "process_wall_seconds": 93.47210798005108,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:3f73a62c10b6f04c68fd7ea55a06d58c273eaa802f98a33f63f9828f9bcc9c8b",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-06-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794321148610702312.log",
+            "worker_wall_seconds": 92.29712048301008
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:0a90ef48a9469810b37aac1f96b99409b9c5636bc72ca19c59f59351c72bacaf",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:38941a388897c07232d3d290ed5eb7295518b52f3493ef9f76be3dc6d54d8cff"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -1965,7 +4144,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 15.0,
       "motion_hash": "sha256:f490d5ad9e4b67486584523598a74963b32a7a2826b6cb3ff3a2988f09866f3d",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5866388796708598,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-07-centred_square_full_height_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:253209e1d4c0818a5a5ee2ea3d6ae214da70708c06e0180dd7b27636a85ab467",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 238395392,
+            "original_worker_pid": 2532349,
+            "parsed_motion_hash": "sha256:5dc6ad8a660bcd79bb8a5881fdee0bf8d076da6f03863d85d0e0eeb0d34435bf",
+            "process_wall_seconds": 163.46749071206432,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:c64a465ecbcf7c58c92149106fb8cc5c311569cd7754dcd85053b7627e475831",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-07-centred_square_full_height_pad/haas/attempt-0001/worker.1794321178234281618.log",
+            "worker_wall_seconds": 162.29420120699797
+          },
+          "rs274": {
+            "air_fraction": 0.5866388796708598,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-07-centred_square_full_height_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:3934deafcfdc662b4f8a1476f188e90b3bc2ae7facbc46863c12b1f83cfdb76b",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 238350336,
+            "original_worker_pid": 2532348,
+            "parsed_motion_hash": "sha256:169e8cc5b9714f1043c18ac41c333a610620a88398cbd5e6100d248b5de9caa8",
+            "process_wall_seconds": 108.8019454939058,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:3973ac2ef07c2f6f8eafaf26e6e4b0033db408f1b528f4a60f2928083efcc2aa",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-07-centred_square_full_height_pad/rs274/attempt-0001/worker.1794321178229852162.log",
+            "worker_wall_seconds": 107.67113864398561
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:f490d5ad9e4b67486584523598a74963b32a7a2826b6cb3ff3a2988f09866f3d",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:456330b8828b4232e732c0606259cff6716c7625c945dabea1768bcb075e13f4"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2043,7 +4290,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 15.0,
       "motion_hash": "sha256:d103c12f4c778b865fbe5c9ae1e44e855a0244b21a062c2091f645641a1ac2e2",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6012469240087649,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-08-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:c2df8736783fa7d334ba0779443c7314b75ba3980ca0288a32cfea443292ed10",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 226021376,
+            "original_worker_pid": 2532562,
+            "parsed_motion_hash": "sha256:cb34be2edafa645c5007d01b59ee0e6d9343d578f5008a7387a2c000526fde5e",
+            "process_wall_seconds": 108.74572844791692,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:06e21611b07cb62a126aeed9892e70db9c38dc058dc8ba36c6716dd350ded495",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-08-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794321182039278321.log",
+            "worker_wall_seconds": 107.57475232798606
+          },
+          "rs274": {
+            "air_fraction": 0.6012469240087649,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-08-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:8632e6019deb7db8afbff6e91cccda0ecbabf70523941ab5977642aaf4379731",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 226050048,
+            "original_worker_pid": 2532560,
+            "parsed_motion_hash": "sha256:209ba85450b847facc5cc8227c94b028afdb300ade681082f07f34389efaf218",
+            "process_wall_seconds": 108.11437026108615,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:9c9f754fbc44553f906926035c1e0667abb492a9c88824511697827538a10860",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-08-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794321182034869093.log",
+            "worker_wall_seconds": 106.85490940802265
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:d103c12f4c778b865fbe5c9ae1e44e855a0244b21a062c2091f645641a1ac2e2",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:924f70b385f950397692b5e83c51657de7d519050da828c0e0b49cab7d6149e4"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2121,7 +4436,75 @@
       "family": "pocket_island",
       "grid_excluded_volume_mm3": 18.0,
       "motion_hash": "sha256:55b1ec2a4176cc212692de4ef131b5e19a03c93fd1ae286af6be36b21db5cb5e",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5369572305057175,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-09-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:49333578dabcd28c3ec0505f01b4b0084178310c7abf2455ed9b24dfd65cd8b7",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 222208000,
+            "original_worker_pid": 2534735,
+            "parsed_motion_hash": "sha256:26ee294373194bfa636ec929114e0b82194e2b2e1664d6a74d5ad5a0a74e38ac",
+            "process_wall_seconds": 85.99126002204139,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:aaa8bc9e9c1ce310628a2603b56e9ab7aa63e9f2fad2ecb8eb9fa0a328217fb8",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-09-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794321242107114472.log",
+            "worker_wall_seconds": 84.98329687793739
+          },
+          "rs274": {
+            "air_fraction": 0.5369572305057175,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-09-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:e4585842cb57229a244480e94c5e2cf2b17d64d54d51dee36ae8e6c8d517d4bb",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 222273536,
+            "original_worker_pid": 2534734,
+            "parsed_motion_hash": "sha256:39982f8d07003cb1d7348ad664cb611cc26d4d5b7f263632b44ceefa057cb8a3",
+            "process_wall_seconds": 102.3503626139136,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:46c8a8f6dc7c115bc4e825e1e97e47598a23ac0832751c9ece2405e9c8976c71",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-pocket_island-test-case-09-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794321242102699096.log",
+            "worker_wall_seconds": 101.17906767502427
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:55b1ec2a4176cc212692de4ef131b5e19a03c93fd1ae286af6be36b21db5cb5e",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:536be3b24534078b523f25dbd95dd66d2b194a5e80b2da275b2ed719d8fcf75a"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2199,7 +4582,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 4.5,
       "motion_hash": "sha256:0c156d2444a70ceccafdad05f1d268b43033b8e5e029a7be77ba77c7cf024b5b",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6150090750222148,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-00-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:c68e35b518e30f01b82e22b8d1176bd32823e91dc0e6f84dc56d0005f304eaec",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 237457408,
+            "original_worker_pid": 2536624,
+            "parsed_motion_hash": "sha256:268c78ee27523322427d03f910a27c3f299ab7c1f31b8cdabdfd3f210397b2be",
+            "process_wall_seconds": 71.69213558000047,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:8c1bd7e8bab93d720dcee8e1bb2a176fbb58dda92144b55e18137c8ea677009f",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-00-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794321290804784807.log",
+            "worker_wall_seconds": 70.71779559599236
+          },
+          "rs274": {
+            "air_fraction": 0.6150090750222148,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-00-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:df65c2228c6f11eef0c82fc8655b7a3988f71ae7b0be98fd4806967396a9346c",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 237457408,
+            "original_worker_pid": 2536625,
+            "parsed_motion_hash": "sha256:08334d305859ea7580de89a2f00431b10a221146c273475ededc0a30ffa574cb",
+            "process_wall_seconds": 79.84573268308304,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:c0b8391ec6d77a56990f9038c9305546d921475ad93204de062f989aa11e88aa",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-00-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794321290804825402.log",
+            "worker_wall_seconds": 78.88526049407665
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:0c156d2444a70ceccafdad05f1d268b43033b8e5e029a7be77ba77c7cf024b5b",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:8d14f99e11570ef923b6f0d12e17010b16e1aeb90b8dfeb99ae0a57463d7619d"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2277,7 +4728,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 9.0,
       "motion_hash": "sha256:7d1d702dc2ee311f07ea405576cc12c1496a8168d581d9b488d31672545ab584",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6321702881236466,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-01-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:c9bee05dd78abdac8cdcc7a93fd6caeba22a6b0db518f46ac3fac6db132a91d9",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 200765440,
+            "original_worker_pid": 2538792,
+            "parsed_motion_hash": "sha256:1cb3ebaad17e106bd1b2fd6568f46f7cbeec4741b1e528f971125d1e35c2408d",
+            "process_wall_seconds": 25.7241051789606,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:ca5ace9938089fe1cc8703e765a2035d6328cb7376f82902b6d02d6059021a4a",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-01-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794321341720001635.log",
+            "worker_wall_seconds": 24.76820899103768
+          },
+          "rs274": {
+            "air_fraction": 0.6321702881236466,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-01-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:53f29eb8961f8a47d2b27d03f9309aed89365b17992ad85776b1128b054da2db",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 200249344,
+            "original_worker_pid": 2538793,
+            "parsed_motion_hash": "sha256:b79fee6a98816fb3648c6a37cf609055d2a5e6cd2ca6a53cce0372390b83e57b",
+            "process_wall_seconds": 13.518358274013735,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:ae3b8cf7730bd8585f6d2b29637cd7244aef021d90911ca48d0aaa8e5e6e1885",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-01-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794321341724561629.log",
+            "worker_wall_seconds": 12.80813635198865
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:7d1d702dc2ee311f07ea405576cc12c1496a8168d581d9b488d31672545ab584",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:a705d3047e32cd9db5a948e6597cde0a366cc1249bd338abf7af6e24817a16c3"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2355,7 +4874,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 3.0,
       "motion_hash": "sha256:6d758fe7d01f35094ee55a647bd82a039c131475839917586fc435c129a1f66e",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6094798616346304,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-02-centred_square_full_height_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:ce5f7e3d5bc80f3afd2faa9066a642748b3ca0a196bd2fd7874f69ff7e30b581",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 218107904,
+            "original_worker_pid": 2538979,
+            "parsed_motion_hash": "sha256:067ac0a7aa22d5277fdbf6b0f507569fa1f0cdd5d51f2be1af409fb4a5a0ad13",
+            "process_wall_seconds": 80.04253251000773,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:ac7b0d400b85a246c466fdbf1d7f9dcde7b332d5801ddebf250094ff6611b2e0",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-02-centred_square_full_height_pad/haas/attempt-0001/worker.1794321344472402965.log",
+            "worker_wall_seconds": 78.86587814707309
+          },
+          "rs274": {
+            "air_fraction": 0.6094798616346304,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-02-centred_square_full_height_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:8441087ff75015b7a26ae34a3595b18366192fa5dcec170d18ade25ca4e5e9f0",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 219066368,
+            "original_worker_pid": 2538980,
+            "parsed_motion_hash": "sha256:509aac1fed18cea67ee0e7787e036fc115da631464cba9d2daee841ab2bbfc1a",
+            "process_wall_seconds": 91.26866994006559,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:ddea8f98752c92659015fb3a301e197bf0d051bfab3f3f9dc24fbabc32541e96",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-dev-case-02-centred_square_full_height_pad/rs274/attempt-0001/worker.1794321344472489917.log",
+            "worker_wall_seconds": 89.96748457604554
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:6d758fe7d01f35094ee55a647bd82a039c131475839917586fc435c129a1f66e",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:824e83868fc950cc1e065a2489bd2e41e57e4a9118988d0da5f39e0bf88017ab"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2433,7 +5020,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 18.0,
       "motion_hash": "sha256:f5f612018683eb18fe165a32c8322749587043a330855b2e8f2d1891ed3081be",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5281480814007918,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-00-centred_square_full_height_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:0a7bc6fe0c4fda9a1878cec916f59ac9f723a550611b731027e0b8838e3fd2d0",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 260845568,
+            "original_worker_pid": 2540580,
+            "parsed_motion_hash": "sha256:4c9dbfbfdb2ff8b07ae768830303eeaa78684170f4354937de184af4606fb308",
+            "process_wall_seconds": 336.30996739305556,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:16fc0e6bba39ec3a7df2111e713482b2ae81a84caa830ca68409679f434d6720",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-00-centred_square_full_height_pad/haas/attempt-0001/worker.1794321367474524839.log",
+            "worker_wall_seconds": 335.32192508596927
+          },
+          "rs274": {
+            "air_fraction": 0.5281480814007918,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-00-centred_square_full_height_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:b9e2bebaa1b3a1c474cfcdcd34a18b3428d2a858bb006fbc0455fe1b686e9b75",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 260841472,
+            "original_worker_pid": 2540579,
+            "parsed_motion_hash": "sha256:c8830d82fbef76cfc0a42b3bb402175072f6662aedf6fc77ce8b537c86f8174a",
+            "process_wall_seconds": 341.66865250701085,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:267c5e9ea85f3dea85d78f520ce4b9e975560aaf68ff17aaf5c4f136ce331b05",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-00-centred_square_full_height_pad/rs274/attempt-0001/worker.1794321367465937990.log",
+            "worker_wall_seconds": 340.44498526793905
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:f5f612018683eb18fe165a32c8322749587043a330855b2e8f2d1891ed3081be",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:a6820de276662766ae79e178f0060b7f10093ea06d1a536beea87787beb78210"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2511,7 +5166,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 6.0,
       "motion_hash": "sha256:1cca1ba853fb9b834bf9faf1fb4aeac633b03e29d074749ab9b66f26c602c1d5",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6983515755333389,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-01-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:02e370c535fe5d4d02a22800d565042b3228bda25b5cb0b5adda4efaf78d8427",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 196222976,
+            "original_worker_pid": 2540868,
+            "parsed_motion_hash": "sha256:0924cb09571d988a7a388059a222827db9f349bbf740a05b81c08103c5702173",
+            "process_wall_seconds": 23.223795932950452,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:78625e4ec46a6819f9fb62dfb6dd1d81eab392f7371119aa6b41267aa5b9b12d",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-01-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794321370740675340.log",
+            "worker_wall_seconds": 21.897438982035965
+          },
+          "rs274": {
+            "air_fraction": 0.6983515755333389,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-01-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:eecde42274f24a2faff2d795e9f8a12ee0b1dbdc7d312f9984ee512d4808d05b",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 195891200,
+            "original_worker_pid": 2540869,
+            "parsed_motion_hash": "sha256:458671a1658bef07358e4fa5ed94ecbbb5f58dd3d6c52810f29a8e6ab5d6c297",
+            "process_wall_seconds": 22.47399642993696,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:d7f6ce6a0b52b0a57326abb97c4c18f8ff99ca1fce87ac05c086bdaf91f9d208",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-01-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794321370740718610.log",
+            "worker_wall_seconds": 21.179848980042152
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:1cca1ba853fb9b834bf9faf1fb4aeac633b03e29d074749ab9b66f26c602c1d5",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:7b12d90625c6564a4eb6ea892072a6fb19965738bde238c8e43ef9ccd26a90b4"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2589,7 +5312,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 21.0,
       "motion_hash": "sha256:b46fe1f22016b1eaa5a44bce0326fd032f6b19863d358ecd7a29206bb91b7c39",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6224849583784886,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-02-offset_square_lower_step_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:034140b2aef2d4272b2f6e6f3a04032ece85bb87dc7ff76212f2df63e97c4813",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 249663488,
+            "original_worker_pid": 2542902,
+            "parsed_motion_hash": "sha256:b35b18aadf013b81056aa6cd50bd3fdc77dc2bff9ac69f1499667b8fdbe8e780",
+            "process_wall_seconds": 173.5573286860017,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:06a291d55f6401a4b614405674fb2df5e804b430366778e79fe6fd71e3d2a88e",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-02-offset_square_lower_step_pad/haas/attempt-0001/worker.1794321393983869730.log",
+            "worker_wall_seconds": 172.64905174495652
+          },
+          "rs274": {
+            "air_fraction": 0.6224849583784886,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-02-offset_square_lower_step_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:a4996b4ea5cc9977c72b0e868f3ee620b5ec2a15d84e24c36ce18aba67577314",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 249737216,
+            "original_worker_pid": 2542903,
+            "parsed_motion_hash": "sha256:1f29459a66b362b6b213406069ece27665f0255b0944778dd811c667b8eed9ae",
+            "process_wall_seconds": 226.41941363899969,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:1018e3a6f79baee5b08008b52cc048aa5178bf3a20995870006c17f5ea3735e2",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-02-offset_square_lower_step_pad/rs274/attempt-0001/worker.1794321393983925444.log",
+            "worker_wall_seconds": 225.25945543404669
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:b46fe1f22016b1eaa5a44bce0326fd032f6b19863d358ecd7a29206bb91b7c39",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:3d04ff76ac9e629fa973ccde6760c81825149388048501ef95476b7e7a62ab2d"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2667,7 +5458,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 2.25,
       "motion_hash": "sha256:8241d0f862ca7d9a7b9afed56465c76dc6a07c5fe6c9e2d5862299c10c4c7a97",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6024893968250011,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-03-offset_square_lower_step_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:0cc6262f4584a558cd503395e0c0c3bee52e7c7e6dcea868974b35759fa2178e",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 246067200,
+            "original_worker_pid": 2545004,
+            "parsed_motion_hash": "sha256:6251ef75d56c4f14477d2f08b66f2e67a16eecae5a80e074eb1460f41d495871",
+            "process_wall_seconds": 280.55450307705905,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:fe86cdafdccf5fa56782c9d015aa0bdf9bfc15c353528e45a4084ade306b06f4",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-03-offset_square_lower_step_pad/haas/attempt-0001/worker.1794321435760159794.log",
+            "worker_wall_seconds": 279.3657597010024
+          },
+          "rs274": {
+            "air_fraction": 0.6024893968250011,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-03-offset_square_lower_step_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:b603d176b4582e0932b7b1940339af5494d4acbb74e212e8bddcef88e032b2c1",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 246132736,
+            "original_worker_pid": 2545005,
+            "parsed_motion_hash": "sha256:ee5d3b2fa3ddaf2febdd25fe29e8f99246d3fc28a84f18b8a4b3cc4f5de1a8c9",
+            "process_wall_seconds": 271.77124851895496,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:2b02cea018c8540fb35ed7642fda7500b53689016ca276259a6437dbd81160ee",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-03-offset_square_lower_step_pad/rs274/attempt-0001/worker.1794321435764701040.log",
+            "worker_wall_seconds": 270.42793547094334
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:8241d0f862ca7d9a7b9afed56465c76dc6a07c5fe6c9e2d5862299c10c4c7a97",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:5f9da5a5fce0e69fd90116a3eecd03cc5926f02c8ada7484e8f99cfd7b553a46"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2745,7 +5604,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 15.0,
       "motion_hash": "sha256:1416f3f5f3ec7cd250137337a373d77631f162265e8fb12d9709c33830d4c431",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5477068121090539,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-04-offset_square_lower_step_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:4fdb2d48f33ac95741ab35b0727c72cda8ce521c6d16c8b9a9e21e3940eb3529",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 270168064,
+            "original_worker_pid": 2549472,
+            "parsed_motion_hash": "sha256:c1ec92138108686f2624716c15d143257eb09a5db97e59df322ae15c144d1c9c",
+            "process_wall_seconds": 367.11006335995626,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:b901ebbf3cf4bf066bf4930cd57b62cd65d39f871f26addafc2589679f6ec556",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-04-offset_square_lower_step_pad/haas/attempt-0001/worker.1794321527707872953.log",
+            "worker_wall_seconds": 366.16017381707206
+          },
+          "rs274": {
+            "air_fraction": 0.5477068121090539,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-04-offset_square_lower_step_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:2d41bc8213c8c3269bbccf531536f7c8fd07c48aafd07b83373b7e5e14f8f40b",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 270299136,
+            "original_worker_pid": 2549471,
+            "parsed_motion_hash": "sha256:040cf51c2ddfda9914f7ac15052058f648d096827c84ab78868e3521e20ef9c6",
+            "process_wall_seconds": 343.83891291101463,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:c6310a367075afd210bcac30b7c25028e70113fb907ccc63af2df62b56b621d3",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-04-offset_square_lower_step_pad/rs274/attempt-0001/worker.1794321527706566889.log",
+            "worker_wall_seconds": 342.23739744198974
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:1416f3f5f3ec7cd250137337a373d77631f162265e8fb12d9709c33830d4c431",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:d97ccdb6be7140b25b5a79166ac88f394af2ae9c5b4fdcbe8e5f1f5298889525"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2823,7 +5750,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 18.0,
       "motion_hash": "sha256:79b3d527eb30a8e3c1b9be74b0db712f4dbc7127f93665c23466b990fb0137c8",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.6168740658312518,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-05-offset_square_lower_step_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:edd90a51d3677a208f7bca6033dfc0b2b6fef243c4c7d4d72fd4bba79c1dd19f",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 227262464,
+            "original_worker_pid": 2556393,
+            "parsed_motion_hash": "sha256:7f18d37aad7eced967ded9015a19ed50c5112f9c3327bcc8dff103a4c580b61b",
+            "process_wall_seconds": 172.16687828896102,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:f261f263117eb36f8109101540390979aa99e09c67216d66076afc17d74eb1de",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-05-offset_square_lower_step_pad/haas/attempt-0001/worker.1794321620433134588.log",
+            "worker_wall_seconds": 170.834276804002
+          },
+          "rs274": {
+            "air_fraction": 0.6168740658312518,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-05-offset_square_lower_step_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:36424fe7ed24683b10c9dea508d14fb0172ecb73706759a4289af8b281ec3f3c",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 227315712,
+            "original_worker_pid": 2556394,
+            "parsed_motion_hash": "sha256:8f8ee08aa229033473a232a95597f5162b08d643334633f461954bd5db9a2f6a",
+            "process_wall_seconds": 165.2089539540466,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:0ed775f386fe0127d699e237f824face1966d7e7cbc647028c88fb948da568bc",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-05-offset_square_lower_step_pad/rs274/attempt-0001/worker.1794321620437528008.log",
+            "worker_wall_seconds": 163.9108117459109
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:79b3d527eb30a8e3c1b9be74b0db712f4dbc7127f93665c23466b990fb0137c8",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:1dd95ab9ccfbf165e8543782ddf50e79c0317c9d64478aa94386a1164c5d2db6"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2901,7 +5896,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 6.0,
       "motion_hash": "sha256:c50b0032b9bec50d73e62f9d868e08678d3142f02f4a034a5c96958fcdd03e7e",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5362146451522012,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-06-offset_square_lower_step_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:d9849c6130b6009cb22cff86873ba3b0337356033bd3f95356fc965354db8b4d",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 235085824,
+            "original_worker_pid": 2562829,
+            "parsed_motion_hash": "sha256:1cd190257b8a76b2424993828cc1ced6b4cfddb20cdfd2588f07f097ffeb551f",
+            "process_wall_seconds": 196.05413110100199,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:f93e51aa47807c3b2952cd5f593a9b7f475cb13ec2f61f79f84b404aaf22d8a4",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-06-offset_square_lower_step_pad/haas/attempt-0001/worker.1794321709156256565.log",
+            "worker_wall_seconds": 195.1525913469959
+          },
+          "rs274": {
+            "air_fraction": 0.5362146451522012,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-06-offset_square_lower_step_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:b99188a5e0472adc3a456d978cadcb5682828c503c0308cd689bf5a4e6c2614e",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 235122688,
+            "original_worker_pid": 2562830,
+            "parsed_motion_hash": "sha256:539c5d4d08acab2bfc728e46a97f35b6fdc31574a36a48f3911e8c9f54391efa",
+            "process_wall_seconds": 170.09553408797365,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:44ba78348ca26900f7358a9ea2f87a8a9996a17258ae0025a2e93134b9e3ebd2",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-06-offset_square_lower_step_pad/rs274/attempt-0001/worker.1794321709160180443.log",
+            "worker_wall_seconds": 168.97667291702237
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:c50b0032b9bec50d73e62f9d868e08678d3142f02f4a034a5c96958fcdd03e7e",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:54cc40a483b4ade003419b70c923d2680e05f80e1e1236e9000d8efac489b66f"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -2979,7 +6042,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 15.0,
       "motion_hash": "sha256:da7d74499e6e4ea9a0427c20664ee5758e9d1b5bc4d71269acfc026522c2703b",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.7319086102658336,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-07-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:25b0ca9129c169ed756910d90f824348a7260e237103bd335a1f0f1ab812d9f4",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 194125824,
+            "original_worker_pid": 2563497,
+            "parsed_motion_hash": "sha256:fecd687f1324aa6dd666fddf7767d78e2429c55adf4f70b977e5bf49e51bf2ed",
+            "process_wall_seconds": 18.92530106101185,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:6845503c711ddc9aeb019eb989cc4face3396ed26c2597dbb49ee2bfa2179f1b",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-07-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794321716336415262.log",
+            "worker_wall_seconds": 17.66653672105167
+          },
+          "rs274": {
+            "air_fraction": 0.7319086102658336,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-07-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:04300b32eb50d58ba3d9a7b23ccdb597a969bb4d47d1ab94476e0c24ec89d906",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 194101248,
+            "original_worker_pid": 2563498,
+            "parsed_motion_hash": "sha256:cec10c6d3c9ad5dae9c1b6517ea4e25af3e9c1f87ebe41f36a6041edf4ba6df8",
+            "process_wall_seconds": 19.72598135797307,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:79bdddee2567902400b002b5076cb5e7614493778e351dc3f03847129c00d30c",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-07-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794321716336459985.log",
+            "worker_wall_seconds": 18.33872720191721
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:da7d74499e6e4ea9a0427c20664ee5758e9d1b5bc4d71269acfc026522c2703b",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:ba85c1793140796eb905112e26aa12af7bf350f016d757b4e93dc0b83f5b9d05"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -3057,7 +6188,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 3.0,
       "motion_hash": "sha256:bbbfea6b048e01025dcf6e3ca7ef91a29f6a5a85dcccbd05e2cdd6f48f23217f",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5994150347201253,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-08-centred_square_full_height_pad/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:688f5123ca0f6173dbb898695a859bd40d19f2cb0e13f1acbf62fed61e5d078e",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 232771584,
+            "original_worker_pid": 2564829,
+            "parsed_motion_hash": "sha256:f72a7e01ecf11f8be74bdfabb17126e5eacf4d5a18c9be33cf30b6bbe3539962",
+            "process_wall_seconds": 131.0416768080322,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:6996dbfe5a2042f50e33fd3f651c17d9bd3a47597cdec38e132a0a3b2612a55c",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-08-centred_square_full_height_pad/haas/attempt-0001/worker.1794321736089855808.log",
+            "worker_wall_seconds": 129.6465707240859
+          },
+          "rs274": {
+            "air_fraction": 0.5994150347201253,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-08-centred_square_full_height_pad/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:2a436e9062aa624887191a947880e122fc22ef7d141781f38c3efccaff12f82a",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 232779776,
+            "original_worker_pid": 2564828,
+            "parsed_motion_hash": "sha256:4f0fd8dd758233b3074d3ecd8bad2cec7436e83779efa76c985e4ba6992a3bd3",
+            "process_wall_seconds": 125.98929317598231,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:afd3a05ac394f3456cfd4d6efebbfd26027f35fdc091a195ed535014c61db744",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-08-centred_square_full_height_pad/rs274/attempt-0001/worker.1794321736088891720.log",
+            "worker_wall_seconds": 124.9777184400009
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:bbbfea6b048e01025dcf6e3ca7ef91a29f6a5a85dcccbd05e2cdd6f48f23217f",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:a651b26df2b39d5aae92010fb06ed065d7a128810164f30c77e7e12b08bc9a1f"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
@@ -3135,7 +6334,75 @@
       "family": "variable_width_depth",
       "grid_excluded_volume_mm3": 3.0,
       "motion_hash": "sha256:12611b5b21383bbe0f418bf0d81a11af7487c71dd6b40ff2ad94ffb5b63af2ce",
-      "posted_qualification": "pending",
+      "posted_qualification": {
+        "dialects": {
+          "haas": {
+            "air_fraction": 0.5892975323155721,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-09-open_oblong_zero_retained_pads/haas/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:53bcee875d45aab872446e1c6219dd1eb1f1c7789f1ecfe1fe874b5b70b8751f",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 218914816,
+            "original_worker_pid": 2567493,
+            "parsed_motion_hash": "sha256:b4aefb85de36eeea9c0c80e727b388647f1040c789afcc94bdce907073ef5795",
+            "process_wall_seconds": 96.22067030798644,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:9e61835f1c406a8bb0f263faac97b5fc72b0746e6877794f20a4d86f60125777",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-09-open_oblong_zero_retained_pads/haas/attempt-0001/worker.1794321792625116353.log",
+            "worker_wall_seconds": 95.04436853900552
+          },
+          "rs274": {
+            "air_fraction": 0.5892975323155721,
+            "coverage": "complete",
+            "coverage_reasons": [],
+            "efficiency_eligible": true,
+            "evaluation_path": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-09-open_oblong_zero_retained_pads/rs274/attempt-0001/evaluation.json",
+            "evaluation_sha256": "sha256:8a022230d9e611f35934ad0bc52d5163a13a58b99c718a7b470dec9ac4d2b526",
+            "geometry_pass": true,
+            "original_worker_own_hwm_bytes": 218624000,
+            "original_worker_pid": 2567494,
+            "parsed_motion_hash": "sha256:059d5242b81cb48955bf5578d106c5bd1c082cee3cc3f972accc3ddabd82d472",
+            "process_wall_seconds": 97.45907645893749,
+            "qualified": true,
+            "safety_pass": true,
+            "schema_version": "t2.3c-dialect-result/1",
+            "settings": {
+              "compute_bounds": true,
+              "exclusion_tolerance_mm3": 0.0,
+              "expected_nc_hash": "sha256:d7e9c4bea83da29269a214e1abdc37a55d4f2b28ca67afdcdf8669c929d3aec7",
+              "max_samples_per_segment": 4096,
+              "max_step_mm": 0.125,
+              "record_stations": false,
+              "safety_screen": true,
+              "subdivisions": null
+            },
+            "status": "qualified",
+            "worker_log": "/home/ntsoi/src/cnc/dispatch/diffcam/T2.3c-posted-qualification-20261110/tasks/procedural-variable_width_depth-test-case-09-open_oblong_zero_retained_pads/rs274/attempt-0001/worker.1794321792630514925.log",
+            "worker_wall_seconds": 96.4221922189463
+          }
+        },
+        "efficiency_eligible": true,
+        "motion_hash": "sha256:12611b5b21383bbe0f418bf0d81a11af7487c71dd6b40ff2ad94ffb5b63af2ce",
+        "qualified": true,
+        "reason": null,
+        "schema_version": "t2.3c-posted-qualification/1",
+        "status": "qualified",
+        "task_hash": "sha256:68eefcd7223c02deefb6345b25094062ac707153ae018e47bcaadb1e2356a557"
+      },
       "predeclared_exclusion_reasons": [
         "unsupported or contradictory task/seed geometry",
         "unreachable original target or finite-cutter/shank/holder access violation",
