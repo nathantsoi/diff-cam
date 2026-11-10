@@ -136,8 +136,8 @@
       "status": "in_progress",
       "owner": "diffcam-worker-2 (runner T4.1a) / coordinator (real pilot T4.1b)",
       "branch": "task/T4.1-runner",
-      "blocker": "T4.1b-wiring tip 553a7d2: J1-J4 + D-07 enforcement done; L1 open: worker posted-job peak RSS was ru_maxrss inherited from the optimizer parent (reproduced: child 830,608 KiB ru_maxrss vs 9,448 kB VmHWM). Fix = VmHWM per child + regression + re-measure posted phases; D-07 premise to be amended from real per-role peaks before launch.",
-      "next": null,
+      "blocker": null,
+      "next": "Coordinator launches the 7-run pilot from clean core (f64, verdicts at 0.125 mm per D-04, cap per D-07 amended).",
       "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts. | DECISION 2026-11-09: pilot launches as an infrastructure/cost pilot once w2 gates are green; fixed/annealed-Adam (gradient) rows are PROVISIONAL until T3.3b characterizes the systematic AD/FD mismatch; if T3.3b finds a real backward bug, Adam rows are rerun after the fix. | D-2026-11-09-04 (reports/decisions.md): pilot verdicts from 0.125 mm posted eval (both dialects); 1.0 mm = screen/diagnostic only; 0.25 mm RS274 convergence point recorded."
     },
     "T3.4": {
@@ -359,15 +359,15 @@
       "note": "merged de37d5a: precision='f32'|'f64' declared option (f32 default), all fields/kernels/adjoints follow dtype; f64 AD/FD < 1% (idx 2, 35) on 75-seg pilot path; f32 bias curve retained; cost f32 29.4 s/2.0 GB vs f64 37.0 s/3.7 GB per gradient."
     },
     "T4.1b-L1": {
-      "status": "in_progress",
+      "status": "done",
       "owner": "coordinator (all three workers stalled in API-timeout retries)",
       "branch": "task/T4.1b-L1-rss",
       "base": "553a7d2",
       "lease": [
         "scripts/run_benchmark_suite.py"
       ],
-      "note": "Reassigned from worker-2 (stalled in API-timeout retries). Per-child VmHWM peak RSS, cap checks on child peak, >=1GiB-parent regression, re-measure posted phases; D-07 to be amended from real peaks. Coordinator took L1 at 17:50; fix + 2 regressions committed e7c5b3b (runner tests 38 passed/6 skipped); full suite + posted-phase re-measure running.",
-      "tip": "e7c5b3b"
+      "note": "Reassigned from worker-2 (stalled in API-timeout retries). Per-child VmHWM peak RSS, cap checks on child peak, >=1GiB-parent regression, re-measure posted phases; D-07 to be amended from real peaks. Coordinator took L1 at 17:50; fix + 2 regressions committed e7c5b3b (runner tests 38 passed/6 skipped); full suite + posted-phase re-measure running. Merged to core 9a6537b. Gates at e941ad0: full 639p/11s, REAL_PILOT_SMOKE 44p (runs/retained/t41b-l1-real-pilot-smoke-e941ad0), REAL_NOMINAL 11p.",
+      "tip": "e941ad0"
     }
   }
 }
