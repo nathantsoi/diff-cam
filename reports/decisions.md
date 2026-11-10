@@ -104,3 +104,25 @@ DECISION:
 - The current pilot stays as retained evidence of the defect. The pilot is re-run after the fix (same config apart from what the fix
   changes), before the T4.2 freeze. The questions about objective weighting, budgets and k (review Q1(c)) are deferred until the
   re-run shows whether optimizers can improve on CAM at all.
+
+## D-2026-11-10-10 — The objective must carry efficiency; selection is feasibility-first (review R1/R2)
+Finding (R1): algorithms/objectives.py:208-210 forces every non-geometry simulator weight to 0 (w_time, w_air_time, w_air, w_jerk,
+…), and has since the prototype (a14a7d4). The hard objective is therefore 2·gouge² + residual² + 50·holder². A geometrically perfect
+CAM seed sits at its global minimum, so no optimizer can improve on it. The pilot as configured cannot test the plan's stated goal
+(experimental_plan §1.3/§5: simultaneous improvement of geometry, posted cycle time and air-cut fraction under zero-gouge and
+holder-safety gates). This was a prototype leftover, not a design choice.
+Finding (R2): selection compares the summed scalar objective, so a gouging candidate can beat a residual-only one.
+DECISION:
+- Selection is **feasibility-first (lexicographic)** for every arm, using hard scores: (1) safety (holder overlap = 0), (2) gouge
+  within the task tolerance, (3) residual within the completion tolerance, then (4) the efficiency objective. An infeasible candidate
+  never beats a feasible one; among infeasible candidates, lower total constraint violation wins. Combined with D-09, a feasible seed
+  can only be replaced by a feasible candidate that is more efficient.
+- The objective gains declared efficiency terms: cycle time (w_time, in seconds from the candidate MotionPlan's durations, which
+  objectives.candidate_motion already recomputes) and air-cut time (w_air_time), in both the smooth objective (gradient-bearing,
+  through the existing sim fields) and the hard objective (exact). Geometry and safety terms stay in the smooth objective as penalties.
+- Weight values and normalisation (for example time relative to the seed's cycle time) are protocol values. They are chosen on the dev
+  split within the declared tuning budget and frozen at T4.2, not hard-coded now; the defaults in code must be explicit config, not 0
+  by fiat.
+- Routing: worker-1's T3.xc gains the feasibility-first ranking (optimize.py/blackbox.py). Worker-2's new card T3.xd adds the efficiency
+  terms (objectives.py), with configurable weights and hard/smooth parity tests. After both merge, the pilot is re-run with a declared
+  efficiency weight before T4.2.
