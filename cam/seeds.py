@@ -921,17 +921,21 @@ def _construct_random_seed(task, declaration, seed, *, exploratory: bool):
                 "noise_shape": list(shape), "raw_mm_per_delta_unit": 1.0,
             }
         noise = _centered_noise(rng, kind, sigma, shape)
-        bound_unit = "normalized_theta" if exploratory else "mm"
-        bound = {
-            "space": spec["parameter_space"], "unit": bound_unit,
+        noise_scale = {
+            "space": spec["parameter_space"],
+            "unit": "normalized_theta" if exploratory else "mm",
             "per_coordinate_scale": sigma,
             "max_abs_coordinate": float(np.max(np.abs(noise))),
-            "definition": ("normalized theta control sigma/uniform half-range, not a physical-MM vertex bound"
-                           if exploratory else
-                           "abs(noise[j][axis]) <= per_coordinate_scale for every free vertex coordinate"),
-            "policy": ("a structurally invalid CAM perturbed plan fails this seed without redraw or substitution"
-                       if exploratory else
-                       "an excess draw fails this seed once; never redraw, replace, clip, or skip"),
+            "definition": (
+                "Gaussian scale is a normalized-theta standard deviation; uniform scale "
+                "is its symmetric half-range, not a physical-MM straight-line bound"
+                if exploratory else
+                "Gaussian scale is the per-coordinate standard deviation in mm; "
+                "uniform scale is its symmetric half-range in mm"),
+            "filter_applied": False,
+            "policy": (
+                "scale controls dispersion only; validity uses actual machine envelope/bounds, "
+                "feed limits, safe entry, contiguity, and validate_for_task; no redraw or clipping"),
             "sqrt_T_growth": False,
         }
         evidence.update({
@@ -941,18 +945,13 @@ def _construct_random_seed(task, declaration, seed, *, exploratory: bool):
             "parameter_space": spec["parameter_space"], "parameter_map": parameter_info,
             "scale": scale_info, "seed_derivation": derivation,
             "noise_sha256": "sha256:" + hashlib.sha256(_canonical_json(noise.tolist())).hexdigest(),
-            "bound": bound, "exploratory": exploratory,
+            "noise_scale": noise_scale, "exploratory": exploratory,
             "excluded_from_init_axis_claims": exploratory,
         })
         if not exploratory:
-            # Retain actual local deviations even when the bound below fails.
+            # Retain actual deviations even if physical motion validation fails.
+            # Never compare a Gaussian sample to sigma as an acceptance test.
             evidence["deviations"] = _deviation_statistics(noise)
-        excess = np.argwhere(np.abs(noise) > sigma)
-        if not exploratory and excess.size:
-            coordinate, axis = (int(excess[0][-2]), int(excess[0][-1]))
-            raise ValueError(
-                f"declared per-coordinate deviation bound exceeded at free vertex {coordinate}, "
-                f"axis {axis}, seed {requested_seed}; failed instance is retained without redraw or clipping")
         if exploratory:
             points = parameterization.positions(noise)
             # Only resulting tool-position deviations have physical MM units;
@@ -1011,7 +1010,8 @@ def random_seed(task: C.TaskSpec, declaration, seed: int) -> SeedResult:
 
     The first/last positions are exactly the declared CAM endpoints. Gaussian
     scale is a coordinate standard deviation; uniform scale is its half-range.
-    An excess Gaussian draw fails this seed, never a clipped/redrawn success.
+    Neither is a validity cutoff. Actual motion constraints are checked at this
+    original seed, with no sigma-based rejection, clipping, or redraw.
     """
     return _construct_random_seed(task, declaration, seed, exploratory=False)
 

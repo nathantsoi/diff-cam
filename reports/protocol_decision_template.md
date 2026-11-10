@@ -138,13 +138,13 @@ The D-08 **random arm is delta-only**. `parameter_space="theta"` in `random_init
 The straight line uses actual CAM start/end points and uniformly placed vertices at T+1 positions, not CAM interior stations in a purported no-init baseline. For T segments there are T−1 free interior vertices. If `L_j` is the straight-line position and `sigma_mm = fraction * selected_reference_mm`, each free-vertex coordinate receives one independent centered deviation `d_j[x,y,z]` in **physical mm**:
 
 - generated position is `P_j = L_j + d_j` only at free vertices; `P_0` and `P_T` are exactly the declared endpoints;
-- there is no cumulative displacement random walk or `sigma * sqrt(T)` bound growth;
-- Gaussian means standard deviation `sigma_mm`; uniform means independent draws on `[-sigma_mm, +sigma_mm]`;
-- accepted draws satisfy `abs(d_j[axis]) <= sigma_mm` for every free-vertex coordinate independently of T.
+- there is no cumulative displacement random walk: scale/dispersion at each free vertex is independent of T, not a `sigma * sqrt(T)` random-walk variance;
+- Gaussian means independent zero-mean normal draws with standard deviation `sigma_mm`; uniform means independent draws on `[-sigma_mm, +sigma_mm]`;
+- **scale is not a validity bound or rejection filter**, so `abs(d_j[axis]) > sigma_mm` alone never invalidates a Gaussian realization.
 
-The coordinate bound is **not a clipping rule**. A Gaussian realization exceeding it is a failed instance at the same requested seed and caller-provided sequence position. Record `status="failed_instance"`, `seed`, nonempty reason, derivation evidence, noise fingerprint, and observed bound fact. Never redraw, replace, reorder, drop, clip, or substitute another seed/path. Successful draws are therefore explicitly conditional on the retained rejection rule; they are not proof that every Gaussian draw yielded a usable line.
+For a syntactically valid declaration and finite draw, seed validity uses only the actual motion constraints: machine envelope/bounds, feed limits, safe rapid entry, contiguity, and `validate_for_task`. A physically invalid realization becomes a recorded `failed_instance` at the same requested seed and caller-provided sequence position, with nonempty reason, derivation evidence, noise fingerprint, and realized deviations when available. Never redraw, replace, reorder, drop, clip, or substitute another seed/path. The metadata's `noise_scale` records standard-deviation/half-range semantics and `filter_applied=false`; it is not a pseudo-physical clearance threshold or a way to manufacture collapse.
 
-Every valid random plan records maximum absolute **coordinate** deviation, maximum **Euclidean vertex** deviation `max_j ||d_j||₂`, and RMS **Euclidean vertex** deviation `sqrt(mean_j ||d_j||₂²)` over free vertices, in mm, with count/bound semantics. The Euclidean maximum is at most `sqrt(3) * sigma_mm` under the coordinate bound, not a function that increases with `sqrt(T)`. Both endpoints and realized deviations must match actual output rather than declared intent alone.
+Every random realization records maximum absolute **coordinate** deviation, maximum **Euclidean vertex** deviation `max_j ||d_j||₂`, and RMS **Euclidean vertex** deviation `sqrt(mean_j ||d_j||₂²)` over free vertices, in mm, including the number of free vertices. These are realized measurements, not rejection limits; in particular, Gaussian draws are not constrained to `sqrt(3) * sigma_mm`. Both endpoints and realized deviations must match actual output. An invalid physical construction retains these diagnostics rather than hiding the draw behind a new seed.
 
 Frozen random initialization requires strictly positive scale. Zero fraction is only an explicit diagnostic/test degenerate probe (`runner_allowed=false`), reproducible as the exact straight-line baseline. Ordinary `require_plan()` rejects it; only explicit `require_plan(diagnostic_only=True)` permits inspection. Canonical CAM start=end therefore yields a legitimate stationary/collapsed construction, not an efficiency success or permission to substitute nominal CAM.
 
@@ -161,7 +161,7 @@ The following is a coordinator form for one attached override, not an agreed exp
   "parameter_space": "theta",
   "distribution": {
     "kind": "TO-BE-FROZEN: gaussian or uniform",
-    "detail": "TO-BE-FROZEN: independent centered draws and bound/rejection rule"
+    "detail": "TO-BE-FROZEN: independent centered normalized-theta draws; dispersion is not a validity cutoff"
   },
   "scale": {
     "fraction": "TO-BE-FROZEN: finite positive multiplier, separately selected from D-08 random",

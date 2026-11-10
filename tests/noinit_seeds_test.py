@@ -157,7 +157,8 @@ def test_cam_perturbed_zero_reproduces_cam_but_is_explicitly_exploratory(task, c
     assert meta["scope"] == "exploratory_cam_perturbation"
     assert meta["exploratory"] is True
     assert meta["excluded_from_init_axis_claims"] is True
-    assert meta["bound"]["unit"] == "normalized_theta"
+    assert meta["noise_scale"]["filter_applied"] is False
+    assert meta["noise_scale"]["unit"] == "normalized_theta"
 
 
 def test_raw_theta_in_random_init_is_not_an_exploratory_fallback(task, cam):
@@ -232,13 +233,6 @@ def test_exploratory_distributions_validate_with_separate_flags_and_baseline(tas
 def test_delta_distributions_keep_local_deviations_and_exact_endpoints(task, cam, family):
     definition = declaration(family=family, fraction=0.0005)
     result = S.random_seed(task, definition, 4)
-    if not result.valid:
-        # Gaussian retains this fixed rejection instance; it does not acquire a
-        # different seed or pretend a clipped substitute was the actual draw.
-        assert family == "gaussian"
-        assert result.status == "failed_instance"
-        assert "deviation bound exceeded" in result.invalid_reason
-        return
     plan = assert_valid(result, task, cam)
     p = positions(plan)
     assert tuple(p[0]) == cam.initial_state.position_mm
@@ -246,10 +240,12 @@ def test_delta_distributions_keep_local_deviations_and_exact_endpoints(task, cam
     meta = result.to_record()["derivation"]
     assert meta["parameter_space"] == "delta"
     assert meta["parameter_map"]["noise_shape"] == [len(cam.segments) - 1, 3]
-    assert meta["bound"]["sqrt_T_growth"] is False
+    assert meta["noise_scale"]["sqrt_T_growth"] is False
+    assert meta["noise_scale"]["filter_applied"] is False
+    assert "bound" not in meta
     assert meta["deviations"]["count"] == len(cam.segments) - 1
-    assert 0 < meta["deviations"]["rms_deviation_mm"] <= math.sqrt(3) * meta["scale"]["scale_mm"]
-    assert meta["deviations"]["max_abs_coordinate_deviation_mm"] <= meta["scale"]["scale_mm"]
+    assert math.isfinite(meta["deviations"]["rms_deviation_mm"])
+    assert 0 < meta["deviations"]["rms_deviation_mm"]
 
 
 def test_uniform_zero_is_the_same_reference_path_even_when_its_source_is_zero(task, cam):
@@ -382,8 +378,9 @@ def local_cam_subset(task, cam, segment_count):
                         cam.timing_rule, provenance="explicit-local-T-subset: synthetic seed test only")
 
 
-def test_vertex_deviation_bound_does_not_grow_with_sqrt_T(task, cam, monkeypatch):
+def test_vertex_scale_and_rms_do_not_grow_with_sqrt_T(task, cam, monkeypatch):
     measured = []
+    scales = []
     for segment_count in (10, 75):
         local = local_cam_subset(task, cam, segment_count)
         local.validate_for_task(task)
@@ -404,31 +401,64 @@ def test_vertex_deviation_bound_does_not_grow_with_sqrt_T(task, cam, monkeypatch
         assert stats["max_deviation_mm"] <= math.sqrt(3.0) * sigma
         # Local RMS per free vertex stays O(sigma), not O(sigma*sqrt(T)).
         assert 0 < stats["rms_deviation_mm"] < 1.5 * sigma
-        assert meta["bound"]["sqrt_T_growth"] is False
+        assert meta["noise_scale"]["sqrt_T_growth"] is False
+        assert meta["noise_scale"]["filter_applied"] is False
         measured.append(stats["rms_deviation_mm"] / sigma)
+        scales.append(sigma)
     assert all(0 < ratio < 1.5 for ratio in measured)
+    assert scales[0] == scales[1]
 
 
-def test_realized_gaussian_outlier_retains_seed_bound_and_deviation_statistics(task, cam):
-    # Observed fixed RNG rejection case, not a retry or a modified seed.
-    result = S.random_seed(task, declaration(fraction=0.0005), 7)
-    assert not result.valid and result.plan is None
-    assert "deviation bound exceeded" in result.invalid_reason
+def test_gaussian_above_sigma_is_retained_when_motion_is_physically_valid(task, cam):
+    # This same fixed RNG realization was previously rejected only for |noise|>sigma.
+    # Its actual coordinates satisfy the physical task constraints, so it is retained.
+    definition = declaration(fraction=0.0005)
+    result = S.random_seed(task, definition, 7)
+    plan = assert_valid(result, task, cam)
+    assert tuple(positions(plan)[0]) == cam.initial_state.position_mm
+    assert tuple(positions(plan)[-1]) == cam.segments[-1].end_mm
     record = result.to_record()
     assert record["schema"] == "diffcam-initialization-seed-result/2"
-    assert record["status"] == "failed_instance" and record["seed"] == 7
+    assert record["status"] == "valid_plan" and record["seed"] == 7
     meta = record["derivation"]
-    assert meta["status"] == "failed_instance"
-    assert meta["requested_seed"] == 7
-    assert meta["reason"] == result.invalid_reason
-    draw = meta["evidence"]
-    bound = draw["bound"]
-    assert bound["unit"] == "mm"
-    assert bound["max_abs_coordinate"] > bound["per_coordinate_scale"]
-    assert draw["deviations"]["max_abs_coordinate_deviation_mm"] > draw["scale"]["scale_mm"]
-    assert 0 < draw["deviations"]["rms_deviation_mm"] < draw["deviations"]["max_deviation_mm"]
-    assert draw["seed_derivation"]["requested_seed"] == 7
-    assert draw["noise_sha256"].startswith("sha256:")
+    assert meta["status"] == "valid_plan"
+    scale = meta["noise_scale"]
+    assert scale["unit"] == "mm"
+    assert scale["filter_applied"] is False
+    assert scale["max_abs_coordinate"] > scale["per_coordinate_scale"]
+    assert meta["deviations"]["max_abs_coordinate_deviation_mm"] > meta["scale"]["scale_mm"]
+    assert 0 < meta["deviations"]["rms_deviation_mm"] < meta["deviations"]["max_deviation_mm"]
+    assert meta["seed_derivation"]["requested_seed"] == 7
+    assert meta["noise_sha256"].startswith("sha256:")
+    assert S.random_seed(task, definition, 7).to_record() == record
+
+
+def test_T75_gaussian_has_95_plus_valid_of_100_with_only_physical_failures(task, cam):
+    assert len(cam.segments) == 75
+    definition = declaration(family="gaussian", fraction=0.0005)
+    results = [S.random_seed(task, definition, seed) for seed in range(100)]
+    valid, failed = [], []
+    for seed, result in enumerate(results):
+        assert result.seed == seed
+        if result.valid:
+            valid.append(assert_valid(result, task, cam))
+            metadata = json.loads(result.derivation)
+            assert metadata["noise_scale"]["filter_applied"] is False
+            assert tuple(positions(result.plan)[0]) == cam.initial_state.position_mm
+            assert tuple(positions(result.plan)[-1]) == cam.segments[-1].end_mm
+        else:
+            failed.append(result)
+            assert result.plan is None and result.invalid_reason
+            reason = result.invalid_reason.casefold()
+            assert "deviation bound" not in reason
+            assert "noise exceeded" not in reason
+            assert "sigma" not in reason
+            assert any(token in reason for token in (
+                "envelope", "rapid", "feed", "contigu", "motion", "position", "validate"))
+    # Every requested index was evaluated exactly once; there is no retry or
+    # discard-and-resample loop that could manufacture either outcome count.
+    assert len(valid) + len(failed) == len(results) == 100
+    assert len(valid) >= 95
 
 
 def test_failed_instance_sequence_preserves_order_and_never_redraws(task, cam, monkeypatch):
@@ -443,7 +473,12 @@ def test_failed_instance_sequence_preserves_order_and_never_redraws(task, cam, m
             self.normal_calls += 1
             assert mean == 0.0
             if self.slot in (1, 3):
-                return np.full(size, 2.0 * sigma)
+                # The first free vertex is the first RAPID endpoint. A huge
+                # negative Z creates an actual envelope/safe-entry failure;
+                # amplitude alone must not invalidate the same requested seed.
+                noise = np.zeros(size)
+                noise[0, 2] = -1000.0
+                return noise
             return np.zeros(size)
 
     def factory(seed_sequence):
@@ -466,8 +501,12 @@ def test_failed_instance_sequence_preserves_order_and_never_redraws(task, cam, m
     for result in (results[0], results[2]):
         assert_valid(result, task, cam)
     for result in (results[1], results[3]):
-        assert "deviation bound exceeded" in result.invalid_reason
-        assert result.to_record()["seed"] == result.seed
+        assert "envelope" in result.invalid_reason or "RAPID" in result.invalid_reason
+        record = result.to_record()
+        assert record["seed"] == result.seed
+        assert record["status"] == "failed_instance"
+        assert record["derivation"]["evidence"]["noise_scale"]["filter_applied"] is False
+        assert record["derivation"]["evidence"]["deviations"]["max_abs_coordinate_deviation_mm"] == 1000.0
     # Repeating a requested slot is explicit, not a hidden post-failure retry.
     duplicate = S.random_seed_sequence(task, declaration(fraction=0.0005), [4, 4, 5])
     assert len(duplicate) == 3 and [item.seed for item in duplicate] == [4, 4, 5]
