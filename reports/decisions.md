@@ -168,3 +168,6 @@ D-08 addendum 2 (review W1–W3, 2026-11-10):
   realised max and RMS deviation from the base.
 - W3: an invalid draw (`valid=False`) is a recorded failed instance at that seed index. It is never redrawn, replaced or skipped
   (the same rule as invalid CMA members).
+D-08 addendum 3 (review X1): random-init validity comes only from physical/plan constraints (envelope/bounds, feed limit, safe entry,
+contiguity, validate_for_task). There is no per-coordinate |noise| ≤ σ check: for Gaussian noise that rejects all but ~1e-37 of seeds
+at T=75 and would manufacture "collapse". The declared scale is reported via the realised max/RMS deviation, not used as a filter.
