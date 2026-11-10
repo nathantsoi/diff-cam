@@ -459,10 +459,11 @@
       "branch": "task/T3.4c-continuation-solver"
     },
     "T4.3a": {
-      "status": "in_progress",
+      "status": "done",
       "owner": "diffcam-worker-1",
       "branch": "task/T4.3a-campaign-driver",
-      "note": "suite_manifest task source + parallel resumable campaign driver; verdict-only posted policy for campaign"
+      "note": "suite_manifest task source + parallel resumable campaign driver; verdict-only posted policy for campaign Merged. 273 planned runs; est ~5.4h at concurrency 6 (synthetic).",
+      "tip": "11b759f"
     }
   }
 }
