@@ -188,3 +188,20 @@ The old endpoint rule is recorded in pilot 2 as degenerate evidence, not as an E
 Campaign arms (provisional until the T4.2 freeze record): nominal-cam, fixed-adam, annealed-adam, continuation-adam,
 hard-cmaes ×{0,1}, smooth-cmaes ×{0,1} on all 39 tasks (dev and test). Experiment 1 arms (straight_line, random ×{0,1} for
 annealed-adam and hard-cmaes) on the 9 dev tasks only.
+
+## D-2026-11-10-13 — Experiment 1 uses one shared full-capacity representation (review Z1)
+Z1: the no-init arms' parameterization is fit_parameterization(init_motion, controls=12), i.e. a DeltaSpline whose BASE is the init
+motion's own deltas, plus a 12-control low-pass residual over 75 segments. A line base plus a low-pass residual cannot represent a
+raster, so the line and random arms could never clear the pocket at any budget. Experiment 1 would then measure representation
+capacity, not initialization.
+DECISION:
+- For Experiment 1 (the init axis) ONLY, every arm, including a CAM-init arm re-run within the experiment, uses the same
+  parameterization: DeltaResidual with K = T (full capacity), zero base, the same scale/bounds declaration. θ0 encodes the init
+  (θ0 = init deltas / scale). Arms therefore differ only in θ0 (as D-08 intends).
+- Solvers in Experiment 1: annealed-adam and continuation-adam, at the same budget. Hard CMA-ES is dropped from Experiment 1:
+  225-dim CMA with this budget is uninformative, and CMA is covered in Experiment 2 (K=12 CAM-based).
+- Segment kinds/feeds are not optimisable, so each arm's segment-kind/feed template is part of its init. This is stated as a
+  limitation.
+- Experiment 2 (solver comparison) keeps the existing K=12 spline-on-CAM representation.
+- The frozen protocol states that θ is unbounded at scale 1 mm (backlog note from Z1).
+- Routing: runner side → worker-2 (with the continuation-adam hook, same runner lease); seeds already produce full MotionPlans.
