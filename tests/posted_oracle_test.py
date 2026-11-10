@@ -165,6 +165,13 @@ def test_operation_target_gouge_and_original_part_diagnostic_are_separate():
     assert rejected.coverage == C.Coverage.UNSUPPORTED
     assert rejected.safety_pass is None
     assert "excluded volume mismatch" in rejected.coverage_reasons[0]
+    for name in ("air_fraction", "air_cut_time_s", "rapid_time_s"):
+        assert rejected.metrics[name].value is None
+        assert rejected.metrics[name].null_reason
+    assert rejected.metrics["air_cut_time_s"].unit == "s"
+    assert rejected.metrics["rapid_time_s"].unit == "s"
+    restored = C.EvaluationResult.from_dict(rejected.to_dict())
+    assert restored.metrics["air_cut_time_s"].null_reason
 
 
 def test_nonfinite_stock_box_fails_instead_of_becoming_empty_safe_stock():
@@ -204,6 +211,11 @@ def test_no_cut_rejection_and_explicit_unknown_surface_metrics():
     assert evaluated.geometry_pass is False
     assert evaluated.metrics["force_proxy"].value is None
     assert evaluated.metrics["air_fraction"].value is None
+    assert "cycle_time_s" in evaluated.metrics["air_fraction"].null_reason
+    assert metric(evaluated, "cycle_time_s") == 0
+    # Both second-valued totals are known zeros for this parsed empty motion.
+    assert metric(evaluated, "air_cut_time_s") == 0
+    assert metric(evaluated, "rapid_time_s") == 0
     empty_geometry = C.GeometrySource(kind="analytic", params={
         "primitive": "box", "min_mm": [0, 0, 0], "max_mm": [0.5, 0.5, 0.5]})
     # Both masks have no occupied voxel centres in this 2mm grid; the original
@@ -216,6 +228,82 @@ def test_no_cut_rejection_and_explicit_unknown_surface_metrics():
     for name in ("max_surface_error_mm", "p99_surface_error_mm", "asd_mm", "hd95_mm"):
         assert empty.metrics[name].value is None
         assert "surface" in empty.metrics[name].null_reason
+
+
+def test_all_cut_feed_has_zero_air_cut_fraction():
+    # The cutter spans the full stock depth. Along this 8 mm path each 1 mm
+    # sampled advance exposes new occupied XY cells; no holder enters stock.
+    fixture = F.make_fixture(
+        "all-cut-air", [F.feed("cut", (10, 10, 4), (18, 10, 4))],
+        F.flat_tool(3, 20), 12 * (2 * 3 * 8 + math.pi * 3 ** 2),
+        "full-depth capsule: every sampled station has new occupied cells",
+        stock_lo=(0, 0, 0), stock_hi=(30, 20, 12), voxel=1.0)
+    result = PostedEvaluator().evaluate_candidate(
+        fixture.task, fixture.motion, {"max_step_mm": 1.0})
+    assert result.coverage == C.Coverage.COMPLETE
+    assert result.safety_pass is True
+    assert metric(result, "removed_volume_mm3") > 0
+    assert metric(result, "cycle_time_s") == pytest.approx(0.8)
+    assert metric(result, "air_cut_time_s") == 0.0
+    assert metric(result, "air_fraction") == 0.0
+    assert metric(result, "rapid_time_s") == 0.0
+
+
+@pytest.mark.parametrize("settings", [{}, {"subdivisions": 3}])
+def test_feed_entirely_above_stock_is_all_air_time(settings):
+    fixture = F.make_fixture(
+        "air-above-stock", [F.feed("above", (20, 20, 18), (20, 20, 14))],
+        F.flat_tool(3, 20), 0.0, "entire feed is above the 12 mm stock top")
+    result = PostedEvaluator().evaluate_candidate(fixture.task, fixture.motion, settings)
+    assert result.coverage == C.Coverage.COMPLETE
+    assert metric(result, "removed_volume_mm3") == 0.0
+    assert metric(result, "cycle_time_s") == pytest.approx(0.4)
+    assert metric(result, "air_cut_time_s") == pytest.approx(metric(result, "cycle_time_s"))
+    assert metric(result, "air_fraction") == pytest.approx(1.0)
+    assert 0 <= metric(result, "air_fraction") <= 1
+    assert metric(result, "rapid_time_s") == 0.0
+    note = result.metrics["air_fraction"].denominator
+    assert "cycle_time_s" in note and "resolution-dependent" in note
+    assert "0.125 mm" in note and "D-04" in note
+    assert result.discretization["air_cut_timing"]["resolution_dependent"] is True
+
+
+def test_air_time_uses_cycle_denominator_and_excludes_rapids():
+    fixture = F.retract_from_own_slot()
+    feed_only = replace(fixture.motion, segments=fixture.motion.segments[:1])
+    without_rapid = PostedEvaluator().evaluate_candidate(fixture.task, feed_only, {})
+    result = PostedEvaluator().evaluate_candidate(fixture.task, fixture.motion, {})
+    assert result.coverage == without_rapid.coverage == C.Coverage.COMPLETE
+    assert 0 < metric(result, "air_cut_time_s") < 0.8
+    assert metric(without_rapid, "cycle_time_s") == pytest.approx(0.8)
+    assert metric(result, "rapid_time_s") == pytest.approx(0.8)
+    assert metric(result, "cycle_time_s") == pytest.approx(1.6)
+    assert metric(result, "air_cut_time_s") == metric(without_rapid, "air_cut_time_s")
+    assert metric(result, "air_fraction") == pytest.approx(
+        metric(result, "air_cut_time_s") / metric(result, "cycle_time_s"))
+    assert metric(without_rapid, "air_fraction") == pytest.approx(
+        metric(without_rapid, "air_cut_time_s") / metric(without_rapid, "cycle_time_s"))
+
+
+def test_air_metrics_deterministic_across_dialects_for_identical_motion():
+    task, motion = machine_fixture(F.retract_from_own_slot(), rapid_penetration_mm=10.0)
+    task, motion = machine_plan(task, motion, C.Transform.translation((100, 80, -150)))
+    expected = PostedEvaluator().evaluate_candidate(task, motion, {})
+    observed = {}
+    for dialect in C.Dialect:
+        raw = post_motion_plan(motion, task, dialect).encode()
+        result = PostedEvaluator().evaluate_posted_gcode(task, raw, dialect, {})
+        assert result.coverage == C.Coverage.COMPLETE
+        assert metric(result, "cycle_time_s") == pytest.approx(1.6)
+        observed[dialect.value] = result
+        for name in ("air_cut_time_s", "rapid_time_s", "air_fraction"):
+            assert metric(result, name) == metric(expected, name)
+    rs274, haas = observed["rs274"], observed["haas"]
+    assert 0 <= metric(rs274, "air_fraction") <= 1
+    for name in ("air_cut_time_s", "rapid_time_s", "air_fraction"):
+        assert metric(rs274, name) == metric(haas, name)
+    assert rs274.metrics["air_cut_time_s"].unit == "s"
+    assert haas.metrics["rapid_time_s"].unit == "s"
 
 
 def test_real_posted_nc_uses_offset_and_retract_without_unplanned_cut():
