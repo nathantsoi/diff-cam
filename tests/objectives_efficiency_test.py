@@ -134,7 +134,8 @@ def test_slower_program_with_identical_hard_geometry_scores_worse():
     assert after.components["efficiency"] > before.components["efficiency"]
     for name in ("gouge_fraction", "residual_fraction", "holder_overlap_fraction", "feasible"):
         assert after.components[name] == before.components[name]
-    np.testing.assert_array_equal(after.diagnostics["final_stock"], before.diagnostics["final_stock"])
+    after_stock = evaluator.sim.stock.to_numpy()[evaluator.parameterization.num_steps]
+    np.testing.assert_array_equal(after_stock, before_stock)
     assert math.isclose(
         after.objective,
         before.objective + spec.time_weight
@@ -189,6 +190,9 @@ def test_efficiency_gradient_matches_finite_difference(time_weight, air_time_wei
     fd = (plus.objective - minus.objective) / (2 * epsilon)
     assert np.isfinite(fd) and abs(fd) > 1e-4
     assert ad == pytest.approx(fd, rel=1e-5, abs=1e-8)
+
+
+def test_efficiency_unknown_candidate_does_not_fabricate_feasible_or_time():
     evaluator = _prototype(precision="f64", spec=_efficiency_spec(1.0))
     rejected = evaluator.evaluate_candidate(np.full(6, np.nan), "unknown", objective_kind="hard")
     assert not rejected.valid

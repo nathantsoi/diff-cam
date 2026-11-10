@@ -38,7 +38,7 @@ def _prototype(seed=7, *, spec=None, precision="f32", initial_position_mm=None, 
     state = C.MachineState(position_mm=start, frame=C.Frame.MACHINE)
     segments = (
         C.Segment(id="plunge", kind=C.SegmentKind.FEED, start_mm=start, end_mm=p1,
-                  duration_s=0.6, feed_mm_s=10.0, tag="plunge"),
+                  duration_s=math.dist(start, p1) / 10, feed_mm_s=10.0, tag="plunge"),
         C.Segment(id="slot", kind=C.SegmentKind.FEED, start_mm=p1, end_mm=p2,
                   duration_s=math.dist(p1, p2) / 10, feed_mm_s=10.0),
     )
