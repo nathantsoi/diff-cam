@@ -330,3 +330,8 @@ per free vertex (indices 3..T-1) around the D-08 add.4 floor-diagonal line, with
 D-13 every Experiment 1 arm then shares one DeltaResidual K=T zero-base parameterization, with θ0 = (that init MotionPlan's deltas) /
 scale. θ0 is therefore not iid in delta space, by design. Init-axis comparisons (each init vs experiment1_cam, same task and solver)
 are computed by the results builder, not by benchmarks/audit.py method pairing.
+
+## Pre-declared interpretation amendment (D-15, 2026-11-10, ~37/312 runs complete, before full results)
+Primary efficiency endpoint = posted Δcycle_time_s. Δair_fraction is secondary, and Δair without Δcycle is labelled
+"air→cut relabelling, not a speed-up". Limitation: positions-only optimisation with fixed feeds and segment kinds. Known sim-vs-posted
+air proxy mismatch (~2× at nominal).

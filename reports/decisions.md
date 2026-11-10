@@ -212,3 +212,20 @@ endpoints, the D-13 shared K=T representation, or the typed collapse offset. Per
 before the campaign. The frozen protocol of record is reports/protocol_decision.md plus the SHA-256 of the exact executed configs
 (campaign + Experiment 1), recorded at launch. The schema gaps are listed there as known tooling limitations. Missing values:
 budget.total_wall_time_s = 172800 (48 h cap); random_init root_seed = 17.
+
+## D-2026-11-10-15 — Pre-declared Exp2 efficiency interpretation (review AA1; declared with ~37/312 runs in, before full results)
+Early campaign records show the only non-θ0 selections are hard-CMA, with cycle time unchanged (e.g. 31.3181 → 31.3150 s) and the
+objective gain coming from the air term: small position shifts make transit segments graze stock and relabel air as cutting. Every
+Adam/continuation/smooth-CMA arm has so far returned θ0. The sim air_fraction (segment-level, seg_engage threshold) is ~2× lower than
+the posted station-level air_fraction even at nominal (0.318 vs 0.590).
+DECLARED NOW, before the full results:
+1. **Primary efficiency claim = Δcycle_time_s** (posted, 0.125 mm, efficiency-eligible pairs). Δair_fraction is SECONDARY. Any Δair
+   without a matching Δcycle is reported as "air→cut relabelling, not a speed-up". The T7.2 tables and summary flag it per method.
+   This narrows the protocol before the results, so it is not tuning.
+2. **Stated limitation:** Exp2 optimises tool positions only. Feeds and segment kinds are fixed by the CAM template, so cycle time can
+   change only through path length. A per-segment feed-scale parameter is future work, not this campaign.
+3. **Known proxy mismatch:** the sim (selection) and posted (reported) air definitions differ by about 2× at nominal. air_time_weight
+   stays 0.01 for this campaign (it was frozen and launched). The mismatch is reported as a limitation and as part of the
+   selection-vs-verdict analysis.
+4. Diagnostic (worker-1): re-evaluate several Adam iterates from history.json on 1–2 tasks to separate "steps leave the feasible set
+   (zero gouge tolerance)" from "no feasible improvement exists" before any claim about gradient methods.
