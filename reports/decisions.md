@@ -136,3 +136,7 @@ D-10 addendum (review S1/S2):
 D-10 clarification (2026-11-10): the default `lexicographic` infeasible-set ranking (holder → gouge → residual → objective) supersedes
 the earlier phrase "lower total constraint violation wins", which now applies only to the `tolerance_normalised_sum` mode. In that
 mode a zero tolerance uses a recorded `zero_tolerance_scale` (default 1.0, i.e. the raw fraction), which is part of the config hash.
+D-10 note (T1.xs, 2026-11-10): the legacy w_air penalty (compute_air_penalty, csg_simulator.py ~:1771) reads post-cut stock[t+1],
+so it charges productive cutting as air. The efficiency objective therefore uses **w_air_time**, which is based on the pre-cut
+seg_air/seg_engage volumes after the T1.xs sign fix. **w_air stays explicitly 0** until a separate fix (a stock[t] contract change)
+lands.
