@@ -149,12 +149,13 @@
       "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot. | Reviewer verified T3.4b (K1/K2 closed). Ablation-driver requirement: catch empty-band ValueError and record an inconclusive calibration step (don't abort)."
     },
     "T3.3": {
-      "status": "in_progress",
+      "status": "done",
       "owner": "diffcam-worker-3",
       "branch": "task/T3.3-real-study",
       "blocker": null,
       "next": "real study at fixed paths (CAM seed, perturbations, straight-line); k sweep, AD/FD eps sweep, antithetic hard estimator; 8 CPU threads",
-      "note": "tooling merged c955b60 (antithetic estimator w/ exact 2N accounting + uncertainty; AD/FD same-objective tooling; cost probe 0.25 mm: 39 fwd/1 bwd/21 hard in 93 s, 1.94 GB). OPEN DIAGNOSTIC: AD vs FD on 4 axes cosine 0.9999996 but L2 discrepancy 0.0205 and index 35 sign flip \u2014 must be characterized (component magnitude vs FD noise floor across eps) before any gradient-mechanics claim."
+      "note": "Merged. 18 cases/1284 evals; AD~FD on CAM; smooth vs randomized-hard often misaligned; results runs/retained/t33-real-study-20261110-w3-r1. Scale sweep: 0.05 x stock diag -> 30/30 valid, 0.10 -> 27/30.",
+      "tip": "87ad685"
     },
     "T3.5": {
       "status": "planned",
