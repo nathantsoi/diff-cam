@@ -402,6 +402,31 @@ def test_interrupted_child_is_recorded_not_misfiled_as_complete(tmp_path):
     assert summary["status_counts"] == {"interrupted": 1}
 
 
+def test_suite_verdict_only_keeps_all_non_step_post_controls_and_exact_nc_hash():
+    from benchmarks import pilot_task
+    from cam.posts import post_motion_plan
+    from cam.seeds import seed_for_task
+
+    config = _pilot_config()
+    config["task_source"] = "suite_manifest"
+    config["campaign_verdict_only"] = True
+    config["refinement_check"]["enabled"] = False
+    task = pilot_task.build_pilot_task(voxel_mm=config["grid_pitch_mm"])
+    motion = seed_for_task(task)
+    nc = post_motion_plan(motion, task, dialect=C.Dialect.RS274).encode("utf-8")
+    normal = runner._pilot_refinement_settings(task, config)
+    fine = runner._phase_settings(task, config, C.Dialect.RS274, nc, "verdict")
+    assert fine["max_step_mm"] == 0.125
+    assert fine["expected_nc_hash"] == C.nc_hash(nc)
+    assert fine["exclusion_tolerance_mm3"] == normal["exclusion_tolerance_mm3"]
+    for name in ("compute_bounds", "safety_screen", "max_samples_per_segment",
+                 "subdivisions", "record_stations"):
+        assert fine[name] == normal[name]
+    config["campaign_verdict_only"] = False
+    with pytest.raises(runner.RunnerError, match="full-fidelity suite"):
+        runner._campaign_verdict_only(config)
+
+
 # --- coordinator follow-ups from discriminator re-review (Q1, Q4) -------------------------------
 def test_smooth_objective_k_comes_from_config_not_code_default():
     import json, pathlib
