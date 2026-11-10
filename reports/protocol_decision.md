@@ -323,3 +323,10 @@ Native counts and the complete D-13 productions need their exact `run_campaign.p
 | Coordinator launch approval with real configs and output resources | Pending; this document alone supplies none |
 
 This protocol records exactly what the coordinator selected and every schema/tooling limitation discovered while encoding it. It does not use the old schema as a pretext to alter the selection, convert any unknown to zero, or suggest that the frozen protocol is already runnable.
+
+## Coordinator clarification (2026-11-10, Experiment 1 random recipe)
+`random_init.parameter_space: "delta"` is a historical label. The executed recipe (D-08 addendum 2) is iid Gaussian positional noise
+per free vertex (indices 3..T-1) around the D-08 add.4 floor-diagonal line, with the entry prefix and both floor corners pinned. Under
+D-13 every Experiment 1 arm then shares one DeltaResidual K=T zero-base parameterization, with θ0 = (that init MotionPlan's deltas) /
+scale. θ0 is therefore not iid in delta space, by design. Init-axis comparisons (each init vs experiment1_cam, same task and solver)
+are computed by the results builder, not by benchmarks/audit.py method pairing.
