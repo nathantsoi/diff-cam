@@ -136,7 +136,7 @@
       "status": "blocked",
       "owner": "diffcam-worker-2 (runner T4.1a) / coordinator (real pilot T4.1b)",
       "branch": "task/T4.1-runner",
-      "blocker": "pilot re-run waits on T3.xc-runner, T1.xs, T3.xd",
+      "blocker": "pilot re-run waits on T3.xc-runner, T3.xd",
       "next": "re-run pilot with declared efficiency weight; report selection-vs-verdict agreement per arm",
       "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts. | DECISION 2026-11-09: pilot launches as an infrastructure/cost pilot once w2 gates are green; fixed/annealed-Adam (gradient) rows are PROVISIONAL until T3.3b characterizes the systematic AD/FD mismatch; if T3.3b finds a real backward bug, Adam rows are rerun after the fix. | D-2026-11-09-04 (reports/decisions.md): pilot verdicts from 0.125 mm posted eval (both dialects); 1.0 mm = screen/diagnostic only; 0.25 mm RS274 convergence point recorded. Pilot 1 (core 9656e29) finding: 0/5 optimizer arms pass 0.125mm geometry; CAM seed perfect; causes = init never scored (D-09) + geometry-only objective (D-10). Pilot re-run after T3.xc+T3.xd, before T4.2."
     },
@@ -377,9 +377,10 @@
       "note": "Merged core 57f7761. Schema/validator/dry-run + D-08 init axis (declaration-only for non-CAM). Gates: focused 26p, full 665p/11s. No frozen values."
     },
     "T4.0-noinit": {
-      "status": "todo",
-      "owner": "diffcam-worker-2 (after pilot audit)",
-      "note": "D-08: runner conditions + cam/seeds straight_line/random MotionPlans (same T/K, safe rapid, feed<=max), validated against T4.2a declarations."
+      "status": "in_progress",
+      "owner": "diffcam-worker-3 (seeds); runner conditions later",
+      "branch": "task/T4.0-noinit-seeds",
+      "note": "D-08: cam/seeds.py straight_line/random MotionPlans from T4.2a declarations; runner wiring after T3.xc-runner."
     },
     "T3.xc": {
       "status": "done",
@@ -393,7 +394,7 @@
       "owner": "diffcam-worker-2",
       "branch": "task/T3.xd-efficiency-objective",
       "note": "D-10 efficiency terms (time, air-time) in hard+smooth objective; explicit weights (objectives.py).",
-      "blocker": "T1.xs (simulator tool_occ sign fix) must merge first"
+      "blocker": null
     },
     "T1.3g": {
       "status": "done",
@@ -403,11 +404,12 @@
       "tip": "9fddcde"
     },
     "T1.xs": {
-      "status": "in_progress",
+      "status": "done",
       "owner": "diffcam-worker-2",
       "branch": "task/T1.xs-tool-occ-sign",
       "note": "smooth tool_occ sign bug at csg_simulator.py:1776/2040/2339 (sigmoid(+tool_d) = outside tool); masked since 57b03a2 by zeroed weights. Blocks T3.xd gradient evidence.",
-      "evidence_caveat": "Before 8c83e76, smooth seg_air/seg_engage/seg_swept and every consumer (w_air penalty, is_air in w_air_time/w_air_late, w_break) were inverted. DiffCAM-pipeline evidence is unaffected: objectives.py forced those weights to 0 from a14a7d4, and grep finds no config/report/retained run with them nonzero. Any pre-pipeline (inherited 57b03a2..a14a7d4) run, ablation or claim that used those weights nonzero optimized an inverted signal and is not to be relied on."
+      "evidence_caveat": "Before 8c83e76, smooth seg_air/seg_engage/seg_swept and every consumer (w_air penalty, is_air in w_air_time/w_air_late, w_break) were inverted. DiffCAM-pipeline evidence is unaffected: objectives.py forced those weights to 0 from a14a7d4, and grep finds no config/report/retained run with them nonzero. Any pre-pipeline (inherited 57b03a2..a14a7d4) run, ablation or claim that used those weights nonzero optimized an inverted signal and is not to be relied on.",
+      "tip": "8c83e76"
     },
     "T1.3h": {
       "status": "done",
