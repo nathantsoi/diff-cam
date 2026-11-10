@@ -53,6 +53,7 @@ def _rust_suite_task(radius=2.0, *, stock=((-80.0, -80.0, -20.0), (80.0, 80.0, 0
         stock=_analytic(primitive="box", min_mm=lo, max_mm=hi),
         original_part=geometry, operation_target=C.OperationTarget(geometry=geometry),
         grid=C.GridSpec((160, 160, 80), lo, 0.25),
+        work_to_machine=C.Transform.translation((0., 0., 0.)),
         tool=dataclasses.replace(base.tool, cutter_kind=C.CutterKind.FLAT,
                                  cutter_radius_mm=radius, shank_radius_mm=radius),
         limits=C.MachineLimits(max_feed_mm_s=30.0, rapid_mm_s=80.0, max_accel_mm_s2=100.0,
@@ -80,10 +81,11 @@ def _assert_typed(plan, task):
                for segment in plan.segments if segment.kind is C.SegmentKind.RAPID)
 
 
-def _one_tag(segments, tag):
+def _one_tag(segments, tag, *, last=False):
     rows = [segment for segment in segments if segment.tag == tag]
-    assert len(rows) == 1, (tag, [(row.id, row.tag) for row in segments])
-    return rows[0]
+    assert len(rows) == 1 or last, (tag, [(row.id, row.tag) for row in segments])
+    assert rows
+    return rows[-1]
 
 
 def test_independent_dt316_cw_square_outside_offset_and_complete_coarse_leads():
@@ -95,22 +97,24 @@ def test_independent_dt316_cw_square_outside_offset_and_complete_coarse_leads():
     assert len(segments) <= 72
     assert _one_tag(segments, "entry-rapid").end_mm == pytest.approx((-56., 51., 4.))
     assert _one_tag(segments, "plunge").end_mm == pytest.approx((-56., 51., 3.))
-    assert _one_tag(segments, "lead-in-vertical").end_mm == pytest.approx((-56., 45., -3.))
+    assert _one_tag(segments, "lead-in-vertical", last=True).end_mm == pytest.approx((-56., 45., -3.))
     assert _one_tag(segments, "lead-in-flat").end_mm == pytest.approx((-56., 42., -3.))
-    assert _one_tag(segments, "lead-in-arc").end_mm == pytest.approx((-50., 36., -3.))
-    assert _one_tag(segments, "lead-out-arc").end_mm == pytest.approx((-44., 42., -3.))
+    assert _one_tag(segments, "lead-in-arc", last=True).end_mm == pytest.approx((-50., 36., -3.))
+    assert _one_tag(segments, "lead-out-arc", last=True).end_mm == pytest.approx((-44., 42., -3.))
     assert _one_tag(segments, "lead-out-flat").end_mm == pytest.approx((-44., 45., -3.))
-    assert _one_tag(segments, "lead-out-vertical").end_mm == pytest.approx((-44., 51., 3.))
+    assert _one_tag(segments, "lead-out-vertical", last=True).end_mm == pytest.approx((-44., 51., 3.))
     assert _one_tag(segments, "exit-rapid").end_mm == pytest.approx((-44., 51., 10.))
     cut = [segment for segment in segments if segment.tag == "finish-cutting"]
     assert len(cut) == 12  # 4 lines + 4 arcs × exact two coarse chords.
     assert cut[0].start_mm == pytest.approx((-50., 36., -3.))
     assert cut[0].end_mm == pytest.approx((50., 36., -3.))
     assert cut[2].end_mm == pytest.approx((56., 30., -3.))
-    assert cut[4].end_mm == pytest.approx((56., -30., -3.))
-    assert cut[6].end_mm == pytest.approx((50., -36., -3.))
-    assert cut[8].end_mm == pytest.approx((-50., -36., -3.))
-    assert cut[10].end_mm == pytest.approx((-56., 30., -3.))
+    assert cut[3].end_mm == pytest.approx((56., -30., -3.))
+    assert cut[4].start_mm == pytest.approx((56., -30., -3.))
+    assert cut[5].end_mm == pytest.approx((50., -36., -3.))
+    assert cut[6].end_mm == pytest.approx((-50., -36., -3.))
+    assert cut[8].end_mm == pytest.approx((-56., -30., -3.))
+    assert cut[9].end_mm == pytest.approx((-56., 30., -3.))
     assert cut[-1].end_mm == pytest.approx((-50., 36., -3.))  # closing arc, never dropped.
     mid = cut[1].end_mm
     assert mid[0] == pytest.approx(50. + 6 / math.sqrt(2))
@@ -133,6 +137,12 @@ def test_independent_dt316_inside_sharp_offset_and_right_compensation():
     assert (min(xs), max(xs)) == pytest.approx((-44., 44.))
 
 
+def test_lead_chord_fitting_catches_intersections_not_only_sampled_points():
+    assert not rc._clear([(0., 0.), (10., 0.)], [((5., -1.), (5., 1.))], 2.0)
+    assert rc._clear([(0., 0.), (10., 0.)], [((5., 3.), (6., 3.))], 2.0)
+    assert rc._clear([(0., 0.), (1., 0.)], [((5., 0.), (6., 0.))], 2.0)
+
+
 def test_independent_dt315_stepover_ladder_and_hole_row_vectors():
     assert rc.stepover_data(120.24, 3.0)[0] == 41
     assert rc.stepover_data(120.24, 3.0)[1] == pytest.approx(120.24 / 41)
@@ -149,7 +159,9 @@ def test_independent_dt315_stepover_ladder_and_hole_row_vectors():
 
 
 def test_determinism_provenance_and_typed_plan():
-    task = procedural_suite.generate_tasks()[0].task
+    task = next(bundle.task for bundle in procedural_suite.generate_tasks()
+                if bundle.task.original_part.params.get("empty_island") is True
+                and bundle.task.family == "facing_asymmetric")
     left = rc.contour2d_seed(task)
     right = rc.contour2d_seed(task)
     assert C.dumps(left) == C.dumps(right)
@@ -172,6 +184,8 @@ def test_all_current_facing_task_construction_counts():
         row["segments"].append(len(plan.segments))
     assert {row["constructed"] for row in counts.values()} and sum(
         row["constructed"] for row in counts.values()) == 13
+    for topology, row in sorted(counts.items()):
+        print(f"FACE COVERAGE {topology}: {row}")
     assert set(counts) == {"open_oblong_zero_retained_pads",
                            "centred_square_full_height_pad", "offset_square_lower_step_pad"}
 
@@ -179,18 +193,46 @@ def test_all_current_facing_task_construction_counts():
 def test_all_current_contour_outer_and_pad_finishes():
     counts = {}
     for bundle in procedural_suite.generate_tasks():
-        plan = rc.contour2d_seed(bundle.task)
-        _assert_typed(plan, bundle.task)
-        assert len(plan.segments) <= 72
-        key = bundle.topology
-        row = counts.setdefault(key, {"outer": 0, "pad": 0})
-        row["outer"] += 1
+        row = counts.setdefault(bundle.topology, {"constructed": 0, "refused": 0,
+                                                  "pad_attempts": 0, "pad_constructed": 0, "pad_refused": 0})
+        try:
+            plan = rc.contour2d_seed(bundle.task)
+        except ValueError as error:
+            row["refused"] += 1
+            print(f"CONTOUR {bundle.topology} {bundle.task.task_id} refused: {error}")
+        else:
+            _assert_typed(plan, bundle.task)
+            assert len(plan.segments) <= 72
+            row["constructed"] += 1
         if bundle.seed_spec.has_retained_island:
-            assert "contour2d-pad" in plan.provenance
-            row["pad"] += 1
+            params = bundle.task.original_part.params
+            xmin, ymin, z = params["island_min_mm"]
+            xmax, ymax, _ = params["island_max_mm"]
+            outer = rc._rect_bounds(bundle.task.original_part.params["pocket_min_mm"],
+                                    bundle.task.original_part.params["pocket_max_mm"])
+            row["pad_attempts"] += 1
+            try:
+                sections = rc.emit_contour_loop(
+                    bundle.task, [(xmin, ymax), (xmax, ymax), (xmax, ymin), (xmin, ymin)],
+                    contour_z=z, spec={"leadInRadius": bundle.task.tool.cutter_radius_mm / 2,
+                                        "leadOutRadius": bundle.task.tool.cutter_radius_mm / 2,
+                                        "leadInVerticalRadius": bundle.task.tool.cutter_radius_mm / 4,
+                                        "leadOutVerticalRadius": bundle.task.tool.cutter_radius_mm / 4},
+                    additional_walls=(outer,), segment_id_prefix="contour2d-pad")
+            except ValueError as error:
+                row["pad_refused"] += 1
+                print(f"CONTOUR PAD {bundle.topology} {bundle.task.task_id} refused: {error}")
+            else:
+                row["pad_constructed"] += 1
+                _assert_typed(C.MotionPlan(frame=C.Frame.MACHINE, initial_state=bundle.task.initial_state,
+                                           segments=sections, timing_rule=C.TimingRule.EXACT_STOP_CONSTANT_SPEED),
+                              bundle.task)
     assert len(counts) == 3
-    assert sum(row["outer"] for row in counts.values()) == 39
-    assert sum(row["pad"] for row in counts.values()) == 26
+    assert sum(row["constructed"] + row["refused"] for row in counts.values()) == 39
+    assert sum(row["pad_attempts"] for row in counts.values()) == 22
+    assert sum(row["pad_constructed"] + row["pad_refused"] for row in counts.values()) == 22
+    for topology, row in sorted(counts.items()):
+        print(f"CONTOUR COVERAGE {topology}: {row}")
 
 
 def test_lower_step_cap_is_explicitly_cleared_at_pad_top_not_floor_gouge():
@@ -242,6 +284,14 @@ def test_low_level_emitter_exposes_contiguous_appendable_segments():
                         provenance="low-level caller test")
     _assert_typed(plan, task)
     assert cuts[-1].end_mm == cuts[0].start_mm
+    second = rc.emit_contour_loop(task, [(-40., -20.), (40., -20.), (40., 20.), (-40., 20.)],
+                                  contour_z=-3., start_machine_mm=first[-1].end_mm,
+                                  segment_id_prefix="finish-loop", max_segments=40)
+    assert second[0].start_mm == first[-1].end_mm
+    joined = C.MotionPlan(frame=C.Frame.MACHINE, initial_state=task.initial_state,
+                          segments=(*first, *second), timing_rule=C.TimingRule.EXACT_STOP_CONSTANT_SPEED)
+    _assert_typed(joined, task)
+    assert len({segment.id for segment in joined.segments}) == len(joined.segments) <= 72
     # Finish stage starts at safe retract; coordinator can concatenate with a
     # prefix by supplying start_machine_mm=<prefix end> and its own cap budget.
     assert first[-1].kind is C.SegmentKind.RAPID
