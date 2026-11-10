@@ -734,7 +734,7 @@ METRIC_UNITS: Dict[str, str] = {
     "unique_contacted_volume_mm3": "mm^3",    # union of collided material
     "collision_sample_count": "count",        # depends on sampling; never compare across settings
     "time_integrated_overlap_mm3_s": "mm^3*s",
-    "cycle_time_s": "s", "air_fraction": "1",
+    "cycle_time_s": "s", "air_fraction": "1", "air_cut_time_s": "s", "rapid_time_s": "s",
     "spatial_uncertainty_mm3": "mm^3", "temporal_uncertainty_mm3": "mm^3",
     "force_proxy": "proxy",                   # uncalibrated; never ranks or qualifies a program
 }
