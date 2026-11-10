@@ -61,10 +61,10 @@ def positions(plan):
                       + [plan.segments[-1].end_mm], dtype=np.float64)
 
 
-def assert_valid(result, task, cam):
+def assert_valid(result, task, cam, *, diagnostic_only=False):
     assert isinstance(result, S.SeedResult)
     assert result.valid, result.invalid_reason
-    plan = result.require_plan()
+    plan = result.require_plan(diagnostic_only=diagnostic_only)
     plan.validate_for_task(task)
     assert len(plan.segments) == len(cam.segments) > 0
     assert plan.initial_state == cam.initial_state == task.initial_state
@@ -129,7 +129,7 @@ def test_random_delta_is_deterministic_and_different_seeds_change_geometry_not_l
 def test_random_theta_zero_reproduces_nominal_cam_displacements(task, cam):
     definition = declaration(space="theta", fraction=0.0, reference="cam_delta_norm")
     result = S.random_seed(task, definition, 11)
-    plan = assert_valid(result, task, cam)
+    plan = assert_valid(result, task, cam, diagnostic_only=True)
     np.testing.assert_allclose(np.asarray(S.seed_deltas_mm(plan)),
                                np.asarray(S.seed_deltas_mm(cam)), atol=1e-12, rtol=0.0)
     assert json.loads(result.derivation)["parameter_map"]["reference_motion"] == "cam"
@@ -137,7 +137,7 @@ def test_random_theta_zero_reproduces_nominal_cam_displacements(task, cam):
 
 def test_random_delta_zero_reproduces_declared_straight_line(task, cam):
     definition = declaration(space="delta", fraction=0.0, reference="cam_delta_norm")
-    random_plan = assert_valid(S.random_seed(task, definition, 11), task, cam)
+    random_plan = assert_valid(S.random_seed(task, definition, 11), task, cam, diagnostic_only=True)
     straight = assert_valid(S.straight_line_seed(task, definition), task, cam)
     np.testing.assert_array_equal(positions(random_plan), positions(straight))
     np.testing.assert_array_equal(np.asarray(S.seed_deltas_mm(random_plan)),
@@ -182,9 +182,24 @@ def test_both_registered_distributions_and_parameter_spaces_validate(task, cam, 
 
 def test_uniform_zero_is_the_same_reference_path_even_when_its_source_is_zero(task, cam):
     definition = declaration(space="delta", family="uniform", fraction=0.0)
-    plan = assert_valid(S.random_seed(task, definition, 23), task, cam)
+    plan = assert_valid(S.random_seed(task, definition, 23), task, cam, diagnostic_only=True)
     assert np.all(np.asarray(S.seed_deltas_mm(plan)) == 0.0)
     assert plan.initial_state == cam.initial_state
+
+
+def test_zero_scale_probe_has_explicit_runner_boundary(task, cam):
+    result = S.random_seed(task, declaration(space="delta", fraction=0.0), 4)
+    assert result.valid
+    metadata = json.loads(result.derivation)
+    assert metadata["scale"]["fraction_zero_is_explicit_degenerate_probe"] is True
+    assert metadata["scale"]["runner_allowed"] is False
+    with pytest.raises(ValueError, match="diagnostic/test-only"):
+        result.require_plan()
+    with pytest.raises(ValueError, match="explicit boolean"):
+        result.require_plan(diagnostic_only="yes")
+    plan = assert_valid(result, task, cam, diagnostic_only=True)
+    assert result.to_record()["derivation"]["scale"]["runner_allowed"] is False
+    assert len(plan.segments) == len(cam.segments)
 
 
 def test_oversized_scale_is_typed_invalid_without_projection(task, cam):

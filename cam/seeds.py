@@ -580,6 +580,7 @@ def _scale_mm(task: C.TaskSpec, cam: C.MotionPlan, scale) -> tuple[float, dict[s
         "reference_value_mm": reference_value,
         "scale_mm": fraction * reference_value,
         "fraction_zero_is_explicit_degenerate_probe": fraction == 0.0,
+        "runner_allowed": fraction > 0.0,
     }
 
 
@@ -649,9 +650,19 @@ class SeedResult:
     def valid(self) -> bool:
         return self.plan is not None
 
-    def require_plan(self) -> C.MotionPlan:
+    def require_plan(self, *, diagnostic_only: bool = False) -> C.MotionPlan:
+        """Return a valid plan, rejecting zero-scale probes for runners by default.
+
+        ``diagnostic_only=True`` is the explicit test/probe opt-in. It is not
+        production caller context or permission to freeze zero as random scale.
+        """
+        if not isinstance(diagnostic_only, bool):
+            raise ValueError("diagnostic_only must be an explicit boolean")
         if self.plan is None:
             raise ValueError(self.invalid_reason)
+        if not diagnostic_only and json.loads(self.derivation).get(
+                "scale", {}).get("runner_allowed") is False:
+            raise ValueError("zero-scale is a diagnostic/test-only probe; frozen no-init scale must be positive")
         return self.plan
 
     def to_record(self) -> dict[str, Any]:
