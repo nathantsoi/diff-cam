@@ -153,3 +153,8 @@ lands.
   feasibility-first (D-10). The final weights are tuned on dev within the declared budget and frozen at T4.2.
 - **Routing:** T3.xd-wiring card (worker-1, right after T3.xc-runner merges). It covers runner/config wiring, the objectives.py
   None-rejection and the validator rule. The pilot re-run is blocked on T3.xc-runner and T3.xd-wiring.
+D-11 addendum (review V1): the native smooth time/air terms are means over n = T − t_start segments (csg_simulator ~2075), while the
+hard terms are totals over the reference. At equal declared weights, smooth arms would get about 1/T of the time pressure
+(≈1/75 on the pilot path). objectives `_configure` sets sim.w_time = time_weight · n / reference and sim.w_air_time likewise, so the
+smooth term is on the same total-time scale as the hard term. The factor is recorded in the normalisation metadata. Regression: on a
+fixed path at high k, the smooth/hard time-term ratio is O(1) within a declared band for the documented native-vs-exact gap.
