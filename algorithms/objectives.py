@@ -64,8 +64,9 @@ class ObjectiveSpec:
         "geometry+safety+time_weight*cycle_time_s/reference_time_s+"
         "air_time_weight*air_time_s/reference_time_s; exact MotionPlan duration and sharp engagement")
     smooth_efficiency_normalization: str = (
-        "geometry+safety+native w_time and w_air_time surrogate terms / reference_time_s; "
-        "NOT exact MotionPlan-duration parity")
+        "geometry+safety+time_weight*mean(native seg_time)/reference_time_s+"
+        "air_time_weight*mean(native seg_time*sigmoid_air)/reference_time_s; "
+        "native local-regime/dt surrogates, NOT exact MotionPlan-duration or exact-stop parity")
     prototype: str = "analytic_target_until_T2.0_custom_target_and_T1.2_chronology"
 
     def __post_init__(self) -> None:
@@ -78,6 +79,10 @@ class ObjectiveSpec:
             _nonnegative_finite(self.reference_cycle_time_s, "reference_cycle_time_s")
             if self.reference_cycle_time_s == 0:
                 raise ValueError("reference_cycle_time_s must be positive when supplied")
+        if self.legacy_weights.w_air != 0:
+            raise ValueError(
+                "legacy w_air is disabled until its separate post-cut stock contract is fixed; "
+                "use air_time_weight for the pre-cut engagement air term")
 
 
 @dataclass

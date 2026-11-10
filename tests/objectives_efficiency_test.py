@@ -53,6 +53,8 @@ def test_time_air_weights_configurable_and_change_spec_hash():
         O.ObjectiveSpec(time_weight=-1.0)
     with pytest.raises(ValueError, match="air_time_weight"):
         O.ObjectiveSpec(air_time_weight=-0.5)
+    with pytest.raises(ValueError, match="post-cut stock contract"):
+        O.ObjectiveSpec(legacy_weights=O.LegacyTrajectoryWeights(w_air=1.0))
 
 
 def test_explicit_zero_efficiency_weights_preserve_scalar_objective_and_gradients():
@@ -140,7 +142,43 @@ def test_slower_program_with_identical_hard_geometry_scores_worse():
         rel_tol=0.0, abs_tol=1e-12)
 
 
-def test_efficiency_unknown_candidate_does_not_fabricate_feasible_or_time():
+def test_native_time_is_a_documented_surrogate_not_exact_motion_duration():
+    """The differentiable fixture has its native regime/dt terms, not exact-stop parity."""
+    evaluator = _prototype(precision="f64", spec=_efficiency_spec(
+        1.0, time_weight=1.0, air_time_weight=0.0))
+    theta = np.zeros(6)
+    smooth = evaluator.evaluate_candidate(theta, "native-time", objective_kind="smooth")
+    assert smooth.valid
+    assert smooth.components["time_source_is_simulator_surrogate"] == 1.0
+    native_mean_seconds = float(evaluator.sim.seg_time.to_numpy().mean())
+    assert smooth.components["cycle_time_s"] == pytest.approx(native_mean_seconds)
+    assert smooth.objective == pytest.approx(native_mean_seconds)
+    exact_seconds = _duration(evaluator.candidate_motion(theta))
+    assert native_mean_seconds > 0.0 and exact_seconds > 0.0
+    assert native_mean_seconds != pytest.approx(exact_seconds, rel=1e-6)
+
+
+@pytest.mark.parametrize("time_weight,air_time_weight", [(0.35, 0.0), (0.0, 0.35)])
+def test_efficiency_gradient_matches_finite_difference(time_weight, air_time_weight):
+    """Each efficiency-only channel must have a meaningful f64 AD/FD signal."""
+    evaluator = _prototype(precision="f64", spec=_efficiency_spec(
+        1.0, time_weight=time_weight, air_time_weight=air_time_weight))
+    theta = np.array([0.002, -0.001, 0.001, -0.001, 0.002, -0.002])
+    taped = evaluator.evaluate_candidate_with_gradient(theta, "efficiency-gradient")
+    assert taped.result.valid
+    assert taped.gradient_theta.shape == theta.shape
+    assert np.isfinite(taped.gradient_theta).all()
+    axis = int(np.argmax(np.abs(taped.gradient_theta)))
+    direction = np.eye(theta.size)[axis]
+    ad = float(taped.gradient_theta @ direction)
+    assert abs(ad) > 1e-4  # A matching pair of near-zero gradients would prove nothing.
+    epsilon = 1e-5
+    plus = evaluator.evaluate_candidate(theta + epsilon * direction, "efficiency-fd-plus")
+    minus = evaluator.evaluate_candidate(theta - epsilon * direction, "efficiency-fd-minus")
+    assert plus.valid and minus.valid
+    fd = (plus.objective - minus.objective) / (2 * epsilon)
+    assert np.isfinite(fd) and abs(fd) > 1e-4
+    assert ad == pytest.approx(fd, rel=1e-5, abs=1e-8)
     evaluator = _prototype(precision="f64", spec=_efficiency_spec(1.0))
     rejected = evaluator.evaluate_candidate(np.full(6, np.nan), "unknown", objective_kind="hard")
     assert not rejected.valid
