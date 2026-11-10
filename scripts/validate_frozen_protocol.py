@@ -628,7 +628,17 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
     objective = object_fields(
         config["objective"], "objective",
         ("primary_k", "anneal_start", "anneal_end", "gouge_weight", "residual_weight",
-         "holder_weight", "holder_margin_mm", "loss_shift_voxels"))
+         "holder_weight", "holder_margin_mm", "loss_shift_voxels"),
+        ("time_weight", "air_time_weight", "reference_rule"))
+    has_efficiency_weight = False
+    for name in ("time_weight", "air_time_weight"):
+        has_efficiency_weight |= number(objective.get(name, 0.0), f"objective.{name}") > 0
+    if has_efficiency_weight:
+        require(objective.get("reference_rule") == "task_nominal_cam_cycle_time",
+                "positive efficiency weights require objective.reference_rule='task_nominal_cam_cycle_time'")
+    else:
+        require(objective.get("reference_rule") in (None, "task_nominal_cam_cycle_time"),
+                "objective.reference_rule must be 'task_nominal_cam_cycle_time' when supplied")
     primary_k = number(objective["primary_k"], "objective.primary_k", 0, strict=True)
     anneal_start = number(objective["anneal_start"], "objective.anneal_start", 0, strict=True)
     anneal_end = number(objective["anneal_end"], "objective.anneal_end", 0, strict=True)
@@ -876,6 +886,10 @@ def native_config(job: Mapping[str, Any], declaration: Mapping[str, Any],
         "experiment": execution["experiment"],
         "task_source": execution["task_source"],
         "precision": declaration["precision"],
+        "time_weight": objective.get("time_weight", 0.0),
+        "air_time_weight": objective.get("air_time_weight", 0.0),
+        "reference_cycle_time_source": objective.get(
+            "reference_rule", "task_nominal_cam_cycle_time"),
         "init": job["init"],
         "init_implementation_available": job["init"] == "cam",
         "arch": execution["architecture"],
