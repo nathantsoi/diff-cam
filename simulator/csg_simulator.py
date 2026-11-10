@@ -1773,7 +1773,7 @@ class CSGSimulatorDelta:
 
             sa = ti.max(-50.0, ti.min(50.0, stock_d * scale))
             stock_occ = 1.0 / (1.0 + ti.exp(sa))            # ~1 inside material
-            ta = ti.max(-50.0, ti.min(50.0, -tool_d * scale))
+            ta = ti.max(-50.0, ti.min(50.0, tool_d * scale))
             tool_occ = 1.0 / (1.0 + ti.exp(ta))             # ~1 inside the swept tool
             air = tool_occ * (1.0 - stock_occ)
 
@@ -2037,7 +2037,7 @@ class CSGSimulatorDelta:
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             tool_d = self.tool_sdf_tip(p, t)
-            ta = ti.max(-50.0, ti.min(50.0, -tool_d))
+            ta = ti.max(-50.0, ti.min(50.0, tool_d))
             tool_occ = 1.0 / (1.0 + ti.exp(ta))             # ~1 inside swept tool
             sa_pre = ti.max(-50.0, ti.min(50.0, self.stock[t, i, j, k]))
             stock_occ_pre = 1.0 / (1.0 + ti.exp(sa_pre))    # ~1 inside material
@@ -2336,7 +2336,7 @@ class CSGSimulatorDelta:
             sa_pre = ti.max(-50.0, ti.min(50.0, stock_d_pre * scale))
             stock_occ_pre = 1.0 / (1.0 + ti.exp(sa_pre))
             tool_d = self.tool_sdf(p, t)
-            ta = ti.max(-50.0, ti.min(50.0, -tool_d * scale))
+            ta = ti.max(-50.0, ti.min(50.0, tool_d * scale))
             tool_occ = 1.0 / (1.0 + ti.exp(ta))
             air = tool_occ * (1.0 - stock_occ_pre)
             a += inv_n * w_a * air * air
