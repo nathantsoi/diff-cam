@@ -94,11 +94,11 @@
     },
     "T2.3": {
       "status": "in_progress",
-      "owner": "diffcam-worker-1",
+      "owner": "diffcam-worker-2 (T2.3b expansion)",
       "branch": null,
       "blocker": null,
       "next": "set counts after T4.1b pilot",
-      "note": "Bootstrap merged d5e320b: 3 families (facing/asymmetric stock, pocket-island contour, variable width/depth) x 1 dev + 1 test; T \u2287 P only finite-radius corner fillets, grid-exact exclusion tol 0; all 12 production evals safety+geometry True; audit clean. Seed generator gained a generic cap-clearing pass after a qualification failure (task unchanged, failure retained). Suite COUNTS pending pilot cost (target 3 dev / 10 test per family)."
+      "note": "Bootstrap merged d5e320b: 3 families (facing/asymmetric stock, pocket-island contour, variable width/depth) x 1 dev + 1 test; T \u2287 P only finite-radius corner fillets, grid-exact exclusion tol 0; all 12 production evals safety+geometry True; audit clean. Seed generator gained a generic cap-clearing pass after a qualification failure (task unchanged, failure retained). Suite COUNTS pending pilot cost (target 3 dev / 10 test per family). Bootstrap (1+1/family) merged. T2.3b: generator v2 with declared counts (default 3 dev/10 test/family), cheap gates; posted qualification batch by coordinator later."
     },
     "T3.0": {
       "status": "complete",
@@ -424,6 +424,11 @@
       "owner": "diffcam-worker-1",
       "branch": "task/T3.xc-runner",
       "note": "runner budget +1 init, cost, selection artifacts, run_id, selection_vs_verdict record; REAL_* gates."
+    },
+    "T2.3b": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T2.3b-suite-expansion"
     }
   }
 }
