@@ -406,7 +406,8 @@
       "status": "in_progress",
       "owner": "diffcam-worker-2",
       "branch": "task/T1.xs-tool-occ-sign",
-      "note": "smooth tool_occ sign bug at csg_simulator.py:1776/2040/2339 (sigmoid(+tool_d) = outside tool); masked since 57b03a2 by zeroed weights. Blocks T3.xd gradient evidence."
+      "note": "smooth tool_occ sign bug at csg_simulator.py:1776/2040/2339 (sigmoid(+tool_d) = outside tool); masked since 57b03a2 by zeroed weights. Blocks T3.xd gradient evidence.",
+      "evidence_caveat": "Before 8c83e76, smooth seg_air/seg_engage/seg_swept and every consumer (w_air penalty, is_air in w_air_time/w_air_late, w_break) were inverted. DiffCAM-pipeline evidence is unaffected: objectives.py forced those weights to 0 from a14a7d4, and grep finds no config/report/retained run with them nonzero. Any pre-pipeline (inherited 57b03a2..a14a7d4) run, ablation or claim that used those weights nonzero optimized an inverted signal and is not to be relied on."
     },
     "T1.3h": {
       "status": "in_progress",
