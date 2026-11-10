@@ -6,6 +6,7 @@ The real four-port construction/posting gates are separate.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 from types import SimpleNamespace
@@ -60,7 +61,7 @@ def _fake_ports(monkeypatch, roughing, *, discontinuity=False):
             raise RuntimeError("test fake requires a high start")
         first = _line(segment_id_prefix + "-entry", start, (0., 0., 10.), rapid=True)
         next_ = _line(segment_id_prefix + "-finish", first.end_mm, (0., 0., contour_z))
-        calls.append({"prefix": segment_id_prefix, "points": points,
+        calls.append({"prefix": segment_id_prefix, "points": points, "options": _kwargs.get("spec"),
                       "additional_walls": additional_walls})
         exit_ = _line(segment_id_prefix + "-exit", next_.end_mm, first.end_mm)
         return (first, next_, exit_)
@@ -69,6 +70,8 @@ def _fake_ports(monkeypatch, roughing, *, discontinuity=False):
                               emit_contour_loop=fake_contour)
     monkeypatch.setitem(__import__("sys").modules, "cam.rustcnc_pocket2d", pocket)
     monkeypatch.setitem(__import__("sys").modules, "cam.rustcnc_face_contour", contour)
+    monkeypatch.setattr(__import__("cam"), "rustcnc_pocket2d", pocket, raising=False)
+    monkeypatch.setattr(__import__("cam"), "rustcnc_face_contour", contour, raising=False)
     return calls
 
 
@@ -84,6 +87,8 @@ def test_composition_replaces_only_deepest_wall_ranges_and_records_provenance(mo
     ]
     plan.validate_for_task(task)
     assert len(calls) == 2
+    assert calls[0]["options"]["leadInRadius"] == task.tool.cutter_radius_mm / 2.0
+    assert calls[0]["options"]["leadOutVerticalRadius"] == task.tool.cutter_radius_mm / 4.0
     assert calls[0]["additional_walls"]
     assert len(calls[1]["additional_walls"]) == 1
     provenance = json.loads(plan.provenance)
@@ -122,6 +127,7 @@ def test_dispatch_uses_declared_family_not_a_legacy_raster(monkeypatch):
                          ("rustcnc_adaptive2d", "adaptive2d_seed")):
         module = SimpleNamespace(**{target: lambda task, spec, max_segments: sentinel})
         monkeypatch.setitem(__import__("sys").modules, "cam." + name, module)
+        monkeypatch.setattr(__import__("cam"), name, module, raising=False)
     monkeypatch.setattr(adapter, "pocket_with_contour_seed",
                         lambda task, spec, max_segments: sentinel)
     for bundle in generate_bootstrap_tasks():
@@ -130,3 +136,22 @@ def test_dispatch_uses_declared_family_not_a_legacy_raster(monkeypatch):
     for value in invalid_types:
         with pytest.raises(ValueError):
             adapter.cam_seed_for_task(bundle.task, max_segments=value)
+
+
+def test_reference_qualification_uses_explicit_seed_factory(monkeypatch):
+    from benchmarks import procedural_suite as suite
+
+    bundle = generate_bootstrap_tasks()[0]
+    called = []
+    seeded = adapter.cam_seed_for_task(bundle.task)
+    bundle = dataclasses.replace(bundle, motion=seeded)
+    monkeypatch.setattr(suite, "run_reference",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("probe-stop")))
+
+    def factory(task):
+        called.append(task.task_id)
+        return seeded
+
+    with pytest.raises(RuntimeError, match="probe-stop"):
+        suite._reference_qualify_seed(bundle, seed_factory=factory)
+    assert called == [bundle.task.task_id]
