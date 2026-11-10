@@ -380,7 +380,7 @@
       "status": "in_progress",
       "owner": "diffcam-worker-3 (seeds); runner conditions later",
       "branch": "task/T4.0-noinit-seeds",
-      "note": "D-08: cam/seeds.py straight_line/random MotionPlans from T4.2a declarations; runner wiring after T3.xc-runner."
+      "note": "D-08: cam/seeds.py straight_line/random MotionPlans from T4.2a declarations; runner wiring after T3.xc-runner. Seeds merged (3ac95e6). Remaining: runner conditions/init axis wiring (runner lease, after T3.xc-runner)."
     },
     "T3.xc": {
       "status": "done",
