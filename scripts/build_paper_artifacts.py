@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
-"""Build deterministic, traceable publication *scaffold* data from audited records.
+"""Build deterministic, traceable result artifacts from audited records.
 
-This program does not evaluate machining or optimizer quality. It consumes an
-existing ``diffcam-eval-audit/1`` report, its manifest, and immutable supporting
-records. Every run/config pair must declare the same precision and decision IDs
-as the explicitly supplied campaign policy. It never writes into ``manuscript/``.
-Only synthetic, smoke, or pilot scaffolding is supported here; final frozen
-campaign qualification is deliberately outside this v1 implementation.
+The published inputs remain immutable. The legacy scaffold preserves its
+explicit audit/config interface. ``--results`` additionally reads published
+pilot reports, a ``run_campaign.py`` audit bundle, and declared T3.3 geometry
+studies, then emits the main/family/init/selection/resource/alignment CSVs and
+``reports/results/summary.md`` into a fresh destination. Partial and absent
+inputs are labelled pending/absent, never replaced with synthetic results.
 
-The optional plotting source requires a separately provisioned matplotlib
-installation. Core tests exercise data generation, not optional image rendering.
+This program does not evaluate machining validity, physical safety, or optimizer
+superiority. Statistical tables use the existing task-cluster audit utilities.
+The optional resource plotting source requires separately provisioned matplotlib;
+core tests cover data generation rather than optional image rendering.
 """
 from __future__ import annotations
 
@@ -23,11 +25,13 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 from typing import Any, Mapping, Sequence
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from algorithms import run_artifacts as R
 from benchmarks import audit as A
 from benchmarks import contracts as C
 
@@ -285,18 +289,35 @@ def precision_values(value: Any, where: str) -> list[tuple[str, Any]]:
 
 
 def validate_precision_and_decisions(config: Mapping[str, Any], *, run_id: str,
-                                     precision: str, decisions: set[str]) -> tuple[Any, str]:
+                                     precision: str, decisions: set[str],
+                                     external_decision_binding: bool = False,
+                                     allow_unavailable_precision: bool = False) -> tuple[Any, str]:
     values = precision_values(config, "")
-    require(values, f"{run_id}: config has no explicit simulator_precision metadata")
-    require(all(value in ("f32", "f64") for _, value in values),
+    legacy = config.get("simulator")
+    if isinstance(legacy, Mapping):
+        requested = legacy.get("requested_precision")
+        record = SimpleNamespace(precision=requested,
+                                 precision_metadata=lambda: dict(legacy))
+        try:
+            R.simulator_precision_metadata(record, requested_precision=requested)
+        except (TypeError, ValueError) as error:
+            raise PaperArtifactError(f"{run_id}: invalid typed simulator identity: {error}") from error
+        values.append(("/simulator", requested))
+    if not values:
+        if allow_unavailable_precision:
+            values.append(("/unavailable", "unavailable"))
+        else:
+            require(values, f"{run_id}: config has no explicit simulator_precision metadata")
+    require(all(value in ("f32", "f64", "unavailable") for _, value in values),
             f"{run_id}: simulator_precision must be explicit f32 or f64")
     distinct = {value for _, value in values}
     require(len(distinct) == 1, f"{run_id}: conflicting precision declarations: {values}")
     actual = values[0][1]
     require(actual == precision,
             f"{run_id}: campaign precision {precision} conflicts with run precision {actual}")
-    require(isinstance(config.get("decision_ids"), list), f"{run_id}: decision_ids must be a list")
-    ids = config["decision_ids"]
+    require(isinstance(config.get("decision_ids"), list) or external_decision_binding,
+            f"{run_id}: decision_ids must be embedded or explicitly bound at dataset scope")
+    ids = config.get("decision_ids", list(decisions))
     require(all(isinstance(item, str) and item.startswith("D-") for item in ids),
             f"{run_id}: decision_ids entries must be explicit D identifiers")
     require(len(ids) == len(set(ids)), f"{run_id}: duplicate decision ID")
@@ -437,7 +458,9 @@ def refinement_from_report(report: Mapping[str, Any], run_ids: Sequence[str]) ->
     for field in ("links_by_run_id", "resources_by_run_id"):
         if field in refinement:
             require(isinstance(refinement[field], Mapping), f"refinement.{field} must be an object")
-    links = refinement.get("links_by_run_id", {})
+    links = refinement.get("links_by_run_id")
+    if links is None:
+        return {}
     require(set(links) == set(run_ids),
             "inline refinement field must supply a validated link for every expected run")
     for run_id, value in links.items():
@@ -822,17 +845,27 @@ def build_artifacts(*, audit_path: Path, manifest_path: Path, decisions_path: Pa
                     ledger_paths: Mapping[str, Path] | None = None,
                     baseline_coverage_path: Path | None = None,
                     refinement_paths: Sequence[Path] = (),
-                    run_root: Path | None = None) -> tuple[dict[str, bytes], dict[str, Any]]:
+                    run_root: Path | None = None,
+                    report_override: Mapping[str, Any] | None = None,
+                    report_ref_override: Mapping[str, Any] | None = None,
+                    external_decision_binding: bool = False,
+                    allow_unavailable_precision_for_noncomplete: bool = False) -> tuple[dict[str, bytes], dict[str, Any]]:
     """Read every input before publishing any bytes; the call itself is side-effect free."""
-    require(input_kind in ("synthetic", "smoke", "pilot"),
-            "only explicitly labeled synthetic/smoke/pilot scaffolding is supported")
+    require(input_kind in ("synthetic", "smoke", "pilot", "campaign"),
+            "input kind must be synthetic/smoke/pilot/campaign")
     require(precision in ("f32", "f64"), "campaign precision must be explicit f32 or f64")
     require(decision_ids and all(isinstance(item, str) and item.startswith("D-")
                                  for item in decision_ids), "declare at least one campaign decision ID")
     decisions = set(decision_ids)
     require(len(decisions) == len(decision_ids), "campaign decision IDs must be unique")
     ledger_paths = dict(ledger_paths or {})
-    report, audit_ref = source(audit_path, "audit")
+    if report_override is None:
+        report, audit_ref = source(audit_path, "audit")
+    else:
+        report = dict(report_override)
+        audit_bytes = json_bytes(report)
+        audit_ref = dict(report_ref_override or {"role": "derived_audit",
+                                                 "sha256": digest(audit_bytes)})
     report = mapping(report, "audit")
     manifest_raw, manifest_ref = source(manifest_path, "manifest")
     try:
@@ -863,7 +896,10 @@ def build_artifacts(*, audit_path: Path, manifest_path: Path, decisions_path: Pa
     validate_config_links(config_docs, manifest)
     for run_id, (_, config_ref) in sorted(config_docs.items()):
         actual, _pointer = validate_precision_and_decisions(
-            config_docs[run_id][0], run_id=run_id, precision=precision, decisions=decisions)
+            config_docs[run_id][0], run_id=run_id, precision=precision, decisions=decisions,
+            external_decision_binding=external_decision_binding,
+            allow_unavailable_precision=(allow_unavailable_precision_for_noncomplete
+                                         and runs[run_id]["status"] != "complete"))
         config_docs[run_id][0]["_validated_precision"] = actual
     require(all(name in manifest.runs for name in ledger_paths), "ledger bound to an unknown run ID")
     ledgers = {}
@@ -1421,6 +1457,954 @@ def build_artifacts(*, audit_path: Path, manifest_path: Path, decisions_path: Pa
     return emit.files, manifest_document
 
 
+def _comparison_specs(manifest: A.Manifest):
+    if "nominal-cam" not in {run.method for run in manifest.runs.values()}:
+        return []
+    methods = sorted({run.method for run in manifest.runs.values() if run.method != "nominal-cam"})
+    return [{"name": f"{method}-versus-nominal-{dialect.value}", "method": method,
+             "baseline": "nominal-cam", "dialect": dialect.value,
+             "metrics": ["cycle_time_s", "air_fraction"]}
+            for method in methods for dialect in C.Dialect]
+
+
+def _filtered_manifest(document, manifest: A.Manifest, *, test_split_only=False):
+    """A selection of immutable full-manifest records, never a new task config."""
+    raw_tasks = document["tasks"]
+    if isinstance(raw_tasks, Mapping):
+        entries = [(key, value) for key, value in raw_tasks.items()]
+    else:
+        entries = [(None, value) for value in raw_tasks]
+    keep = set()
+    for key, value in entries:
+        task_id = value.get("task_id", key)
+        if test_split_only:
+            if value.get("task_split", value.get("split")) != "test":
+                continue
+        keep.add(task_id)
+    if isinstance(raw_tasks, Mapping):
+        tasks = {key: value for key, value in raw_tasks.items()
+                 if value.get("task_id", key) in keep}
+    else:
+        tasks = [dict(value) for value in raw_tasks
+                 if value.get("task_id") in keep]
+    runs = [raw for raw in document.get("expected_runs", document.get("runs", []))
+            if raw["task_id"] in keep]
+    require(bool(keep and runs), "no test-split/evaluable campaign tasks selected")
+    filtered = dict(document, tasks=tasks, expected_runs=runs,
+                    comparisons=_comparison_specs(manifest))
+    return A.load_manifest(filtered), filtered
+
+
+def _pilot_verdicts(root: Path, published: Mapping[str, Any], manifest: A.Manifest):
+    refinement = mapping(published.get("refinement"), "pilot.refinement")
+    links_ref = refinement.get("links_by_run_id")
+    if not isinstance(links_ref, Mapping):
+        raise PaperArtifactError("pilot refinement links are unavailable")
+    evaluations, references, source_hashes = {}, [], {}
+    for run_id in sorted(manifest.runs):
+        pointer = mapping(links_ref.get(run_id), f"{run_id}.reported refinement link")
+        relative = PurePosixPath(pointer.get("path", ""))
+        require(not relative.is_absolute() and "." not in relative.parts,
+                f"{run_id}: unsafe refinement link path")
+        path = (root / relative).resolve()
+        require(path.is_relative_to(root.parent.resolve()), f"{run_id}: refinement link escapes pilot bundle")
+        if digest(path.read_bytes()) != pointer.get("sha256"):
+            raise PaperArtifactError(f"{run_id}: refinement link hash differs from published report")
+        raw, ref = source(path, f"refinement_link:{run_id}")
+        link = mapping(raw, f"{run_id}.refinement_link")
+        require(link.get("schema") == "diffcam-refinement-link/4"
+                and link.get("verdict_run_id") == run_id + "-verdict",
+                f"{run_id}: invalid schema-4 verdict identity")
+        evaluations[run_id], source_hashes[run_id] = {}, {}
+        references.append(ref)
+        for dialect in C.Dialect:
+            item = mapping(link["roles"]["verdict"]["evaluations"].get(dialect.value),
+                           f"{run_id}.{dialect.value}.verdict.role")
+            require(item.get("sha256") and link["roles"]["verdict"].get("max_step_mm") == 0.125,
+                    f"{run_id}.{dialect.value}: no linked 0.125 mm verdict")
+            filename = relative_payload(path, item["path"], f"{run_id}.{dialect.value}.verdict.path")
+            require(digest(filename.read_bytes()) == item["sha256"],
+                    f"{run_id}.{dialect.value}: verdict bytes differ from link")
+            doc, evidence = source(filename, f"verdict:{run_id}:{dialect.value}")
+            typed = typed_evaluation(doc, f"{run_id}.{dialect.value}")
+            require(typed.discretization["settings"]["max_step_mm"] == 0.125,
+                    f"{run_id}.{dialect.value}: wrong posted verdict step")
+            evaluation = evaluations[run_id][dialect.value] = typed
+            references.append(evidence)
+            source_hashes[run_id][dialect.value] = evidence["sha256"]
+    diagnostics = refinement.get("screen_disagreements_by_run_id")
+    require(isinstance(diagnostics, Mapping) and set(diagnostics) == set(evaluations),
+            "pilot must expose exact screen-disagreement links for every verdict")
+    return evaluations, tuple(diagnostics.items()), references, source_hashes
+
+
+def _campaign_verdicts(root: Path, manifest: A.Manifest):
+    artifact_root = root / "audit-runs" if (root / "audit-runs").is_dir() else root
+    evaluations, references = {}, []
+    for run_id in sorted(manifest.runs):
+        if not (artifact_root / run_id / "run.json").is_file():
+            return None, references
+        evaluations[run_id] = {}
+        for dialect in C.Dialect:
+            filename = artifact_root / run_id / C.DIALECT_ARTIFACTS[dialect][1]
+            if not filename.is_file():
+                return None, references
+            doc, ref = source(filename, f"verdict:{run_id}:{dialect.value}")
+            typed = typed_evaluation(doc, f"{run_id}/{dialect.value}")
+            if typed.discretization["settings"]["max_step_mm"] != 0.125:
+                return None, references
+            evaluations[run_id][dialect.value] = typed
+            references.append(ref)
+    return evaluations, references
+
+
+def _auxiliary_records(root: Path, manifest: A.Manifest):
+    configs, metrics, histories, refs, observations = {}, {}, {}, {}, []
+    for run_id in sorted(manifest.runs):
+        directory = root / run_id
+        if not directory.is_dir():
+            continue
+        record = C.loads((directory / "run.json").read_text(encoding="utf-8"))
+        require(isinstance(record, C.RunRecord) and record.run_id == run_id
+                and record.task_hash == manifest.tasks[manifest.runs[run_id].task_id].task_hash,
+                f"{run_id}: auxiliary result identity mismatch")
+        observations.append(record)
+        for filename, target in (("config.json", configs), ("metrics.json", metrics),
+                                 ("history.json", histories)):
+            if (directory / filename).is_file():
+                raw, identity = source(directory / filename, f"{filename[:-5]}:{run_id}")
+                target[run_id] = mapping(raw, f"{run_id}.{filename}")
+                refs[f"{filename[:-5]}:{run_id}"] = identity
+    return {"configs": configs, "metrics": metrics, "histories": histories,
+            "refs": refs, "observations": observations}
+
+
+def _task_tolerances(document, configs, manifest):
+    """Recover absent task metadata only from a matching, hash-checked TaskSpec."""
+    by_task = {}
+    for run_id, config in configs.items():
+        expected = manifest.runs[run_id]
+        source_task = config.get("task")
+        if not isinstance(source_task, Mapping):
+            continue
+        task = C.TaskSpec.from_dict(source_task)
+        require(task.task_hash == manifest.tasks[expected.task_id].task_hash,
+                f"{run_id}: config's typed task hash differs from the audit manifest")
+        value = task.tolerances.completion_residual_mm3
+        if expected.task_id in by_task and by_task[expected.task_id] != value:
+            raise PaperArtifactError(f"{expected.task_id}: conflicting typed residual tolerances")
+        by_task[expected.task_id] = value
+    tasks = document["tasks"]
+    if isinstance(tasks, Mapping):
+        items = list(tasks.items())
+        new_tasks = dict(tasks)
+    else:
+        items = [(None, item) for item in tasks]
+        new_tasks = list(tasks)
+    for index, (key, task_info) in enumerate(items):
+        task_id = task_info.get("task_id", key)
+        if task_id in by_task:
+            value = dict(task_info)
+            declared = value.get("completion_residual_mm3")
+            require(declared is None or declared == by_task[task_id],
+                    f"{task_id}: manifest and typed TaskSpec residual tolerances disagree")
+            value["completion_residual_mm3"] = by_task[task_id]
+            new_tasks[index] = value
+    return dict(document, tasks=new_tasks)
+
+
+def _derived_audit_bytes(report):
+    """Identity for a generated audit, excluding its host filesystem location.
+
+    The complete host-bound report is still validated and used for all values.
+    Only the derived metadata identity replaces run-root/run-directory paths
+    with logical task/run identifiers. Immutable input byte hashes are retained.
+    """
+    neutral = dict(report, runs_root="task-root-relative")
+    neutral["runs"] = [dict(row, run_dir=row["run_id"]) for row in report["runs"]]
+    return json_bytes(neutral)
+
+
+def _dataset(label: str, root: Path | None, kind: str):
+    if root is None or not root.is_dir():
+        return {"label": label, "kind": kind, "state": "absent",
+                "reason": "declared input directory is absent", "sources": [],
+                "auxiliary": {"configs": {}, "metrics": {}, "histories": {}, "refs": {}, "observations": []}}
+    root = no_manuscript(root, f"{label}.root")
+    if not (root / "manifest.json").is_file():
+        return {"label": label, "kind": kind, "state": "pending",
+                "reason": "manifest/report not yet published", "sources": [], "manifest": None,
+                "auxiliary": {"configs": {}, "metrics": {}, "histories": {}, "refs": {}, "observations": []}}
+    manifest_raw, manifest_ref = source(root / "manifest.json", f"manifest:{label}")
+    manifest = A.load_manifest(manifest_raw)
+    artifact_root = root / "audit-runs" if (root / "audit-runs").is_dir() else root
+    observed = list(artifact_root.glob("*/run.json"))
+    auxiliary = _auxiliary_records(artifact_root, manifest)
+    manifest_raw = _task_tolerances(manifest_raw, auxiliary["configs"], manifest)
+    manifest = A.load_manifest(manifest_raw)
+    dataset = {"label": label, "kind": kind, "root": root, "manifest_raw": manifest_raw,
+               "manifest_ref": manifest_ref, "manifest": manifest, "artifact_root": artifact_root,
+               "auxiliary": auxiliary, "sources": [manifest_ref, *auxiliary["refs"].values()],
+               "observed_run_count": len(observed), "expected_run_count": len(manifest.runs)}
+    published_path = root / ("audit.json" if (root / "audit.json").is_file() else "pilot_report.json")
+    if not published_path.is_file():
+        dataset.update(state="pending",
+                       reason=f"no finalized audit/report; {len(observed)}/{len(manifest.runs)} run records visible")
+        return dataset
+    published, reference = source(published_path, f"published_audit:{label}")
+    dataset["published"] = published
+    dataset["sources"].append(reference)
+    summary = mapping(published.get("summary"), f"{label}.summary") if kind != "campaign" else {}
+    if kind == "campaign":
+        summary = mapping(published.get("summary"), f"{label}.audit.summary")
+    reconciliation = mapping(published.get("expected_vs_observed", published.get("reconciliation")),
+                             f"{label}.reconciliation")
+    if not (published.get("evidence_complete", summary.get("evidence_complete")) is True
+            and summary.get("auditor_passed") is True
+            and reconciliation.get("exact_id_reconciliation") is True):
+        dataset.update(state="pending", reason="published audit is not mechanical/evidence complete")
+        return dataset
+    complete_records = all(record.status is C.RunStatus.COMPLETE for record in auxiliary["observations"])
+    if len(observed) != len(manifest.runs) or not complete_records:
+        dataset.update(state="pending",
+                       reason="D-04 table waits for terminal completion of every expected run; existing failed/partial rows remain visible")
+        return dataset
+    try:
+        filtered_manifest, _filtered_raw = _filtered_manifest(
+            manifest_raw, manifest, test_split_only=kind == "campaign")
+        if root / "audit-runs" is not None and (root / "audit-runs").is_dir():
+            run_root = root / "audit-runs"
+        else:
+            run_root = root
+        verdicts, sources = _campaign_verdicts(run_root, manifest)
+        # A verdict-only campaign does not produce a screen comparison. Its
+        # required empty sets record no additional evidence, not proven agreement.
+        diagnostics = ({run_id: [] for run_id in manifest.runs}
+                       if kind == "campaign" else {})
+        if kind != "campaign" and published_path.name == "pilot_report.json":
+            verdicts, raw_diagnostics, sources, _hashes = _pilot_verdicts(root, published, manifest)
+            diagnostics = dict(raw_diagnostics)
+        if verdicts is None:
+            dataset.update(state="pending", reason="one or more 0.125 mm typed verdicts are absent")
+            return dataset
+        report, selected_manifest = A.generate_report(
+            run_root, filtered_manifest, bootstrap_seed=20261108,
+            verdict_evaluations=verdicts, screen_disagreements=diagnostics)
+    except (A.AuditInputError, C.ContractError) as error:
+        raise PaperArtifactError(f"{label}: cannot derive its validated audit: {error}") from error
+    dataset["sources"].extend(sources)
+    report_ref = {"role": f"derived_audit:{label}", "sha256": digest(_derived_audit_bytes(report))}
+    dataset.update(state="available", reason="validated immutable audit; all expected runs have D-04 verdicts",
+                   report=report, report_ref=report_ref, selected_manifest=selected_manifest,
+                   verdicts=verdicts,
+                   selected_task_count=len(selected_manifest.tasks),
+                   selected_task_ids=sorted(selected_manifest.tasks),
+                   expected_task_count=len(filtered_manifest.tasks))
+    return dataset
+
+
+def _csv_rows(files, name):
+    import csv as _csv
+    import io as _io
+    return list(_csv.DictReader(_io.StringIO(files[name].decode("utf-8"))))
+
+
+def _meta(ref):
+    return {"role": ref["role"], "sha256": ref["sha256"]}
+
+
+def _built_dataset(dataset, decision_ids, decisions_path, precision):
+    if dataset["state"] != "available":
+        return {"files": {}, "rows": {}, "sources": dataset["sources"]}
+    root = dataset["root"]
+    artifact_root = dataset["artifact_root"]
+    configs = {run_id: artifact_root / run_id / "config.json"
+               for run_id in dataset["manifest"].runs}
+    histories = {run_id: artifact_root / run_id / "history.json"
+                 for run_id in dataset["manifest"].runs
+                 if (artifact_root / run_id / "history.json").is_file()}
+    files, metadata = build_artifacts(
+        audit_path=root / "manifest.json", manifest_path=root / "manifest.json",
+        decisions_path=decisions_path, run_configs=configs, precision=precision,
+        decision_ids=decision_ids, input_kind=dataset["kind"], ledger_paths=histories,
+        report_override=dataset["report"], report_ref_override=dataset["report_ref"],
+        external_decision_binding=True, allow_unavailable_precision_for_noncomplete=True)
+    return {"files": files, "manifest": metadata,
+            "rows": {name: _csv_rows(files, f"tables/{name}.csv")
+                     for name in ("run_status", "metric_comparisons", "outcome_comparisons",
+                                  "resource_cost", "coverage")},
+            "sources": [_meta(item) for item in metadata["input_file_identities"]]}
+
+
+def _number(value):
+    if value is None or value == "NA":
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        value = float(value)
+    require(isinstance(value, (int, float)) and math.isfinite(value), "result number must be finite")
+    return value
+
+
+def _init_dataset(dataset):
+    if dataset.get("manifest") is None:
+        return {}
+    auxiliary = dataset["auxiliary"]
+    manifest = dataset["manifest"]
+    configs, metrics = auxiliary["configs"], auxiliary["metrics"]
+    histories = auxiliary["histories"]
+    by_id = {}
+    for record in auxiliary["observations"]:
+        cfg = dict(configs[record.run_id])
+        init = mapping(cfg.get("initialization"), "initialization") if isinstance(
+            cfg.get("initialization"), Mapping) else {}
+        by_id[record.run_id] = {"record": record, "config": cfg, "metrics": metrics.get(record.run_id, {}),
+                                "method": manifest.runs[record.run_id].method,
+                                "seed": manifest.runs[record.run_id].seed,
+                                "history": histories.get(record.run_id, {}),
+                                "init": init.get("init", "cam"),
+                                "scope": init.get("scope", "primary")}
+    return by_id
+
+
+def _improvement(dataset, method, family):
+    manifest = dataset.get("selected_manifest", dataset.get("manifest"))
+    if manifest is None:
+        return None, None, 0
+    ids = [run.run_id for run in manifest.runs.values()
+           if run.method == method and not nominal_method(method)
+           and (family in (None, "overall") or manifest.tasks[run.task_id].family == family)]
+    observations = _init_dataset(dataset)
+    flags = [run["metrics"].get("selection", {}).get("no_improvement_over_initialization")
+             for run in (observations.get(run_id) for run_id in ids) if run is not None]
+    known = [value for value in flags if isinstance(value, bool) and value is not None]
+    return ((sum(value is True for value in known) / len(known) if known else None),
+            len(known), len(flags))
+
+
+def _main_rows(dataset, built):
+    columns = ["dataset", "state", "reason", "method", "family", "dialect", "expected_tasks",
+               "geometry_pass_rate", "geometry_known_n", "safety_pass_rate", "safety_known_n",
+               "completion_pass_rate", "completion_known_n", "delta_cycle_s", "cycle_ci_lower",
+               "cycle_ci_upper", "cycle_holm_p", "cycle_paired_n", "delta_air_fraction",
+               "air_ci_lower", "air_ci_upper", "air_holm_p", "air_paired_n",
+               "no_improvement_rate", "no_improvement_known_n", "optimizer_runs",
+               "small_sample_warning", "statistical_unit"]
+    if dataset["state"] != "available":
+        if dataset.get("manifest") is None:
+            methods = ["nominal-cam"]
+        else:
+            methods = sorted({run.method for run in dataset["manifest"].runs.values()})
+        rows = []
+        for method in methods:
+            values = {column: None for column in columns}
+            values.update(dataset=dataset["label"], state=dataset["state"], reason=dataset["reason"],
+                          method=method, family="overall", statistical_unit="task",
+                          expected_tasks=(dataset.get("selected_task_count")))
+            rows.append({"table": "main_results", "columns": columns, "values": values,
+                         "source_rows": [], "sources": dataset.get("sources", [])})
+        return rows, columns, []
+    comparison_names = {row["comparison"]: row for row in dataset["report"]["comparisons"]}
+    metrics = {(comparison_names[row["comparison"]]["method"], row["family"], row["dialect"], row["metric"]): row
+               for row in built["rows"]["metric_comparisons"]}
+    outcomes = {(comparison_names[row["comparison"]]["baseline" if row["side"] == "baseline" else "method"],
+                 row["family"], row["dialect"], row["outcome"], row["side"]): row
+                for row in built["rows"]["outcome_comparisons"]}
+    manifest = dataset["selected_manifest"]
+    families = ["overall", *sorted({task.family for task in manifest.tasks.values()})]
+    methods = sorted({run.method for run in manifest.runs.values()})
+    rows, source_rows = [], []
+    for method in methods:
+        for family in families:
+            for dialect in C.Dialect:
+                # benchmarks.audit reports one family as `overall` only.
+                # Never discard the known statistic in its named family row.
+                stat_family = "overall" if len(families) == 2 else family
+                outcome_row = outcomes.get((method, stat_family, dialect.value, "geometry_pass", "method")) or (
+                    outcomes.get(("nominal-cam", stat_family, dialect.value, "geometry_pass", "baseline"))
+                    if nominal_method(method) else None)
+                values = {"dataset": dataset["label"], "state": dataset["state"],
+                          "reason": dataset["reason"], "method": method, "family": family,
+                          "dialect": dialect.value,
+                          "expected_tasks": sum(info.family == family or family == "overall"
+                                               for info in manifest.tasks.values())}
+                evidence_rows = []
+                for flag, col in (("geometry_pass", "geometry"), ("safety_pass", "safety"),
+                                  ("completion_pass", "completion")):
+                    row = outcomes.get((method, stat_family, dialect.value, flag, "method"))
+                    if row is None and nominal_method(method):
+                        row = outcomes.get(("nominal-cam", stat_family, dialect.value, flag, "baseline"))
+                    values[col + "_pass_rate"] = _number(row["task_mean_rate"]) if row else None
+                    values[col + "_known_n"] = row["known_task_units"] if row else None
+                    if row:
+                        side = "baseline" if nominal_method(method) else "method"
+                        evidence_rows.append(f"outcome_comparisons#{row['comparison']}/{flag}/{side}")
+                for metric, prefix in (("cycle_time_s", "cycle"), ("air_fraction", "air")):
+                    row = metrics.get((method, stat_family, dialect.value, metric))
+                    values["delta_" + ("cycle_s" if prefix == "cycle" else "air_fraction")] = (
+                        _number(row["mean_difference"]) if row else None)
+                    values[prefix + "_ci_lower"] = _number(row["ci_lower"]) if row else None
+                    values[prefix + "_ci_upper"] = _number(row["ci_upper"]) if row else None
+                    values[prefix + "_holm_p"] = _number(row["holm_p"]) if row else None
+                    values[prefix + "_paired_n"] = row["paired_tasks"] if row else None
+                    if row:
+                        evidence_rows.append(f"metric_comparisons#{row['comparison']}/{family}/{metric}")
+                rate, known, total = _improvement(dataset, method, family)
+                values.update(no_improvement_rate=rate, no_improvement_known_n=known,
+                              optimizer_runs=total,
+                              small_sample_warning=(outcome_row.get("small_n_warning") if outcome_row else None),
+                              statistical_unit="task")
+                rows.append({"table": "main_results", "columns": columns, "values": values,
+                             "source_rows": evidence_rows, "sources": built["sources"]})
+    return rows, columns, source_rows
+
+
+def _collapse_rules(dataset):
+    frozen = dataset["root"] / "frozen_config.json"
+    raw = dataset.get("manifest_raw", {})
+    candidate = raw.get("collapse_criterion")
+    if candidate is None and frozen.is_file():
+        document, ref = source(frozen, f"frozen_protocol:{dataset['label']}")
+        dataset["sources"].append(ref)
+        raw = document.get("raw_config", document)
+        candidate = raw.get("collapse_criterion")
+    candidate = candidate or {"geometry_or_completion_failure": True,
+                              "residual_multiplier": 1.5, "residual_operator": "gt",
+                              "require_no_hard_loss_improvement_over_initial": True,
+                              "predicate": "provisional D-08 example; not frozen protocol"}
+    return mapping(candidate, "collapse_criterion")
+
+
+def _collapse_case(case, parent, evaluation, parent_evaluation, rules):
+    if case is None or parent is None or evaluation is None or parent_evaluation is None:
+        return None, "case/parent/typed fine verdict unavailable"
+    metric = mapping(case["metrics"], "case metrics")
+    selection = mapping(metric.get("selection"), "case selection")
+    initial = selection.get("initial_candidate")
+    best = metric.get("best_candidate")
+    if not isinstance(initial, Mapping) or not isinstance(best, Mapping):
+        return None, "hard initial/selected loss unavailable"
+    h0, h1 = initial.get("objective"), best.get("objective")
+    if not isinstance(h0, (int, float)) or not isinstance(h1, (int, float)):
+        return None, "hard initial/selected objective unavailable"
+    improved = h1 < h0
+    # Use the raw typed task tolerance carried by this run's config/task record.
+    task = case["config"].get("task", {})
+    tolerance = mapping(task.get("tolerances"), "case task tolerances")
+    residual_limit = tolerance.get("completion_residual_mm3")
+    removed = metric_value(evaluation, "removed_volume_mm3")
+    residual = metric_value(evaluation, "residual_volume_mm3")
+    completion = None
+    if isinstance(residual_limit, (int, float)):
+        completion = residual is not None and removed is not None and removed > 0 and residual <= residual_limit
+    if completion is None or evaluation.geometry_pass is None:
+        return None, "typed geometry/completion verdict is unavailable"
+    geom_bad = evaluation.geometry_pass is False or completion is False
+    opposite = parent_evaluation
+    parent_residual = metric_value(opposite, "residual_volume_mm3")
+    excess = None
+    if residual is not None and parent_residual is not None:
+        multiplier = _number(rules["residual_multiplier"])
+        compare = residual > multiplier * parent_residual if rules["residual_operator"] == "gt" else residual >= multiplier * parent_residual
+        excess = compare
+    vote = bool(geom_bad if rules.get("geometry_or_completion_failure", True) else False) or bool(excess)
+    if rules.get("require_no_hard_loss_improvement_over_initial", True):
+        vote = vote and not improved
+    return bool(vote), {"hard_loss_initial": h0, "hard_loss_selected": h1,
+                        "hard_loss_improved": improved,
+                        "geometry_or_completion_failure": geom_bad,
+                        "residual_excess_vs_cam": excess,
+                        "completion_pass": completion}
+
+
+def _init_rows(dataset):
+    columns = ["dataset", "state", "method", "init", "scope", "included_in_init_axis",
+               "expected_runs", "observed_runs", "failed_runs", "collapse_count",
+               "collapse_rate", "collapse_criterion", "failure_details", "reason"]
+    records = _init_dataset(dataset)
+    grouped = {}
+    if dataset.get("manifest") is not None:
+        for expected in dataset["manifest"].runs.values():
+            case = records.get(expected.run_id)
+            init = case["init"] if case else "pending"
+            scope = case["scope"] if case else "pending"
+            key = (expected.method, init, scope)
+            grouped.setdefault(key, []).append((expected.run_id, case))
+    rules = _collapse_rules(dataset) if dataset["state"] == "available" else {}
+    rows = []
+    for (method, init, scope), cases in sorted(grouped.items()):
+        exploratory = scope == "exploratory_cam_perturbation"
+        if init not in ("cam", "straight_line", "random") and not (
+                init == "pending" and any(case is None for _, case in cases)):
+            raise PaperArtifactError(f"unsupported initialization value: {init}")
+        if init not in ("cam", "pending") and method not in ("annealed-adam", "hard-cmaes"):
+            raise PaperArtifactError(f"unsupported non-CAM solver for initialization: {method}")
+        known = [case for _, case in cases if case is not None]
+        values = {"dataset": dataset["label"], "state": dataset["state"], "method": method,
+                  "init": init, "scope": scope, "included_in_init_axis": not exploratory,
+                  "expected_runs": len(cases), "observed_runs": len(known),
+                  "failed_runs": sum(case["record"].status is not C.RunStatus.COMPLETE for case in known),
+                  "collapse_count": None, "collapse_rate": None,
+                  "collapse_criterion": rules or None, "reason": dataset["reason"]}
+        sources = list(dataset.get("sources", []))
+        failure_details = []
+        for case in known:
+            record = case["record"]
+            if record.status is C.RunStatus.COMPLETE:
+                continue
+            detail = {"run_id": record.run_id, "seed": case["seed"],
+                      "status": record.status.value, "failure_reason": record.failure_reason}
+            filename = case["config"].get("initialization_seed_result_file")
+            if filename is not None:
+                relative = PurePosixPath(filename)
+                require(not relative.is_absolute() and ".." not in relative.parts and "." not in relative.parts,
+                        f"{record.run_id}: unsafe initializer seed-result path")
+                source_path = dataset["artifact_root"] / record.run_id / relative
+                seed_document, seed_ref = source(source_path, f"initialization_seed_result:{record.run_id}")
+                detail["seed_result"] = seed_document
+                sources.append(seed_ref)
+            failure_details.append(detail)
+        values["failure_details"] = failure_details
+        if exploratory:
+            values["reason"] = "exploratory CAM perturbation; not a plain-CAM parent or init-axis comparison"
+        elif dataset["state"] == "available":
+            cam_parent = next((case for _, case in sorted(records.items()) if (
+                case["method"] == method and case["init"] == "cam"
+                and case["scope"] != "exploratory_cam_perturbation"
+                and case["seed"] == 0)), None)
+            collapse, descriptions = [], []
+            for case in known:
+                run_id = case["record"].run_id
+                if case["init"] == "cam":
+                    continue
+                parent_run = case["config"].get("initialization", {}).get("parent_run_id")
+                parent = records.get(parent_run) if parent_run is not None else cam_parent
+                if parent is not None and (parent["method"] != method or parent["init"] != "cam"
+                                           or parent["scope"] == "exploratory_cam_perturbation"):
+                    parent = None  # no substitution for a failed declared-parent lookup
+                eval_pair = dataset["verdicts"].get(run_id)
+                parent_pair = dataset["verdicts"].get(parent_run or (
+                    cam_parent["record"].run_id if cam_parent else ""))
+                details = []
+                case_flags = []
+                for dialect in C.Dialect:
+                    evaluation = eval_pair.get(dialect.value) if isinstance(eval_pair, dict) else None
+                    parent_eval = parent_pair.get(dialect.value) if isinstance(parent_pair, dict) else None
+                    if not isinstance(evaluation, C.EvaluationResult):
+                        verdict, why = None, "fine verdict unavailable"
+                    else:
+                        verdict, why = _collapse_case(case, parent, evaluation, parent_eval, rules)
+                    if verdict is None:
+                        descriptions.append({"run_id": run_id, "dialect": dialect.value,
+                                             "status": "pending", "reason": why})
+                    else:
+                        descriptions.append({"run_id": run_id, "dialect": dialect.value,
+                                             "status": verdict, "criteria": why,
+                                             "parent_run_id": parent["record"].run_id if parent else None})
+                    case_flags.append(verdict)
+                # A collapse count is in cases, never in dialect observations.
+                # A mixed/missing D-04 verdict cannot be silently normalized away.
+                consistent = len(case_flags) == len(C.Dialect) and len(set(case_flags)) == 1
+                collapse.append(bool(consistent and all(case_flags)))
+                if not consistent:
+                    collapse = None
+                    break
+            values["collapse_criterion"] = {"rules": rules,
+                                            "default_parent_rule": "same solver, init=cam, primary scope, seed 0; valid declared parent takes precedence",
+                                            "per_case": descriptions}
+            if collapse is not None:
+                denominator = sum(case["init"] != "cam" for case in known)
+                if denominator:
+                    values["collapse_count"] = sum(collapse)
+                    values["collapse_rate"] = sum(collapse) / denominator
+                else:
+                    values["reason"] = "plain-CAM reference; no non-CAM denominator"
+            else:
+                values["reason"] = "collapse unknown for at least one case; no filtered success rate"
+        rows.append({"table": "init_axis", "columns": columns, "values": values,
+                     "source_rows": [f"config:{run_id}" for run_id, _ in cases], "sources": sources})
+    if not rows:
+        return [{"table": "init_axis", "columns": columns,
+                 "values": dict.fromkeys(columns) | {"dataset": dataset["label"],
+                                                      "state": dataset["state"],
+                                                      "reason": dataset["reason"]},
+                 "source_rows": [], "sources": dataset.get("sources", [])}], columns
+    return rows, columns
+
+
+def _disagreement_rows(dataset):
+    columns = ["dataset", "run_id", "method", "init", "dialect", "feasible_at_025",
+               "geometry_pass_at_0125", "agree", "selection_config_hash", "seed_soft_objective",
+               "seed_hard_objective", "soft_minus_hard", "no_improvement_over_init", "reason"]
+    records = _init_dataset(dataset)
+    rows = []
+    if dataset["state"] != "available":
+        values = dict.fromkeys(columns)
+        values.update(dataset=dataset["label"], reason=dataset["reason"])
+        return [{"table": "selection_disagreement", "columns": columns, "values": values,
+                 "source_rows": [], "sources": dataset.get("sources", [])}], columns
+    for run_id, case in sorted(records.items()):
+        metric = case["metrics"]
+        selection = mapping(metric.get("selection", {}), "selection")
+        best = metric.get("best_candidate")
+        selection = mapping(selection, "selection")
+        for dialect in C.Dialect:
+            evaluation = dataset["verdicts"].get(run_id, {}).get(dialect.value)
+            if not isinstance(evaluation, C.EvaluationResult):
+                continue
+            feasible, reason = None, "missing recorded hard-selection components"
+            if isinstance(best, Mapping):
+                components = best.get("components", {})
+                feasible = components.get("feasible_at_025")
+                if feasible is None and components.get("feasible") in (0.0, 1.0):
+                    feasible = bool(components["feasible"])
+                if isinstance(feasible, bool):
+                    reason = "recorded selected hard-evaluation flag; not a posted re-evaluation"
+            fine_geometry = evaluation.geometry_pass
+            initial = mapping(metric.get("selection", {}), "selection").get("initial_candidate", {})
+            hard = initial.get("objective") if isinstance(initial, Mapping) else None
+            soft, gap = None, None
+            history = case["history"].get("history", [])
+            if history:
+                first = history[0]
+                theta = first.get("theta")
+                if (isinstance(theta, list) and isinstance(initial, Mapping)
+                        and initial.get("theta_hash") is not None):
+                    require(C.content_hash(theta) == initial.get("theta_hash"),
+                            f"{run_id}: first-history θ does not match its initial candidate")
+                    soft = first.get("soft_objective", first.get("objective"))
+                    if isinstance(soft, (int, float)) and isinstance(hard, (int, float)):
+                        gap = soft - hard
+            values = {"dataset": dataset["label"], "run_id": run_id, "method": case["method"],
+                      "init": case["init"], "dialect": dialect.value, "feasible_at_025": feasible,
+                      "geometry_pass_at_0125": fine_geometry,
+                      "agree": feasible == fine_geometry if isinstance(feasible, bool)
+                      and isinstance(fine_geometry, bool) else None,
+                      "selection_config_hash": case["config"].get("hard_selection_config_hash"),
+                      "seed_soft_objective": soft, "seed_hard_objective": hard,
+                      "soft_minus_hard": gap,
+                      "no_improvement_over_init": metric.get("selection", {}).get(
+                          "no_improvement_over_initialization"), "reason": reason}
+            rows.append({"table": "selection_disagreement", "columns": columns, "values": values,
+                         "source_rows": [f"metrics:{run_id}", f"verdict:{run_id}:{dialect.value}"],
+                         "sources": dataset["sources"]})
+    return rows, columns
+
+
+def _resource_rows(dataset):
+    columns = ["dataset", "state", "run_id", "role", "candidate_evaluations", "forward_calls",
+               "backward_calls", "validation_calls", "entry_count", "wall_time_s",
+               "process_peak_rss_bytes", "phase_wall_time_s", "memory_scope", "note"]
+    rows = []
+    for run_id, case in sorted(_init_dataset(dataset).items()):
+        history = case["history"].get("ledger", {})
+        entries = history.get("entries", [])
+        walls = [item.get("wall_time_s") for item in entries]
+        wall = math.fsum(walls) if all(isinstance(value, (int, float)) and math.isfinite(value) for value in walls) else None
+        values = {"dataset": dataset["label"], "state": dataset["state"],
+                  "run_id": run_id, "role": "optimizer_total",
+                  "candidate_evaluations": history.get("candidate_evaluations"),
+                  "forward_calls": history.get("forward_calls"),
+                  "backward_calls": history.get("backward_calls"),
+                  "validation_calls": history.get("validation_calls"),
+                  "entry_count": len(entries), "wall_time_s": wall,
+                  "process_peak_rss_bytes": history.get("process_peak_rss_bytes"),
+                  "phase_wall_time_s": None, "memory_scope": history.get("memory_scope"),
+                  "note": "whole optimizer process peak; not per-candidate or device-only memory"}
+        rows.append({"table": "resource_costs", "columns": columns, "values": values,
+                     "source_rows": [f"ledger:{run_id}"], "sources": dataset["sources"]})
+        phases = case["metrics"].get("execution", {}).get("posted_evaluation_phases", [])
+        values = dict.fromkeys(columns)
+        values.update(dataset=dataset["label"], state=dataset["state"], run_id=run_id)
+        peaks = []
+        for phase in phases:
+            for process in phase.get("processes", []):
+                peaks.append((process.get("role"), process))
+        for role, process in peaks:
+            cells = dict(values)
+            peak_kib = process.get("worker_peak_rss_kib")
+            cells.update(role=role, entry_count=None, phase_wall_time_s=process.get("process_wall_seconds"),
+                         process_peak_rss_bytes=(peak_kib * 1024 if isinstance(peak_kib, (int, float)) else None),
+                         memory_scope=process.get("memory_note"),
+                         note="individual posted worker; phase overlap is not folded into candidate wall time")
+            rows.append({"table": "resource_costs", "columns": columns, "values": cells,
+                         "source_rows": [f"metrics:{run_id}"], "sources": dataset["sources"]})
+    return rows, columns
+
+
+def _gradient_rows(root: Path | None):
+    columns = ["case_id", "path_id", "objective_mode", "k", "precision", "status",
+               "ad_fd_cosine", "ad_fd_relative_difference_norm", "epsilon_normalized_theta",
+               "fd_indices", "ad_primary_cosine", "ad_reference_cosine",
+               "ad_primary_relative_difference_norm", "ad_reference_relative_difference_norm",
+               "primary_pairs", "reference_pairs", "primary_standard_error_rms",
+               "reference_standard_error_rms", "hard_reused_across_k", "wall_time_s",
+               "actual_candidate_evaluations", "own_process_vmhwm_bytes", "reason"]
+    if root is None or not root.is_dir():
+        return [{"table": "gradient_alignment", "columns": columns,
+                 "values": dict.fromkeys(columns, None) | {"status": "absent"},
+                 "source_rows": [], "sources": []}], columns
+    studies = sorted((path for path in root.glob("full-reuse-*/matrix-plan.json")),
+                     key=lambda path: path.parent.name)
+    if not studies:
+        return [{"table": "gradient_alignment", "columns": columns,
+                 "values": dict.fromkeys(columns, None) | {"status": "pending"},
+                 "source_rows": [], "sources": []}], columns
+    plan_file = studies[-1]
+    plan, reference = source(plan_file, "gradient_matrix")
+    rows = []
+    for case in plan.get("cases", []):
+        path_id, k = case["path_id"], case["k"]
+        filename = plan_file.parent / f"case-{case['case_index']:03d}-{path_id}-k{k:g}-geometry.json"
+        sources = [reference]
+        if not filename.is_file():
+            values = dict.fromkeys(columns) | {"case_id": case["case_index"], "path_id": path_id,
+                                               "objective_mode": case.get("objective_mode", "geometry"),
+                                               "k": k, "status": "pending",
+                                               "reason": "case is declared but its result is not present"}
+            rows.append({"table": "gradient_alignment", "columns": columns, "values": values,
+                         "source_rows": [], "sources": sources})
+            continue
+        document, ref = source(filename, f"gradient_case:{case['case_index']}")
+        found_case = document.get("case", {})
+        require(found_case.get("case_index") == case["case_index"]
+                and found_case.get("path_id") == path_id and found_case.get("k") == k,
+                f"gradient case identity differs from the declared matrix: {filename}")
+        sources.append(ref)
+        alignment = document["ad_vs_primary_hard"]
+        reference_alignment = document["ad_vs_reference_hard"]
+        primary = document["randomized_hard"]["primary"]
+        high = document["randomized_hard"]["reference"]
+        fd_rows = document["smooth_ad"].get("fd_alignment_and_coordinate_errors", [])
+        first_fd = fd_rows[0].get("alignment_on_selected_coordinates", {}) if fd_rows else {}
+        epsilon = fd_rows[0].get("epsilon_normalized_theta") if fd_rows else None
+        values = {"case_id": case["case_index"], "path_id": path_id,
+                  "objective_mode": case.get("objective_mode", document.get("objective_mode")),
+                  "k": k, "precision": document["setup"].get("precision"),
+                  "status": document.get("status"),
+                  "ad_fd_cosine": first_fd.get("cosine"),
+                  "ad_fd_relative_difference_norm": first_fd.get("relative_difference_norm"),
+                  "epsilon_normalized_theta": epsilon,
+                  "fd_indices": (fd_rows[0].get("evaluated_indices") if fd_rows else None),
+                  "ad_primary_cosine": alignment.get("cosine"),
+                  "ad_reference_cosine": reference_alignment.get("cosine"),
+                  "ad_primary_relative_difference_norm": alignment.get("relative_difference_norm"),
+                  "ad_reference_relative_difference_norm": reference_alignment.get("relative_difference_norm"),
+                  "primary_pairs": primary.get("pairs"), "reference_pairs": high.get("pairs"),
+                  "primary_standard_error_rms": primary.get("standard_error_rms"),
+                  "reference_standard_error_rms": high.get("standard_error_rms"),
+                  "hard_reused_across_k": document["randomized_hard"].get("reused_across_k"),
+                  "wall_time_s": document.get("wall_time_s"),
+                  "actual_candidate_evaluations": document.get("actual_candidate_evaluations"),
+                  "own_process_vmhwm_bytes": document["memory"].get("own_process_vmhwm_bytes"),
+                  "reason": document.get("diagnostic_status")}
+        rows.append({"table": "gradient_alignment", "columns": columns, "values": values,
+                     "source_rows": [f"matrix-plan#/cases/{case['case_index']}"], "sources": sources})
+    return rows, columns
+
+
+def _markdown_table(columns, rows):
+    lines = ["| " + " | ".join(columns) + " |", "|" + "|".join("---" for _ in columns) + "|"]
+    for row in rows:
+        lines.append("| " + " | ".join(display(row.get(column)) for column in columns) + " |")
+    return "\n".join(lines)
+
+
+def _results_summary(datasets, main, init, disagreements, gradients, resources):
+    lines = ["# Results package", "",
+             "Generated only from locally available typed records and the existing task-cluster audit machinery. "
+             "This is not a finished 39-task campaign, a physical machining result, or a claim that a program is safe to run.", "",
+             "## Input availability", ""]
+    availability = []
+    for dataset in datasets:
+        availability.append({"dataset": dataset["label"], "state": dataset["state"],
+                             "reason": dataset["reason"],
+                             "expected_run_records": dataset.get("expected_run_count"),
+                             "observed_run_records": dataset.get("observed_run_count")})
+    lines.append(_markdown_table(["dataset", "state", "expected_run_records",
+                                   "observed_run_records", "reason"], availability))
+    lines.extend(["", "## Main method-versus-CAM outcomes", "",
+                  "Overall rows only below; `family_breakdown.csv` retains every family separately. "
+                  "Pilot results are bounded one-task/dev evidence. Campaign main rows are restricted to the test split. "
+                  "A delta is method minus CAM, not an automatically beneficial direction. NA is unavailable, not zero.", ""])
+    columns = ["dataset", "method", "dialect", "expected_tasks", "geometry_pass_rate",
+               "safety_pass_rate", "completion_pass_rate", "delta_cycle_s", "cycle_ci_lower",
+               "cycle_ci_upper", "cycle_holm_p", "cycle_paired_n", "delta_air_fraction",
+               "air_holm_p", "air_paired_n", "no_improvement_rate"]
+    overall = [item["values"] for item in main
+               if item["values"].get("family") in (None, "overall")]
+    lines.append(_markdown_table(columns, overall))
+    lines.extend(["", "### Unfavourable and limiting findings", ""])
+    unfavourable = []
+    for row in overall:
+        for flag in ("geometry_pass_rate", "safety_pass_rate", "completion_pass_rate"):
+            value = row.get(flag)
+            if isinstance(value, (int, float)) and value < 1:
+                unfavourable.append(f"- **{row['dataset']} / {row['method']} / {row['dialect']}**: "
+                                    f"{flag} = {display(value)} over {display(row['expected_tasks'])} declared task units.")
+        for name in ("no_improvement_rate",):
+            if row.get(name) == 1:
+                unfavourable.append(f"- **{row['dataset']} / {row['method']}**: every recorded non-nominal optimizer arm has no hard improvement over its initialization.")
+        for name in ("delta_cycle_s", "delta_air_fraction"):
+            if isinstance(row.get(name), (int, float)) and row[name] > 0:
+                unfavourable.append(f"- **{row['dataset']} / {row['method']} / {row['dialect']}**: {name} is positive ({display(row[name])}); no efficiency win is inferred.")
+    for item in disagreements:
+        if item["values"].get("agree") is False:
+            values = item["values"]
+            unfavourable.append(
+                f"- **{values['run_id']} / {values['dialect']}**: recorded 0.25 mm "
+                "selection flag and 0.125 mm geometry verdict disagree.")
+    if unfavourable:
+        lines.extend(unfavourable)
+    else:
+        lines.append("- No numerical improvement claim or favourable inference is made for unavailable inputs.")
+    lines.extend(["", "## Initialization axis", "", init and _markdown_table(
+        ["dataset", "method", "init", "scope", "expected_runs", "observed_runs", "failed_runs",
+         "collapse_count", "collapse_rate", "failure_details", "reason"], [item["values"] for item in init]) or
+        "Pending: no initialized arms with a typed record.", "",
+        "CAM perturbation is exploratory and excluded from the init-axis comparison. A CAM semantic anchor is never replaced by a perturbation "
+        "or inferred parent. Collapse is pending when the declared hard-loss, parent or 0.125 mm verdict evidence is missing.", "",
+        "## Selection vs 0.125 mm verdict and seed soft/hard gap", ""])
+    lines.append(_markdown_table(["dataset", "run_id", "init", "dialect", "feasible_at_025",
+                                   "geometry_pass_at_0125", "agree", "seed_soft_objective",
+                                   "seed_hard_objective", "soft_minus_hard", "no_improvement_over_init"],
+                                  [item["values"] for item in disagreements]))
+    lines.extend(["", "The 0.25 mm hard-selection flag and the independently posted 0.125 mm geometry verdict are separate roles; "
+                  "missing selection evidence is excluded rather than counted as agreement. The signed soft−hard gap at the matched seed θ "
+                  "is a model discrepancy, not a safety verdict.", ""])
+    lines.extend(["## Resource costs", "", _markdown_table(
+        ["dataset", "run_id", "role", "candidate_evaluations", "forward_calls", "backward_calls",
+         "validation_calls", "wall_time_s", "phase_wall_time_s", "process_peak_rss_bytes", "memory_scope"],
+        [item["values"] for item in resources]), "",
+        "Optimizer process peaks cover the whole optimizer process, not one candidate. Posted-worker rows retain their process-local role. "
+        "Elapsed process durations, candidate ledger sums and phase walls are different quantities; concurrency and other system work are not "
+        "converted into a universal speedup or aggregate-memory certificate.", ""])
+    lines.extend(["", "## T3.3 AD/FD/randomized-hard alignment", "", _markdown_table(
+        ["case_id", "path_id", "objective_mode", "k", "status", "ad_fd_cosine",
+         "ad_fd_relative_difference_norm", "ad_primary_cosine", "ad_reference_cosine",
+         "ad_primary_relative_difference_norm", "ad_reference_relative_difference_norm",
+         "primary_standard_error_rms", "reference_standard_error_rms", "actual_candidate_evaluations"],
+        [item["values"] for item in gradients]), "",
+        "These cases measure alignment, not gradient equality or unbiasedness. Randomized hard smoothing is a different surrogate; "
+        "k-independent hard probes are reused here (not fresh samples at every k). Standard errors are reported, not hidden. "
+        "FD alignment is on the declared coordinate subset and epsilon values. Declared-but-absent cases remain pending. "
+        "Positive alignment/cosine does not establish machining correctness.", ""])
+    for row in gradients:
+        values = row["values"]
+        if values.get("status") == "complete":
+            primary = values.get("ad_primary_cosine")
+            if isinstance(primary, (int, float)) and primary < 0.999:
+                lines.append(f"- **{values['path_id']} / k={display(values['k'])} / {values['objective_mode']}**: "
+                             f"AD/primary-randomized-hard cosine={display(primary)}; "
+                             f"relative difference={display(values['ad_primary_relative_difference_norm'])}. "
+                             f"AD/reference cosine={display(values['ad_reference_cosine'])}. "
+                             "The differing surrogates remain materially distinct.")
+    lines.extend(["", "## Limitations and scope", "",
+                  "- **CEM is unavailable**: hard CMA-ES is only a zero-order representative and must not be relabelled CEM.",
+                  "- **Titan evidence is partial**; it is not re-executed or validated by this package.",
+                  "- **CNC-Net is native-route only here**: no executable-NC performance evidence is inferred. CAMotics remains supplementary, not a silent correctness oracle.",
+                  "- All optimizer/pilot/gradient values are simulation/CPU studies, not physical CNC runs, tool-monitoring calibrations, collision-free certificates or trial-ready directions.",
+                  "- Efficiency weights are provisional where the source records declare them provisional (including 0.01/0.01 in D-11 pilot work); study-specific weights are likewise not globally frozen protocol values.",
+                  "- The smooth time/air channels use the documented native surrogate; the n/reference factor restores total-time scale but does not assert exact native-to-hard timing equality.",
+                  "- Pilot 1 is retained pre-D-09/D-10 evidence with its own geometry-only setup and failure modes. Later pilot inputs are not silently substituted for it, and pilot/campaign defaults must not be conflated.",
+                  "- Selection at 0.25 mm and fine 0.125 mm posted verdicts remain separate. Unsupported/failed/missing outcomes are never silently admitted as success or automatic geometry passes.",
+                  "- Verdict-only campaign inputs have no additional screen comparison. Empty diagnostic sets do not establish zero disagreement or manufacture a screen-agreement statistic.",
+                  "- Test tasks are independent units; solver seeds are averaged within a task. Sparse paired counts and null intervals remain explicit. A pass on an isolated dev task does not establish suite-wide performance.",
+                  "- Unmeasured resources and missing comparisons stay NA. Process-local memory does not prove global peak-memory sufficiency at higher concurrency.",
+                  "- Pending pilot/campaign cases are not completed experiments. No claim of final protocol freezing, published-study completeness or manuscript acceptance is made.", ""])
+    return "\n".join(lines).encode("utf-8")
+
+
+def build_results_package(*, pilot_1_root: Path, pilot_2_root: Path | None,
+                          pilot_init_root: Path | None, campaign_root: Path | None,
+                          gradient_root: Path | None, decisions_path: Path,
+                          decision_ids: Sequence[str], precision: str = "f64"):
+    require(precision in ("f32", "f64"), "results precision must be explicit f32 or f64")
+    datasets = [_dataset("pilot_1", Path(pilot_1_root), "pilot"),
+                _dataset("pilot_2", pilot_2_root, "pilot"),
+                _dataset("pilot_init", pilot_init_root, "pilot"),
+                _dataset("campaign", campaign_root, "campaign")]
+    files, rows = {}, {"main_results": [], "family_breakdown": [], "init_axis": [],
+                       "selection_disagreement": [], "resource_costs": [], "input_status": []}
+    source_inventory = []
+    for dataset in datasets:
+        files[f"input_status/{dataset['label']}.json"] = json_bytes({
+            "state": dataset["state"], "reason": dataset["reason"],
+            "expected_run_count": dataset.get("expected_run_count"),
+            "observed_run_count": dataset.get("observed_run_count")})
+        rows["input_status"].append({"table": "input_status", "columns": [
+            "dataset", "state", "reason", "expected_run_count", "observed_run_count"],
+            "values": {"dataset": dataset["label"], "state": dataset["state"], "reason": dataset["reason"],
+                       "expected_run_count": dataset.get("expected_run_count"),
+                       "observed_run_count": dataset.get("observed_run_count")},
+            "source_rows": [], "sources": dataset.get("sources", [])})
+        built = _built_dataset(dataset, decision_ids, decisions_path, precision)
+        main, columns, _sources = _main_rows(dataset, built)
+        rows["main_results"].extend(main)
+        rows["family_breakdown"].extend([dict(item, table="family_breakdown")
+                                         for item in main if item["values"].get("family") != "overall"])
+        init, _columns = _init_rows(dataset)
+        rows["init_axis"].extend(init)
+        disagreement, _columns = _disagreement_rows(dataset)
+        rows["selection_disagreement"].extend(disagreement)
+        resource, _columns = _resource_rows(dataset)
+        rows["resource_costs"].extend(resource)
+        for name, payload in built["files"].items():
+            files[f"raw/{dataset['label']}/{name}"] = payload
+        source_inventory.extend(built["sources"])
+        if dataset["state"] != "available":
+            source_inventory.extend(dataset.get("sources", []))
+    gradients, gradient_columns = _gradient_rows(gradient_root)
+    rows["gradient_alignment"] = gradients
+    for item in gradients:
+        source_inventory.extend(item.pop("sources", []))
+    for name, group in rows.items():
+        if not group and name == "resource_costs":
+            files[f"{name}.csv"] = csv_bytes(_resource_rows(datasets[0])[1], [])
+        if not group:
+            continue
+        columns = group[0]["columns"]
+        require(all(item["columns"] == columns for item in group),
+                f"inconsistent results table columns: {name}")
+        files[f"{name}.csv"] = csv_bytes(columns, [item["values"] for item in group])
+        for index, item in enumerate(group):
+            item["claim_id"] = f"{name}.csv#row-{index}"
+            item["source_file_identity"] = {_meta(ref)["role"]: _meta(ref)["sha256"]
+                                            for ref in item.get("sources", [])}
+            item.pop("sources", None)
+    files["summary.md"] = _results_summary(
+        datasets, rows["main_results"], rows["init_axis"], rows["selection_disagreement"],
+        gradients, rows["resource_costs"])
+    files["claim_evidence_results.json"] = json_bytes({
+        "schema": "diffcam-results-claim-evidence/1",
+        "rows": [{key: value for key, value in item.items() if key != "sources"} for group in rows.values() for item in group]})
+    unique_sources = {(item["role"], item["sha256"]): item for item in source_inventory}
+    manifest = {
+        "schema": "diffcam-results-package/1", "scope": "audited pilot/gradient data with explicit missing/pending campaign inputs",
+        "derived_audit_identity": "content hash with only runs_root/run_dir made task-local; immutable input bytes and statistics remain unchanged",
+        "input_states": [{"label": dataset["label"], "state": dataset["state"],
+                          "reason": dataset["reason"]} for dataset in datasets],
+        "campaign_main_split": "test", "pilot_main_scope": "retained bounded pilot data, not held-out generalization",
+        "precision": precision, "decision_binding": "explicit dataset-scoped protocol declaration unless embedded per-run decision IDs exist",
+        "decision_ids": list(decision_ids),
+        "statistics": {"independent_unit": "task", "bootstrap_seed": 20261108,
+                       "bootstrap_replicates": 2000, "confidence": 0.95,
+                       "pairing": "method minus nominal-cam on common efficiency-eligible tasks", "holm": "existing audit adjustments"},
+        "limitations": ["CEM unavailable", "Titan evidence partial", "CNC-Net native-route only",
+                        "simulation rather than physical execution", "provisional efficiency weights unless frozen",
+                        "pending/missing inputs are explicit, not fabricated"],
+        "input_file_identities": sorted(unique_sources.values(), key=lambda item: (item["role"], item["sha256"])),
+        "builder_source_sha256": digest(Path(__file__).read_bytes()),
+        "files": [{"path": path, "sha256": digest(payload), "bytes": len(payload)}
+                  for path, payload in sorted(files.items())],
+        "physical_execution_status": "not_executed_not_machining_qualified",
+    }
+    manifest["file_count_excluding_manifest"] = len(files)
+    files["results_manifest.json"] = json_bytes(manifest)
+    return files, manifest
+
+
 def parse_bindings(items: Sequence[str], label: str) -> dict[str, Path]:
     result: dict[str, Path] = {}
     for item in items:
@@ -1454,18 +2438,28 @@ def publish_outputs(files: Mapping[str, bytes], destination: Path) -> Path:
 
 def make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--audit", required=True, type=Path, help="complete pilot_report.json from benchmarks.audit")
-    parser.add_argument("--manifest", required=True, type=Path, help="matching task/run manifest")
-    parser.add_argument("--decisions", required=True, type=Path, help="immutable reports/decisions.md")
-    parser.add_argument("--output", required=True, type=Path,
+    parser.add_argument("--audit", type=Path, help="complete pilot_report.json from benchmarks.audit")
+    parser.add_argument("--manifest", type=Path, help="matching task/run manifest")
+    parser.add_argument("--decisions", type=Path, default=ROOT / "reports/decisions.md",
+                        help="immutable reports/decisions.md")
+    parser.add_argument("--output", type=Path, default=ROOT / "reports/results",
                         help="fresh/empty destination, e.g. reports/paper_artifacts/pilot-smoke; never manuscript/")
-    parser.add_argument("--campaign-precision", required=True, choices=("f32", "f64"),
+    parser.add_argument("--campaign-precision", default="f64", choices=("f32", "f64"),
                         help="required precision of every bound run's simulator_precision metadata")
-    parser.add_argument("--decision", required=True, action="append", dest="decision_ids", metavar="D-ID",
-                        help="campaign decision identifier; repeat for every ID each config must declare")
+    parser.add_argument("--decision", action="append", default=[], dest="decision_ids", metavar="D-ID",
+                        help="dataset decision binding; required for legacy mode (results mode defaults to D-05 only)")
+    parser.add_argument("--results", action="store_true",
+                        help="build the real results package, preserving pending campaign/pilot input states")
+    parser.add_argument("--runs-root", type=Path, default=ROOT / "runs",
+                        help="root containing the named pilot/retained-study directories in results mode")
+    parser.add_argument("--pilot-1-root", type=Path)
+    parser.add_argument("--pilot-2-root", type=Path)
+    parser.add_argument("--pilot-init-root", type=Path)
+    parser.add_argument("--campaign-root", type=Path)
+    parser.add_argument("--gradient-study-root", type=Path)
     parser.add_argument("--input-kind", choices=("synthetic", "smoke", "pilot"), default="synthetic",
                         help="explicit scope label; final frozen campaign inputs are outside this scaffold")
-    bindings = parser.add_mutually_exclusive_group(required=True)
+    bindings = parser.add_mutually_exclusive_group(required=False)
     bindings.add_argument("--run-root", type=Path,
                           help="root containing each expected RUN_ID/config.json")
     bindings.add_argument("--run-config", action="append", default=[], metavar="RUN_ID=PATH",
@@ -1482,6 +2476,31 @@ def make_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = make_parser()
     args = parser.parse_args(argv)
+    if args.results:
+        runs_root = args.runs_root
+        try:
+            files, metadata = build_results_package(
+                pilot_1_root=args.pilot_1_root or runs_root / "pilot-pocket-20261109-t41b-pilot",
+                pilot_2_root=args.pilot_2_root or runs_root / "pilot-pocket-20261110-pilot2",
+                pilot_init_root=args.pilot_init_root or runs_root / "pilot-pocket-20261110-pilot2_init",
+                campaign_root=args.campaign_root,
+                gradient_root=args.gradient_study_root or runs_root / "retained/t33-real-study-20261110-w3-r1",
+                decisions_path=args.decisions,
+                decision_ids=args.decision_ids or ["D-2026-11-09-05"],
+                precision=args.campaign_precision)
+            output = publish_outputs(files, args.output)
+        except (PaperArtifactError, A.AuditInputError, C.ContractError, OSError, KeyError, TypeError,
+                json.JSONDecodeError) as error:
+            parser.error(str(error))
+        print(json.dumps({"status": "results_package_complete", "output": str(output),
+                          "input_states": metadata["input_states"], "file_count": len(files)}, sort_keys=True))
+        return 0
+    legacy_required = {"--audit": args.audit, "--manifest": args.manifest,
+                       "--decision": args.decision_ids,
+                       "--run-root or --run-config": args.run_root or args.run_config}
+    for flag, value in legacy_required.items():
+        if not value:
+            parser.error(f"{flag} is required for the legacy scaffold interface")
     try:
         configs = ({} if args.run_root is not None
                    else parse_bindings(args.run_config, "--run-config"))
