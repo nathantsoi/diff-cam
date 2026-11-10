@@ -126,3 +126,17 @@ DECISION:
 - Routing: worker-1's T3.xc gains the feasibility-first ranking (optimize.py/blackbox.py). Worker-2's new card T3.xd adds the efficiency
   terms (objectives.py), with configurable weights and hard/smooth parity tests. After both merge, the pilot is re-run with a declared
   efficiency weight before T4.2.
+D-10 addendum (review S1/S2):
+- S1: infeasible-candidate ranking uses a **declared normalisation**. Default: lexicographic within the infeasible set (holder violation
+  first, then gouge, then residual), with an optional sum of each violation as a fraction of its tolerance selectable by config. The
+  choice is a protocol value frozen at T4.2, not implicit in code.
+- S2: selection feasibility is judged on the 0.25 mm hard sim, while the verdict is the 0.125 mm posted evaluation (D-04). Selection
+  thresholds are declared as ≤ the verdict thresholds, with an optional declared margin. The margin value is frozen at T4.2.
+  The pilot re-run reports selection-vs-verdict feasibility agreement per arm.
+D-10 clarification (2026-11-10): the default `lexicographic` infeasible-set ranking (holder → gouge → residual → objective) supersedes
+the earlier phrase "lower total constraint violation wins", which now applies only to the `tolerance_normalised_sum` mode. In that
+mode a zero tolerance uses a recorded `zero_tolerance_scale` (default 1.0, i.e. the raw fraction), which is part of the config hash.
+D-10 note (T1.xs, 2026-11-10): the legacy w_air penalty (compute_air_penalty, csg_simulator.py ~:1771) reads post-cut stock[t+1],
+so it charges productive cutting as air. The efficiency objective therefore uses **w_air_time**, which is based on the pre-cut
+seg_air/seg_engage volumes after the T1.xs sign fix. **w_air stays explicitly 0** until a separate fix (a stock[t] contract change)
+lands.
