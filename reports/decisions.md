@@ -62,3 +62,26 @@ With real peaks at about 0.42 GiB it has roughly 19× headroom; changing it woul
 The "6–8 GiB review" flag cannot trigger at these peaks. The optimizer parent's own peak (~3.4–3.7 GiB, f64; D-05) is a separate,
 host-level budget and is not compared against the per-job cap. A tighter cap (for example 2 GiB) can be revisited at the T4.2 freeze
 if a leak-detection margin is wanted.
+
+## D-2026-11-10-08 — Experiment 1 (initialization) stays in protocol scope
+Review P1: the T4.2a schema (4daf0c9, configs/frozen_benchmark.schema.json:260) allows only the 5 CAM-initialised conditions, so it
+could not declare Experiment 1, even though reports/experimental_plan.md §3 marks `No-Init + Smooth-Adam` / `No-Init + Hard-CEM`
+**mandatory (Exp. 1)**, and the manuscript's insight (1) ("uninitialised optimisation collapses; CAM init required") rests on it.
+The plan already requires it, so this is not a scope change. DECISION:
+- The protocol gains an **initialization axis** that is independent of the solver: `init ∈ {cam, straight_line, random}`, with
+  `cam` the default for every existing condition. Experiment 1 adds `straight_line|random × {smooth-adam, hard-cmaes}` on the same
+  task, K, budgets and hard-validation rules as the CAM-initialised conditions. Smooth-Adam uses the annealed recipe (the plan's
+  internal reference). `straight_line` is deterministic and gets one run; `random` gets one run per declared seed.
+- **CEM is unavailable** (nothing in the codebase implements it). Hard CMA-ES stands as the zero-order representative, and claims
+  are limited accordingly: "zero-order (CMA-ES)", not "CEM". Implementing CEM later would require a protocol amendment.
+- No-init seeds must be valid MotionPlans for the task: the same segment count / K parameterisation, a safe rapid entry, and
+  feed ≤ max. They are not required to be efficiency-eligible. Collapse or infeasibility is a valid recorded outcome, not a failure.
+- Routing: worker-3 adds the init axis to the T4.2a schema/validator now (in T4.2a). After the pilot audit, worker-2 implements
+  the runner conditions and the cam/seeds `straight_line`/`random` seeds (new card). These conditions are not part of the
+  running 7-run pilot.
+Override: the user may instead scope Experiment 1 and insight (1) out of the first paper; that would be recorded as a superseding decision.
+D-08 addendum (review P2): three items must be pinned in the frozen protocol before any no-init run: (a) the `random` init
+distribution (θ or delta space, scale and its reference, seed derivation); (b) the `straight_line` endpoints and segment placement;
+(c) an operational `collapse` criterion (for example, the 0.125 mm verdict fails geometry or completion, or the residual exceeds
+X × the CAM-init residual, with no hard-loss improvement over the run's own initial path). The T4.2a validator requires all three
+whenever init ≠ cam and rejects placeholders in a frozen config. The values themselves are chosen at the T4.2 freeze.
