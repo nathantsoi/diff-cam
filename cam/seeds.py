@@ -511,7 +511,8 @@ def _nonnegative_int(value, where: str) -> int:
     return int(value)
 
 
-def _finite_number(value, where: str, *, allow_zero: bool = True) -> float:
+def _finite_coordinate(value, where: str) -> float:
+    """Parse a signed physical coordinate, independently of a positive scale."""
     if isinstance(value, (bool, np.bool_)):
         raise ValueError(f"{where}: expected a finite number, not a boolean")
     try:
@@ -520,6 +521,11 @@ def _finite_number(value, where: str, *, allow_zero: bool = True) -> float:
         raise ValueError(f"{where}: expected a finite number") from error
     if not math.isfinite(result):
         raise ValueError(f"{where}: expected a finite number")
+    return result
+
+
+def _finite_number(value, where: str, *, allow_zero: bool = True) -> float:
+    result = _finite_coordinate(value, where)
     if result < 0 or (not allow_zero and result == 0):
         raise ValueError(f"{where}: scale must be {'positive' if not allow_zero else 'nonnegative'}")
     return result
@@ -705,28 +711,130 @@ def _endpoint(cam: C.MotionPlan, value, where: str) -> Point:
         try:
             raw = ast.literal_eval(text.split(":", 1)[1].strip())
             if isinstance(raw, (list, tuple)) and len(raw) == 3:
-                return tuple(_finite_number(v, where + ".coordinate") for v in raw)
+                return tuple(_finite_coordinate(v, where + ".coordinate") for v in raw)
         except (SyntaxError, ValueError) as error:
             raise ValueError(f"{where}: malformed finite machine_mm coordinate") from error
     raise ValueError(f"{where}: use 'cam_start', 'cam_end', or 'machine_mm:(x,y,z)'")
 
 
-def _line_positions(task: C.TaskSpec, cam: C.MotionPlan, declaration,
-                   *, require_cam_endpoints: bool = False) -> np.ndarray:
+_DIAGONAL_START = "stock_bbox_min_at_cam_min_cutting_z"
+_DIAGONAL_END = "stock_bbox_max_at_cam_min_cutting_z"
+
+
+def _line_geometry(task: C.TaskSpec, cam: C.MotionPlan, declaration,
+                   *, require_diagonal_endpoints: bool = False) -> tuple[np.ndarray, dict[str, Any]]:
+    """Resolve explicit D-12 geometry or a separate literal-line diagnostic.
+
+    A D-12 path uses the initial safe CAM pose only as p0, not as its floor
+    endpoint. Its p1 is above the stock-min XY corner, p2 is that corner at
+    the minimum CAM cutting Z, and pT is the stock-max XY corner at that Z.
+    Legacy CAM/literal endpoints retain their declared, non-D-12 semantics.
+    """
     statement = _straight_fields(declaration)
     if statement["segment_placement"] != "uniform":
         raise ValueError("straight_line_init.segment_placement must be the registered 'uniform' placement")
-    if require_cam_endpoints and (statement["start"] != "cam_start" or
-                                  statement["end"] != "cam_end"):
-        raise ValueError("D-08 random initialization must use CAM start/end anchors; literal endpoints belong to separate straight_line_seed diagnostics")
+    diagonal = (statement["start"], statement["end"]) == (_DIAGONAL_START, _DIAGONAL_END)
+    if require_diagonal_endpoints and not diagonal:
+        raise ValueError(
+            "D-12 random initialization requires stock_bbox_min_at_cam_min_cutting_z and "
+            "stock_bbox_max_at_cam_min_cutting_z; CAM/literal endpoints belong to separate diagnostics")
     if len(cam.segments) < 4:
-        raise ValueError("D-08 line-seed construction requires at least four CAM segments for the native K basis")
-    start = _endpoint(cam, statement["start"], "straight_line_init.start")
-    end = _endpoint(cam, statement["end"], "straight_line_init.end")
+        raise ValueError("D-08 line-seed construction requires at least four CAM segments for entry and basis constraints")
     count = len(cam.segments)
-    # This does not omit duplicate positions or zero-length segments: preserving
-    # T is more important than manufacturing a less degenerate-looking program.
-    return np.linspace(start, end, count + 1, dtype=np.float64)
+    if not diagonal:
+        if statement["start"] in (_DIAGONAL_START, _DIAGONAL_END) or statement["end"] in (
+                _DIAGONAL_START, _DIAGONAL_END):
+            raise ValueError("D-12 stock-bbox diagonal start/end selectors must be declared together")
+        start = _endpoint(cam, statement["start"], "straight_line_init.start")
+        end = _endpoint(cam, statement["end"], "straight_line_init.end")
+        # Preserve explicit legacy diagnostics without silently turning CAM
+        # start/end aliases into a stock-bbox diagonal (which D-12 supersedes).
+        return np.linspace(start, end, count + 1, dtype=np.float64), {
+            "schema": "diffcam-init-line-layout/2",
+            "geometry": "declared_endpoint_line_diagnostic",
+            "decision": "not-D-12; retained only for explicitly selected legacy/literal diagnostics",
+            "placement": "uniform over all T intervals",
+            "segment_count": count,
+            "random_delta_supported": False,
+        }
+    if cam.initial_state.position_mm is None or cam.initial_state.known is False:
+        raise ValueError("D-12 requires a known safe CAM initial position")
+    if cam.segments[0].kind != C.SegmentKind.RAPID:
+        raise ValueError("D-12 segment 0 must use the original RAPID for safe entry")
+    if cam.segments[1].kind != C.SegmentKind.FEED:
+        raise ValueError("D-12 segment 1 must be exactly FEED, not RAPID or ARC, for the floor plunge")
+    # This reads typed task geometry, not a strict declaration object. Its
+    # additional ``primitive`` field is valid and is not a declaration amendment.
+    stock = task.stock.params
+    inverse = task.work_to_machine.inverse().apply
+    forward = task.work_to_machine.apply
+    bounds = []
+    for key in ("min_mm", "max_mm"):
+        raw = stock[key]
+        if not isinstance(raw, (tuple, list)) or len(raw) != 3:
+            raise ValueError(f"D-12 stock bbox {key} must contain three work-frame MM coordinates")
+        bounds.append(tuple(_finite_coordinate(v, f"D-12 stock bbox {key}") for v in raw))
+    lower, upper = bounds
+    if any(upper[axis] <= lower[axis] for axis in range(3)):
+        raise ValueError("D-12 stock bbox must have positive ordered XYZ extents")
+    initial = tuple(float(v) for v in cam.initial_state.position_mm)
+    initial_work = inverse(initial)
+    if initial_work[2] <= upper[2]:
+        raise ValueError("D-12 initial CAM pose must be strictly above the stock top")
+    cutting = [(segment, inverse(point))
+               for segment in cam.segments if segment.kind != C.SegmentKind.RAPID
+               for point in (segment.start_mm, segment.end_mm)]
+    if not cutting:
+        raise ValueError("D-12 requires at least one non-RAPID CAM segment to determine the operation floor")
+    floor_z = min(float(point[2]) for _, point in cutting)
+    floor_segment_ids = [segment.id for segment, point in cutting if point[2] == floor_z]
+    floor_min = forward((lower[0], lower[1], floor_z))
+    floor_max = forward((upper[0], upper[1], floor_z))
+    above_min = forward((lower[0], lower[1], initial_work[2]))
+    # T intervals: entry (0->1), plunge (1->2), then exactly T-1 uniform
+    # floor-diagonal intervals. The two literal floor corners remain in place.
+    diagonal_points = np.linspace(floor_min, floor_max, count - 1, dtype=np.float64)
+    points = np.vstack((initial, above_min, diagonal_points))
+    if points.shape != (count + 1, 3):
+        raise ValueError("D-12 construction failed to preserve exactly T+1 positions")
+    layout = {
+        "schema": "diffcam-init-line-layout/2",
+        "decision": "D-12",
+        "geometry": "stock_bbox_diagonal_at_cam_min_cutting_z_with_safe_entry",
+        "point_units": "machine_mm",
+        "stock_bbox_source": "task.stock.params min_mm/max_mm, transformed from work to machine",
+        "stock_bbox_work_mm": {"min_mm": list(lower), "max_mm": list(upper)},
+        "stock_top_work_mm": upper[2],
+        "operation_floor_source": "minimum work-frame Z over non-RAPID CAM segment start/end positions",
+        "cam_min_cutting_z_work_mm": floor_z,
+        "minimum_cutting_z_segment_ids": sorted(set(floor_segment_ids)),
+        "initial_safe_position_mm": list(initial),
+        "above_stock_min_corner_mm": list(above_min),
+        "floor_min_corner_mm": list(diagonal_points[0]),
+        "floor_max_corner_mm": list(diagonal_points[-1]),
+        "floor_diagonal_length_mm": float(np.linalg.norm(diagonal_points[-1] - diagonal_points[0])),
+        "safe_initial_z_work_mm": initial_work[2],
+        "initial_state_only_source": "cam.initial_state.position_mm; no CAM interior point is used as start/end",
+        "index_layout": {
+            "initial_safe_position": 0,
+            "above_stock_min_corner": 1,
+            "floor_diagonal_range_inclusive": [2, count],
+            "rapid_segment_indices": [0],
+            "feed_plunge_segment_indices": [1],
+            "uniform_floor_interval_count": count - 1,
+            "free_noise_position_range_inclusive": [3, count - 1],
+            "noise_free_position_indices": [0, 1, 2, count],
+            "pinned_floor_corner_indices": [2, count],
+        },
+        "plunge_source_segment_id": cam.segments[1].id,
+        "plunge_feed_mm_s": cam.segments[1].feed_mm_s,
+        "task_max_feed_mm_s": task.limits.max_feed_mm_s,
+        "same_segment_count_and_k": True,
+        "segment_count": count,
+        "position_count": count + 1,
+        "fitted_k_policy": "unchanged downstream; this constructor only supplies exact MotionPlan positions",
+    }
+    return points, layout
 
 
 def _motion_from_positions(task: C.TaskSpec, cam: C.MotionPlan, positions,
@@ -780,12 +888,13 @@ def _motion_from_positions(task: C.TaskSpec, cam: C.MotionPlan, positions,
 
 
 def straight_line_seed(task: C.TaskSpec, declaration) -> SeedResult:
-    """Build D-08's declared uniform straight-line initialization.
+    """Build the explicit D-12 stock-bbox floor-diagonal initialization.
 
-    ``cam_start``/``cam_end`` name CAM's initial/final positions. Between them,
-    T equal placements are used, with CAM's original segment kinds and rates.
-    Literal absolute MACHINE positions are available as ``machine_mm:(x,y,z)``.
-    No implicit endpoint, minimum-motion or efficiency criterion is invented.
+    With the D-12 selector pair, p0 is the safe CAM pose, p1 is the above-stock
+    bbox-min corner, p2/pT are the floor-diagonal corners, and T/K are retained.
+    The original first RAPID and second FEED supply safe entry and plunge rates.
+    Explicit legacy CAM or ``machine_mm:(x,y,z)`` endpoints remain separate
+    diagnostics; they do not change meaning or count as the D-12 initialization.
     """
     try:
         if not isinstance(task, C.TaskSpec):
@@ -793,8 +902,9 @@ def straight_line_seed(task: C.TaskSpec, declaration) -> SeedResult:
         declaration_hash = _declaration_hash(declaration)
         _reject_placeholders(declaration)
         cam = seed_for_task(task)
-        points = _line_positions(task, cam, declaration)
+        points, line_layout = _line_geometry(task, cam, declaration)
         metadata = {
+            "layout": line_layout,
             "schema": "diffcam-init-seed/1", "mode": "straight_line",
             "task_hash": task.task_hash, "cam_motion_hash": cam.motion_hash,
             "declaration_hash": declaration_hash,
@@ -877,8 +987,8 @@ def _construct_random_seed(task, declaration, seed, *, exploratory: bool):
         cam = seed_for_task(task)
         # D-08 validates its line anchors. The CAM sidecar instead validates
         # common segment/exact-stop/safe-entry requirements on the actual CAM.
-        line_points = None if exploratory else _line_positions(
-            task, cam, declaration, require_cam_endpoints=True)
+        line_points, line_layout = (None, None) if exploratory else _line_geometry(
+            task, cam, declaration, require_diagonal_endpoints=True)
         distribution = _fields(spec["distribution"], ("kind", "detail"),
                                name + ".distribution")
         kind = distribution["kind"]
@@ -910,14 +1020,19 @@ def _construct_random_seed(task, declaration, seed, *, exploratory: bool):
                     _canonical_json(parameterization.linear_map.tolist())).hexdigest(),
             }
         else:
-            # Exactly one independent residual per FREE vertex, not a step
-            # increment whose errors accumulate through the remaining path.
-            shape = (len(cam.segments) - 1, 3)
+            # D-12's 0->1 RAPID and 1->2 FEED plunge are deterministic. Its
+            # literal floor corners at p2 and pT are pinned. Only p3..p(T-1)
+            # receive independent positional deviations, never step increments.
+            shape = (len(cam.segments) - 3, 3)
+            if shape[0] != line_points[3:-1].shape[0]:
+                raise ValueError("D-12 free-noise shape must exactly match actual positions 3..T-1")
             sigma = scale_mm
             points0 = line_points
             parameter_info = {
-                "mode": "iid_per_vertex_mm", "reference_motion": "straight_line",
+                "mode": "iid_per_vertex_mm", "reference_motion": "D-12_stock_bbox_floor_diagonal",
                 "steps": len(cam.segments), "free_vertices": shape[0],
+                "free_position_range_inclusive": [3, len(cam.segments) - 1],
+                "free_vertex_count_rule": "T-3 positions in inclusive range 3..T-1",
                 "noise_shape": list(shape), "raw_mm_per_delta_unit": 1.0,
             }
         noise = _centered_noise(rng, kind, sigma, shape)
@@ -943,6 +1058,7 @@ def _construct_random_seed(task, declaration, seed, *, exploratory: bool):
             "seed": requested_seed, "declaration_hash": declaration_hash,
             "task_hash": task.task_hash, "cam_motion_hash": cam.motion_hash,
             "parameter_space": spec["parameter_space"], "parameter_map": parameter_info,
+            "line_layout": line_layout,
             "scale": scale_info, "seed_derivation": derivation,
             "noise_sha256": "sha256:" + hashlib.sha256(_canonical_json(noise.tolist())).hexdigest(),
             "noise_scale": noise_scale, "exploratory": exploratory,
@@ -958,22 +1074,23 @@ def _construct_random_seed(task, declaration, seed, *, exploratory: bool):
             # the theta coordinates above are normalized spline parameters.
             measured = _deviation_statistics(points[1:-1] - points0[1:-1])
         else:
-            # Assign endpoints explicitly: they are pinned even if a future
-            # noise implementation supplies nonzero boundary dummy entries.
+            # The three-position entry prefix and both floor corners are pinned.
+            # The only free positions are the interior floor-diagonal vertices.
             points = points0.copy()
-            points[1:-1] += noise
-            points[0] = points0[0]
-            points[-1] = points0[-1]
+            points[3:-1] += noise
+            points[[0, 1, 2, -1]] = points0[[0, 1, 2, -1]]
             measured = _deviation_statistics(noise)
         if not np.array_equal(points[0], points0[0]):
             raise ValueError("generated path did not preserve its declared initial endpoint exactly")
-        if not exploratory and not np.array_equal(points[-1], points0[-1]):
-            raise ValueError("D-08 delta path did not preserve its declared final endpoint exactly")
+        pinned = [0, 1, 2, len(cam.segments)]
+        if not exploratory and not np.array_equal(points[pinned], points0[pinned]):
+            raise ValueError("D-12 delta path did not preserve its safe entry, plunge and floor corners exactly")
         evidence.update({
             "status": "generated_candidate", "deviations": measured,
             "endpoint_start": list(map(float, points[0])),
             "endpoint_end": list(map(float, points[-1])),
             "final_endpoint_pinning_required": not exploratory,
+            "entry_plunge_and_floor_pinning_required": not exploratory,
             "same_segment_count_as_cam": len(cam.segments),
             "scope": "exploratory_cam_perturbation" if exploratory else "D-08_delta_random_initialization",
         })
@@ -984,10 +1101,11 @@ def _construct_random_seed(task, declaration, seed, *, exploratory: bool):
                 "iid normalized CAM-fit/theta residuals, not physical MM straight-line offsets; "
                 "invalid CAM construction is retained at this seed"
                 if exploratory else
-                "iid per free vertex in physical MM about the straight line, with both endpoints pinned exactly"),
+                "iid per free vertex in physical MM about D-12 stock-bbox floor diagonal; "
+                "entry, plunge and literal floor corners are pinned exactly"),
             "same_segment_count_as_cam": len(cam.segments),
-            "feed_rule": "retain each original segment kind and limited feed; recompute duration from generated length/rate",
-            "safe_entry": "actual first RAPID point pair must be above stock top; unsafe entries are invalid",
+            "feed_rule": "retain each original segment kind and limited feed, including the index-1 plunge; recompute duration from generated length/rate",
+            "safe_entry": "D-12 indices 0 and 1 are above stock; first segment is RAPID and index 1->2 is a noise-free FEED plunge",
             "structural_scope": "valid_plan does not mean safe, completed, machinable, or efficiency-eligible",
             "failure_policy": "an invalid draw remains at this seed; it is never redrawn, replaced, clipped, or skipped",
         }
@@ -1006,12 +1124,13 @@ def _construct_random_seed(task, declaration, seed, *, exploratory: bool):
 
 
 def random_seed(task: C.TaskSpec, declaration, seed: int) -> SeedResult:
-    """Sample D-08 delta-only, iid free-vertex noise about the straight line.
+    """Sample iid deltas only on D-12's free floor-diagonal vertices.
 
-    The first/last positions are exactly the declared CAM endpoints. Gaussian
-    scale is a coordinate standard deviation; uniform scale is its half-range.
-    Neither is a validity cutoff. Actual motion constraints are checked at this
-    original seed, with no sigma-based rejection, clipping, or redraw.
+    The safe CAM pose, above-stock entry, plunge onset and two literal floor
+    corners are exact. Free indices are 3..T-1. Gaussian scale is a coordinate
+    standard deviation; uniform scale is its half-range. Neither is a validity
+    cutoff. Actual motion constraints are checked at this original seed, with
+    no sigma rejection, clipping, retry or replacement.
     """
     return _construct_random_seed(task, declaration, seed, exploratory=False)
 

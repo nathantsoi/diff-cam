@@ -1,4 +1,4 @@
-"""D-08 straight-line/random MotionPlan seed tests (no evaluator or campaign)."""
+"""D-08/D-12 line/random MotionPlan seed tests (no evaluator or campaign)."""
 from __future__ import annotations
 
 import copy
@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from benchmarks import contracts as C
+from benchmarks import procedural_suite as PS
 from benchmarks.pilot_task import build_pilot_task, fit_parameterization
 from cam import seeds as S
 
@@ -28,7 +29,8 @@ def declaration(*, space="delta", fraction=0.001, reference="stock_xy_extent",
                 family="gaussian", detail="iid", root_seed=0):
     return {
         "straight_line_init": {
-            "start": "cam_start", "end": "cam_end", "segment_placement": "uniform",
+            "start": "stock_bbox_min_at_cam_min_cutting_z",
+            "end": "stock_bbox_max_at_cam_min_cutting_z", "segment_placement": "uniform",
             "feed_and_rapid_entry": "retain limited CAM feed rates and require above-stock rapid entry",
             "same_segment_count_and_k": True, "safe_rapid_entry": True,
             "respect_task_feed_limits": True, "efficiency_not_required": True,
@@ -108,22 +110,94 @@ def assert_valid(result, task, cam, *, diagnostic_only=False):
     return plan
 
 
-def test_straight_line_is_structurally_valid_even_when_cam_start_equals_cam_end(task, cam):
-    line = S.straight_line_seed(task, declaration())
+def expected_floor_corners(task, cam):
+    inverse = task.work_to_machine.inverse().apply
+    floor_z = min(inverse(point)[2]
+                  for segment in cam.segments if segment.kind != C.SegmentKind.RAPID
+                  for point in (segment.start_mm, segment.end_mm))
+    lower, upper = task.stock.params["min_mm"], task.stock.params["max_mm"]
+    return (task.work_to_machine.apply((lower[0], lower[1], floor_z)),
+            task.work_to_machine.apply((upper[0], upper[1], floor_z)), floor_z)
+
+
+def assert_d12_geometry(task, cam, result, *, diagnostic_only=False):
+    plan = assert_valid(result, task, cam, diagnostic_only=diagnostic_only)
+    point = positions(plan)
+    lower, upper = task.stock.params["min_mm"], task.stock.params["max_mm"]
+    floor_start, floor_end, floor_z = expected_floor_corners(task, cam)
+    safe_work_z = task.work_to_machine.inverse().apply(point[0])[2]
+    above_min = task.work_to_machine.apply((lower[0], lower[1], safe_work_z))
+    np.testing.assert_array_equal(point[0], cam.initial_state.position_mm)
+    np.testing.assert_allclose(point[1], above_min, atol=1e-12, rtol=0.0)
+    np.testing.assert_array_equal(point[2], floor_start)
+    np.testing.assert_array_equal(point[-1], floor_end)
+    np.testing.assert_allclose(point[2:], np.linspace(floor_start, floor_end,
+                                                      len(cam.segments) - 1),
+                               atol=0.0, rtol=0.0)
+    work = np.asarray([task.work_to_machine.inverse().apply(p) for p in point[2:]])
+    np.testing.assert_allclose(work[:, 2], floor_z, atol=1e-12, rtol=0.0)
+    assert min(task.work_to_machine.inverse().apply(point[i])[2] for i in (0, 1)) > upper[2]
+    assert plan.segments[0].kind == C.SegmentKind.RAPID
+    assert plan.segments[1].kind == C.SegmentKind.FEED
+    assert 0 < plan.segments[1].feed_mm_s <= task.limits.max_feed_mm_s
+    assert plan.segments[1].feed_mm_s == cam.segments[1].feed_mm_s
+    assert plan.segments[1].end_mm == floor_start
+    assert math.dist(point[2], point[-1]) > 0.0
+    assert sum(segment.duration_s for segment in plan.segments) > 0.0
+    meta = json.loads(result.derivation)
+    layout = meta["layout"]
+    indices = layout["index_layout"]
+    assert layout["decision"] == "D-12"
+    assert layout["cam_min_cutting_z_work_mm"] == floor_z
+    assert layout["floor_min_corner_mm"] == list(floor_start)
+    assert layout["floor_max_corner_mm"] == list(floor_end)
+    assert layout["floor_diagonal_length_mm"] > 0
+    assert layout["minimum_cutting_z_segment_ids"]
+    assert layout["same_segment_count_and_k"] is True
+    assert layout["segment_count"] == len(cam.segments)
+    assert layout["position_count"] == len(cam.segments) + 1
+    assert indices["rapid_segment_indices"] == [0]
+    assert indices["feed_plunge_segment_indices"] == [1]
+    assert indices["floor_diagonal_range_inclusive"] == [2, len(cam.segments)]
+    assert indices["free_noise_position_range_inclusive"] == [3, len(cam.segments) - 1]
+    assert indices["noise_free_position_indices"] == [0, 1, 2, len(cam.segments)]
+    assert indices["pinned_floor_corner_indices"] == [2, len(cam.segments)]
+    assert "unchanged downstream" in layout["fitted_k_policy"]
+    assert meta["zero_length_segments"] == sum(
+        math.dist(segment.start_mm, segment.end_mm) == 0 for segment in plan.segments)
+    assert meta["validation"] == "validate_for_task passed"
+    return plan, meta
+
+
+def test_d12_diagonal_is_nondegenerate_on_pilot_and_a_real_suite_task(task, cam):
+    assert_d12_geometry(task, cam, S.straight_line_seed(task, declaration()))
+    bundle = PS.make_task(PS.generate_scenarios(dev_per_family=1, test_per_family=1)[0])
+    suite_cam = S.seed_for_task(bundle.task)
+    assert suite_cam.motion_hash == bundle.motion.motion_hash
+    assert_d12_geometry(bundle.task, suite_cam,
+                        S.straight_line_seed(bundle.task, declaration()))
+
+
+def test_legacy_cam_endpoints_remain_an_explicit_closed_line_diagnostic(task, cam):
+    definition = declaration()
+    definition["straight_line_init"]["start"] = "cam_start"
+    definition["straight_line_init"]["end"] = "cam_end"
+    line = S.straight_line_seed(task, definition)
     plan = assert_valid(line, task, cam)
-    # The canonical pilot goes from home to the same home. This is a real
-    # collapsed no-init path, not an excuse to invent a CAM-shaped fallback.
     assert plan.initial_state.position_mm == (0.0, 0.0, 10.0)
     assert plan.segments[-1].end_mm == (0.0, 0.0, 10.0)
     assert all(math.dist(s.start_mm, s.end_mm) == 0.0 for s in plan.segments)
     meta = json.loads(line.derivation)
     assert meta["zero_length_segments"] == len(cam.segments)
+    assert meta["layout"]["geometry"] == "declared_endpoint_line_diagnostic"
+    assert meta["layout"]["decision"].startswith("not-D-12")
+    assert meta["layout"]["random_delta_supported"] is False
     assert meta["mode"] == "straight_line"
-    assert meta["validation"] == "validate_for_task passed"
 
 
 def test_explicit_boundary_endpoints_are_not_clipped(task, cam):
     definition = declaration()
+    definition["straight_line_init"]["start"] = "cam_start"
     definition["straight_line_init"]["end"] = "machine_mm:(40,30,60)"
     plan = assert_valid(S.straight_line_seed(task, definition), task, cam)
     assert tuple(positions(plan)[0]) == cam.initial_state.position_mm
@@ -169,14 +243,19 @@ def test_raw_theta_in_random_init_is_not_an_exploratory_fallback(task, cam):
     assert "cam_perturbed_init" in result.invalid_reason
 
 
-def test_random_delta_cannot_substitute_a_cam_interior_or_literal_endpoint(task, cam):
+def test_random_delta_rejects_cam_or_literal_endpoints_instead_of_d12(task, cam):
     definition = declaration(family="uniform")
     definition["straight_line_init"]["end"] = (
         "machine_mm:" + repr(cam.segments[len(cam.segments) // 2].end_mm))
     result = S.random_seed(task, definition, 2)
     assert not result.valid and result.plan is None
-    assert "CAM start/end anchors" in result.invalid_reason
+    assert "D-12 random initialization requires" in result.invalid_reason
     assert result.status == "failed_instance"
+    definition = declaration(family="uniform")
+    definition["straight_line_init"]["start"] = "cam_start"
+    definition["straight_line_init"]["end"] = "cam_end"
+    result = S.random_seed(task, definition, 2)
+    assert not result.valid and "separate diagnostics" in result.invalid_reason
 
 def test_random_delta_zero_reproduces_declared_straight_line(task, cam):
     definition = declaration(space="delta", fraction=0.0, reference="cam_delta_norm")
@@ -185,7 +264,7 @@ def test_random_delta_zero_reproduces_declared_straight_line(task, cam):
     np.testing.assert_array_equal(positions(random_plan), positions(straight))
     np.testing.assert_array_equal(np.asarray(S.seed_deltas_mm(random_plan)),
                                   np.asarray(S.seed_deltas_mm(straight)))
-    assert json.loads(random_plan.provenance)["parameter_map"]["reference_motion"] == "straight_line"
+    assert json.loads(random_plan.provenance)["parameter_map"]["reference_motion"] == "D-12_stock_bbox_floor_diagonal"
 
 
 def test_seed_derivation_bytes_and_full_plan_provenance_are_explicit(task, cam):
@@ -230,28 +309,39 @@ def test_exploratory_distributions_validate_with_separate_flags_and_baseline(tas
 
 
 @pytest.mark.parametrize("family", ["gaussian", "uniform"])
-def test_delta_distributions_keep_local_deviations_and_exact_endpoints(task, cam, family):
+def test_delta_distributions_keep_local_deviations_and_pin_entry_and_floor_corners(task, cam, family):
     definition = declaration(family=family, fraction=0.0005)
     result = S.random_seed(task, definition, 4)
     plan = assert_valid(result, task, cam)
-    p = positions(plan)
-    assert tuple(p[0]) == cam.initial_state.position_mm
-    assert tuple(p[-1]) == cam.segments[-1].end_mm
+    baseline, _ = assert_d12_geometry(task, cam, S.straight_line_seed(task, definition))
+    p, base = positions(plan), positions(baseline)
+    np.testing.assert_array_equal(p[:3], base[:3])
+    np.testing.assert_array_equal(p[-1], base[-1])
+    assert not np.array_equal(p[3:-1], base[3:-1])
+    assert tuple(p[2]) == expected_floor_corners(task, cam)[0]
+    assert tuple(p[-1]) == expected_floor_corners(task, cam)[1]
     meta = result.to_record()["derivation"]
     assert meta["parameter_space"] == "delta"
-    assert meta["parameter_map"]["noise_shape"] == [len(cam.segments) - 1, 3]
+    assert meta["parameter_map"]["noise_shape"] == [len(cam.segments) - 3, 3]
+    assert meta["parameter_map"]["free_position_range_inclusive"] == [3, len(cam.segments) - 1]
+    assert meta["line_layout"]["decision"] == "D-12"
+    assert meta["entry_plunge_and_floor_pinning_required"] is True
     assert meta["noise_scale"]["sqrt_T_growth"] is False
     assert meta["noise_scale"]["filter_applied"] is False
     assert "bound" not in meta
-    assert meta["deviations"]["count"] == len(cam.segments) - 1
+    assert meta["deviations"]["count"] == len(cam.segments) - 3
     assert math.isfinite(meta["deviations"]["rms_deviation_mm"])
     assert 0 < meta["deviations"]["rms_deviation_mm"]
 
 
-def test_uniform_zero_is_the_same_reference_path_even_when_its_source_is_zero(task, cam):
+def test_uniform_zero_is_the_same_d12_reference_path(task, cam):
     definition = declaration(space="delta", family="uniform", fraction=0.0)
     plan = assert_valid(S.random_seed(task, definition, 23), task, cam, diagnostic_only=True)
-    assert np.all(np.asarray(S.seed_deltas_mm(plan)) == 0.0)
+    straight = assert_valid(S.straight_line_seed(task, definition), task, cam)
+    assert np.any(np.asarray(S.seed_deltas_mm(plan)) != 0.0)
+    np.testing.assert_array_equal(positions(plan), positions(straight))
+    np.testing.assert_array_equal(np.asarray(S.seed_deltas_mm(plan)),
+                                  np.asarray(S.seed_deltas_mm(straight)))
     assert plan.initial_state == cam.initial_state
 
 
@@ -290,6 +380,7 @@ def test_oversized_scale_is_typed_invalid_without_projection(task, cam):
 
 def test_explicit_out_of_machine_coordinate_is_rejected_not_clipped(task, cam):
     definition = declaration()
+    definition["straight_line_init"]["start"] = "cam_start"
     definition["straight_line_init"]["end"] = "machine_mm:(100,0,20)"
     result = S.straight_line_seed(task, definition)
     assert not result.valid and result.plan is None
@@ -351,6 +442,7 @@ def test_nonmapping_declaration_returns_a_typed_failure(task, cam):
 
 def test_literal_coordinate_parser_does_not_execute_code(task, cam):
     definition = declaration()
+    definition["straight_line_init"]["start"] = "cam_start"
     definition["straight_line_init"]["end"] = "machine_mm:__import__('os').system('exit 1')"
     result = S.straight_line_seed(task, definition)
     assert not result.valid and result.plan is None
@@ -391,12 +483,12 @@ def test_vertex_scale_and_rms_do_not_grow_with_sqrt_T(task, cam, monkeypatch):
         assert len(plan.segments) == segment_count
         assert len(points) == segment_count + 1
         assert tuple(points[0]) == cam.initial_state.position_mm
-        assert tuple(points[-1]) == cam.segments[-1].end_mm
+        assert tuple(points[-1]) == expected_floor_corners(task, local)[1]
         meta = json.loads(result.derivation)
         sigma = meta["scale"]["scale_mm"]
         stats = meta["deviations"]
-        assert meta["parameter_map"]["noise_shape"] == [segment_count - 1, 3]
-        assert stats["count"] == segment_count - 1
+        assert meta["parameter_map"]["noise_shape"] == [segment_count - 3, 3]
+        assert stats["count"] == segment_count - 3
         assert stats["max_abs_coordinate_deviation_mm"] <= sigma
         assert stats["max_deviation_mm"] <= math.sqrt(3.0) * sigma
         # Local RMS per free vertex stays O(sigma), not O(sigma*sqrt(T)).
@@ -416,7 +508,7 @@ def test_gaussian_above_sigma_is_retained_when_motion_is_physically_valid(task, 
     result = S.random_seed(task, definition, 7)
     plan = assert_valid(result, task, cam)
     assert tuple(positions(plan)[0]) == cam.initial_state.position_mm
-    assert tuple(positions(plan)[-1]) == cam.segments[-1].end_mm
+    assert tuple(positions(plan)[-1]) == expected_floor_corners(task, cam)[1]
     record = result.to_record()
     assert record["schema"] == "diffcam-initialization-seed-result/2"
     assert record["status"] == "valid_plan" and record["seed"] == 7
@@ -445,7 +537,7 @@ def test_T75_gaussian_has_95_plus_valid_of_100_with_only_physical_failures(task,
             metadata = json.loads(result.derivation)
             assert metadata["noise_scale"]["filter_applied"] is False
             assert tuple(positions(result.plan)[0]) == cam.initial_state.position_mm
-            assert tuple(positions(result.plan)[-1]) == cam.segments[-1].end_mm
+            assert tuple(positions(result.plan)[-1]) == expected_floor_corners(task, cam)[1]
         else:
             failed.append(result)
             assert result.plan is None and result.invalid_reason
@@ -473,9 +565,9 @@ def test_failed_instance_sequence_preserves_order_and_never_redraws(task, cam, m
             self.normal_calls += 1
             assert mean == 0.0
             if self.slot in (1, 3):
-                # The first free vertex is the first RAPID endpoint. A huge
-                # negative Z creates an actual envelope/safe-entry failure;
-                # amplitude alone must not invalidate the same requested seed.
+                # The first free vertex is now a floor-diagonal vertex; entry
+                # and plunge remain pinned. A huge negative Z creates a real
+                # envelope failure, not a dispersion/amplitude rejection.
                 noise = np.zeros(size)
                 noise[0, 2] = -1000.0
                 return noise
