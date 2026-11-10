@@ -602,12 +602,17 @@ def _posted_job_process(task, job, config):
         raise RunnerError("posted worker returned mismatched identities")
     if record["settings"] != dict(job.settings):
         raise RunnerError("posted worker returned different sampling settings")
-    peak = _positive_int(record.get("worker_peak_rss_kib"), "posted peak RSS KiB") * 1024
+    self_reported_kib = _positive_int(record.get("worker_peak_rss_kib"), "posted peak RSS KiB")
+    polled_kib = None if observed_child_hwm is None else observed_child_hwm // 1024
+    # The worker samples its own VmHWM when it writes its record; serialisation and
+    # interpreter teardown can raise it slightly afterwards, which the parent's poll
+    # may see. The recorded peak is the larger of the two, and the cap applies to it.
+    record["worker_self_reported_peak_rss_kib"] = self_reported_kib
+    record["parent_polled_child_vmhwm_kib"] = polled_kib
+    record["worker_peak_rss_kib"] = max(self_reported_kib, polled_kib or 0)
+    peak = record["worker_peak_rss_kib"] * 1024
     if peak > policy["max_rss_bytes_per_job"]:
         raise RunnerError(f"posted worker exceeded its memory ceiling: {peak} bytes")
-    if observed_child_hwm is not None and observed_child_hwm > peak:
-        raise RunnerError("posted worker under-reported its peak RSS relative to the parent's poll")
-    record["parent_polled_child_vmhwm_kib"] = None if observed_child_hwm is None else observed_child_hwm // 1024
     record["memory_policy_result"] = "within_declared_peak_rss_ceiling"
     record["elapsed_seconds"] = time.perf_counter() - started
     record["process_wall_seconds"] = record["elapsed_seconds"]
@@ -648,6 +653,7 @@ def _post_jobs(task, jobs, config):
                 "worker_peak_rss_kib": metadata.get("worker_peak_rss_kib"),
                 "worker_peak_rss_source": metadata.get("worker_peak_rss_source"),
                 "parent_polled_child_vmhwm_kib": metadata.get("parent_polled_child_vmhwm_kib"),
+                "worker_self_reported_peak_rss_kib": metadata.get("worker_self_reported_peak_rss_kib"),
                 "diagnostic_inherited_ru_maxrss_kib": metadata.get("diagnostic_inherited_ru_maxrss_kib"),
                 "status": metadata["status"],
                 "log": metadata.get("log"),
@@ -1235,8 +1241,7 @@ def _measure_budget(config, root, *, evaluator_override=None, capture_dir=None,
         raise RunnerError("exactly two real, identity-matched posted evaluations must be timed")
     posted_seconds = [float(record["wall_seconds"]) for record in posted_times]
     if sys.platform.startswith("linux"):
-        import resource
-        optimizer_peak_rss_kib = int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
+        optimizer_peak_rss_kib = _self_peak_rss_kib()  # own VmHWM; ru_maxrss would include a launcher's peak
     else:
         optimizer_peak_rss_kib = None
     return {

@@ -1705,3 +1705,4 @@ def test_posted_children_peak_rss_is_their_own_not_the_parents(tmp_path):
         assert item["diagnostic_inherited_ru_maxrss_kib"] >= parent_kib * 0.9
         polled = item["parent_polled_child_vmhwm_kib"]
         assert polled is None or polled <= item["worker_peak_rss_kib"]
+        assert item["worker_self_reported_peak_rss_kib"] <= item["worker_peak_rss_kib"]
