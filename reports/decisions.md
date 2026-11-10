@@ -85,3 +85,22 @@ distribution (θ or delta space, scale and its reference, seed derivation); (b) 
 (c) an operational `collapse` criterion (for example, the 0.125 mm verdict fails geometry or completion, or the residual exceeds
 X × the CAM-init residual, with no hard-loss improvement over the run's own initial path). The T4.2a validator requires all three
 whenever init ≠ cam and rejects placeholders in a frozen config. The values themselves are chosen at the T4.2 freeze.
+
+## D-2026-11-10-09 — The initial program is a hard-scored selection candidate (pilot finding)
+Pilot (runs/pilot-pocket-20261109-t41b-pilot): nominal CAM passes the 0.125 mm verdict with residual 0 and gouge 0, while all 5
+optimizer arms fail geometry (residual 0.008–11%, gouge 0.5–1.75%). Their selected candidates' 0.25 mm hard-sim metrics match the
+posted verdicts (for example fixed-adam: sim residual 6.614% / gouge 0.525% vs posted 6.614% / 0.525%), so this is NOT
+sim-to-post disagreement.
+Cause: no arm ever hard-scores its own initialization. Adam's first hard validation (`validate:1`) comes after a step, and CMA-ES
+never evaluates its mean (θ=0 = the CAM seed). Selection therefore can only return a program that has already moved away from the
+seed, here a perfect one. A second, separate observation: at the seed, the smooth objective (k=40) is 0.645 while the hard objective
+is 0, a large soft-to-hard bias (T3.4's subject).
+DECISION:
+- Every optimizer arm hard-scores θ0 (its initialization) once, before any update. It is recorded as candidate `…:init`, counts as
+  one candidate evaluation in the budget ledger, and is the initial incumbent for hard selection. The final program is the best
+  hard-valid candidate including θ0; ties go to θ0. "No improvement over initialization" is a valid recorded outcome, not a failure.
+- This applies identically to fixed and annealed Adam and to hard and smooth CMA-ES, and later to the D-08 no-init arms (where θ0 is
+  the straight-line/random path).
+- The current pilot stays as retained evidence of the defect. The pilot is re-run after the fix (same config apart from what the fix
+  changes), before the T4.2 freeze. The questions about objective weighting, budgets and k (review Q1(c)) are deferred until the
+  re-run shows whether optimizers can improve on CAM at all.
