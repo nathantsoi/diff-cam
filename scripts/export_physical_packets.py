@@ -30,6 +30,10 @@ from cam.gcode_parser import GCodeError, parse_motion_plan
 
 
 SCHEMA_VERSION = "physical-trial-packet/1"
+CAMPAIGN_PACKET_SCHEMA = "physical-trial-campaign-packet/1"
+CAMPAIGN_SETUP_SCHEMA = "physical-trial-campaign-review-setup/1"
+CAMPAIGN_INDEX_SCHEMA = "physical-trial-campaign-index/1"
+CAMPAIGN_SOURCE_SCHEMA = "diffcam-campaign/1"
 SETUP_SCHEMA = "physical-trial-setup/1"
 PROTOCOL_SCHEMA = "physical-trial-protocol/1"
 DIALECTS = tuple(dialect.value for dialect in C.Dialect)
@@ -790,12 +794,739 @@ def _write_new(root: Path, name: str, data: bytes) -> None:
         stream.write(data)
 
 
+# Campaign outputs are intentionally not converted into fictitious legacy
+# nominal_result/sources/hashes files. These helpers consume their actual typed
+# records and immutable task registry entries, without running a simulator or
+# any equipment. The previous single-run packet path above remains unchanged.
+
+
+def _campaign_snapshot(path: Path, label: str) -> tuple[dict[str, Any], bytes]:
+    data = _read_bytes(path)
+    def reject(token: str) -> None:
+        raise ValueError(f"non-finite JSON number {token}")
+    try:
+        value = json.loads(data.decode("utf-8"), parse_constant=reject)
+    except (UnicodeError, ValueError, TypeError, json.JSONDecodeError) as error:
+        raise PacketError(f"cannot load {label}: {error}") from error
+    return _mapping(value, label), data
+
+
+def _campaign_file(root: Path, name: str) -> Path:
+    path = _safe_path(root, name)
+    _require(path.is_file(), f"missing campaign artifact {path}")
+    resolved = path.resolve()
+    _require(resolved.is_relative_to(root.resolve()),
+             f"campaign artifact escapes its supplied root: {name}")
+    return path
+
+
+def _campaign_dir(root: Path, name: str) -> Path:
+    path = _safe_path(root, name)
+    _require(path.is_dir(), f"missing campaign directory {path}")
+    _require(path.resolve().is_relative_to(root.resolve()),
+             f"campaign directory escapes its supplied root: {name}")
+    return path
+
+
+def _campaign_context(root: Path, task_loader) -> dict[str, Any]:
+    _require(root.is_dir(), f"campaign root is not a directory: {root}")
+    manifest, manifest_bytes = _campaign_snapshot(root / "manifest.json", "campaign manifest")
+    plan_document, plan_bytes = _campaign_snapshot(root / "campaign_plan.json", "campaign plan")
+    core = _mapping(plan_document.get("core"), "campaign plan.core")
+    _require(core.get("schema") == CAMPAIGN_SOURCE_SCHEMA,
+             f"campaign plan.schema must be {CAMPAIGN_SOURCE_SCHEMA}")
+    _require(plan_document.get("plan_hash") == C.content_hash(core),
+             "campaign_plan content hash mismatch")
+    campaign = _mapping(manifest.get("campaign"), "campaign manifest.campaign")
+    _require(campaign.get("plan_hash") == plan_document.get("plan_hash"),
+             "campaign manifest/plan disagree about plan_hash")
+    for key in ("config_sha256", "campaign_id"):
+        _require(campaign.get(key) == core.get(key),
+                 f"campaign manifest/plan disagree about {key}")
+    source_metadata = _mapping(core.get("source_metadata"), "campaign source_metadata")
+    _require(campaign.get("source_metadata") == source_metadata,
+             "campaign manifest/plan source metadata differ")
+    _text(source_metadata, "source_commit", "campaign.source_metadata")
+    conditions = {}
+    for item in core.get("conditions", []):
+        _require(isinstance(item, (list, tuple)) and len(item) == 2,
+                 "campaign conditions must be [method, seeds] pairs")
+        method = item[0]
+        _require(isinstance(method, str) and method, "campaign condition needs a method")
+        seeds = item[1]
+        _require(isinstance(seeds, list) and seeds and all(
+            isinstance(seed, int) and not isinstance(seed, bool) and seed >= 0 for seed in seeds),
+            f"{method} seeds must be nonnegative integers")
+        _require(len(set(seeds)) == len(seeds), f"{method} has duplicate seeds")
+        for seed in seeds:
+            _require((method, seed) not in conditions,
+                     f"duplicate campaign condition {method}/{seed}")
+            conditions[(method, seed)] = method
+    _require(conditions.get(("nominal-cam", 0)) == "nominal-cam",
+             "one deterministic nominal-cam seed 0 is required")
+    workspaces = _mapping(core, "campaign plan.core")
+    workspace_map = {}
+    for raw in workspaces.get("workspaces", []):
+        row = _mapping(raw, "campaign workspace")
+        run_id = _text(row, "run_id", "campaign workspace")
+        _require(run_id not in workspace_map, f"duplicate campaign workspace {run_id}")
+        workspace_map[run_id] = row
+    source = core.get("source")
+    _require(source in ("suite_manifest", "prototype_analytic"),
+             f"unsupported campaign task source {source}")
+    _require(source == "suite_manifest" or task_loader is not None,
+             "a prototype campaign requires its explicitly checked typed task loader")
+    return {
+        "root": root.resolve(), "manifest": manifest, "core": core,
+        "plan": plan_document, "source_metadata": source_metadata,
+        "source_kind": source, "conditions": conditions, "workspaces": workspace_map,
+        "task_loader": task_loader, "registries": {},
+        "source_snapshots": {"manifest.json": manifest_bytes, "campaign_plan.json": plan_bytes},
+    }
+
+
+def _campaign_task(context: dict[str, Any], task_id: str) -> tuple[C.TaskSpec, dict[str, Any]]:
+    _require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", task_id) is not None,
+             f"unsafe campaign task identifier {task_id!r}")
+    cache = context["registries"]
+    if task_id in cache:
+        return cache[task_id]
+    loader = context["task_loader"]
+    if loader is None:
+        # Read-only runner API: validates the immutable registry/TaskSpec/nominal
+        # identity and documents that it never initializes a simulator.
+        from scripts import run_benchmark_suite as runner
+        core = context["core"]
+        _require(core.get("suite_manifest_sha256") == runner._SUITE_MANIFEST_SHA256,
+                 "campaign/registry suite-manifest hash differs")
+        registry = runner.REPOSITORY / runner._SUITE_MANIFEST_RELATIVE
+        _require(C.sha256_bytes(registry.read_bytes()) == runner._SUITE_MANIFEST_SHA256,
+                 "registered task-manifest byte hash differs")
+        task, nominal, _parameters, _reference = runner._suite_task_binding({"task_id": task_id})
+        document = runner._json(registry)
+        rows = [row for row in document.get("tasks", [])
+                if isinstance(row, Mapping) and row.get("task_id") == task_id]
+        _require(len(rows) == 1, f"registry has no unique TaskSpec source for {task_id}")
+        row = rows[0]
+        ref = {"kind": "registered suite_manifest typed TaskSpec",
+               "path": runner._SUITE_MANIFEST_RELATIVE,
+               "sha256": C.sha256_bytes(registry.read_bytes()),
+               "entry_sha256": C.content_hash(row),
+               "nominal_motion_hash": row.get("motion_hash"),
+               "nominal_provenance": row.get("seed_provenance"),
+               "registry_motion_hash": nominal.motion_hash}
+    else:
+        task = loader(task_id)
+        ref = {"kind": "explicit typed prototype task supplied by caller",
+               "source": "unit/prototype loader, not registered campaign evidence",
+               "entry_sha256": C.content_hash(_plain(task))}
+    _require(isinstance(task, C.TaskSpec) and task.task_id == task_id,
+             f"task loader did not return the expected TaskSpec for {task_id}")
+    result = task, ref
+    cache[task_id] = result
+    return result
+
+
+def _campaign_pending_setup(task: C.TaskSpec, motion: C.MotionPlan) -> dict[str, Any]:
+    """Describe simulation-declared geometry, not an invented physical setup."""
+    initial = task.initial_state
+    _require(initial.known and initial.position_mm is not None,
+             "known initial machine position is required for a setup review document")
+    _require(initial.work_offset == "G54",
+             "campaign review setup requires the declared G54 work offset")
+    stock = _mapping(task.stock.params, "task.stock.params")
+    lower, upper = stock["min_mm"], stock["max_mm"]
+    for values, label in ((lower, "stock min"), (upper, "stock max")):
+        _require(isinstance(values, (list, tuple)) and len(values) == 3,
+                 f"{label} must be a 3D coordinate")
+        [_number(value, label) for value in values]
+    centre_work = ((lower[0] + upper[0]) / 2,
+                   (lower[1] + upper[1]) / 2, upper[2])
+    floor = {"kind": "pending setup review", "reason": None}
+    if task.original_part.params.get("primitive") == "box_minus_pocket":
+        bottom = _number(task.original_part.params["box_min_mm"][2], "stock bottom")
+        cut_floor = _number(task.original_part.params["pocket_min_mm"][2], "cut floor")
+        remaining = cut_floor - bottom
+        if remaining > 0:
+            floor = {"kind": "retained_stock_below_cut", "stock_bottom_mm": bottom,
+                     "cut_floor_mm": cut_floor, "remaining_thickness_mm": remaining,
+                     "basis": "analytic original_part pocket floor minus stock bottom; setup clearance is still pending review"}
+        else:
+            floor = {"kind": "pending setup review", "stock_bottom_mm": bottom,
+                     "cut_floor_mm": cut_floor,
+                     "remaining_thickness_mm": remaining,
+                     "reason": "through-cut or nonpositive retained thickness requires part- and fixture-specific clearance review; no clearance is assumed"}
+    else:
+        floor["reason"] = "through-hole and unrepresented floor clamping remain part/setup-specific"
+    document = {
+        "schema_version": CAMPAIGN_SETUP_SCHEMA,
+        "status": "pending physical setup review",
+        "physical_setup_complete": False,
+        "source": "typed TaskSpec declarations only; no operator-supplied physical setup record exists in campaign output",
+        "task_hash": task.task_hash, "tool_setup_hash": task.tool_setup_hash,
+        "machine": {
+            "identifier": None, "manufacturer": None, "model": None,
+            "record_source": "unavailable in campaign inputs; an operator must identify the actual machine",
+            "controllers": {dialect: {"identifier": None,
+                                      "scope": "declared NC dialect only; not a claimed machine compatibility"}
+                            for dialect in DIALECTS},
+            "declared_simulation_limits": _plain(task.limits),
+        },
+        "tool": {
+            "assembly": _plain(task.tool), "declared_stickout_mm": task.tool.stickout_mm,
+            "tool_setup_hash": task.tool_setup_hash,
+            "measurement": {"state": "declared_not_measured", "operator_record_id": None},
+        },
+        "work_offset": {
+            "identifier": initial.work_offset, "convention": "G54 stock top-centre",
+            "transform": _plain(task.work_to_machine),
+            "initial_machine_position_mm": list(initial.position_mm),
+            "stock_min_work_mm": list(lower), "stock_max_work_mm": list(upper),
+            "stock_top_centre_work_mm": list(centre_work),
+            "stock_top_centre_machine_mm": list(map(float, task.work_to_machine.apply(centre_work))),
+            "operator_touchoff_record": None,
+        },
+        "fixtures": {
+            "geometry": _plain(task.fixtures), "identifiers": None,
+            "complete_fixture_representation": False,
+            "review": "fixture identities and actual clamping require operator review; no clamp clearance is inferred",
+        },
+        "stock_geometry": _plain(task.stock),
+        "simulation_tolerances": _plain(task.tolerances),
+        "floor": floor,
+        "material": {"name": None, "alloy_or_grade": None, "stock_record": None},
+        "process": {
+            "spindle_rpm": None, "spindle_direction": None, "coolant": None,
+            "motion_mode": motion.timing_rule.value, "speed_clipping": False,
+            "length_unit": "mm",
+        },
+        "pending_reasons": [
+            "actual machine model/identifier and controller hardware are not supplied",
+            "tool/holder stickout measurement is declared for simulation, not operator-measured",
+            "fixture identities, material certificate and process/RPM/coolant declarations are unavailable",
+            "physical stock touch-off, fixture clearance and floor setup require review",
+        ],
+        "manual_setup_verification": [
+            {"item": item, "required": True, "operator_record": None,
+             "state": "pending setup review"} for item in MANUAL_SETUP
+        ],
+    }
+    _require(document["machine"]["model"] is None and document["material"]["name"] is None,
+             "cannot manufacture an unobserved physical setup identity")
+    return document
+
+
+def _campaign_metric_qualification(result: C.EvaluationResult, task: C.TaskSpec,
+                                   role: str, dialect: str) -> dict[str, Any]:
+    reasons = []
+    if result.safety_pass is not True:
+        reasons.append(f"{dialect}: safety_pass={result.safety_pass}")
+    if result.geometry_pass is not True:
+        reasons.append(f"{dialect}: geometry_pass={result.geometry_pass}")
+    values = {}
+    checks = [
+        ("min_clearance_lower_bound_mm", "mm", "min", task.tolerances.clearance_mm),
+        ("rapid_cutter_penetration_upper_bound_mm", "mm", "max", task.tolerances.rapid_penetration_mm),
+        ("max_surface_error_mm", "mm", "max", task.tolerances.local_surface_error_mm),
+        ("residual_volume_mm3", "mm^3", "max", task.tolerances.completion_residual_mm3),
+        ("gouge_volume_mm3", "mm^3", "max", task.tolerances.gouge_volume_mm3),
+        ("original_part_gouge_volume_mm3", "mm^3", "max", task.tolerances.gouge_volume_mm3),
+    ]
+    for name, unit, sense, limit in checks:
+        metric = result.metrics.get(name)
+        entry = _plain(metric) if metric is not None else {
+            "value": None, "unit": unit, "null_reason": "metric absent in campaign verdict"}
+        values[name] = entry
+        if metric is None or metric.value is None or metric.unit != unit:
+            reasons.append(f"{dialect}: {name} unavailable or wrong unit")
+            continue
+        actual = _number(metric.value, f"{role}/{dialect}.{name}")
+        if (sense == "min" and actual < limit) or (sense == "max" and actual > limit):
+            reasons.append(f"{dialect}: {name} {actual} violates declared bound {limit}")
+    removed = result.metrics.get("removed_volume_mm3")
+    values["removed_volume_mm3"] = _plain(removed) if removed is not None else None
+    if removed is None or removed.value is None or removed.unit != "mm^3" or removed.value <= 0:
+        reasons.append(f"{dialect}: positive actual removed_volume_mm3 is unavailable")
+    return {"status": "simulation-qualified" if not reasons else "pending setup review",
+            "reasons": reasons, "coverage": result.coverage.value,
+            "safety_pass": result.safety_pass, "geometry_pass": result.geometry_pass,
+            "efficiency_eligible": result.efficiency_eligible, "metrics": values}
+
+
+def _campaign_program(context: dict[str, Any], task: C.TaskSpec, task_dir: Path,
+                      workspace: Mapping[str, Any], entry: Mapping[str, Any]) -> dict[str, Any]:
+    run_id = _text(entry, "run_id", "expected campaign run")
+    run_dir = _campaign_dir(task_dir, run_id)
+    _require(run_dir.is_dir(), f"selected run is not a directory: {run_dir}")
+    run = _typed(run_dir / "run.json", C.RunRecord)
+    _require(run.run_id == run_id and run.task_hash == task.task_hash,
+             f"{run_id}: run/task identity mismatch")
+    _require(run.task_hash == workspace.get("task_hash"),
+             f"{run_id}: workspace task hash differs")
+    _require(run.source_commit == context["source_metadata"]["source_commit"] and
+             run.dirty_patch_hash == context["source_metadata"].get("dirty_patch_hash"),
+             f"{run_id}: source revision differs from campaign plan")
+    _require(run.status is C.RunStatus.COMPLETE and run.failure_reason is None,
+             f"{run_id}: only complete immutable run records are eligible for packet export")
+    _require(len(set(run.artifacts)) == len(run.artifacts), f"{run_id}: duplicate artifact entries")
+    required = {"config.json", "motion_plan.json", "metrics.json", "eval_posted.json",
+                *(f"{name}.nc" for name in DIALECTS),
+                *(f"eval_posted_{name}.json" for name in DIALECTS)}
+    _require(required.issubset(run.artifacts), f"{run_id}: incomplete immutable artifact inventory")
+    config = _mapping(_load(_campaign_file(run_dir, "config.json")), f"{run_id}.config")
+    _require(config.get("task_id") == task.task_id and config.get("task_hash") == task.task_hash and
+             config.get("run_id") == run_id,
+             f"{run_id}: per-run config task/run identity differs")
+    _require(config.get("source_commit") == run.source_commit and
+             config.get("dirty_patch_hash") == run.dirty_patch_hash,
+             f"{run_id}: per-run config source provenance differs")
+    simulator = _mapping(config.get("simulator"), f"{run_id}.simulator")
+    _require(simulator.get("requested_precision") == "f64" and
+             simulator.get("runtime_default_fp") == "f64" and
+             simulator.get("backend_arch") == "Arch.x64",
+             f"{run_id}: provenance does not record the declared f64 CPU runtime")
+    initialization = _mapping(config.get("initialization"), f"{run_id}.initialization")
+    _require(initialization.get("init") == "cam" and initialization.get("exploratory") is False,
+             f"{run_id}: campaign packet requires ordinary CAM initialization, not an exploratory sidecar")
+    motion = _typed(run_dir / "motion_plan.json", C.MotionPlan)
+    try:
+        motion.validate_for_task(task)
+    except (ValueError, C.ContractError) as error:
+        raise PacketError(f"{run_id}: typed motion/task mismatch: {error}") from error
+    index = _mapping(_load(_campaign_file(run_dir, "eval_posted.json")), f"{run_id}.eval_posted")
+    programs = _mapping(index.get("programs"), f"{run_id}.programs")
+    posted_index = {item.dialect: item for item in run.posted}
+    _require(set(posted_index) == set(DIALECTS), f"{run_id}: expected both dialect posting records")
+    files, hashes, evaluations = {}, {}, {}
+    for name in (*run.artifacts, "run.json"):
+        path = _campaign_file(run_dir, name)
+        digest = _file_digest(path)
+        relative = _safe_path(Path(), name).as_posix()
+        files[relative] = path.read_bytes()
+        hashes[relative] = digest
+    for name in DIALECTS:
+        nc_path = _campaign_file(run_dir, f"{name}.nc")
+        nc_bytes = nc_path.read_bytes()
+        nc_hash = C.nc_hash(nc_bytes)
+        _require(_file_digest(nc_path) == nc_hash, f"{run_id}/{name}: raw NC byte hash changed")
+        declared = posted_index[name]
+        _require(declared.status == "supported" and declared.nc_hash == nc_hash and
+                 declared.eval_file == f"eval_posted_{name}.json",
+                 f"{run_id}/{name}: typed run posting/hash mismatch")
+        pointer = _mapping(programs.get(name), f"{run_id}/index/{name}")
+        _require(pointer.get("status") == "supported" and pointer.get("nc_hash") == nc_hash and
+                 pointer.get("eval_file") == declared.eval_file,
+                 f"{run_id}/{name}: posted index/hash mismatch")
+        evaluation = _typed(_campaign_file(run_dir, declared.eval_file), C.EvaluationResult)
+        _require(evaluation.dialect is C.Dialect(name) and evaluation.nc_hash == nc_hash and
+                 evaluation.task_hash == task.task_hash and evaluation.tool_setup_hash == task.tool_setup_hash,
+                 f"{run_id}/{name}: evaluation task/tool/NC identity mismatch")
+        _require(evaluation.evaluator_id == "posted_hard/production",
+                 f"{run_id}/{name}: not a production posted verdict")
+        _require(evaluation.coverage is C.Coverage.COMPLETE,
+                 f"{run_id}/{name}: simulation coverage is {evaluation.coverage.value}, not complete")
+        settings = _mapping(evaluation.discretization.get("settings"),
+                            f"{run_id}/{name}.discretization.settings")
+        _require(settings.get("max_step_mm") == 0.125 and
+                 settings.get("expected_nc_hash") == nc_hash and
+                 settings.get("compute_bounds") is True and settings.get("safety_screen") is True,
+                 f"{run_id}/{name}: verdict controls disagree with 0.125 mm bounded screening")
+        air_timing = _mapping(evaluation.discretization.get("air_cut_timing"),
+                              f"{run_id}/{name}.air_cut_timing")
+        _require(air_timing.get("authoritative_verdict_max_step_mm") == 0.125,
+                 f"{run_id}/{name}: missing the authoritative 0.125 mm timing control")
+        _require(settings.get("exclusion_tolerance_mm3") ==
+                 task.operation_target.geometry.params.get("grid_exclusion_tolerance_mm3"),
+                 f"{run_id}/{name}: operation-target exclusion tolerance differs")
+        try:
+            parsed = parse_motion_plan(nc_bytes.decode("utf-8"), task, dialect=C.Dialect(name))
+        except (UnicodeDecodeError, GCodeError, ValueError, C.ContractError) as error:
+            raise PacketError(f"{run_id}/{name}: NC does not parse against task: {error}") from error
+        parsed_hash = parsed.motion_hash
+        _require(evaluation.discretization.get("parsed_motion_hash") == parsed_hash and
+                 evaluation.motion_hash in (None, parsed_hash),
+                 f"{run_id}/{name}: parsed NC motion identity differs")
+        evaluations[name] = {
+            "nc": f"programs/optimized/{name}.nc", "nc_sha256": nc_hash,
+            "evaluation": f"programs/optimized/{declared.eval_file}",
+            "evaluator_id": evaluation.evaluator_id,
+            "evaluator_revision": evaluation.evaluator_revision,
+            "coverage": evaluation.coverage.value, "coverage_reasons": list(evaluation.coverage_reasons),
+            "safety_pass": evaluation.safety_pass,
+            "geometry_pass": evaluation.geometry_pass,
+            "efficiency_eligible": evaluation.efficiency_eligible,
+            "qualification": _campaign_metric_qualification(evaluation, task, run_id, name),
+            "discretization": _plain(evaluation.discretization),
+            "raw_metrics": _plain(evaluation.metrics),
+            "cycle_time_s": _metric(evaluation, "cycle_time_s", "s", f"{run_id}/{name}"),
+            "typed_result": evaluation,
+        }
+    return {
+        "run": run, "run_id": run_id, "method": entry["method"], "seed": entry["seed"],
+        "directory": run_dir, "files": files, "artifact_sha256": hashes,
+        "motion": motion, "evaluations": evaluations,
+        "status": ("simulation-qualified" if all(
+            row["qualification"]["status"] == "simulation-qualified" for row in evaluations.values())
+            else "pending setup review"),
+    }
+
+
+def _campaign_select(nominal: dict[str, Any], candidates: Sequence[dict[str, Any]],
+                     method: str = "rs274") -> dict[str, Any]:
+    """Select by the predeclared primary endpoint, with a secondary sign check."""
+    _require(method == "rs274", "D-15 campaign packet selection declares rs274 as primary")
+    alternatives = []
+    for candidate in candidates:
+        row = {"run_id": candidate["run_id"], "method": candidate["method"],
+               "seed": candidate["seed"], "eligible": False, "reason": None, "metrics": {}}
+        for dialect in DIALECTS:
+            base = nominal["evaluations"][dialect]["cycle_time_s"]
+            current = candidate["evaluations"][dialect]["cycle_time_s"]
+            row["metrics"][dialect] = {
+                "nominal_cycle_time_s": base, "optimizer_cycle_time_s": current,
+                "delta_optimizer_minus_nominal_s": current - base,
+                "reduction_nominal_minus_optimizer_s": base - current,
+            }
+        permitted = all(candidate["evaluations"][dialect]["qualification"]["efficiency_eligible"] is True
+                        for dialect in DIALECTS)
+        if not permitted or candidate["status"] != "simulation-qualified":
+            row["reason"] = "not efficiency-eligible and simulation-qualified in both dialects"
+        else:
+            primary = row["metrics"]["rs274"]["reduction_nominal_minus_optimizer_s"]
+            secondary = row["metrics"]["haas"]["reduction_nominal_minus_optimizer_s"]
+            if primary <= 0:
+                row["reason"] = "no positive primary-dialect cycle-time reduction"
+            elif secondary <= 0:
+                row["reason"] = "haas cycle-time reduction sign does not agree with primary"
+            else:
+                row["eligible"] = True
+        alternatives.append(row)
+    alternatives.sort(key=lambda row: row["run_id"])
+    eligible = sorted((row for row in alternatives if row["eligible"]),
+                      key=lambda row: (-row["metrics"]["rs274"]["reduction_nominal_minus_optimizer_s"],
+                                       row["run_id"]))
+    selected = eligible[0] if eligible else None
+    for index, row in enumerate(eligible, start=1):
+        row["rank_by_primary_cycle_reduction"] = index
+    return {
+        "policy": "D-15: greatest positive nominal-minus-optimizer posted cycle_time_s reduction; rs274 primary; haas must have the same positive sign; ties by run_id",
+        "primary_dialect": "rs274", "secondary_dialect": "haas",
+        "nominal_run_id": nominal["run_id"],
+        "optimized_run_id": None if selected is None else selected["run_id"],
+        "optimized_method": None if selected is None else selected["method"],
+        "selected_comparison": None if selected is None else selected["metrics"],
+        "improvement_found": selected is not None,
+        "no_improvement_reason": (None if selected is not None else
+                                  "no efficiency-eligible optimizer gave a positive rs274 cycle-time reduction with the same positive sign for haas"),
+        "candidates": alternatives,
+    }
+
+
+def export_campaign_packets(campaign_root: str | Path, output: str | Path, *,
+                            task_loader=None, split: str = "test") -> dict[str, Any]:
+    """Export completed test snapshots; no profile, simulator or machine operation.
+
+    ``task_loader`` is an explicit typed fixture/data-source boundary for tests.
+    Normal callers use the registered, hash-checked suite task binding. Dev-split
+    support exists for offline fixtures; the CLI exports only test tasks.
+    """
+    _require(split in ("dev", "test"), "campaign packet split must be dev or test")
+    context = _campaign_context(Path(campaign_root).expanduser().resolve(), task_loader)
+    root = context["root"]
+    destination = Path(output).expanduser().resolve()
+    _require(not destination.is_relative_to(root),
+             "packet output must not modify the read-only campaign tree")
+    _require(not destination.exists() or
+             (destination.is_dir() and not any(destination.iterdir())),
+             "campaign packet output must be new or empty; existing evidence is never overwritten")
+    tasks = []
+    for row in context["manifest"].get("tasks", []):
+        task_row = _mapping(row, "campaign manifest task")
+        task_split = task_row.get("task_split", task_row.get("split"))
+        if task_split != split:
+            continue
+        task_id = _text(task_row, "task_id", "campaign manifest task")
+        task, registry = _campaign_task(context, task_id)
+        _require(task.split.value == split and task.task_hash == task_row.get("task_hash") and
+                 task.family == task_row.get("family"), f"{task_id}: registry/manifest identity differs")
+        directory = _campaign_dir(root / "tasks", task_id)
+        per_manifest = _mapping(_load(directory / "manifest.json"), f"{task_id}.manifest")
+        tasks.append((task_row, task, directory, per_manifest, registry))
+    _require(tasks, f"no declared {split} campaign tasks")
+    packets, deferred, artifacts = [], [], {}
+    for task_row, task, directory, per_manifest, registry in sorted(tasks, key=lambda item: item[1].task_id):
+        expected = per_manifest.get("expected_runs")
+        _require(isinstance(expected, list) and expected, f"{task.task_id}: empty expected runs")
+        records, states = [], []
+        for entry in expected:
+            item = _mapping(entry, f"{task.task_id}.expected_runs")
+            run_id = _text(item, "run_id", f"{task.task_id}.expected_runs")
+            _require((item.get("method"), item.get("seed")) in context["conditions"],
+                     f"{run_id}: unexpected method/seed outside canonical plan")
+            workspace = context["workspaces"].get(run_id)
+            _require(workspace is not None and workspace.get("task_id") == task.task_id and
+                     workspace.get("task_hash") == task.task_hash,
+                     f"{run_id}: canonical campaign workspace identity mismatch")
+            if not (directory / run_id / "run.json").is_file():
+                states.append({"run_id": run_id, "status": "missing run.json"})
+                continue
+            run = _typed(directory / run_id / "run.json", C.RunRecord)
+            states.append({"run_id": run_id, "status": run.status.value,
+                           "failure_reason": run.failure_reason})
+            if run.status is C.RunStatus.COMPLETE:
+                records.append((workspace, item, run))
+        if len(records) != len(expected) or not any(item["method"] == "nominal-cam" for _, item, _ in records):
+            deferred.append({"task_id": task.task_id, "task_hash": task.task_hash,
+                             "reason": "not all expected runs have a complete typed record",
+                             "records": states})
+            continue
+        frozen = _mapping(_load(directory / "frozen_config.json"), f"{task.task_id}.frozen_config")
+        _require(_load(directory / "campaign-runner-config.json") == frozen.get("raw_config"),
+                 f"{task.task_id}: immutable runner config differs from frozen_config.raw_config")
+        for workspace, _item, _run in records:
+            _require(_file_digest(directory / "campaign-runner-config.json") ==
+                     _hash_field(workspace.get("config_sha256"), f"{task.task_id}.config_sha256"),
+                     f"{task.task_id}: immutable config byte hash differs from canonical plan")
+        programs = []
+        for workspace, item, run in records:
+            _require(workspace.get("identity") == _hash_field(frozen.get("identity"),
+                                                              f"{task.task_id}.frozen identity"),
+                     f"{run.run_id}: frozen/plan workspace identity differs")
+            _require(run.run_id == item["run_id"] and run.run_id == workspace["run_id"],
+                     f"{task.task_id}: run ID differs among canonical records")
+            programs.append(_campaign_program(context, task, directory, workspace, item))
+        nominal = next(program for program in programs if program["method"] == "nominal-cam")
+        selection = _campaign_select(nominal, [program for program in programs
+                                              if program["method"] != "nominal-cam"])
+        chosen = {nominal["run_id"], selection["optimized_run_id"]}
+        files = {"task.json": C.dumps(task).encode("utf-8"),
+                 "setup.json": _json_bytes(_campaign_pending_setup(task, nominal["motion"]))}
+        rows = []
+        for program in programs:
+            if program["run_id"] not in chosen:
+                continue
+            role = "baseline" if program["run_id"] == nominal["run_id"] else "optimized"
+            for name, data in program["files"].items():
+                relative = f"programs/{role}/{name}"
+                _require(relative not in files, f"duplicate campaign payload path {relative}")
+                files[relative] = data
+            evaluations = {}
+            for dialect in DIALECTS:
+                evidence = dict(program["evaluations"][dialect])
+                typed = evidence.pop("typed_result")
+                evidence["selected_dialect"] = dialect == "rs274"
+                evidence["nc"] = f"programs/{role}/{dialect}.nc"
+                evidence["evaluation"] = f"programs/{role}/eval_posted_{dialect}.json"
+                evaluations[dialect] = evidence
+            rows.append({
+                "role": role, "run_id": program["run_id"], "method": program["method"],
+                "seed": program["seed"], "status": program["status"],
+                "task_hash": task.task_hash, "tool_setup_hash": task.tool_setup_hash,
+                "motion_hash": program["motion"].motion_hash,
+                "source_commit": program["run"].source_commit,
+                "source_run_json_sha256": program["artifact_sha256"]["run.json"],
+                "source_artifact_sha256": program["artifact_sha256"],
+                "task_record": "task.json",
+                "work_offset": {"identifier": task.initial_state.work_offset,
+                                "transform": _plain(task.work_to_machine)},
+                "fixture_geometry": _plain(task.fixtures),
+                "stock_geometry": _plain(task.stock), "tool": _plain(task.tool),
+                "evaluations": evaluations,
+            })
+        status = ("simulation-qualified" if all(row["status"] == "simulation-qualified" for row in rows)
+                  else "pending setup review")
+        packet = {
+            "schema_version": CAMPAIGN_PACKET_SCHEMA,
+            "status": status, "physical_trial_status": "pending setup review",
+            "documentation_only": True, "equipment_execution_authorized": False,
+            "physical_trial_performed": False,
+            "qualification_scope": "both production 0.125 mm verdicts, typed task/tool/stock identity and numeric local bounds; not a physical setup certificate",
+            "setup_document": "setup.json", "setup_hash": task.tool_setup_hash,
+            "campaign": {"campaign_id": context["core"].get("campaign_id"),
+                         "plan_hash": context["plan"]["plan_hash"],
+                         "source_metadata": _plain(context["source_metadata"]),
+                         "source_kind": context["source_kind"]},
+            "task": {"task_id": task.task_id, "task_hash": task.task_hash,
+                     "split": task.split.value, "family": task.family}, "task_source": registry,
+            "programs": rows, "selection": selection,
+            "manual_setup_verification": [{
+                "item": item, "required": True, "operator_record": None,
+                "state": "pending setup review"} for item in MANUAL_SETUP],
+            "payload_sha256": {name: _digest(data) for name, data in sorted(files.items())},
+        }
+        relative_root = f"{task.task_id}/rs274"
+        contents = dict(files)
+        contents["hashes.json"] = _json_bytes(packet["payload_sha256"])
+        contents["packet.json"] = _json_bytes(packet)
+        for name, data in contents.items():
+            relative = f"{relative_root}/{name}"
+            _require(relative not in artifacts, f"duplicate packet output {relative}")
+            artifacts[relative] = data
+        packets.append({
+            "task_id": task.task_id, "task_hash": task.task_hash,
+            "dialect": "rs274", "packet": f"{relative_root}/packet.json",
+            "packet_sha256": _digest(contents["packet.json"]), "status": status,
+            "physical_trial_status": "pending setup review",
+            "nominal_run_id": nominal["run_id"],
+            "optimized_run_id": selection["optimized_run_id"],
+            "improvement_found": selection["improvement_found"],
+            "selected_comparison": selection["selected_comparison"],
+        })
+    _require(packets, f"no completed {split}-split campaign task is exportable")
+    documents = {}
+    for name in ("manifest.json", "campaign_plan.json"):
+        documents[name] = {"sha256": _digest(context["source_snapshots"][name]), "path": name}
+        artifacts[f"source/{name}"] = context["source_snapshots"][name]
+    index = {
+        "schema_version": CAMPAIGN_INDEX_SCHEMA,
+        "documentation_only": True, "equipment_execution_authorized": False,
+        "physical_trial_status": "pending setup review",
+        "campaign_root": str(root), "source_documents": documents,
+        "campaign": _plain(context["manifest"]["campaign"]),
+        "selection_policy": "D-15: nominal-cam plus greatest positive rs274 nominal-minus-optimizer posted cycle-time reduction, requiring same-sign haas reduction; ties by run_id; otherwise nominal only",
+        "task_split": split,
+        "primary_dialect": "rs274",
+        "completed_tasks": len(packets),
+        "deferred_incomplete_tasks": deferred,
+        "packets": packets,
+    }
+    artifacts["campaign-index.json"] = _json_bytes(index)
+    destination.mkdir(parents=True, exist_ok=True)
+    for name, data in sorted(artifacts.items()):
+        _write_new(destination, name, data)
+    for packet in packets:
+        verified = verify_packet(destination / packet["packet"].rsplit("/", 1)[0])
+        _require(verified.get("task", {}).get("task_hash") == packet["task_hash"] and
+                 verified["selection"]["optimized_run_id"] == packet["optimized_run_id"],
+                 "internal packet identity verification failed")
+        _require(_file_digest(destination / packet["packet"]) == packet["packet_sha256"],
+                 f"packaged manifest hash mismatch: {packet['task_id']}")
+    return index
+
+
+def _verify_campaign_packet(root: Path, manifest: Mapping[str, Any]) -> None:
+    _require(manifest.get("status") in ("simulation-qualified", "pending setup review"),
+             "invalid campaign packet status")
+    _require(manifest.get("documentation_only") is True and
+             manifest.get("physical_trial_status") == "pending setup review" and
+             manifest.get("equipment_execution_authorized") is False and
+             manifest.get("physical_trial_performed") is False,
+             "campaign packet must remain documentation-only/pending physical setup review")
+    task = _typed(root / "task.json", C.TaskSpec)
+    _require(manifest["task"] == {"task_id": task.task_id, "task_hash": task.task_hash,
+                                 "split": task.split.value, "family": task.family},
+             "packet task identity differs from its typed TaskSpec")
+    programs = manifest.get("programs")
+    _require(isinstance(programs, list) and 1 <= len(programs) <= 2,
+             "campaign packet must contain nominal only or nominal plus one optimizer")
+    baseline = [row for row in programs if row.get("role") == "baseline"]
+    _require(len(baseline) == 1 and baseline[0]["method"] == "nominal-cam",
+             "campaign packet requires exactly one nominal-cam baseline")
+    for program in programs:
+        role = _text(program, "role", "campaign program")
+        _require(role in ROLES, "invalid campaign program role")
+        if role != "baseline":
+            _require(program.get("run_id") == manifest["selection"].get("optimized_run_id"),
+                     "optimized packet program differs from its selection")
+            _require(program.get("method") != "nominal-cam",
+                     "nominal-cam cannot masquerade as the optimizer")
+        required_files = {
+            "motion_plan.json", "run.json", "config.json", "metrics.json",
+            *(f"{name}.nc" for name in DIALECTS),
+            *(f"eval_posted_{name}.json" for name in DIALECTS),
+        }
+        for name in required_files:
+            _require(program["source_artifact_sha256"].get(name) == _file_digest(
+                root / "programs" / role / name),
+                     f"{role}/{name}: source-record digest differs from packaged bytes")
+        run = _typed(root / "programs" / role / "run.json", C.RunRecord)
+        _require(run.run_id == program["run_id"] and run.task_hash == task.task_hash,
+                 f"{role}: packaged run/task identity mismatch")
+        motion = _typed(root / "programs" / role / "motion_plan.json", C.MotionPlan)
+        _require(program["motion_hash"] == motion.motion_hash,
+                 f"{role}: packaged motion identity differs")
+        try:
+            motion.validate_for_task(task)
+        except (ValueError, C.ContractError) as error:
+            raise PacketError(f"{role}: packaged motion does not match task: {error}") from error
+        evaluations = _mapping(program.get("evaluations"), f"{role}.evaluations")
+        _require(set(evaluations) == set(DIALECTS), f"{role}: both dialect verdicts are required")
+        for dialect in DIALECTS:
+            entry = evaluations[dialect]
+            nc_bytes = (root / "programs" / role / f"{dialect}.nc").read_bytes()
+            nc_hash = C.nc_hash(nc_bytes)
+            _require(entry.get("nc_sha256") == nc_hash and
+                     entry.get("nc") == f"programs/{role}/{dialect}.nc",
+                     f"{role}/{dialect}: packet NC hash/path mismatch")
+            _require(entry.get("qualification", {}).get("status") in
+                     ("simulation-qualified", "pending setup review"),
+                     f"{role}/{dialect}: invalid simulation qualification")
+            _require(entry.get("coverage") == "complete",
+                     f"{role}/{dialect}: incomplete simulation coverage in packet")
+            typed = _typed(root / "programs" / role / f"eval_posted_{dialect}.json",
+                             C.EvaluationResult)
+            _require(typed.nc_hash == nc_hash and typed.task_hash == task.task_hash and
+                     typed.tool_setup_hash == task.tool_setup_hash and typed.coverage is C.Coverage.COMPLETE,
+                     f"{role}/{dialect}: packaged verdict identity/coverage mismatch")
+            _require(entry.get("safety_pass") == typed.safety_pass and
+                     entry.get("geometry_pass") == typed.geometry_pass and
+                     entry.get("efficiency_eligible") == typed.efficiency_eligible,
+                     f"{role}/{dialect}: packaged endorsing flags differ from typed verdict")
+            _require(typed.discretization.get("settings", {}).get("max_step_mm") == 0.125,
+                     f"{role}/{dialect}: packaged verdict is not the 0.125 mm evaluation")
+            qualified = _campaign_metric_qualification(typed, task, run.run_id, dialect)
+            _require(entry["qualification"] == qualified,
+                     f"{role}/{dialect}: listed qualification differs from typed verdict")
+        expected = ("simulation-qualified" if all(
+            entry["qualification"]["status"] == "simulation-qualified"
+            for entry in evaluations.values()) else "pending setup review")
+        _require(program.get("status") == expected,
+                 f"{role}: packet status differs from typed simulation qualification")
+    nominal_motion = _typed(root / "programs" / "baseline" / "motion_plan.json", C.MotionPlan)
+    _require(_load(root / "setup.json") == _campaign_pending_setup(task, nominal_motion),
+             "campaign pending-setup document does not match its actual task declarations")
+    expected_status = ("simulation-qualified" if all(
+        row["status"] == "simulation-qualified" for row in programs) else "pending setup review")
+    _require(manifest["status"] == expected_status,
+             "campaign packet aggregate status differs from its programs")
+    selection = manifest.get("selection", {})
+    _require(selection.get("primary_dialect") == "rs274" and
+             selection.get("nominal_run_id") == baseline[0]["run_id"],
+             "campaign selection does not identify its rs274 nominal baseline")
+    improvement = selection.get("improvement_found")
+    _require(isinstance(improvement, bool), "selection improvement_found must be boolean")
+    if improvement:
+        _require(len(programs) == 2 and selection.get("optimized_run_id"),
+                 "improving campaign selection needs nominal plus exactly one optimizer")
+        for dialect in DIALECTS:
+            values = selection["selected_comparison"][dialect]
+            base = _typed(root / "programs" / "baseline" / f"eval_posted_{dialect}.json",
+                          C.EvaluationResult)
+            optimized = _typed(root / "programs" / "optimized" / f"eval_posted_{dialect}.json",
+                               C.EvaluationResult)
+            nominal_cycle = _metric(base, "cycle_time_s", "s", "packet baseline")
+            optimized_cycle = _metric(optimized, "cycle_time_s", "s", "packet optimizer")
+            _require(values.get("nominal_cycle_time_s") == nominal_cycle and
+                     values.get("optimizer_cycle_time_s") == optimized_cycle and
+                     values.get("delta_optimizer_minus_nominal_s") == optimized_cycle - nominal_cycle and
+                     values.get("reduction_nominal_minus_optimizer_s") == nominal_cycle - optimized_cycle and
+                     nominal_cycle > optimized_cycle,
+                     f"{dialect}: selected cycle-time comparison is not positive and source-consistent")
+    else:
+        _require(len(programs) == 1 and selection.get("optimized_run_id") is None and
+                 _text(selection, "no_improvement_reason", "selection"),
+                 "nominal-only packet needs an explicit no-improvement reason")
+    _require(manifest.get("payload_sha256"), "campaign packet lacks payload hashes")
+
+
 def verify_packet(root: Path) -> dict[str, Any]:
     """Re-read a packet and verify its manifest/payload byte hashes."""
     manifest = _mapping(_load(_safe_path(root, "packet.json")), "packet")
-    _require(manifest.get("schema_version") == SCHEMA_VERSION, "packet schema mismatch")
-    _require(manifest.get("status") == "pending setup review",
-             "unreviewed physical packets must remain pending setup review")
+    schema = manifest.get("schema_version")
+    _require(schema in (SCHEMA_VERSION, CAMPAIGN_PACKET_SCHEMA), "packet schema mismatch")
+    if schema == SCHEMA_VERSION:
+        _require(manifest.get("status") == "pending setup review",
+                 "unreviewed physical packets must remain pending setup review")
     files = _mapping(manifest.get("payload_sha256"), "packet.payload_sha256")
     _require(files, "packet payload hash map is empty")
     _require(_load(root / "hashes.json") == files,
@@ -804,6 +1535,8 @@ def verify_packet(root: Path) -> dict[str, Any]:
         path = _safe_path(root, name)
         _require(_file_digest(path) == _hash_field(expected, f"payload[{name}]"),
                  f"packet payload hash mismatch: {name}")
+    if schema == CAMPAIGN_PACKET_SCHEMA:
+        _verify_campaign_packet(root, manifest)
     return manifest
 
 
@@ -876,14 +1609,16 @@ def export_packet(*, selections: Mapping[str, str | Path], setup: Mapping[str, A
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--selection", action="append", required=True, metavar="ROLE=RUN_DIR",
-                        help="baseline or optimized completed immutable run directory; may repeat")
-    parser.add_argument("--dialect", choices=DIALECTS, required=True,
-                        help="selected machine-program dialect; both evaluated records are retained")
+    parser.add_argument("--selection", action="append", metavar="ROLE=RUN_DIR",
+                        help="baseline or optimized completed immutable run directory; may repeat (legacy mode)")
+    parser.add_argument("--campaign", type=Path,
+                        help="completed campaign snapshot; select test tasks without executing anything")
+    parser.add_argument("--dialect", choices=DIALECTS,
+                        help="legacy packet dialect; campaign selection is always declared primary rs274")
     parser.add_argument("--refinement-link", action="append", default=[], metavar="ROLE=LINK_JSON",
                         help="auxiliary diffcam-refinement-link/3 for the selected role; required for final packets")
-    parser.add_argument("--setup", type=Path, required=True, help="explicit machine/tool/work/setup JSON")
-    parser.add_argument("--protocol", type=Path, required=True, help="pending or hash-pinned frozen protocol JSON")
+    parser.add_argument("--setup", type=Path, help="explicit machine/tool/work/setup JSON (legacy mode)")
+    parser.add_argument("--protocol", type=Path, help="pending or hash-pinned frozen protocol JSON (legacy mode)")
     parser.add_argument("--output", type=Path, required=True, help="new output directory; existing files are never mixed")
     parser.add_argument("--final-for-protocol", action="store_true",
                         help="only valid with an explicitly hash-pinned frozen T4.2 record")
@@ -891,28 +1626,48 @@ def main(argv: Sequence[str] | None = None) -> int:
     selected = {}
     refinements = {}
     try:
-        for entry in args.refinement_link:
-            role, separator, path = entry.partition("=")
-            if not separator or role not in ROLES or not path or role in refinements:
-                raise PacketError(f"invalid/repeated --refinement-link {entry!r}")
-            refinements[role] = path
-        for entry in args.selection:
-            role, separator, path = entry.partition("=")
-            if not separator or role not in ROLES or not path or role in selected:
-                raise PacketError(f"invalid/repeated --selection {entry!r}; expected baseline=PATH or optimized=PATH")
-            selected[role] = path
-        result = export_packet(
-            selections=selected, setup=_load(args.setup), protocol=_load(args.protocol),
-            selected_dialect=args.dialect, output=args.output,
-            final_for_protocol=args.final_for_protocol, refinement_links=refinements,
-        )
+        if args.campaign is not None:
+            _require(not args.selection and not args.refinement_link and args.setup is None and
+                     args.protocol is None and not args.final_for_protocol,
+                     "--campaign is a separate documentation-export mode; mutually exclusive legacy selection/setup/protocol arguments are not mixed")
+            _require(args.dialect in (None, "rs274"),
+                     "D-15 campaign selection is fixed to rs274; use legacy mode for an explicit physical Haas setup")
+            result = export_campaign_packets(args.campaign, args.output)
+        else:
+            _require(args.selection, "provide --selection or --campaign")
+            _require(args.dialect is not None and args.setup is not None and args.protocol is not None,
+                     "legacy mode requires --dialect, --setup and --protocol")
+            for entry in args.refinement_link:
+                role, separator, path = entry.partition("=")
+                if not separator or role not in ROLES or not path or role in refinements:
+                    raise PacketError(f"invalid/repeated --refinement-link {entry!r}")
+                refinements[role] = path
+            for entry in args.selection:
+                role, separator, path = entry.partition("=")
+                if not separator or role not in ROLES or not path or role in selected:
+                    raise PacketError(f"invalid/repeated --selection {entry!r}; expected baseline=PATH or optimized=PATH")
+                selected[role] = path
+            result = export_packet(
+                selections=selected, setup=_load(args.setup), protocol=_load(args.protocol),
+                selected_dialect=args.dialect, output=args.output,
+                final_for_protocol=args.final_for_protocol, refinement_links=refinements,
+            )
     except PacketError as error:
         parser.exit(2, f"packet rejected: {error}\n")
-    print(json.dumps({
-        "status": result["status"], "packet": str(args.output / "packet.json"),
-        "programs": [item["run_id"] for item in result["programs"]],
-        "equipment_execution_authorized": False,
-    }, indent=2, sort_keys=True))
+    if args.campaign is not None:
+        print(json.dumps({
+            "campaign_packet_index": str(args.output / "campaign-index.json"),
+            "completed_test_tasks": result["completed_tasks"],
+            "packet_count": len(result["packets"]),
+            "deferred_incomplete_test_tasks": len(result["deferred_incomplete_tasks"]),
+            "primary_dialect": "rs274", "equipment_execution_authorized": False,
+        }, indent=2, sort_keys=True))
+    else:
+        print(json.dumps({
+            "status": result["status"], "packet": str(args.output / "packet.json"),
+            "programs": [item["run_id"] for item in result["programs"]],
+            "equipment_execution_authorized": False,
+        }, indent=2, sort_keys=True))
     return 0
 
 

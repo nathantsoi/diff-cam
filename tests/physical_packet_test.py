@@ -554,3 +554,137 @@ def test_unknown_initial_state_cannot_be_silently_authorized(tmp_path):
     rehash(source)
     with pytest.raises(P.PacketError, match="typed motion does not match|initial machine state"):
         export(tmp_path / "out", source=source)
+
+
+def campaign_shaped_program(tmp_path, *, corrupt_nc=False, unknown_coverage=False):
+    """Metadata-only campaign-layout fixture using retained real records.
+
+    The 0.125 mm controls are transport fixtures, not a new physical evaluation.
+    """
+    source = clone_run(tmp_path, C.loads((RETAINED / "run.json").read_text()).run_id)
+    task = C.loads((source / "task.json").read_text())
+    run = C.loads((source / "run.json").read_text())
+    write_json(source / "config.json", {
+        "unit_fixture_metadata_only": True,
+        "task_id": task.task_id, "task_hash": task.task_hash, "run_id": run.run_id,
+        "source_commit": run.source_commit, "dirty_patch_hash": run.dirty_patch_hash,
+        "simulator": {"requested_precision": "f64", "runtime_default_fp": "f64",
+                      "backend_arch": "Arch.x64"},
+        "initialization": {"init": "cam", "exploratory": False},
+    })
+    for dialect in P.DIALECTS:
+        path = source / f"eval_posted_{dialect}.json"
+        record = load(path)
+        settings = record["record"]["discretization"]["settings"]
+        settings["max_step_mm"] = 0.125
+        record["record"]["discretization"].setdefault("air_cut_timing", {}).update({
+            "authoritative_verdict_max_step_mm": 0.125,
+            "unit_metadata_only_not_reexecuted": True,
+        })
+        if unknown_coverage:
+            record["record"]["coverage"] = "unknown"
+            record["record"]["coverage_reasons"] = ["unit metadata: declared unknown coverage"]
+            record["record"]["geometry_pass"] = None
+            record["record"]["safety_pass"] = None
+            record["record"]["efficiency_eligible"] = False
+        write_json(path, record)
+        if corrupt_nc:
+            with (source / "haas.nc").open("ab") as stream:
+                stream.write(b"( metadata-only unit corruption; never executed )\n")
+            break
+    context = {"source_metadata": {"source_commit": run.source_commit,
+                                   "dirty_patch_hash": run.dirty_patch_hash}}
+    entry = {"run_id": run.run_id, "method": "nominal-cam", "seed": 0}
+    return P._campaign_program(context, task, tmp_path, {"task_hash": task.task_hash}, entry)
+
+
+def scoring_program(run_id, rs_cycle, haas_cycle, *, qualified=True):
+    return {
+        "run_id": run_id, "method": "unit-optimizer", "seed": 0,
+        "status": "simulation-qualified" if qualified else "pending setup review",
+        "evaluations": {
+            "rs274": {"cycle_time_s": rs_cycle, "qualification": {"efficiency_eligible": qualified}},
+            "haas": {"cycle_time_s": haas_cycle, "qualification": {"efficiency_eligible": qualified}},
+        },
+    }
+
+
+def test_campaign_selection_uses_primary_cycle_and_secondary_sign():
+    nominal = scoring_program("nominal", 100.0, 100.0)
+    wrong_sign = scoring_program("wrong-sign", 70.0, 105.0)
+    smaller = scoring_program("smaller-positive", 85.0, 92.0)
+    larger = scoring_program("larger-positive", 80.0, 90.0)
+    selected = P._campaign_select(nominal, [wrong_sign, smaller, larger])
+    assert selected["optimized_run_id"] == "larger-positive"
+    assert selected["primary_dialect"] == "rs274"
+    assert selected["selected_comparison"]["rs274"]["reduction_nominal_minus_optimizer_s"] == 20.0
+    assert selected["selected_comparison"]["haas"]["reduction_nominal_minus_optimizer_s"] == 10.0
+    wrong = next(row for row in selected["candidates"] if row["run_id"] == "wrong-sign")
+    assert not wrong["eligible"] and "sign does not agree" in wrong["reason"]
+
+
+def test_campaign_selection_is_deterministic_on_ties_and_nominal_only_without_gain():
+    nominal = scoring_program("nominal", 100.0, 100.0)
+    tied = P._campaign_select(nominal, [scoring_program("z-last", 80.0, 80.0),
+                                        scoring_program("a-first", 80.0, 80.0)])
+    assert tied["optimized_run_id"] == "a-first"
+    no_gain = P._campaign_select(nominal, [
+        scoring_program("same-time", 100.0, 99.0),
+        scoring_program("not-qualified", 80.0, 80.0, qualified=False),
+        scoring_program("slower", 105.0, 105.0),
+    ])
+    assert no_gain["optimized_run_id"] is None and not no_gain["improvement_found"]
+    assert "no efficiency-eligible optimizer" in no_gain["no_improvement_reason"]
+    assert all(not row["eligible"] for row in no_gain["candidates"])
+
+
+def test_campaign_file_identity_hash_and_metrics_pass_on_valid_fixture(tmp_path):
+    before = {name: digest((RETAINED / name).read_bytes())
+              for name in ("haas.nc", "task.json", "config.json")}
+    program = campaign_shaped_program(tmp_path)
+    assert program["status"] == "simulation-qualified"
+    assert program["artifact_sha256"]["run.json"]
+    for dialect in P.DIALECTS:
+        evidence = program["evaluations"][dialect]
+        assert evidence["qualification"]["status"] == "simulation-qualified"
+        assert evidence["qualification"]["coverage"] == "complete"
+        assert evidence["cycle_time_s"] > 0
+        assert (tmp_path / program["run_id"] / f"{dialect}.nc").read_bytes() == \
+               (RETAINED / f"{dialect}.nc").read_bytes()
+    assert {name: digest((RETAINED / name).read_bytes()) for name in before} == before
+
+
+def test_campaign_rejects_missing_coverage_and_byte_hash_mismatch(tmp_path):
+    with pytest.raises(P.PacketError, match="coverage is unknown"):
+        campaign_shaped_program(tmp_path / "none", unknown_coverage=True)
+    with pytest.raises(P.PacketError, match="typed run posting/hash mismatch|raw NC byte hash changed"):
+        campaign_shaped_program(tmp_path / "tampered", corrupt_nc=True)
+    assert not (tmp_path / "none").exists() or not any((tmp_path / "none").rglob("packet.json"))
+    assert not (tmp_path / "tampered").exists() or not any((tmp_path / "tampered").rglob("packet.json"))
+
+
+def test_campaign_pending_setup_preserves_geometry_without_inventing_machine_fields():
+    task = C.loads((RETAINED / "task.json").read_text())
+    motion = C.loads((RETAINED / "motion_plan.json").read_text())
+    setup = P._campaign_pending_setup(task, motion)
+    assert setup["physical_setup_complete"] is False
+    assert setup["status"] == "pending physical setup review"
+    assert setup["machine"]["model"] is None and setup["machine"]["identifier"] is None
+    assert setup["machine"]["manufacturer"] is None
+    assert setup["tool"]["assembly"] == json.loads(C.canonical_json(task.tool))
+    assert setup["tool"]["declared_stickout_mm"] == task.tool.stickout_mm
+    assert setup["work_offset"]["identifier"] == task.initial_state.work_offset == "G54"
+    assert setup["work_offset"]["initial_machine_position_mm"] == list(task.initial_state.position_mm)
+    assert setup["stock_geometry"] == json.loads(C.canonical_json(task.stock))
+    assert setup["fixtures"]["geometry"] == json.loads(C.canonical_json(task.fixtures))
+    assert setup["material"]["name"] is None and setup["process"]["spindle_rpm"] is None
+    assert "collision-free" not in json.dumps(setup)
+    assert setup["floor"]["remaining_thickness_mm"] > 0
+    params = dict(task.original_part.params)
+    params["pocket_min_mm"] = list(params["pocket_min_mm"])
+    params["pocket_min_mm"][2] = params["box_min_mm"][2]
+    through = dataclasses.replace(task, original_part=dataclasses.replace(
+        task.original_part, params=params))
+    floor = P._campaign_pending_setup(through, motion)["floor"]
+    assert floor["kind"] == "pending setup review"
+    assert floor["remaining_thickness_mm"] == 0 and "through-cut" in floor["reason"]
