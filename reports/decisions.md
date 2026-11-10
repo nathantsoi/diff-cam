@@ -244,3 +244,6 @@ continuation lr_max 0.01). The CAM-vs-line θ0 difference is O(10 mm) per segmen
 (b) Exp1's primary claim is narrowed to: "under the Exp2 budget and step size, non-CAM initialisations do/do not reach feasibility".
 (c) Exploratory Exp1b (only if R ≫ 1): the same 9 dev tasks and arms with a single declared large step, lr = 1.0 (θ in mm;
     24-step reach ≈ 24 mm, about the dev pocket extent), labelled exploratory, not a held-out claim. Launched after Exp1 completes.
+D-13 addendum result (T4.3d): R ranges 91.7–188.4 (annealed) and 45.8–94.2 (continuation) over all 27 dev task/init cases
+(evidence: dispatch/diffcam/T4.3d-exp1-reach/exp1_reach.json, sha256:11cd503f…). As pre-declared, Exp1 non-CAM outcomes are read as
+"unreachable within budget/step size", and the exploratory Exp1b (lr 1.0) is triggered. It launches after Exp2 completes.
