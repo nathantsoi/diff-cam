@@ -475,9 +475,10 @@
       "tip": "73f8635"
     },
     "T4.0-noinit-c": {
-      "status": "in_progress",
+      "status": "done",
       "owner": "diffcam-worker-3",
-      "note": "D-08 addendum 4: straight_line = stock XY bbox diagonal at op floor Z"
+      "note": "D-08 addendum 4: straight_line = stock XY bbox diagonal at op floor Z Merged. Backlog: precision_test f32 pinned FD is thread-count sensitive (fails at TI_CPU_MAX_NUM_THREADS=8, passes at default).",
+      "tip": "f9e8483"
     },
     "EXT-CAM-INIT": {
       "status": "pending_user_input",
