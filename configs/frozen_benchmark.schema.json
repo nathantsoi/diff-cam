@@ -274,7 +274,7 @@
   "$defs": {
     "nonempty_text": {
       "type": "string", "minLength": 1,
-      "not": {"pattern": "(?i)(^\\s*$|TO[-_ ]BE[-_ ]FROZEN|\\b(?:TODO|TBD)\\b|^\\s*<[^>]*>\\s*$)"}
+      "not": {"pattern": "(^\\s*$|[Tt][Oo][-_ ][Bb][Ee][-_ ][Ff][Rr][Oo][Zz][Ee][Nn]|\\b(?:[Tt][Oo][Dd][Oo]|[Tt][Bb][Dd])\\b|^\\s*<[^>]*>\\s*$)"}
     },
     "repo_relative_path": {
       "type": "string", "minLength": 1,
@@ -355,10 +355,10 @@
       "type": "object", "additionalProperties": false,
       "required": ["geometry_or_completion_failure", "residual_multiplier", "residual_operator", "require_no_hard_loss_improvement_over_initial", "predicate", "collapse_and_infeasibility_are_valid_recorded_outcomes"],
       "properties": {
-        "geometry_or_completion_failure": {"const": true},
+        "geometry_or_completion_failure": {"type": "boolean"},
         "residual_multiplier": {"$ref": "#/$defs/positive_number"},
         "residual_operator": {"enum": ["gt", "ge"]},
-        "require_no_hard_loss_improvement_over_initial": {"const": true},
+        "require_no_hard_loss_improvement_over_initial": {"type": "boolean"},
         "predicate": {"$ref": "#/$defs/nonempty_text"},
         "collapse_and_infeasibility_are_valid_recorded_outcomes": {"const": true}
       }

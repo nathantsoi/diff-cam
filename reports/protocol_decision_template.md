@@ -133,16 +133,16 @@ No-init runner seeds must produce valid task MotionPlans with the same segment c
 
 ```json
 "collapse_criterion": {
-  "geometry_or_completion_failure": true,
+  "geometry_or_completion_failure": "TO-BE-FROZEN: replace with the coordinator's explicit true/false clause selection",
   "residual_multiplier": "TO-BE-FROZEN: finite positive multiplier X",
   "residual_operator": "TO-BE-FROZEN: gt or ge",
-  "require_no_hard_loss_improvement_over_initial": true,
-  "predicate": "TO-BE-FROZEN: at the 0.125 mm verdict, exact OR/AND clauses using geometry or completion failure and/or residual X times matched CAM-init residual, AND no hard-loss improvement over this run's own initial path",
+  "require_no_hard_loss_improvement_over_initial": "TO-BE-FROZEN: replace with the coordinator's explicit true/false selection for the own-initial-path hard-loss clause",
+  "predicate": "TO-BE-FROZEN: at the 0.125 mm verdict, exact OR/AND clauses for residual X times matched CAM-init residual and any coordinator-selected geometry/completion and own-initial-path hard-loss clauses",
   "collapse_and_infeasibility_are_valid_recorded_outcomes": true
 }
 ```
 
-This is the operational predicate chosen **before** running the experiment, not a before-run expectation that it will pass. The frozen form must make the comparison's CAM-residual reference, multiplier X, comparison operator, required terms and own-initial-path hard-loss test explicit. Keep the prose consistent with the structured fields. The validator requires nonempty declarations, finite positive X and fixed boolean policies; it does not parse natural-language logic or execute the predicate. Collapse or infeasibility is a recorded negative/inefficient scientific outcome, not a tooling failure, hidden exclusion, zero cost or successful efficiency result. Do not delete or edit it after observing the results without a versioned amendment and rerun policy.
+This is the operational predicate chosen **before** running the experiment, not a before-run expectation that it will pass. The frozen form must make the comparison's CAM-residual reference, multiplier X, comparison operator, selected clauses and any own-initial-path hard-loss test explicit. The residual X/operator supplies the residual comparison; the two clause booleans are explicit **coordinator choices**, with no validator-selected clause default. Keep the prose consistent with their true/false selections. The validator requires nonempty declarations, finite positive X and explicit boolean types, and preserves the chosen values; it does not parse natural-language logic or execute the predicate. The unchanged-segment/K, safe-rapid/feed declarations and valid-recorded-collapse outcome booleans are mandated D-08 policies and remain fixed true. Collapse or infeasibility is a recorded negative/inefficient scientific outcome, not a tooling failure, hidden exclusion, zero cost or successful efficiency result. Do not delete or edit it after observing the results without a versioned amendment and rerun policy.
 
 Current implementation status: no-init cases are **declared but not yet runnable**. For these cases the tool writes only `initialization-declaration.json`, carrying the exact initializer fields, task/K identities, budgets and hashes. Its report uses `declared_not_yet_runnable=true`, `native_dry_run_performed=false`, null run ID/candidate/validation values and `planned_run_count=0`. No runner invocation or optimizer/evaluator launch is made for these cases. Those rows must not be counted as native dry-runs or substituted for CAM evidence. Actual native CAM cases still run the real runner with `--dry-run`; `validated_run_count` includes only those, not pending declaration previews. A future task-source, experiment or initializer implementation requires its own registered integration and evidence; `--validate-only` cannot create execution capability.
 

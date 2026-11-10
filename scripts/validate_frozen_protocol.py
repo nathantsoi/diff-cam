@@ -379,12 +379,12 @@ def initializations(protocol: Mapping[str, Any]) -> list[str]:
                               "require_no_hard_loss_improvement_over_initial", "predicate",
                               "collapse_and_infeasibility_are_valid_recorded_outcomes"))
     boolean(collapse["geometry_or_completion_failure"],
-            "collapse_criterion.geometry_or_completion_failure", True)
+            "collapse_criterion.geometry_or_completion_failure")
     number(collapse["residual_multiplier"], "collapse_criterion.residual_multiplier", 0, strict=True)
     require(collapse["residual_operator"] in ("gt", "ge"),
             "collapse_criterion.residual_operator must be gt or ge")
     boolean(collapse["require_no_hard_loss_improvement_over_initial"],
-            "collapse_criterion.require_no_hard_loss_improvement_over_initial", True)
+            "collapse_criterion.require_no_hard_loss_improvement_over_initial")
     text(collapse["predicate"], "collapse_criterion.predicate")
     boolean(collapse["collapse_and_infeasibility_are_valid_recorded_outcomes"],
             "collapse_criterion.collapse_and_infeasibility_are_valid_recorded_outcomes", True)

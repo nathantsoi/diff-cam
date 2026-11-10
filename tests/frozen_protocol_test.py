@@ -358,10 +358,20 @@ def test_d08_placeholder_scale_and_collapse_rules_are_enforced(tmp_path):
     case["collapse_criterion"]["residual_multiplier"] = None
     with pytest.raises(V.ProtocolError, match="residual_multiplier.*finite number"):
         run_case(case, tmp_path)
+
+
+def test_d08_coordinator_chooses_collapse_clauses_not_tool_defaults(tmp_path):
     case = make_init_case(tmp_path)
+    case["collapse_criterion"]["geometry_or_completion_failure"] = False
     case["collapse_criterion"]["require_no_hard_loss_improvement_over_initial"] = False
-    with pytest.raises(V.ProtocolError, match="require_no_hard_loss_improvement_over_initial.*true"):
-        run_case(case, tmp_path)
+    case["collapse_criterion"]["predicate"] = (
+        "0.125 mm verdict residual > 1.5 times matched CAM-init residual; "
+        "geometry/completion and own-initial-path hard-loss clauses disabled")
+    declaration = V.validate_declaration(case, tmp_path / "repo", tmp_path / "decisions.md")
+    criterion = declaration["protocol"]["collapse_criterion"]
+    assert criterion["geometry_or_completion_failure"] is False
+    assert criterion["require_no_hard_loss_improvement_over_initial"] is False
+    assert criterion["collapse_and_infeasibility_are_valid_recorded_outcomes"] is True
 
 
 def test_d08_init_specific_comparisons_tuning_and_unavailable_cem(tmp_path):
