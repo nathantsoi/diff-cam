@@ -454,9 +454,10 @@
       "tip": "82c08d2"
     },
     "T3.4c": {
-      "status": "in_progress",
+      "status": "done",
       "owner": "diffcam-worker-2",
-      "branch": "task/T3.4c-continuation-solver"
+      "branch": "task/T3.4c-continuation-solver",
+      "tip": "b741a9a"
     },
     "T4.3a": {
       "status": "done",
@@ -464,6 +465,16 @@
       "branch": "task/T4.3a-campaign-driver",
       "note": "suite_manifest task source + parallel resumable campaign driver; verdict-only posted policy for campaign Merged. 273 planned runs; est ~5.4h at concurrency 6 (synthetic).",
       "tip": "11b759f"
+    },
+    "T3.4c-runner": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-2",
+      "note": "continuation-adam runner condition + schema enum per T3.4c \u00a74 ABI"
+    },
+    "T4.0-noinit-c": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-3",
+      "note": "D-08 addendum 4: straight_line = stock XY bbox diagonal at op floor Z"
     }
   }
 }

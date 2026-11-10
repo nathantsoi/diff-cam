@@ -171,3 +171,20 @@ D-08 addendum 2 (review W1–W3, 2026-11-10):
 D-08 addendum 3 (review X1): random-init validity comes only from physical/plan constraints (envelope/bounds, feed limit, safe entry,
 contiguity, validate_for_task). There is no per-coordinate |noise| ≤ σ check: for Gaussian noise that rejects all but ~1e-37 of seeds
 at T=75 and would manufacture "collapse". The declared scale is reported via the realised max/RMS deviation, not used as a filter.
+
+## D-2026-11-10-12 — Pilot 2 findings; straight-line init endpoints; campaign arms
+Pilot 2 (runs/pilot-pocket-20261110-pilot2_init, core c0a0a1b, 24-candidate budget, efficiency 0.01/0.01):
+- Every CAM-init optimizer arm (fixed/annealed Adam, hard/smooth CMA-ES ×2) returned θ0 ("no improvement over initialization").
+  CMA found lower-scalar-objective candidates (e.g. 0.01054 vs θ0 0.01117), but they were infeasible. The pilot pocket's CAM path is
+  geometrically exact with ~12% air, so there is little feasible efficiency slack there. The procedural suite (air 55–63%) is the real
+  test bed.
+- The D-08 straight_line arm is **degenerate on this pocket**: the CAM path starts and ends at the same retract point, so
+  "CAM start → CAM end" is a zero-length line (cycle 0 s, residual 1.0), and the random arm is noise around that point.
+  This would make insight (1) hold by construction.
+DECISION (D-08 addendum 4): `straight_line` endpoints are redefined without using any CAM interior. It is the straight segment across
+the stock XY bounding-box diagonal (min corner → max corner) at the CAM path's minimum cutting Z (the operation floor), with a safe
+rapid entry above the stock top and the same segment count/K. `random` = iid per-vertex noise around that line (unchanged recipe).
+The old endpoint rule is recorded in pilot 2 as degenerate evidence, not as an Experiment 1 result.
+Campaign arms (provisional until the T4.2 freeze record): nominal-cam, fixed-adam, annealed-adam, continuation-adam,
+hard-cmaes ×{0,1}, smooth-cmaes ×{0,1} on all 39 tasks (dev and test). Experiment 1 arms (straight_line, random ×{0,1} for
+annealed-adam and hard-cmaes) on the 9 dev tasks only.
