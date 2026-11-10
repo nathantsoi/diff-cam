@@ -1,0 +1,289 @@
+"""T4.3a suite binding and campaign orchestration tests.
+
+No real suite optimizer is launched here. Only the explicit two-condition
+prototype uses actual runner workers with a typed posted-evaluation test stub.
+"""
+import copy
+import inspect
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import threading
+import time
+
+import numpy as np
+import pytest
+
+from algorithms import objectives as O
+from algorithms import run_artifacts as R
+from benchmarks import audit
+from benchmarks import contracts as C
+from scripts import run_benchmark_suite as runner
+from scripts import run_campaign as campaign
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _precision_metadata(_simulator):
+    body = {
+        "schema_version": "simulator-precision-identity/1",
+        "requested_precision": "f64", "declared_default_fp": "f64", "runtime_default_fp": "f64",
+        "backend_arch": "test_fixture_not_a_runtime_measurement",
+        "process_constraint": "one precision per process",
+        "policy": {"schema_version": "simulator-precision-uniform/1",
+                   "variant_revision": "uniform-f64/1", "default_fp": "f64",
+                   "field_scope": "all_float_fields", "kernel_scope": "all_float_kernels_and_adjoints"},
+    }
+    return dict(body, precision_identity_sha256=C.content_hash(body))
+
+
+def _runner_template():
+    result = json.loads((ROOT / "configs/pilot2.json").read_text())
+    result.update(task_source="prototype_analytic", experiment="pilot",
+                  candidate_evaluations=1, population_size=2,
+                  validation_interval=1, max_validation_calls=0,
+                  precision="f64")
+    result["refinement_check"]["enabled"] = False
+    return result
+
+
+def _prototype_campaign(*, methods=("nominal-cam", "fixed-adam"), concurrency=2):
+    conditions = [{"condition": method, "seeds": [0]} for method in methods]
+    return {
+        "schema": "diffcam-campaign/1", "campaign_id": "explicit-prototype-unit-test",
+        "task_source": "prototype_analytic", "prototype_unit_test": True,
+        "task_filter": {"splits": ["dev"]}, "concurrency": concurrency,
+        "conditions": conditions, "runner_config": _runner_template(),
+        "cost_model": {
+            "scope": "synthetic arithmetic units for a unit-test schedule",
+            "seconds_per_candidate_by_condition": {method: 10.0 for method in methods},
+            "fixed_overhead_seconds_by_condition": {method: 2.0 for method in methods},
+            "aggregate_bootstrap_replicates": 100,
+        },
+    }
+
+
+def _write_config(tmp_path, document):
+    path = tmp_path / "campaign.json"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def test_all_39_suite_bindings_match_embedded_tasks_and_nominal_seed():
+    manifest = json.loads((ROOT / "configs/task_manifest.json").read_text())
+    assert len(manifest["tasks"]) == 39
+    observed = {"dev": 0, "test": 0}
+    for row in manifest["tasks"]:
+        config = dict(_runner_template(), task_source="suite_manifest", task_id=row["task_id"])
+        task, motion, parameterization, metadata = runner._suite_task_binding(config)
+        assert task.task_id == row["task_id"] and task.task_hash == row["task_hash"]
+        assert motion.motion_hash == row["motion_hash"]
+        assert parameterization.num_steps == len(motion.segments)
+        assert metadata["reference_cycle_time_source"] == "task_nominal_cam_cycle_time"
+        spec, emitted = runner._objective_spec(config, task)
+        assert spec.reference_cycle_time_s == metadata["reference_cycle_time_s"]
+        assert emitted["reference_motion_hash"] == motion.motion_hash
+        observed[task.split.value] += 1
+    assert observed == {"dev": 9, "test": 30}
+    held_out = next(row for row in manifest["tasks"] if row["split"] == "test")
+    config = dict(_runner_template(), task_source="suite_manifest", task_id=held_out["task_id"])
+    task, _motion, _params, _factory, _posted = runner._context(config, ROOT)
+    assert task.split == C.Split.TEST
+    entries = runner._plan_entries(config, task, "test", None)
+    assert entries and all(entry["task_id"] == held_out["task_id"] for entry in entries)
+    assert runner._identity(task, config, "test") == entries[0]["identity"]
+    with pytest.raises(runner.RunnerError, match="grid_pitch_mm"):
+        runner._suite_context(dict(config, grid_pitch_mm=task.grid.voxel_mm * 2))
+
+
+def _typed_evaluation(task, nc_bytes, dialect=C.Dialect.RS274, *, geometry_pass=True, step=0.125):
+    """Typed test output for the prototype's explicitly stubbed posted child seam."""
+    return C.EvaluationResult(
+        evaluator_id="campaign-unit-post-stub", evaluator_revision="unit-only",
+        task_hash=task.task_hash, tool_setup_hash=task.tool_setup_hash,
+        discretization={"settings": {
+                "max_step_mm": step, "expected_nc_hash": C.nc_hash(nc_bytes),
+                "exclusion_tolerance_mm3": 0.0, "compute_bounds": True, "safety_screen": True,
+                "max_samples_per_segment": 4096, "subdivisions": None, "record_stations": False,
+            }, "segments": []},
+        coverage=C.Coverage.COMPLETE, coverage_reasons=(),
+        metrics={"cycle_time_s": C.Metric(value=20.0, unit="s"),
+                 "residual_volume_mm3": C.Metric(value=0.5, unit="mm^3"),
+                 "gouge_volume_mm3": C.Metric(value=0.0, unit="mm^3"),
+                 "max_surface_error_mm": C.Metric(value=0.0, unit="mm"),
+                 "removed_volume_mm3": C.Metric(value=8904.0, unit="mm^3")},
+        safety_pass=True, geometry_pass=geometry_pass, dialect=dialect, nc_hash=C.nc_hash(nc_bytes),
+    )
+
+
+def test_campaign_primary_post_role_is_fine_verdict_without_aux_phases(tmp_path):
+    document = _prototype_campaign()
+    config = document["runner_config"]
+    config["task_source"] = "suite_manifest"
+    config["campaign_verdict_only"] = True
+    task, motion, parameterization = runner._prototype()
+    reference = runner._nominal_cycle_metadata(task, motion)
+    theta = np.zeros(parameterization.num_params)
+    posted_roles = []
+
+    class Vector:
+        def __getitem__(self, key): return self
+        def to_list(self): return [0.0, 0.0, 0.0]
+
+    evaluator = O.CandidateEvaluator.__new__(O.CandidateEvaluator)
+    evaluator.task, evaluator.motion = task, motion
+    evaluator.parameterization = parameterization
+    evaluator.spec = O.ObjectiveSpec(reference_cycle_time_s=reference["reference_cycle_time_s"])
+    evaluator.reference_cycle_time_s = reference["reference_cycle_time_s"]
+    evaluator.efficiency_metadata = {"time_weight": 0.0, "air_time_weight": 0.0, **reference}
+    evaluator.sim = type("Sim", (), {
+        "tool_start": Vector(), "precision": "f64",
+        "precision_metadata": _precision_metadata})()
+    evaluator.ledger = R.ComputeLedger()
+    candidate = C.CandidateResult(candidate_id="campaign-role-unit", theta_hash=C.content_hash([0.0]),
+                                  objective_kind="hard", objective=0.0, valid=True)
+    outcome = runner.Outcome(
+        seed=0, best=candidate, best_theta=theta, initial_theta=theta,
+        budget=runner.B.OptimizationBudget(candidate_evaluations=1, population_size=None),
+        evaluations=1, validation_calls=0, generations=0, forward_calls=1, backward_calls=0,
+        invalid_candidates=0, termination_reason="campaign_role_unit", history=[])
+
+    def posted_factory(actual_task, actual_config):
+        poster = object.__new__(runner.PilotPostedEvaluator)
+        poster.timings, poster.phase_records = [], []
+
+        def evaluate_posting(task_arg, posting, workspace, *, role="screen", single_dialect=False):
+            posted_roles.append((role, Path(workspace).name))
+            return {post.dialect: _typed_evaluation(
+                task_arg, posting.files[C.DIALECT_ARTIFACTS[post.dialect][0]], dialect=post.dialect)
+                for post in posting.posted}
+
+        poster.evaluate_posting = evaluate_posting
+        return poster
+
+    record = runner._write_outcome(
+        {"run_id": "campaign-fine-unit", "method": "nominal-cam", "seed": 0},
+        evaluator, outcome, posted_factory, config, tmp_path, runner.REPOSITORY)
+    assert record.status == C.RunStatus.COMPLETE
+    assert posted_roles == [("verdict", "primary")]
+    for dialect in C.Dialect:
+        evaluation = C.loads((tmp_path / record.run_id / C.DIALECT_ARTIFACTS[dialect][1]).read_text())
+        assert evaluation.discretization["settings"]["max_step_mm"] == 0.125
+    config["refinement_check"]["enabled"] = True
+    with pytest.raises(runner.RunnerError, match="disable auxiliary"):
+        runner._campaign_verdict_only(config)
+    config["campaign_verdict_only"] = False
+    assert runner._campaign_verdict_only(config) is False
+
+
+def _spawn_fail_without_artifacts(state):
+    def spawn(command, cwd, env, stdout, stderr):
+        with state["lock"]:
+            state["active"] += 1
+            state["peak"] = max(state["peak"], state["active"])
+            state["commands"].append(command)
+
+        class Process:
+            pid = 900001
+
+            def wait(self, timeout=None):
+                time.sleep(0.03)
+                with state["lock"]:
+                    state["active"] -= 1
+                return 1
+
+            def terminate(self): return None
+            def kill(self): return None
+
+        return Process()
+    return spawn
+
+
+def test_concurrency_cap_and_failed_records_preserved_on_resume(tmp_path):
+    methods = ("nominal-cam", "fixed-adam", "annealed-adam", "hard-cmaes", "smooth-cmaes")
+    document = _prototype_campaign(methods=methods, concurrency=2)
+    del document["cost_model"]  # Scheduling/failure fixture, not an init-only CMA cost-model case.
+    path = _write_config(tmp_path, document)
+    state = {"active": 0, "peak": 0, "commands": [], "lock": threading.Lock()}
+    root = tmp_path / "campaign"
+    result = campaign.run_campaign(path, root, spawn=_spawn_fail_without_artifacts(state))
+    assert result["run_count"] == 5 and 1 < state["peak"] <= 2
+    rows = json.loads((root / "manifest.json").read_text())["expected_runs"]
+    assert rows and all(row["status"] == "interrupted" for row in rows)
+    for row in rows:
+        record = C.loads((root / "tasks" / row["task_id"] / row["run_id"] / "run.json").read_text())
+        assert record.status == C.RunStatus.INTERRUPTED and record.failure_reason
+    assert json.loads((root / "audit.json").read_text())["reconciliation"]["exact_id_reconciliation"]
+
+    state["commands"].clear()
+    rerun = campaign.run_campaign(path, root, resume=True,
+                                   spawn=_spawn_fail_without_artifacts(state))
+    assert rerun["run_count"] == 5 and len(state["commands"]) == 5
+    task_root = next((root / "tasks").iterdir())
+    assert list((task_root / "resume-backups").iterdir())  # Every failed attempt is retained.
+    assert len(list((task_root / "logs").iterdir())) == 10
+
+
+def _prototype_child_code():
+    # The child, not just a patched parent, replaces only its posted factory.
+    # Optimizer, parameterization, TaskSpec and artifact writing all stay real.
+    return """import sys
+from benchmarks import contracts as C
+from scripts import run_benchmark_suite as runner
+""" + inspect.getsource(_typed_evaluation) + """
+class UnitPosted:
+    def evaluate_posted_gcode(self, task, nc_bytes, dialect, settings):
+        return _typed_evaluation(task, nc_bytes, dialect=dialect, step=0.125)
+original_context = runner._context
+def unit_context(config, repository):
+    task, motion, parameterization, evaluator_factory, _ = original_context(config, repository)
+    return task, motion, parameterization, evaluator_factory, lambda task, config: UnitPosted()
+runner._context = unit_context
+raise SystemExit(runner.main(sys.argv[1:]))
+"""
+
+
+def test_one_task_two_conditions_end_to_end_resume_skip_and_audit_projection(tmp_path):
+    path = _write_config(tmp_path, _prototype_campaign(concurrency=2))
+    def spawn(command, **kwargs):
+        modified = list(command)
+        modified[1:2] = ["-c", _prototype_child_code()]
+        return subprocess.Popen(modified, **kwargs)
+
+    root = tmp_path / "campaign"
+    planned = campaign.run_campaign(path, root, dry_run=True)
+    assert planned["run_count"] == 2 and planned["launched"] is False
+    result = campaign.run_campaign(path, root, resume=True, spawn=spawn)
+    assert result["status_counts"] == {"complete": 2}
+    assert result["audit_summary"]["all_runs_completed"] is True
+    assert result["audit_summary"]["auditor_passed"] is True
+    manifest = audit.load_manifest(root / "manifest.json")
+    reports, checked = audit.audit_runs(root / "audit-runs", manifest)
+    assert len(reports) == 2 and checked["summary"]["all_runs_completed"]
+    for row in reports:
+        actual = root / "tasks" / manifest.runs[row["run_id"]].task_id / row["run_id"] / "run.json"
+        projected = root / "audit-runs" / row["run_id"] / "run.json"
+        assert actual.samefile(projected)
+    record_hashes = {path: path.read_bytes() for path in root.glob("tasks/*/*/run.json")}
+
+    def must_not_spawn(command, **kwargs):
+        raise AssertionError("complete audited runs must be skipped on resume")
+
+    again = campaign.run_campaign(path, root, resume=True, spawn=must_not_spawn)
+    assert again["status_counts"] == {"complete": 2}
+    assert all(row["resumed_skipped"] for row in json.loads(
+        (root / "manifest.json").read_text())["expected_runs"])
+    assert all(path.read_bytes() == payload for path, payload in record_hashes.items())
+    with pytest.raises(campaign.CampaignError, match="cannot be reset"):
+        campaign.run_campaign(path, root, resume=True, dry_run=True)
+
+
+def test_prototype_dry_run_reports_declared_workload_not_execution(tmp_path):
+    path = _write_config(tmp_path, _prototype_campaign())
+    result = campaign.run_campaign(path, tmp_path / "dry", concurrency=1, dry_run=True)
+    assert result["run_count"] == 2 and result["launched"] is False
+    assert result["cost_estimate"]["estimated_wall_seconds"] == 34.0
+    assert not list((tmp_path / "dry").glob("tasks/*/*/run.json"))

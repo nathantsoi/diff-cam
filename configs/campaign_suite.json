@@ -1,0 +1,87 @@
+{
+  "schema": "diffcam-campaign/1",
+  "campaign_id": "t43a-suite-planning",
+  "task_source": "suite_manifest",
+  "task_manifest": "configs/task_manifest.json",
+  "task_filter": {
+    "splits": ["dev", "test"],
+    "families": ["facing_asymmetric", "pocket_island", "variable_width_depth"]
+  },
+  "concurrency": 6,
+  "conditions": [
+    {"condition": "nominal-cam", "seeds": [0]},
+    {"condition": "fixed-adam", "seeds": [0]},
+    {"condition": "annealed-adam", "seeds": [0]},
+    {"condition": "hard-cmaes", "seeds": [0, 1]},
+    {"condition": "smooth-cmaes", "seeds": [0, 1]}
+  ],
+  "runner_config": {
+    "schema": "diffcam-benchmark-runner/1",
+    "experiment": "pilot",
+    "task_source": "suite_manifest",
+    "grid_pitch_mm": 0.25,
+    "posted_refinement": {
+      "max_step_mm": 1.0,
+      "subdivisions": null,
+      "compute_bounds": true,
+      "safety_screen": true,
+      "max_samples_per_segment": 4096,
+      "record_stations": false
+    },
+    "exclusion_tolerance_mm3": 0.0,
+    "require_grid_exclusion_tolerance": true,
+    "arch": "cpu",
+    "precision": "f64",
+    "notes": "T4.3a suite driver configuration; provisional development inputs, not a frozen protocol, machining authorization, or measured timing claim.",
+    "seeds": [0, 1],
+    "candidate_evaluations": 24,
+    "timeout_s": 10800.0,
+    "timing_timeout_s": 10800.0,
+    "population_size": 6,
+    "refinement_check": {
+      "enabled": false,
+      "verdict_step_mm": 0.125,
+      "screen_step_mm": 1.0,
+      "convergence_step_mm": 0.25,
+      "parallel_jobs": 2,
+      "max_rss_bytes_per_job": 8589934592,
+      "poll_interval_s": 1.0,
+      "timeout_s": 10800.0
+    },
+    "campaign_verdict_only": true,
+    "validation_interval": 4,
+    "max_validation_calls": 6,
+    "max_generations": null,
+    "learning_rate": 0.005,
+    "time_weight": 0.01,
+    "time_weight_note": "provisional dev pilot value (D-11), not protocol",
+    "air_time_weight": 0.01,
+    "air_time_weight_note": "provisional dev pilot value (D-11), not protocol",
+    "reference_cycle_time_source": "task_nominal_cam_cycle_time",
+    "max_gradient_norm": 0.5,
+    "k_fixed": 40.0,
+    "k_smooth": 40.0,
+    "k_anneal_start": 20.0,
+    "k_anneal_end": 120.0,
+    "sigma0": 0.01
+  },
+  "cost_model": {
+    "scope": "declared synthetic workload units for a concurrency-six dry-run schedule only; not measured rates, a confidence interval, or a launch recommendation",
+    "seconds_per_candidate_by_condition": {
+      "nominal-cam": 1.0,
+      "fixed-adam": 12.0,
+      "annealed-adam": 12.0,
+      "hard-cmaes": 5.0,
+      "smooth-cmaes": 12.0
+    },
+    "fixed_overhead_seconds_by_condition": {
+      "nominal-cam": 120.0,
+      "fixed-adam": 180.0,
+      "annealed-adam": 180.0,
+      "hard-cmaes": 180.0,
+      "smooth-cmaes": 180.0
+    },
+    "aggregate_bootstrap_replicates": 2000,
+    "aggregate_bootstrap_seed": 20261108
+  }
+}

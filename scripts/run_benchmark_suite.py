@@ -102,6 +102,8 @@ def _requested_precision(config, *, pilot=False):
 
 
 _REFERENCE_SOURCE = "task_nominal_cam_cycle_time"
+_SUITE_MANIFEST_RELATIVE = "configs/task_manifest.json"
+_SUITE_MANIFEST_SHA256 = "sha256:78235400e4c8c1f9b98b3e0372940ae487a7a9c51badd7fb2d6964ed23c43e3f"
 
 
 def _validate_efficiency_values(config: Mapping[str, Any]) -> tuple[float, float]:
@@ -158,7 +160,7 @@ def _normalized_config(path: str | Path) -> dict[str, Any]:
     raw = _json(Path(path))
     if not isinstance(raw, dict) or raw.get("schema") != RUNNER_SCHEMA:
         raise RunnerError(f"config schema must be {RUNNER_SCHEMA}")
-    _requested_precision(raw, pilot=raw.get("task_source", "pilot_pocket") == "pilot_pocket")
+    _requested_precision(raw, pilot=_f64_required(raw))
     _configured_typed_sources(raw)
     for name in ("candidate_evaluations", "population_size", "max_validation_calls"):
         _positive_int(raw.get(name), name, zero=name == "max_validation_calls")
@@ -204,6 +206,61 @@ def _prototype() -> tuple[C.TaskSpec, C.MotionPlan, P.DeltaResidual]:
     return task, plan, parameterization
 
 
+def _f64_required(config):
+    return config.get("task_source", "pilot_pocket") in ("pilot_pocket", "suite_manifest")
+
+
+def _suite_task_binding(config):
+    """Load and verify the registered suite without initializing a simulator."""
+    manifest_path = REPOSITORY / _SUITE_MANIFEST_RELATIVE
+    document = _json(manifest_path)
+    if C.sha256_bytes(manifest_path.read_bytes()) != _SUITE_MANIFEST_SHA256:
+        raise RunnerError("suite_manifest identity differs from the registered 39-task manifest")
+    task_id = config.get("task_id")
+    if (not isinstance(task_id, str)
+            or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", task_id) is None):
+        raise RunnerError("suite_manifest requires a filename-safe task_id")
+    from cam.seeds import seed_for_task
+    rows = [row for row in document.get("tasks", []) if isinstance(row, Mapping)
+            and row.get("task_id") == task_id]
+    if len(rows) != 1:
+        raise RunnerError(f"suite_manifest must select exactly one task_id: {task_id!r}")
+    row = rows[0]
+    record = row.get("task_record", {})
+    source = record.get("record") if isinstance(record, Mapping) else None
+    if not isinstance(source, Mapping):
+        raise RunnerError(f"suite_manifest task {task_id} has no embedded typed TaskSpec")
+    try:
+        task = C.TaskSpec.from_dict(source)
+    except (TypeError, ValueError) as error:
+        raise RunnerError(f"invalid suite TaskSpec {task_id}: {error}") from error
+    if (task.task_id != task_id or task.task_hash != row.get("task_hash")
+            or task.family != row.get("family") or task.split.value != row.get("split")):
+        raise RunnerError(f"suite_manifest task identity/family/split mismatch: {task_id}")
+    motion = seed_for_task(task)
+    if motion.motion_hash != row.get("motion_hash"):
+        raise RunnerError(f"suite_manifest nominal motion hash mismatch: {task_id}")
+    if row.get("seed_provenance") != motion.provenance:
+        raise RunnerError(f"suite_manifest nominal motion provenance mismatch: {task_id}")
+    motion.validate_for_task(task)
+    parameterization = pilot_io.fit_parameterization(motion, controls=12)
+    reference_metadata = _nominal_cycle_metadata(task, motion)
+    return task, motion, parameterization, reference_metadata
+
+
+def _suite_context(config):
+    task, motion, parameterization, reference_metadata = _suite_task_binding(config)
+    pitch = config.get("grid_pitch_mm", task.grid.voxel_mm)
+    if (isinstance(pitch, bool) or not isinstance(pitch, (int, float))
+            or not math.isfinite(pitch) or pitch != task.grid.voxel_mm):
+        raise RunnerError("suite_manifest grid_pitch_mm must match the immutable task grid")
+    _sampled_pilot_sources(task, REPOSITORY)
+    _pilot_exclusion_tolerance(task, config)
+    return (task, motion, parameterization,
+            partial(_pilot_evaluator, repository=REPOSITORY,
+                    reference_metadata=reference_metadata), _pilot_post_factory)
+
+
 def _context(config: Mapping[str, Any], repository: Path):
     kind = config.get("task_source", "pilot_pocket")
     if kind == "prototype_analytic":
@@ -212,6 +269,8 @@ def _context(config: Mapping[str, Any], repository: Path):
         # Builtin pilot source lives in the application repository, not the
         # caller's artifact output directory. Preserve the legacy plugin argument.
         return _pilot_context(config, REPOSITORY)
+    if kind == "suite_manifest":
+        return _suite_context(config)
     if not config.get("allow_python_plugins", False):
         raise RunnerError("unregistered task_source and no allow_python_plugins=true opt-in")
     if not isinstance(kind, str) or ":" not in kind:
@@ -421,9 +480,24 @@ def _pilot_refinement_settings(task, config):
     return dataclasses.asdict(RefinementSettings.from_mapping(settings))
 
 
+def _campaign_verdict_only(config):
+    """Campaign primary posted verdicts are fine-only unless full fidelity is opted in."""
+    value = config.get("campaign_verdict_only", False)
+    if not isinstance(value, bool):
+        raise RunnerError("campaign_verdict_only must be a boolean")
+    if value:
+        if config.get("task_source") != "suite_manifest":
+            raise RunnerError("campaign_verdict_only is scoped to suite_manifest")
+        if config["refinement_check"]["enabled"]:
+            raise RunnerError("verdict-only campaign config must disable auxiliary refinement_check")
+    elif config.get("task_source") == "suite_manifest" and not config["refinement_check"]["enabled"]:
+        raise RunnerError("full-fidelity suite campaign must enable refinement_check")
+    return value
+
+
 def _refinement_policy(config):
     """Fidelity roles and D-04/D-07 posted-worker resource limits."""
-    if config.get("task_source", "pilot_pocket") != "pilot_pocket":
+    if config.get("task_source", "pilot_pocket") not in ("pilot_pocket", "suite_manifest"):
         return {"enabled": False}
     fields = {
         "enabled", "verdict_step_mm", "screen_step_mm", "convergence_step_mm",
@@ -457,7 +531,7 @@ def _refinement_policy(config):
 def _phase_settings(task, config, dialect, nc_bytes, role, *, primary=None, controls=None):
     """Freeze production controls, changing only the declared role's step."""
     policy = _refinement_policy(config)
-    if not policy["enabled"]:
+    if not policy["enabled"] and not (_campaign_verdict_only(config) and role == "verdict"):
         raise RunnerError("posted job phases require the declared real-pilot fidelity policy")
     steps = {"screen": policy["screen_step_mm"], "verdict": policy["verdict_step_mm"],
              "convergence": policy["convergence_step_mm"]}
@@ -891,7 +965,7 @@ def _identity(task: C.TaskSpec, config: Mapping[str, Any], split: str,
         "task_hash": task.task_hash, "task_split": task.split.value, "split": split,
         "experiment": config["experiment"], "task_source": config.get("task_source", "prototype_analytic"),
         "arch": config.get("arch", "cpu"),
-        "precision": _requested_precision(config, pilot=config.get("task_source", "pilot_pocket") == "pilot_pocket"),
+        "precision": _requested_precision(config, pilot=_f64_required(config)),
         "seeds": config["seeds"], "candidate_evaluations": config["candidate_evaluations"],
         "population_size": config["population_size"], "validation_interval": config["validation_interval"],
         "max_validation_calls": config["max_validation_calls"],
@@ -1679,7 +1753,7 @@ def _manifest(config: Mapping[str, Any], task: C.TaskSpec, entries: Sequence[Map
                                "method": entry["method"], "seed": entry["seed"]} for entry in entries],
             "comparisons": [],
             "runner": {"schema": RUNNER_SCHEMA, "planned_not_executed": planned,
-                       "experiment": config["experiment"], "split": "dev",
+                       "experiment": config["experiment"], "split": task.split.value,
                        "output_dir": str(root),
                        "prototype_analytic_task": config.get("task_source", "pilot_pocket") == "prototype_analytic",
                        "task_source": config.get("task_source", "pilot_pocket"),
@@ -1869,7 +1943,8 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
         evaluator_for_posts = posted_factory(task, config)
         if isinstance(evaluator_for_posts, PilotPostedEvaluator):
             evaluations = evaluator_for_posts.evaluate_posting(
-                task, posting, root / "posted-jobs" / entry["run_id"] / "screen")
+                task, posting, root / "posted-jobs" / entry["run_id"] / "primary",
+                role="verdict" if _campaign_verdict_only(config) else "screen")
             for post in posting.posted:
                 nc_name, eval_name = C.DIALECT_ARTIFACTS[post.dialect]
                 actual = evaluations[post.dialect]
@@ -1962,7 +2037,7 @@ def _fit_initializer_parameterization(motion: C.MotionPlan):
 
 def _child(config: Mapping[str, Any], entry: Mapping[str, Any], root: Path) -> None:
     task, motion, params, evaluator_factory, posted_factory = _context(config, root)
-    if entry["identity"] != _identity(task, config, "dev"):
+    if entry["identity"] != _identity(task, config, task.split.value):
         raise RunnerError("child task identity differs from frozen parent manifest")
     if config.get("__test_interrupt__") == entry["run_id"]:
         raise KeyboardInterrupt("injected child interruption; parent must retain the status")
@@ -3090,8 +3165,8 @@ def _run_parent(config: Mapping[str, Any], args: argparse.Namespace, root: Path)
     task, motion, parameterization, _, posted_factory = _context(config, root)
     if task.split.value != args.split:
         raise RunnerError(f"prototype source is dev-only; task split is {task.split.value}")
-    if args.split != "dev":
-        raise RunnerError("held-out test/external sources are not shipped in this card")
+    if args.split != "dev" and config.get("task_source") != "suite_manifest":
+        raise RunnerError("held-out test/external tasks require the registered suite_manifest source")
     if config["experiment"] != "pilot":
         raise RunnerError(f"experiment {config['experiment']!r} is not implemented in T4.1a")
     entries = _plan_entries(config, task, args.split, args.only)
