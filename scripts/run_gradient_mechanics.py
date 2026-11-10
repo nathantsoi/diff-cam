@@ -797,7 +797,8 @@ def _dtype_information(sim) -> dict[str, Any]:
 
 
 def _prepare_study_path(path, task, base_evaluator, config: FixedStudyConfig) -> dict[str, Any]:
-    declaration = _seed_declaration(path, config.path_root_seed)
+    declaration = (None if path["kind"] in ("cam", "stationary_line")
+                   else _seed_declaration(path, config.path_root_seed))
     result = None
     if path["kind"] == "cam":
         motion = seed_module.seed_for_task(task)
@@ -826,10 +827,11 @@ def _prepare_study_path(path, task, base_evaluator, config: FixedStudyConfig) ->
     fixed_points = np.asarray(fixed_motion.waypoints_mm(), dtype=np.float64)
     shape = source_points.shape == fixed_points.shape
     fit_error = (float(np.linalg.norm(fixed_points - source_points, axis=1).max()) if shape else None)
-    declare = dict(path)
+    declare = dict(path) if declaration is not None else None
     result_derivation = None if result is None else json.loads(result.derivation)
-    declare["reference_scale_metadata"] = (None if result is None else result_derivation.get("scale"))
-    declare["noise_scale_metadata"] = (None if result is None else result_derivation.get("noise_scale"))
+    if declare is not None:
+        declare["reference_scale_metadata"] = (None if result is None else result_derivation.get("scale"))
+        declare["noise_scale_metadata"] = (None if result is None else result_derivation.get("noise_scale"))
     return {"id": path["id"], "kind": path["kind"], "status": "ready",
             "source_motion": motion, "source_result": result,
             "source_hash": motion.motion_hash, "motion": fixed_motion,

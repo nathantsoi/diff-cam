@@ -629,6 +629,9 @@ def test_fixed_path_source_and_fixed_theta_hashes_stay_distinct():
     task = build_pilot_task()  # Analytic metadata only; no simulator/runtime started.
     base = FixedPathFactory(task, None, None, object())
     base.sim, base.spec, base.ledger, base.seed = object(), None, None, 0
+    nominal = R._prepare_study_path(config.paths[0], task, base, config)
+    assert nominal["status"] == "ready" and nominal["declaration"] is None
+    assert nominal["source_record"]["mode"] == "nominal_cam" and nominal["source_result"] is None
     ready = R._prepare_study_path(config.paths[1], task, base, config)
     assert ready["status"] == "ready"
     assert ready["source_motion"].frame == C.Frame.MACHINE
