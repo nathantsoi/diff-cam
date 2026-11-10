@@ -1,362 +1,373 @@
 {
- "schema": "diffcam-task-status/v1",
- "updated": "2026-11-08",
- "integration_branch": "core",
- "coordinator": "diffcam-orchestrator",
- "tasks": {
-  "T0.0": {
-   "status": "complete",
-   "owner": "diffcam-orchestrator",
-   "branch": "task/T0.0-contracts",
-   "blocker": null,
-   "next": null,
-   "note": "FROZEN v1 diffcam-contracts/1 at core ba97d6e semantics; acks: worker-2/T1.0, worker-3/T2.1, worker-1/T1.4 (2026-11-08). Changes now require version bump + handoff. | v1.1 (d632e2c): Tolerances.rapid_penetration_mm + clearance metric split, from T1.0 review."
-  },
-  "T0.1": {
-   "status": "complete",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T0.1-references",
-   "blocker": null,
-   "next": null,
-   "note": "merged; pycma 48a821b (BSD-3), CNC-Net ba0652f (license missing/unclear), CAMotics e84665f (GPL-2.0+); 11 network-free tests; repeat+offline verify exit 0. CAMotics binary unavailable (needs cbang/Qt5/SCons/V8 build) -> blocks T1.3 external cross-check."
-  },
-  "T0.2": {
-   "status": "complete",
-   "owner": "diffcam-orchestrator",
-   "branch": "task/T0.2-environment",
-   "blocker": null,
-   "next": null,
-   "note": "merged 22719af; uv.lock, optim extra (cma 4.5.0); pytest 20 passed + CPU smoke exit 0; GPU backend not validated"
-  },
-  "T1.0": {
-   "status": "complete",
-   "owner": "diffcam-worker-2",
-   "branch": "task/T1.0-reference-fixtures",
-   "blocker": null,
-   "next": null,
-   "note": "merged; flat/box/linear reference with certified removed-volume brackets, chronology, collision metrics; import isolation tested. Coordinator check: slot volume converges to analytic. Follow-up T1.0b (rapid tolerance) to worker-2."
-  },
-  "T1.1": {
-   "status": "complete",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T1.1-cutter-sweeps",
-   "blocker": null,
-   "next": null,
-   "note": "merged; exact Z-interval-restricted swept membership (score, not Euclidean SDF); separate smooth surrogate; FD agreement rtol .08; coordinator brute-force check 0/737280 mismatches. Open: 0.5 mm exploratory segfault -> investigated in T1.2 step 0."
-  },
-  "T1.2": {
-   "status": "complete",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T1.2-holder-chronology",
-   "blocker": null,
-   "next": null,
-   "note": "merged; pre-cut conservative whole-segment holder screen (false positive at 1 subdivision clears at >=2, matches reference); reset_candidate_state(); 13th-instance Taichi segfault -> guard at 12 instances/runtime (use one sim per process or reuse+reset); isotropic-grid rejection; T1.1 review findings fixed. GAP: no independent shank modeled (T1.3 must cover). | REVIEW (discriminator): H1 holder screen centre-sampled not conservative (HIGH), H2 guard counts failed constructors, H3 max_steps=0, H4 reset keeps saved tool_start -> T1.2b folded into T2.0 branch (worker-1)"
-  },
-  "T1.4": {
-   "status": "complete",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T1.4-nc-semantics",
-   "blocker": null,
-   "next": null,
-   "note": "merged; parse_motion_plan/post_motion_plan typed APIs; G54/G53/G43/arcs(3 planes, R, turns)/units/G91; G28/G30, G64, comp, canned cycles rejected; 57 focused tests; coordinator independently re-verified canonical machine coords + both-dialect round trip. Legacy parse_gcode kept for old callers (not an evaluation entry point)."
-  },
-  "T1.3": {
-   "status": "complete",
-   "owner": "worker-3 (T1.3a CAMotics+metrics) / worker-2 (T1.3b production posted evaluator)",
-   "branch": "task/T1.3a-camotics-metrics",
-   "blocker": null,
-   "next": "T1.3a (CAMotics adapter + metrics) now; T1.3b production posted evaluator after T1.2",
-   "note": "T1.3a (CAMotics prototype adapter, metrics, bias study) and T1.3b + fixes (production posted evaluator; arcs fixed 31fd369; corner fillets 71088af/82849d4) MERGED. DECISION 2026-11-09: mandatory independent cross-check = T1.0 NumPy reference (independent implementation, plan \u00a74) for supported line fixtures; CAMotics external route geometry=null (all STLs non-watertight; slot loses both end caps: 1728 vs 2067.29) -> T1.3c time-boxed investigation (worker-3); CAMotics does not block T4.1b. | T1.3 COMPLETE: production posted evaluator + independent T1.0 reference cross-check; CAMotics supplementary (watertight export fixed; known 1.2.0 horizontal-sweep start-cap defect documented)."
-  },
-  "T2.0": {
-   "status": "complete",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T2.0-custom-geometry",
-   "blocker": null,
-   "next": null,
-   "note": "merged; sampled stock/target via contracts GeometrySource, trilinear cell-centre interp + clamp, all target consumers rerouted, position penalties full range, reset preserves sources. Baked target in runtime voxel units. No shank model."
-  },
-  "T2.1": {
-   "status": "complete",
-   "owner": "diffcam-worker-3",
-   "branch": "task/T2.1-parameterization",
-   "blocker": null,
-   "next": null,
-   "note": "merged; DeltaResidual/DeltaSpline(clamped cubic, 4<=K<=T)/AbsolutePositionResidual, T=segments, anchor_end option, exact pullbacks (45 tests; coordinator independently re-verified J^T)"
-  },
-  "T2.2": {
-   "status": "complete",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T2.2-pilot-pocket",
-   "blocker": null,
-   "next": null,
-   "note": "T2.2 + T2.2b merged. Pilot pocket: T = P \u222a four r=2 mm corner fillets; excluded 18.0 mm\u00b3 grid-exact (continuous 20.60 diagnostic); 0.25 mm pitch. Nominal (line-only seed): production safety+geometry True, residual/gouge/surface 0 (coordinator re-verified rs274). Retained: runs/retained/pilot-pocket-20261109-t22b-exact-exclusion. COST: one posted evaluation \u2248 1085 s on CPU at 0.25 mm -> pilot budget concern."
-  },
-  "T2.3": {
-   "status": "in_progress",
-   "owner": "diffcam-worker-1",
-   "branch": null,
-   "blocker": null,
-   "next": "set counts after T4.1b pilot",
-   "note": "Bootstrap merged d5e320b: 3 families (facing/asymmetric stock, pocket-island contour, variable width/depth) x 1 dev + 1 test; T \u2287 P only finite-radius corner fillets, grid-exact exclusion tol 0; all 12 production evals safety+geometry True; audit clean. Seed generator gained a generic cap-clearing pass after a qualification failure (task unchanged, failure retained). Suite COUNTS pending pilot cost (target 3 dev / 10 test per family)."
-  },
-  "T3.0": {
-   "status": "complete",
-   "owner": "diffcam-worker-2",
-   "branch": "task/T3.0-objectives",
-   "blocker": null,
-   "next": null,
-   "note": "merged (final gate vs real reset hook + sampled targets); stateless candidates, ObjectiveSpec incl. k, atomic artifacts"
-  },
-  "T3.1": {
-   "status": "complete",
-   "owner": "diffcam-worker-2",
-   "branch": "task/T3.1-blackbox",
-   "blocker": null,
-   "next": null,
-   "note": "merged; CMA-ES hard/smooth, exact resume incl. final.json | Q1-Q4 follow-ups merged (fcb57db), reviewer-verified. Residual nit: popsize guard only when population_size explicit; direct solve_cma_es with population_size=None and budget < cma default popsize still ends at 0 generations (runner unaffected)."
-  },
-  "T3.2": {
-   "status": "complete",
-   "owner": "diffcam-worker-2",
-   "branch": "task/T3.2-adam",
-   "blocker": null,
-   "next": null,
-   "note": "merged; fixed/annealed Adam, deterministic (n=1), schedule length frozen in config, invalid never best"
-  },
-  "T4.0": {
-   "status": "complete",
-   "owner": "diffcam-worker-2",
-   "branch": "task/T4.0-auditor",
-   "blocker": null,
-   "next": null,
-   "note": "merged; auditor + exact paired sign-flip test (n<=16 enumerated), CI null n<2, small-n warning <5, Holm, cluster bootstrap CIs; coordinator re-verified p by enumeration | REOPENED: discriminator review (3 reproduced defects: failed runs dropped from denominators [HIGH], abs tie tolerance, 1-task-family CI) -> T4.0b worker-2"
-  },
-  "T4.1": {
-   "status": "in_progress",
-   "owner": "diffcam-worker-2 (runner T4.1a) / coordinator (real pilot T4.1b)",
-   "branch": "task/T4.1-runner",
-   "blocker": "T4.1b-wiring: re-merge core (now contains T3.3c) + finish precision wiring/gates (H3)",
-   "next": null,
-   "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts. | DECISION 2026-11-09: pilot launches as an infrastructure/cost pilot once w2 gates are green; fixed/annealed-Adam (gradient) rows are PROVISIONAL until T3.3b characterizes the systematic AD/FD mismatch; if T3.3b finds a real backward bug, Adam rows are rerun after the fix. | D-2026-11-09-04 (reports/decisions.md): pilot verdicts from 0.125 mm posted eval (both dialects); 1.0 mm = screen/diagnostic only; 0.25 mm RS274 convergence point recorded."
-  },
-  "T3.4": {
-   "status": "in_progress",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T3.4-continuation",
-   "blocker": "T3.3b AD/FD characterization before dev ablations",
-   "next": "dev ablations after pilot",
-   "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot. | Reviewer verified T3.4b (K1/K2 closed). Ablation-driver requirement: catch empty-band ValueError and record an inconclusive calibration step (don't abort)."
-  },
-  "T3.3": {
-   "status": "in_progress",
-   "owner": "diffcam-worker-3",
-   "branch": "task/T3.3-gradient-mechanics",
-   "blocker": null,
-   "next": "real study after pilot; first characterize index-35 AD/FD sign difference",
-   "note": "tooling merged c955b60 (antithetic estimator w/ exact 2N accounting + uncertainty; AD/FD same-objective tooling; cost probe 0.25 mm: 39 fwd/1 bwd/21 hard in 93 s, 1.94 GB). OPEN DIAGNOSTIC: AD vs FD on 4 axes cosine 0.9999996 but L2 discrepancy 0.0205 and index 35 sign flip \u2014 must be characterized (component magnitude vs FD noise floor across eps) before any gradient-mechanics claim."
-  },
-  "T3.5": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
-   "blocker": null,
-   "next": null
-  },
-  "T5.0": {
-   "status": "complete",
-   "owner": "diffcam-worker-3",
-   "branch": "task/T5.0-external-compat",
-   "blocker": null,
-   "next": null,
-   "note": "merged: matrix + json. CNC-Net original stack BLOCKED (sm_120); 'CNC-Net @ba0652f on modernized stack' one-step smoke PASSED (IoU 0.424, 22.5s) \u2014 not faithful reproduction; executable NC mapping unsupported natively. Titan BLOCKED (no STEP backend, no provenance/license). CNCGEN preview descriptive only."
-  },
-  "T5.1": {
-   "status": "complete",
-   "owner": "diffcam-worker-2",
-   "branch": "task/T5.1-cncnet-adapter",
-   "blocker": null,
-   "next": null,
-   "note": "merged 16299a6. Scope frozen before results: one dev box pocket w/ island, 80 mm/object unit isotropic transform, ONE per-instance native step on modernized stack (no pretraining/weights). Native 64^3 IoU 0.4668; DiffCAM-mapped IoU 0.4760, residual 36.6 mm3, gouge 1131 mm3. Executable NC: 'incompatible: executable NC mapping unsupported' (variable radii, learned rotations, no ordered path). Evidence in external/cncnet-t51-pilot-worker-2/native-4/comparison.json (sha256 f561430d...). For T4.2: CNC-Net baseline limited to native reconstruction route; claims must state this."
-  },
-  "T5.2": {
-   "status": "complete",
-   "owner": "diffcam-worker-3",
-   "branch": "task/T5.2-external-titan",
-   "blocker": null,
-   "next": null,
-   "note": "T5.2 adapters merged (1070c1c): isolated OCP 7.7.2 STEP import of Titan-M1 (inch->mm verified), sampled P/T, bounded native partial-roughing pilot. Production eval UNSUPPORTED for sampled P/T -> T1.3f (worker-3). Excluded-volume convention decided (grid-resolved, tol 0; native 82.20 mm3 diagnostic; grid 139.29 mm3 declared). Titan provenance/license still unknown (local only). | Production evaluation now runs (T1.3f): geometry False / safety null honestly reported; Titan nominal is a partial roughing pilot only. | T5.2b merged: independent analytic bore raster (plug \u2229 nominal source void, native face z-ranges recorded) matches 68/68 cells; negative r=0.875 \u2192 56 mismatches; RESOLUTION LIMIT at 1.27 mm: small bore D=2.057 mm \u22481.6 cells, 1.25\u00d7 radius undetectable (documented). Artifacts data/external/titan-m1-t52b."
-  },
-  "T4.2": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
-   "blocker": "T4.1b pilot + T3.3b (gradient validity) + T2.3 counts",
-   "next": null,
-   "note": "Protocol must state: real-simulator objectives reproduce only to ~1 float32 ulp (Taichi CPU atomics, e.g. holder_overlap_total); same-seed CMA runs are approximately (not bitwise) repeatable since ulp ties can flip rankings; replay agreement uses rel 1e-5. Option to make hard-path reductions deterministic (fixed-order f64) if exact repeatability is required. | H4: RTX 5070 Ti consumer GPU has low f64 throughput and 2x VRAM; if T4.3 shards use GPU, re-measure f64 cost there before freezing; runners keep init_taichi=False (sim's own init auto-selects GPU when CUDA exists)."
-  },
-  "T4.3": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
-   "blocker": null,
-   "next": null
-  },
-  "T6.1": {
-   "status": "in_progress",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T6.1-packets",
-   "blocker": null,
-   "next": "schema re-check after T4.1b merge; final packets after T4.2",
-   "note": "exporter merged (58cf85c+1e333a6): status 'simulation-qualified'/'pending setup review' only; nominal dev packet reproduced byte-identically; production_refinement slot (absent-with-reason for nominal; required for final). MUST re-check against the final T4.1b refinement-link schema (D-04 may bump to /4: verdicts from 0.125 mm both dialects) before final packets. Final packets after T4.2 freeze. No hardware authorized."
-  },
-  "T6.2": {
-   "status": "in_progress",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T6.2-measurements",
-   "blocker": null,
-   "next": "real trial data (outside agent scope)",
-   "note": "software merged 749fc6f (packet/NC/setup gating, fiducial SVD registration, uncertainty, rejected/interrupted retention, force/load/proxy separation; synthetic-only empirical reports refused). Empirical conclusions PENDING real trial records (qualified operator)."
-  },
-  "T7.1": {
-   "status": "planned",
-   "owner": null,
-   "branch": null,
-   "blocker": null,
-   "next": null
-  },
-  "T7.2": {
-   "status": "in_progress",
-   "owner": "diffcam-worker-3",
-   "branch": "task/T7.2-artifacts",
-   "blocker": null,
-   "next": "after T4.3",
-   "note": "scaffold merged f07c254 (claim-to-evidence per cell, failure/unavailable/refinement rows, precision + decision-ID matching, byte-identical regeneration; never writes manuscript/). Real tables after T4.3."
-  },
-  "T1.0b": {
-   "status": "complete",
-   "owner": "diffcam-worker-2",
-   "branch": "task/T1.0b-rapid-tolerance",
-   "blocker": null,
-   "next": null,
-   "note": "merged; certification needs evaluator band (sqrt3*v/2 + temporal) < rapid_penetration_mm \u2014 T1.3 must pick resolution accordingly (coordinator check: retract certifies at tol 0.5, unknown at 0.25 with v=0.25)"
-  },
-  "T5.0b": {
-   "status": "complete",
-   "owner": "diffcam-worker-3",
-   "branch": "task/T5.0b-cncnet-env",
-   "blocker": null,
-   "next": null,
-   "note": "merged; baselines/cncnet recipe re-proved from fresh venv: IoU 0.423786 vs 0.423761"
-  },
-  "T4.0b": {
-   "status": "complete",
-   "owner": "diffcam-worker-2",
-   "branch": "task/T4.0b-audit-fixes",
-   "blocker": null,
-   "next": null,
-   "note": "merged; failures counted as known 0, drop counts, complete_data flag, relative tie tol, pooled CI for singleton strata, Holm dedupe; verified with reviewer repros"
-  },
-  "T1.0c": {
-   "status": "complete",
-   "owner": "diffcam-worker-2",
-   "branch": "task/T1.0c-reference-safety",
-   "blocker": null,
-   "next": null,
-   "note": "merged; whole-cell stock bounds for safety, zero-length screen unified, conservative lower-bound clearance metrics; T1.3 must inherit whole-cell semantics | Optional tightness follow-up (discriminator L2): whole-cell slack also applied to aligned grids (retract upper 1.82->3.57 mm; one convergence row true->null). If T1.3/T4.1 sees too many 'uncertain' rapids, apply slack only to boundary-straddling cells."
-  },
-  "T1.4b": {
-   "status": "complete",
-   "owner": "diffcam-worker-3",
-   "branch": "task/T1.4b-nc-review-fixes",
-   "blocker": null,
-   "next": null,
-   "note": "merged; all 7 findings + legacy G18 fixed w/ regressions. Decision: inch 3-decimal arcs -> UnsupportedPostError (contract 1e-3 mm radius tol kept). CAM lease stays with worker-3 until reassigned."
-  },
-  "T4.0c": {
-   "status": "complete",
-   "owner": "diffcam-worker-2",
-   "branch": "task/T4.0c-audit-flags",
-   "blocker": null,
-   "next": null,
-   "note": "merged"
-  },
-  "T1.2b": {
-   "status": "complete",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T2.0-custom-geometry@9644d1b",
-   "blocker": null,
-   "next": null,
-   "note": "merged; H1 hard holder checks inflated by cell half-diagonal (safe-case overlap 100->25->0 mm3 at n=1,2,3), H2 lifecycle charged after init, H3 max_steps>=1, H4 reset restores configured start. Reviewer repros pass."
-  },
-  "T3.xb": {
-   "status": "complete",
-   "owner": "diffcam-worker-2",
-   "branch": "task/T3.2-adam",
-   "blocker": null,
-   "next": null,
-   "note": "merged; O1-O6 fixed, reviewer repros re-run by coordinator"
-  },
-  "T1.4c": {
-   "status": "complete",
-   "owner": "diffcam-worker-3",
-   "note": "merged; T/H bound to task tool_number; later different H refused"
-  },
-  "T1.3c": {
-   "status": "complete",
-   "owner": "diffcam-worker-3",
-   "branch": "task/T1.3c-camotics",
-   "blocker": null,
-   "next": null,
-   "note": "merged 49c38a5. Single-thread MCUBES -> watertight, oriented STL (0.25/0.1 mm), directed-edge validation (no self-intersection guarantee). Endpoint-cap loss ROOT CAUSE: CAMotics 1.2.0 horizontal ConicSweep rejects interior start-cylinder points (beta<0) and disc fallback divides by (Bz-Az)=0 -> starting disc never cut. CAMotics remains supplementary with this documented defect; not a production oracle."
-  },
-  "T1.3f": {
-   "status": "complete",
-   "owner": "diffcam-worker-3",
-   "branch": "task/T1.3f-sampled-eval",
-   "blocker": null,
-   "next": null,
-   "note": "merged a212925+62e5573: exact-grid sampled P/T in production evaluator (no resampling), analytic regressions preserved; Titan production posts: coverage complete, geometry False (single roughing plunge), safety null (rapid-cutter penetration upper bound 1.67 mm vs tol 0). Evaluator/task tests 106 passed on core."
-  },
-  "T2.2b": {
-   "status": "complete",
-   "owner": "diffcam-worker-1",
-   "branch": null,
-   "blocker": null,
-   "next": null,
-   "note": "reachable pilot target; merged 77a319b (G1 exact grid exclusion)"
-  },
-  "T5.2b": {
-   "status": "complete",
-   "owner": "diffcam-worker-3",
-   "branch": null,
-   "blocker": null,
-   "next": null,
-   "note": "independent Titan bore raster 68/68; merged bb552e8"
-  },
-  "T3.4b": {
-   "status": "complete",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T3.4b-shift",
-   "blocker": null,
-   "next": null,
-   "note": "merged 2424699: shift via sim per-voxel stock field; phi_hard = hard stock_d[T]; two-sided band predicate; leak tests; C2. Coordinator real-sim gaps small and shrinking with k (k=20: +0.06/+0.17/+0.00 vox)."
-  },
-  "T3.3b": {
-   "status": "complete",
-   "owner": "diffcam-worker-3",
-   "branch": "task/T3.3b-adfd",
-   "blocker": null,
-   "next": null,
-   "note": "SYSTEMATIC AD/FD mismatch: idx2 AD -0.4785 vs FD -0.4990 (4.1%, eps-independent), idx35 sign flip; per-component bisect (sigmoid clamp, ti.max carve, stop-gradients, f32 backward). Affects Adam/T3.4 step quality. | PRIORITY right after pilot launch; gates T3.4 ablations and any optimizer choice for T4.2. | INTERIM: index-2 bias is f32 field/adjoint accumulation (full f64: AD -0.3407647 vs FD -0.3407663); helper-only f64 does not fix; terminal block verified. Index-35 +0.00728 NOT reproduced (fresh AD -0.00296 \u2248 FD) -> investigating possible state leakage. Pending: precision-fix cost (f64 full vs narrow). | Reviewer G2: f32 ADJOINT bias grows ~linearly with path length (prefix 8: 0.24%, 48: 2.5%, 75: 4.1%); f32 FORWARD accurate (f32 FD \u2248 f64 FD) -> CMA/hard rows unaffected; only gradient rows provisional. Precision choice must be validated on the longest suite path. | RESULT: full f64 fixes index-2 (AD -0.49917 vs FD -0.49916), 112 s/3.67 GB vs f32 93 s/1.94 GB; scalar-only f64 insufficient; idx-35 UNREPRODUCED on exact c955b60 (closed). -> D-2026-11-09-05. | MERGED 8320c05 with permanent AD-consistency regression (same \u03b8 / after other \u03b8 / fresh process)."
-  },
-  "T3.3c": {
-   "status": "complete",
-   "owner": "diffcam-worker-1",
-   "branch": "task/T3.3c-sim-precision",
-   "blocker": null,
-   "next": null,
-   "note": "merged de37d5a: precision='f32'|'f64' declared option (f32 default), all fields/kernels/adjoints follow dtype; f64 AD/FD < 1% (idx 2, 35) on 75-seg pilot path; f32 bias curve retained; cost f32 29.4 s/2.0 GB vs f64 37.0 s/3.7 GB per gradient."
+  "schema": "diffcam-task-status/v1",
+  "updated": "2026-11-09",
+  "integration_branch": "core",
+  "coordinator": "diffcam-orchestrator",
+  "tasks": {
+    "T0.0": {
+      "status": "complete",
+      "owner": "diffcam-orchestrator",
+      "branch": "task/T0.0-contracts",
+      "blocker": null,
+      "next": null,
+      "note": "FROZEN v1 diffcam-contracts/1 at core ba97d6e semantics; acks: worker-2/T1.0, worker-3/T2.1, worker-1/T1.4 (2026-11-08). Changes now require version bump + handoff. | v1.1 (d632e2c): Tolerances.rapid_penetration_mm + clearance metric split, from T1.0 review."
+    },
+    "T0.1": {
+      "status": "complete",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T0.1-references",
+      "blocker": null,
+      "next": null,
+      "note": "merged; pycma 48a821b (BSD-3), CNC-Net ba0652f (license missing/unclear), CAMotics e84665f (GPL-2.0+); 11 network-free tests; repeat+offline verify exit 0. CAMotics binary unavailable (needs cbang/Qt5/SCons/V8 build) -> blocks T1.3 external cross-check."
+    },
+    "T0.2": {
+      "status": "complete",
+      "owner": "diffcam-orchestrator",
+      "branch": "task/T0.2-environment",
+      "blocker": null,
+      "next": null,
+      "note": "merged 22719af; uv.lock, optim extra (cma 4.5.0); pytest 20 passed + CPU smoke exit 0; GPU backend not validated"
+    },
+    "T1.0": {
+      "status": "complete",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T1.0-reference-fixtures",
+      "blocker": null,
+      "next": null,
+      "note": "merged; flat/box/linear reference with certified removed-volume brackets, chronology, collision metrics; import isolation tested. Coordinator check: slot volume converges to analytic. Follow-up T1.0b (rapid tolerance) to worker-2."
+    },
+    "T1.1": {
+      "status": "complete",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T1.1-cutter-sweeps",
+      "blocker": null,
+      "next": null,
+      "note": "merged; exact Z-interval-restricted swept membership (score, not Euclidean SDF); separate smooth surrogate; FD agreement rtol .08; coordinator brute-force check 0/737280 mismatches. Open: 0.5 mm exploratory segfault -> investigated in T1.2 step 0."
+    },
+    "T1.2": {
+      "status": "complete",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T1.2-holder-chronology",
+      "blocker": null,
+      "next": null,
+      "note": "merged; pre-cut conservative whole-segment holder screen (false positive at 1 subdivision clears at >=2, matches reference); reset_candidate_state(); 13th-instance Taichi segfault -> guard at 12 instances/runtime (use one sim per process or reuse+reset); isotropic-grid rejection; T1.1 review findings fixed. GAP: no independent shank modeled (T1.3 must cover). | REVIEW (discriminator): H1 holder screen centre-sampled not conservative (HIGH), H2 guard counts failed constructors, H3 max_steps=0, H4 reset keeps saved tool_start -> T1.2b folded into T2.0 branch (worker-1)"
+    },
+    "T1.4": {
+      "status": "complete",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T1.4-nc-semantics",
+      "blocker": null,
+      "next": null,
+      "note": "merged; parse_motion_plan/post_motion_plan typed APIs; G54/G53/G43/arcs(3 planes, R, turns)/units/G91; G28/G30, G64, comp, canned cycles rejected; 57 focused tests; coordinator independently re-verified canonical machine coords + both-dialect round trip. Legacy parse_gcode kept for old callers (not an evaluation entry point)."
+    },
+    "T1.3": {
+      "status": "complete",
+      "owner": "worker-3 (T1.3a CAMotics+metrics) / worker-2 (T1.3b production posted evaluator)",
+      "branch": "task/T1.3a-camotics-metrics",
+      "blocker": null,
+      "next": "T1.3a (CAMotics adapter + metrics) now; T1.3b production posted evaluator after T1.2",
+      "note": "T1.3a (CAMotics prototype adapter, metrics, bias study) and T1.3b + fixes (production posted evaluator; arcs fixed 31fd369; corner fillets 71088af/82849d4) MERGED. DECISION 2026-11-09: mandatory independent cross-check = T1.0 NumPy reference (independent implementation, plan \u00a74) for supported line fixtures; CAMotics external route geometry=null (all STLs non-watertight; slot loses both end caps: 1728 vs 2067.29) -> T1.3c time-boxed investigation (worker-3); CAMotics does not block T4.1b. | T1.3 COMPLETE: production posted evaluator + independent T1.0 reference cross-check; CAMotics supplementary (watertight export fixed; known 1.2.0 horizontal-sweep start-cap defect documented)."
+    },
+    "T2.0": {
+      "status": "complete",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T2.0-custom-geometry",
+      "blocker": null,
+      "next": null,
+      "note": "merged; sampled stock/target via contracts GeometrySource, trilinear cell-centre interp + clamp, all target consumers rerouted, position penalties full range, reset preserves sources. Baked target in runtime voxel units. No shank model."
+    },
+    "T2.1": {
+      "status": "complete",
+      "owner": "diffcam-worker-3",
+      "branch": "task/T2.1-parameterization",
+      "blocker": null,
+      "next": null,
+      "note": "merged; DeltaResidual/DeltaSpline(clamped cubic, 4<=K<=T)/AbsolutePositionResidual, T=segments, anchor_end option, exact pullbacks (45 tests; coordinator independently re-verified J^T)"
+    },
+    "T2.2": {
+      "status": "complete",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T2.2-pilot-pocket",
+      "blocker": null,
+      "next": null,
+      "note": "T2.2 + T2.2b merged. Pilot pocket: T = P \u222a four r=2 mm corner fillets; excluded 18.0 mm\u00b3 grid-exact (continuous 20.60 diagnostic); 0.25 mm pitch. Nominal (line-only seed): production safety+geometry True, residual/gouge/surface 0 (coordinator re-verified rs274). Retained: runs/retained/pilot-pocket-20261109-t22b-exact-exclusion. COST: one posted evaluation \u2248 1085 s on CPU at 0.25 mm -> pilot budget concern."
+    },
+    "T2.3": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-1",
+      "branch": null,
+      "blocker": null,
+      "next": "set counts after T4.1b pilot",
+      "note": "Bootstrap merged d5e320b: 3 families (facing/asymmetric stock, pocket-island contour, variable width/depth) x 1 dev + 1 test; T \u2287 P only finite-radius corner fillets, grid-exact exclusion tol 0; all 12 production evals safety+geometry True; audit clean. Seed generator gained a generic cap-clearing pass after a qualification failure (task unchanged, failure retained). Suite COUNTS pending pilot cost (target 3 dev / 10 test per family)."
+    },
+    "T3.0": {
+      "status": "complete",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T3.0-objectives",
+      "blocker": null,
+      "next": null,
+      "note": "merged (final gate vs real reset hook + sampled targets); stateless candidates, ObjectiveSpec incl. k, atomic artifacts"
+    },
+    "T3.1": {
+      "status": "complete",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T3.1-blackbox",
+      "blocker": null,
+      "next": null,
+      "note": "merged; CMA-ES hard/smooth, exact resume incl. final.json | Q1-Q4 follow-ups merged (fcb57db), reviewer-verified. Residual nit: popsize guard only when population_size explicit; direct solve_cma_es with population_size=None and budget < cma default popsize still ends at 0 generations (runner unaffected)."
+    },
+    "T3.2": {
+      "status": "complete",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T3.2-adam",
+      "blocker": null,
+      "next": null,
+      "note": "merged; fixed/annealed Adam, deterministic (n=1), schedule length frozen in config, invalid never best"
+    },
+    "T4.0": {
+      "status": "complete",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T4.0-auditor",
+      "blocker": null,
+      "next": null,
+      "note": "merged; auditor + exact paired sign-flip test (n<=16 enumerated), CI null n<2, small-n warning <5, Holm, cluster bootstrap CIs; coordinator re-verified p by enumeration | REOPENED: discriminator review (3 reproduced defects: failed runs dropped from denominators [HIGH], abs tie tolerance, 1-task-family CI) -> T4.0b worker-2"
+    },
+    "T4.1": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-2 (runner T4.1a) / coordinator (real pilot T4.1b)",
+      "branch": "task/T4.1-runner",
+      "blocker": null,
+      "next": "7-run pilot RUNNING since 2026-11-09 ~22:15: launched from clean detached worktree diffcam-wt/T4.1-pilot-launch at core 9656e29 (pid 832300); output runs/pilot-pocket-20261109-t41b-pilot (+ .log). Then audit + pilot_report.json review.",
+      "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts. | DECISION 2026-11-09: pilot launches as an infrastructure/cost pilot once w2 gates are green; fixed/annealed-Adam (gradient) rows are PROVISIONAL until T3.3b characterizes the systematic AD/FD mismatch; if T3.3b finds a real backward bug, Adam rows are rerun after the fix. | D-2026-11-09-04 (reports/decisions.md): pilot verdicts from 0.125 mm posted eval (both dialects); 1.0 mm = screen/diagnostic only; 0.25 mm RS274 convergence point recorded."
+    },
+    "T3.4": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T3.4-continuation",
+      "blocker": "T3.3b AD/FD characterization before dev ablations",
+      "next": "dev ablations after pilot",
+      "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot. | Reviewer verified T3.4b (K1/K2 closed). Ablation-driver requirement: catch empty-band ValueError and record an inconclusive calibration step (don't abort)."
+    },
+    "T3.3": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-3",
+      "branch": "task/T3.3-gradient-mechanics",
+      "blocker": null,
+      "next": "real study after pilot; first characterize index-35 AD/FD sign difference",
+      "note": "tooling merged c955b60 (antithetic estimator w/ exact 2N accounting + uncertainty; AD/FD same-objective tooling; cost probe 0.25 mm: 39 fwd/1 bwd/21 hard in 93 s, 1.94 GB). OPEN DIAGNOSTIC: AD vs FD on 4 axes cosine 0.9999996 but L2 discrepancy 0.0205 and index 35 sign flip \u2014 must be characterized (component magnitude vs FD noise floor across eps) before any gradient-mechanics claim."
+    },
+    "T3.5": {
+      "status": "planned",
+      "owner": null,
+      "branch": null,
+      "blocker": null,
+      "next": null
+    },
+    "T5.0": {
+      "status": "complete",
+      "owner": "diffcam-worker-3",
+      "branch": "task/T5.0-external-compat",
+      "blocker": null,
+      "next": null,
+      "note": "merged: matrix + json. CNC-Net original stack BLOCKED (sm_120); 'CNC-Net @ba0652f on modernized stack' one-step smoke PASSED (IoU 0.424, 22.5s) \u2014 not faithful reproduction; executable NC mapping unsupported natively. Titan BLOCKED (no STEP backend, no provenance/license). CNCGEN preview descriptive only."
+    },
+    "T5.1": {
+      "status": "complete",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T5.1-cncnet-adapter",
+      "blocker": null,
+      "next": null,
+      "note": "merged 16299a6. Scope frozen before results: one dev box pocket w/ island, 80 mm/object unit isotropic transform, ONE per-instance native step on modernized stack (no pretraining/weights). Native 64^3 IoU 0.4668; DiffCAM-mapped IoU 0.4760, residual 36.6 mm3, gouge 1131 mm3. Executable NC: 'incompatible: executable NC mapping unsupported' (variable radii, learned rotations, no ordered path). Evidence in external/cncnet-t51-pilot-worker-2/native-4/comparison.json (sha256 f561430d...). For T4.2: CNC-Net baseline limited to native reconstruction route; claims must state this."
+    },
+    "T5.2": {
+      "status": "complete",
+      "owner": "diffcam-worker-3",
+      "branch": "task/T5.2-external-titan",
+      "blocker": null,
+      "next": null,
+      "note": "T5.2 adapters merged (1070c1c): isolated OCP 7.7.2 STEP import of Titan-M1 (inch->mm verified), sampled P/T, bounded native partial-roughing pilot. Production eval UNSUPPORTED for sampled P/T -> T1.3f (worker-3). Excluded-volume convention decided (grid-resolved, tol 0; native 82.20 mm3 diagnostic; grid 139.29 mm3 declared). Titan provenance/license still unknown (local only). | Production evaluation now runs (T1.3f): geometry False / safety null honestly reported; Titan nominal is a partial roughing pilot only. | T5.2b merged: independent analytic bore raster (plug \u2229 nominal source void, native face z-ranges recorded) matches 68/68 cells; negative r=0.875 \u2192 56 mismatches; RESOLUTION LIMIT at 1.27 mm: small bore D=2.057 mm \u22481.6 cells, 1.25\u00d7 radius undetectable (documented). Artifacts data/external/titan-m1-t52b."
+    },
+    "T4.2": {
+      "status": "in_progress",
+      "owner": "coordinator (values) / diffcam-worker-3 (T4.2a tooling)",
+      "branch": null,
+      "blocker": "T4.1b pilot + T3.3b (gradient validity) + T2.3 counts",
+      "next": null,
+      "note": "Protocol must state: real-simulator objectives reproduce only to ~1 float32 ulp (Taichi CPU atomics, e.g. holder_overlap_total); same-seed CMA runs are approximately (not bitwise) repeatable since ulp ties can flip rankings; replay agreement uses rel 1e-5. Option to make hard-path reductions deterministic (fixed-order f64) if exact repeatability is required. | H4: RTX 5070 Ti consumer GPU has low f64 throughput and 2x VRAM; if T4.3 shards use GPU, re-measure f64 cost there before freezing; runners keep init_taichi=False (sim's own init auto-selects GPU when CUDA exists). | T4.2a tooling to worker-3."
+    },
+    "T4.3": {
+      "status": "planned",
+      "owner": null,
+      "branch": null,
+      "blocker": null,
+      "next": null
+    },
+    "T6.1": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T6.1-packets",
+      "blocker": null,
+      "next": "schema re-check after T4.1b merge; final packets after T4.2",
+      "note": "exporter merged (58cf85c+1e333a6): status 'simulation-qualified'/'pending setup review' only; nominal dev packet reproduced byte-identically; production_refinement slot (absent-with-reason for nominal; required for final). MUST re-check against the final T4.1b refinement-link schema (D-04 may bump to /4: verdicts from 0.125 mm both dialects) before final packets. Final packets after T4.2 freeze. No hardware authorized."
+    },
+    "T6.2": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T6.2-measurements",
+      "blocker": null,
+      "next": "real trial data (outside agent scope)",
+      "note": "software merged 749fc6f (packet/NC/setup gating, fiducial SVD registration, uncertainty, rejected/interrupted retention, force/load/proxy separation; synthetic-only empirical reports refused). Empirical conclusions PENDING real trial records (qualified operator)."
+    },
+    "T7.1": {
+      "status": "planned",
+      "owner": null,
+      "branch": null,
+      "blocker": null,
+      "next": null
+    },
+    "T7.2": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-3",
+      "branch": "task/T7.2-artifacts",
+      "blocker": null,
+      "next": "after T4.3",
+      "note": "scaffold merged f07c254 (claim-to-evidence per cell, failure/unavailable/refinement rows, precision + decision-ID matching, byte-identical regeneration; never writes manuscript/). Real tables after T4.3."
+    },
+    "T1.0b": {
+      "status": "complete",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T1.0b-rapid-tolerance",
+      "blocker": null,
+      "next": null,
+      "note": "merged; certification needs evaluator band (sqrt3*v/2 + temporal) < rapid_penetration_mm \u2014 T1.3 must pick resolution accordingly (coordinator check: retract certifies at tol 0.5, unknown at 0.25 with v=0.25)"
+    },
+    "T5.0b": {
+      "status": "complete",
+      "owner": "diffcam-worker-3",
+      "branch": "task/T5.0b-cncnet-env",
+      "blocker": null,
+      "next": null,
+      "note": "merged; baselines/cncnet recipe re-proved from fresh venv: IoU 0.423786 vs 0.423761"
+    },
+    "T4.0b": {
+      "status": "complete",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T4.0b-audit-fixes",
+      "blocker": null,
+      "next": null,
+      "note": "merged; failures counted as known 0, drop counts, complete_data flag, relative tie tol, pooled CI for singleton strata, Holm dedupe; verified with reviewer repros"
+    },
+    "T1.0c": {
+      "status": "complete",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T1.0c-reference-safety",
+      "blocker": null,
+      "next": null,
+      "note": "merged; whole-cell stock bounds for safety, zero-length screen unified, conservative lower-bound clearance metrics; T1.3 must inherit whole-cell semantics | Optional tightness follow-up (discriminator L2): whole-cell slack also applied to aligned grids (retract upper 1.82->3.57 mm; one convergence row true->null). If T1.3/T4.1 sees too many 'uncertain' rapids, apply slack only to boundary-straddling cells."
+    },
+    "T1.4b": {
+      "status": "complete",
+      "owner": "diffcam-worker-3",
+      "branch": "task/T1.4b-nc-review-fixes",
+      "blocker": null,
+      "next": null,
+      "note": "merged; all 7 findings + legacy G18 fixed w/ regressions. Decision: inch 3-decimal arcs -> UnsupportedPostError (contract 1e-3 mm radius tol kept). CAM lease stays with worker-3 until reassigned."
+    },
+    "T4.0c": {
+      "status": "complete",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T4.0c-audit-flags",
+      "blocker": null,
+      "next": null,
+      "note": "merged"
+    },
+    "T1.2b": {
+      "status": "complete",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T2.0-custom-geometry@9644d1b",
+      "blocker": null,
+      "next": null,
+      "note": "merged; H1 hard holder checks inflated by cell half-diagonal (safe-case overlap 100->25->0 mm3 at n=1,2,3), H2 lifecycle charged after init, H3 max_steps>=1, H4 reset restores configured start. Reviewer repros pass."
+    },
+    "T3.xb": {
+      "status": "complete",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T3.2-adam",
+      "blocker": null,
+      "next": null,
+      "note": "merged; O1-O6 fixed, reviewer repros re-run by coordinator"
+    },
+    "T1.4c": {
+      "status": "complete",
+      "owner": "diffcam-worker-3",
+      "note": "merged; T/H bound to task tool_number; later different H refused"
+    },
+    "T1.3c": {
+      "status": "complete",
+      "owner": "diffcam-worker-3",
+      "branch": "task/T1.3c-camotics",
+      "blocker": null,
+      "next": null,
+      "note": "merged 49c38a5. Single-thread MCUBES -> watertight, oriented STL (0.25/0.1 mm), directed-edge validation (no self-intersection guarantee). Endpoint-cap loss ROOT CAUSE: CAMotics 1.2.0 horizontal ConicSweep rejects interior start-cylinder points (beta<0) and disc fallback divides by (Bz-Az)=0 -> starting disc never cut. CAMotics remains supplementary with this documented defect; not a production oracle."
+    },
+    "T1.3f": {
+      "status": "complete",
+      "owner": "diffcam-worker-3",
+      "branch": "task/T1.3f-sampled-eval",
+      "blocker": null,
+      "next": null,
+      "note": "merged a212925+62e5573: exact-grid sampled P/T in production evaluator (no resampling), analytic regressions preserved; Titan production posts: coverage complete, geometry False (single roughing plunge), safety null (rapid-cutter penetration upper bound 1.67 mm vs tol 0). Evaluator/task tests 106 passed on core."
+    },
+    "T2.2b": {
+      "status": "complete",
+      "owner": "diffcam-worker-1",
+      "branch": null,
+      "blocker": null,
+      "next": null,
+      "note": "reachable pilot target; merged 77a319b (G1 exact grid exclusion)"
+    },
+    "T5.2b": {
+      "status": "complete",
+      "owner": "diffcam-worker-3",
+      "branch": null,
+      "blocker": null,
+      "next": null,
+      "note": "independent Titan bore raster 68/68; merged bb552e8"
+    },
+    "T3.4b": {
+      "status": "complete",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T3.4b-shift",
+      "blocker": null,
+      "next": null,
+      "note": "merged 2424699: shift via sim per-voxel stock field; phi_hard = hard stock_d[T]; two-sided band predicate; leak tests; C2. Coordinator real-sim gaps small and shrinking with k (k=20: +0.06/+0.17/+0.00 vox)."
+    },
+    "T3.3b": {
+      "status": "complete",
+      "owner": "diffcam-worker-3",
+      "branch": "task/T3.3b-adfd",
+      "blocker": null,
+      "next": null,
+      "note": "SYSTEMATIC AD/FD mismatch: idx2 AD -0.4785 vs FD -0.4990 (4.1%, eps-independent), idx35 sign flip; per-component bisect (sigmoid clamp, ti.max carve, stop-gradients, f32 backward). Affects Adam/T3.4 step quality. | PRIORITY right after pilot launch; gates T3.4 ablations and any optimizer choice for T4.2. | INTERIM: index-2 bias is f32 field/adjoint accumulation (full f64: AD -0.3407647 vs FD -0.3407663); helper-only f64 does not fix; terminal block verified. Index-35 +0.00728 NOT reproduced (fresh AD -0.00296 \u2248 FD) -> investigating possible state leakage. Pending: precision-fix cost (f64 full vs narrow). | Reviewer G2: f32 ADJOINT bias grows ~linearly with path length (prefix 8: 0.24%, 48: 2.5%, 75: 4.1%); f32 FORWARD accurate (f32 FD \u2248 f64 FD) -> CMA/hard rows unaffected; only gradient rows provisional. Precision choice must be validated on the longest suite path. | RESULT: full f64 fixes index-2 (AD -0.49917 vs FD -0.49916), 112 s/3.67 GB vs f32 93 s/1.94 GB; scalar-only f64 insufficient; idx-35 UNREPRODUCED on exact c955b60 (closed). -> D-2026-11-09-05. | MERGED 8320c05 with permanent AD-consistency regression (same \u03b8 / after other \u03b8 / fresh process)."
+    },
+    "T3.3c": {
+      "status": "complete",
+      "owner": "diffcam-worker-1",
+      "branch": "task/T3.3c-sim-precision",
+      "blocker": null,
+      "next": null,
+      "note": "merged de37d5a: precision='f32'|'f64' declared option (f32 default), all fields/kernels/adjoints follow dtype; f64 AD/FD < 1% (idx 2, 35) on 75-seg pilot path; f32 bias curve retained; cost f32 29.4 s/2.0 GB vs f64 37.0 s/3.7 GB per gradient."
+    },
+    "T4.1b-L1": {
+      "status": "done",
+      "owner": "coordinator (all three workers stalled in API-timeout retries)",
+      "branch": "task/T4.1b-L1-rss",
+      "base": "553a7d2",
+      "lease": [
+        "scripts/run_benchmark_suite.py"
+      ],
+      "note": "Reassigned from worker-2 (stalled in API-timeout retries). Per-child VmHWM peak RSS, cap checks on child peak, >=1GiB-parent regression, re-measure posted phases; D-07 to be amended from real peaks. Coordinator took L1 at 17:50; fix + 2 regressions committed e7c5b3b (runner tests 38 passed/6 skipped); full suite + posted-phase re-measure running. Merged to core 9a6537b. Gates at e941ad0: full 639p/11s, REAL_PILOT_SMOKE 44p (runs/retained/t41b-l1-real-pilot-smoke-e941ad0), REAL_NOMINAL 11p.",
+      "tip": "e941ad0"
+    }
   }
- }
 }

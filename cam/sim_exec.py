@@ -13,6 +13,7 @@ pure G-code work stays lightweight.
 import numpy as np
 import taichi as ti
 
+from algorithms.run_artifacts import simulator_array
 from simulator.csg_simulator import CSGSimulatorDelta
 
 
@@ -43,6 +44,7 @@ def carve_stock(
     voxel_size_mm=None,              # explicit spacing overrides resolution
     work_volume_in=(16.0, 12.0, 10.0),
     stock_origin_in=None,
+    precision="f32",
 ):
     """Run ``positions`` through the simulator and return the final stock SDF grid.
 
@@ -51,7 +53,7 @@ def carve_stock(
     constructed (which re-initialises Taichi), so callers comparing two
     trajectories should carve one, copy the result to NumPy, then carve the next.
     """
-    positions = np.asarray(positions, dtype=np.float32)
+    positions = np.asarray(positions)
     if positions.ndim != 2 or positions.shape[1] != 3 or len(positions) < 2:
         raise ValueError(f"positions must be (M>=2, 3); got {positions.shape}")
 
@@ -67,12 +69,13 @@ def carve_stock(
         voxel_size_mm=voxel_size_mm,
         work_volume_in=work_volume_in,
         stock_origin_in=stock_origin_in,
+        precision=precision,
     )
     sim.tool_radius[None] = tool_radius
     sim.tool_height[None] = tool_height
 
-    padded = np.zeros((sim.max_steps, 3), dtype=np.float32)
-    padded[: len(deltas)] = deltas
+    padded = simulator_array(sim, np.zeros((sim.max_steps, 3)))
+    padded[: len(deltas)] = simulator_array(sim, deltas)
     sim.tool_delta.from_numpy(padded)
 
     sim.forward_hard(n_pos)                         # carves n_pos-1 segments

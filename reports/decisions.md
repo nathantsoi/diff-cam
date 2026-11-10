@@ -44,3 +44,21 @@ The real-grid dry-run failed closed in the 1.0 mm screen phase: production NumPy
 per job, over the 2 GiB cap extrapolated from a small grid. Host: ~124 GiB total, ~45 GiB available. DECISION: max_rss_bytes_per_job = 8 GiB,
 parallel_jobs = 2, geometry/sampling controls frozen; cap still fails closed; peaks measured per phase/dialect and reported. If a phase
 exceeds 8 GiB, stop and open an evaluator memory-optimization card rather than raise the cap further.
+
+### D-07 amendment (2026-11-09, T4.1b-L1) — premise corrected; cap retained
+The 3,689,144,320 B "screen peak" behind D-07 was not the evaluator's memory. Posted workers recorded
+`getrusage(RUSAGE_SELF).ru_maxrss`, which Linux carries across fork/execve, so every child reported the f64 optimizer parent's
+peak (3,600,904 KiB for every role in the 553a7d2 dry-run). Fixed on task/T4.1b-L1-rss (e7c5b3b): workers record their own
+VmHWM, the parent cross-checks its polled child VmHWM, and ru_maxrss is kept only as a labelled diagnostic.
+Re-measured by re-running the 553a7d2 dry-run's five posted jobs as standalone workers (2 concurrent), on unchanged job specs:
+| role / dialect | own VmHWM | wall | evaluation bytes vs 553a7d2 |
+|---|---|---|---|
+| screen 1.0 mm rs274 / haas | 0.418 / 0.418 GiB | 153 / 152 s | identical / identical |
+| verdict 0.125 mm rs274 / haas | 0.416 / 0.416 GiB | 1235 / 1213 s | identical / identical |
+| convergence 0.25 mm rs274 | 0.417 GiB | 505 s | identical |
+(`/usr/bin/time -v` max RSS agrees with VmHWM for every job.) Evidence: /tmp/diffcam-l1-remeasure.0yLJ72.
+DECISION: keep max_rss_bytes_per_job = 8 GiB and parallel_jobs = 2 unchanged. The cap is a fail-closed ceiling, not a tuned budget.
+With real peaks at about 0.42 GiB it has roughly 19× headroom; changing it would mean re-gating the runner for no pilot benefit.
+The "6–8 GiB review" flag cannot trigger at these peaks. The optimizer parent's own peak (~3.4–3.7 GiB, f64; D-05) is a separate,
+host-level budget and is not compared against the per-job cap. A tighter cap (for example 2 GiB) can be revisited at the T4.2 freeze
+if a leak-detection margin is wanted.
