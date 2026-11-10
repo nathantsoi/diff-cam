@@ -106,11 +106,11 @@ def make_case(tmp_path):
             "timeout_s": 30.0, "total_wall_time_s": 50.0,
         },
         "estimates": {
-            "run_count": 8, "candidate_evaluations": 29, "validation_calls": 14,
+            "run_count": 8, "candidate_evaluations": 36, "validation_calls": 14,
             "seconds_per_candidate_by_method": {"nominal-cam": 0.5, "fixed-adam": 1.25,
                                                "annealed-adam": 0.5, "hard-cmaes": 0.5,
                                                "smooth-cmaes": 0.5},
-            "worker_seconds": 30.5,
+            "worker_seconds": 35.5,
             "cpu_rss_bytes_per_job": 1073741824,
             "uncertainty": "synthetic arithmetic estimates only; no universal timings or guaranteed phase-memory bound",
         },
@@ -233,9 +233,10 @@ def make_init_case(tmp_path):
     })
     # Seven no-init declarations plus one separate exploratory sidecar are
     # added to the eight native CAM cases; only the eight perform native dry-runs.
-    case["estimates"].update({"run_count": 16, "candidate_evaluations": 61,
-                              "validation_calls": 30, "worker_seconds": 54.5})
-    case["budget"]["total_wall_time_s"] = 60.0
+    # Every non-nominal optimizer row includes one hard init evaluation (T3.xc).
+    case["estimates"].update({"run_count": 16, "candidate_evaluations": 76,
+                              "validation_calls": 30, "worker_seconds": 63.5})
+    case["budget"]["total_wall_time_s"] = 75.0
     return case
 
 
@@ -259,17 +260,17 @@ def test_valid_schema_runs_every_primary_and_variant_case_with_exact_provenance(
     assert doc["declared_not_yet_runnable_count"] == 0
     assert all(row["init"] == "cam" and row["native_dry_run_performed"] for row in report["dry_runs"])
     assert len(report["dry_runs"]) == 8
-    assert doc["cost_accounting"]["candidate_evaluations"] == 29
+    assert doc["cost_accounting"]["candidate_evaluations"] == 36
     assert doc["cost_accounting"]["validation_calls"] == 14
-    assert doc["cost_accounting"]["worker_seconds"] == 30.5
+    assert doc["cost_accounting"]["worker_seconds"] == 35.5
     assert doc["prototype_adapter_compatible"] is True
     nominal = next(row for row in report["dry_runs"] if row["condition"] == "nominal-cam")
     assert nominal["candidate_evaluations"] == 1
     variant = next(row for row in report["dry_runs"] if row["scope"] == "dimensionality_subset")
     assert variant["variant"] == "lower-k"
     fixed = next(row for row in report["dry_runs"] if row["condition"] == "fixed-adam" and row["variant"] is None)
-    assert fixed["candidate_evaluations"] == 4 and fixed["validation_calls"] == 2
-    assert fixed["estimated_wall_time_s"] == 7.5
+    assert fixed["candidate_evaluations"] == 5 and fixed["validation_calls"] == 2
+    assert fixed["estimated_wall_time_s"] == 8.75
     assert variant["run_id"] != fixed["run_id"]
     assert doc["protocol_sha256"] == sha(tmp_path / "protocol.json")
     assert doc["primary_task_hash"] == R._prototype()[0].task_hash
@@ -323,9 +324,9 @@ def test_d08_init_axis_has_explicit_previews_not_cam_runner_evidence(tmp_path):
     assert report["exploratory_cam_perturbation_count"] == 1
     assert len(report["dry_runs"]) == 16
     assert report["cost_accounting"]["jobs"] == 16
-    assert report["cost_accounting"]["candidate_evaluations"] == 61
+    assert report["cost_accounting"]["candidate_evaluations"] == 76
     assert report["cost_accounting"]["validation_calls"] == 30
-    assert report["cost_accounting"]["worker_seconds"] == 54.5
+    assert report["cost_accounting"]["worker_seconds"] == 63.5
     pending = [row for row in report["dry_runs"] if row["declared_not_yet_runnable"]]
     assert len(pending) == 8
     assert {row["seed"] for row in pending
@@ -402,22 +403,22 @@ def test_cam_perturbed_case_has_separate_identity_and_claim_exclusions(tmp_path)
 def test_sidecar_alone_does_not_invent_a_d08_random_axis(tmp_path):
     case = make_case(tmp_path)
     case["methods"][2]["cam_perturbed_init"] = make_cam_perturbed_override()
-    case["estimates"].update({"run_count": 9, "candidate_evaluations": 33,
-                              "validation_calls": 16, "worker_seconds": 33.5})
+    case["estimates"].update({"run_count": 9, "candidate_evaluations": 41,
+                              "validation_calls": 16, "worker_seconds": 39.0})
     report = run_case(case, tmp_path)
     assert [key for key in ("random_init", "straight_line_init", "collapse_criterion")
             if key in case] == []
     assert report["exploratory_cam_perturbation_count"] == 1
     assert report["declared_not_yet_runnable_count"] == 1
     assert report["validated_run_count"] == 8
-    assert report["cost_accounting"]["worker_seconds"] == 33.5
+    assert report["cost_accounting"]["worker_seconds"] == 39.0
 
 
 def test_variant_sidecar_preserves_variant_k_and_parent_identity(tmp_path):
     case = make_case(tmp_path)
     case["dimensionality_subset"][0]["cam_perturbed_init"] = make_cam_perturbed_override()
-    case["estimates"].update({"run_count": 9, "candidate_evaluations": 33,
-                              "validation_calls": 16, "worker_seconds": 38.0})
+    case["estimates"].update({"run_count": 9, "candidate_evaluations": 41,
+                              "validation_calls": 16, "worker_seconds": 44.25})
     declaration = V.validate_declaration(case, tmp_path / "repo", tmp_path / "decisions.md")
     sidecar = next(job for job in declaration["jobs"]
                    if job["scope"] == "exploratory_cam_perturbation")
@@ -477,6 +478,23 @@ def test_sidecar_must_attach_to_cam_parent_with_independent_seed_reference(tmp_p
     # scale object and own seed stream remain present, never a random_init fallback.
     assert case["methods"][2]["cam_perturbed_init"]["seed_derivation_rule"]["root_seed"] == 101
     V.validate_declaration(case, tmp_path / "repo", tmp_path / "decisions.md")
+
+
+def test_worker_seconds_equal_total_wall_time_cap_is_allowed(tmp_path):
+    # The validator's boundary is estimated_worker_seconds <= total_wall_time_s,
+    # not a strict <. Equality is an allowed declared arithmetic boundary.
+    case = make_case(tmp_path)
+    case["budget"]["total_wall_time_s"] = case["estimates"]["worker_seconds"]
+    report = run_case(case, tmp_path)
+    assert report["cost_accounting"]["worker_seconds"] == 35.5
+    assert case["budget"]["total_wall_time_s"] == 35.5
+
+
+def test_worker_seconds_above_total_wall_time_cap_fails_closed(tmp_path):
+    case = make_case(tmp_path)
+    case["budget"]["total_wall_time_s"] = case["estimates"]["worker_seconds"] - 0.01
+    with pytest.raises(V.ProtocolError, match="total_wall_time_s is smaller"):
+        run_case(case, tmp_path)
 
 
 @pytest.mark.parametrize("key", ["random_init", "straight_line_init", "collapse_criterion"])

@@ -636,6 +636,26 @@ def _select_hard_candidate(state: _State, result: C.CandidateResult, theta: np.n
         state.best_theta = np.asarray(theta, dtype=float).copy()
 
 
+def _hard_population_fitness(ranks: Sequence[Optional[tuple[float, ...]]]) -> list[float]:
+    """Return CMA fitness in original member order, ranked by hard feasibility.
+
+    CMA uses order, not the gap between scalar objective values. Assigning the
+    ordinal in this population lets its distribution follow the same declared
+    safety/completion rank as final selection. Invalid/non-rankable members
+    always receive the finite invalid penalty, with no hidden resampling.
+    """
+    order = sorted(range(len(ranks)),
+                   key=lambda index: (ranks[index] is None,
+                                      ranks[index] if ranks[index] is not None else ()))
+    fitness = [float(optimizer_invalid_penalty())] * len(ranks)
+    position = 0
+    for index in order:
+        if ranks[index] is not None:
+            fitness[index] = float(position)
+            position += 1
+    return fitness
+
+
 def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRunResult:
     getter = getattr(evaluator, "clear_evaluation_k", None)
     if getter is not None:
@@ -678,6 +698,7 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
         best_in_population: Optional[C.CandidateResult] = None
         best_in_population_theta = None
         invalid = 0
+        population_ranks: list[Optional[tuple[float, ...]]] = []
         for candidate_index, theta in enumerate(candidates):
             physical = np.asarray(theta, dtype=np.float64)
             candidate_id = f"{state.run_id}:g{state.generations}:m{candidate_index}"
@@ -686,6 +707,7 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
             after = evaluator.ledger.snapshot()
             state.forward_calls += after["forward_calls"] - before["forward_calls"]
             state.backward_calls += after["backward_calls"] - before["backward_calls"]
+            rank = None
             if result.valid and result.objective is not None:
                 value = float(result.objective)
                 if best_in_population is None or value < best_in_population.objective:
@@ -693,11 +715,20 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
                     best_in_population_theta = physical.copy()
                 if state.objective_kind == "hard":
                     _refine_hard_selection(state, evaluator, result)
-                    _select_hard_candidate(state, result, physical)
+                    rank = _hard_rank(result, state.selection_limits)
+                    if rank is not None:
+                        _select_hard_candidate(state, result, physical)
+                    else:
+                        # A finite result with unavailable modeled safety is
+                        # not a free objective win. It cannot guide hard CMA.
+                        invalid += 1
             else:
                 value = float(optimizer_invalid_penalty())
                 invalid += 1
+            population_ranks.append(rank)
             fitness.append(value)
+        if state.objective_kind == "hard":
+            fitness = _hard_population_fitness(population_ranks)
         state.es.tell(candidates, fitness)
         state.evaluations += len(candidates)
         state.invalid_candidates += invalid
@@ -706,6 +737,8 @@ def _run(state: _State, evaluator: Any, checkpoint_dir: Optional[Path]) -> CmaRu
             "generation": state.generations, "evaluations": state.evaluations,
             "population_size": len(candidates), "invalid_members": invalid,
             "fitness": list(fitness),
+            "fitness_semantics": ("hard_rank_ordinal_within_population"
+                                  if state.objective_kind == "hard" else "raw_objective"),
             "best_fitness": None if best_in_population is None else best_in_population.objective,
             "best_overall": None if state.best is None else state.best.objective,
             "best_theta": None if state.best_theta is None else state.best_theta.tolist(),

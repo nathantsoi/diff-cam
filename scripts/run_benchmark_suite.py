@@ -38,7 +38,7 @@ from algorithms import run_artifacts as R
 from benchmarks import audit as audit
 from benchmarks import contracts as C
 from benchmarks import pilot_task as pilot_io
-from cam.posted_evaluator import PostedEvaluator, RefinementSettings, _analytic_mask
+from cam.posted_evaluator import PostedEvaluator, RefinementSettings, _analytic_mask, _revision, EVALUATOR_ID
 from cam.posts import post_motion_plan
 from simulator.csg_simulator import CSGSimulatorDelta
 
@@ -69,6 +69,9 @@ class Outcome:
     invalid_candidates: int
     termination_reason: str
     history: list[dict[str, Any]]
+    # The actual solver result is needed for θ0/selection evidence in artifacts.
+    # Nominal and older synthetic Outcome construction have no such solver state.
+    optimizer_result: Optional[Any] = None
 
 
 def _json(path: Path) -> Any:
@@ -413,9 +416,16 @@ def _phase_settings(task, config, dialect, nc_bytes, role, *, primary=None, cont
         raise RunnerError(f"invalid {role} posted settings: {error}") from error
 
 
-def _validate_posted_result(task, nc_bytes, dialect, settings, result):
+def _validate_posted_result(task, nc_bytes, dialect, settings, result,
+                            *, require_current_evaluator=False):
     if not isinstance(result, C.EvaluationResult):
         raise RunnerError("posted worker did not return a typed EvaluationResult")
+    if require_current_evaluator:
+        expected = f"{EVALUATOR_ID}/{_revision()}"
+        actual = f"{result.evaluator_id}/{result.evaluator_revision}"
+        if actual != expected:
+            raise RunnerError(
+                f"reused result evaluator identity/revision mismatch: current {expected}, reused {actual}")
     if result.dialect is not dialect or result.nc_hash != C.nc_hash(nc_bytes):
         raise RunnerError("posted result has the wrong dialect or exact NC hash")
     if result.task_hash != task.task_hash or result.tool_setup_hash != task.tool_setup_hash:
@@ -433,6 +443,14 @@ class PostedJob:
     settings: Mapping[str, Any]
     workspace: Path
     reused_source: Optional[Path] = None
+    # Infer only at construction. Later supplied unit-test override files are
+    # not historical cache and keep the initial False setting. Declared cached
+    # sources, including direct PostedJob(path) uses, require current identity.
+    require_current_evaluator: Optional[bool] = None
+
+    def __post_init__(self):
+        if self.require_current_evaluator is None:
+            object.__setattr__(self, "require_current_evaluator", self.reused_source is not None)
 
 
 def _prepare_posted_job(task, job):
@@ -526,7 +544,8 @@ def _posted_job_process(task, job, config):
     if job.reused_source is not None:
         source = job.reused_source.read_bytes()
         result = C.loads(source.decode("utf-8"))
-        _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, result)
+        _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, result,
+                                require_current_evaluator=job.require_current_evaluator)
         if R.record_bytes(result) != source:
             raise RunnerError("cached typed refinement is not canonical production evidence")
         return result, {
@@ -769,8 +788,11 @@ def _prototype_evaluator(task, motion, parameterization, config, seed):
 
 
 def _budget(config: Mapping[str, Any], method: str) -> B.OptimizationBudget:
+    assert method != "nominal-cam"
+    # Raw config retains the previously declared search evaluations. Exactly
+    # one ordinary hard θ0 evaluation precedes every optimizer's updates.
     return B.OptimizationBudget(
-        candidate_evaluations=config["candidate_evaluations"],
+        candidate_evaluations=config["candidate_evaluations"] + 1,
         population_size=config["population_size"] if method.endswith("cmaes") else None,
         validation_interval=config["validation_interval"],
         max_validation_calls=config["max_validation_calls"],
@@ -790,6 +812,8 @@ def _identity(task: C.TaskSpec, config: Mapping[str, Any], split: str) -> str:
         "learning_rate": config["learning_rate"], "k_fixed": config["k_fixed"], "k_smooth": config["k_smooth"],
         "k_anneal_start": config["k_anneal_start"], "k_anneal_end": config["k_anneal_end"],
         "max_generations": config.get("max_generations"),
+        "hard_init_accounting": "one ordinary hard candidate before every optimizer update",
+        "hard_selection_policy": dataclasses.asdict(B.HardSelectionPolicy()),
     }
     return C.content_hash(payload)
 
@@ -830,18 +854,20 @@ def _budget_sizes(config, method):
     if method == "nominal-cam":
         return 1, 0
     budget = _budget(config, method)
-    iterations = budget.candidate_evaluations
+    remaining = budget.candidate_evaluations - 1
+    iterations = remaining
     if budget.max_generations is not None:
         iterations = min(iterations, budget.max_generations)
     if method.endswith("cmaes") and budget.population_size is not None:
-        iterations = min(iterations, budget.candidate_evaluations // budget.population_size)
+        iterations = min(iterations, remaining // budget.population_size)
     if iterations <= 0:
         raise RunnerError("the requested generation budget selects no work")
-    candidates = 1 if method == "nominal-cam" else iterations
+    # Budget total includes θ0; generations/gradient updates remain search work.
+    candidates = 1 + iterations
     if method.endswith("cmaes"):
-        candidates *= (budget.population_size or 2)
+        candidates = 1 + iterations * budget.population_size
         # A generation evaluates members, but can trigger at most one validation.
-    # For Adam, candidates and iterations are the same count.
+    # For Adam, candidates are init plus gradient evaluations.
     validations = min(budget.max_validation_calls, iterations,
                       candidates // budget.validation_interval if budget.validation_interval else 0)
     if budget.max_validation_calls and not budget.validation_interval:
@@ -908,6 +934,8 @@ def _pecent(config: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]) -> 
             kind = "smooth_forward" if entry["method"] == "smooth-cmaes" else (
                 "smooth_gradient" if entry["method"] in ("fixed-adam", "annealed-adam") else "hard_forward")
             unit = _finite_seconds(evidence["candidate_seconds"].get(kind), kind)
+            init_seconds = 0.0 if entry["method"] == "nominal-cam" else _finite_seconds(
+                evidence["candidate_seconds"]["hard_forward"], "hard initialization")
             setup = _finite_seconds(evidence["constructor_seconds"], "constructor_seconds")
             other = (_finite_seconds(evidence["worker_wall_seconds"], "worker_wall_seconds")
                      - setup - sum(_finite_seconds(evidence["candidate_seconds"].get(key), key)
@@ -915,20 +943,23 @@ def _pecent(config: Mapping[str, Any], entries: Sequence[Mapping[str, Any]]) -> 
                      - measured_post - refined_seconds)
             extra = {
                 "constructor_seconds": setup,
-                "candidate_seconds": unit * candidates,
+                "candidate_seconds": unit * (candidates - int(entry["method"] != "nominal-cam")),
+                "initialization_seconds": init_seconds,
                 "validation_seconds": _finite_seconds(evidence["candidate_seconds"]["hard_forward"], "hard_forward") * validations,
                 "posted_seconds": measured_post,
                 "other_worker_seconds": other,
                 "estimation": "one measured point per evaluation type, not a timing confidence interval",
             }
-            estimate = setup + extra["candidate_seconds"] + extra["validation_seconds"] + measured_post + other
+            estimate = (setup + extra["candidate_seconds"] + extra["initialization_seconds"]
+                        + extra["validation_seconds"] + measured_post + other)
             if other < -1e-9:
                 raise RunnerError("timing evidence has a negative process-overhead residual")
             # Candidate durations are recorded to nanoseconds; do not make a
             # valid worker fail solely because a sum rounds a fraction above its wall clock.
             other = max(other, 0.0)
             extra["other_worker_seconds"] = other
-            estimate = setup + extra["candidate_seconds"] + extra["validation_seconds"] + measured_post + other
+            estimate = (setup + extra["candidate_seconds"] + extra["initialization_seconds"]
+                        + extra["validation_seconds"] + measured_post + other)
             note = "one measured point per evaluation type in one child; workload estimate, not a timing interval or launch permission"
         elif raw is not None:
             estimate = raw * (candidates + validations)
@@ -1402,7 +1433,9 @@ def _manifest(config: Mapping[str, Any], task: C.TaskSpec, entries: Sequence[Map
                        "nominal_cam": "one_deterministic_run"}}
 
 
-def _evaluate_outcome(condition: str, evaluator: Any, config: Mapping[str, Any], seed: int) -> Outcome:
+def _evaluate_outcome(condition: str, evaluator: Any, config: Mapping[str, Any], seed: int,
+                      run_id: Optional[str] = None) -> Outcome:
+    run_id = run_id or condition
     dims = evaluator.parameterization.num_params
     zeros = np.zeros(dims)
     if condition == "nominal-cam":
@@ -1425,13 +1458,14 @@ def _evaluate_outcome(condition: str, evaluator: Any, config: Mapping[str, Any],
         kind = "hard" if condition == "hard-cmaes" else "smooth"
         result = B.solve_cma_es(evaluator, _budget(config, condition), seed=seed,
                                 objective_kind=kind, x0=zeros, sigma0=config.get("sigma0", 0.01),
-                                run_id=condition)
+                                run_id=run_id)
         if result.best is None:
             raise RunnerError(f"{condition}: no valid candidate from whole population")
         return Outcome(seed, result.best, result.best_theta, result.initial_theta,
                        result.budget, result.evaluations, result.validation_calls, result.generations,
                        getattr(result, "forward_calls", 0), getattr(result, "backward_calls", 0),
-                       result.invalid_candidates, result.termination_reason, result.history)
+                       result.invalid_candidates, result.termination_reason, result.history,
+                       optimizer_result=result)
     if condition == "fixed-adam":
         mode, k_start, k_end = "fixed", config["k_fixed"], config["k_fixed"]
     else:
@@ -1440,14 +1474,14 @@ def _evaluate_outcome(condition: str, evaluator: Any, config: Mapping[str, Any],
                           max_gradient_norm=config.get("max_gradient_norm", 0.5),
                           k_start=k_start, k_end=k_end)
     result = adam.solve_adam(evaluator, _budget(config, condition), cfg, seed=seed,
-                             x0=zeros, run_id=condition)
+                             x0=zeros, run_id=run_id)
     if result.best is None:
         raise RunnerError(f"{condition}: no valid hard-selected candidate "
                           f"(termination_reason={result.termination_reason})")
     return Outcome(seed, result.best, result.best_theta, result.initial_theta, result.budget,
                    result.evaluations, result.validation_calls, result.gradient_updates,
                    result.forward_calls, result.backward_calls, result.invalid_evaluations,
-                   result.termination_reason, result.history)
+                   result.termination_reason, result.history, optimizer_result=result)
 
 
 def _write_failure(entry: Mapping[str, Any], task: C.TaskSpec, motion: C.MotionPlan,
@@ -1494,6 +1528,15 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
                                                        "backward_calls": outcome.backward_calls,
                                                        "generations": outcome.generations}},
                                     repository=repository)
+    optimized = outcome.optimizer_result
+    config_out["hard_selection"] = (
+        None if optimized is None else {
+            "policy": dataclasses.asdict(optimized.selection),
+            "resolved": optimized.selection_thresholds,
+        })
+    config_out["hard_selection_config_hash"] = (
+        None if optimized is None or optimized.selection_thresholds is None
+        else optimized.selection_thresholds["config_hash"])
     initial = evaluator.parameterization.positions(outcome.initial_theta)
     best = evaluator.parameterization.positions(outcome.best_theta)
     files = dict(posting.files)
@@ -1503,6 +1546,8 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
         "metrics.json": R.json_bytes({"best_candidate": B._candidate_dict(outcome.best),
                                       "termination_reason": outcome.termination_reason,
                                       "invalid_candidates": outcome.invalid_candidates,
+                                      "selection": (None if optimized is None
+                                                    else B._selection_metadata(optimized)),
                                       "execution": {"subprocess": os.getpid(), "simulators_in_worker": 1,
                                                     "simulator_tool_start_normalized": (
                                                         evaluator.sim.tool_start[None].to_list()),
@@ -1572,7 +1617,8 @@ def _child(config: Mapping[str, Any], entry: Mapping[str, Any], root: Path) -> N
         raise KeyboardInterrupt("injected child interruption; parent must retain the status")
     evaluator = evaluator_factory(task, motion, params, config, entry["seed"])
     try:
-        outcome = _evaluate_outcome(entry["method"], evaluator, config, entry["seed"])
+        outcome = _evaluate_outcome(entry["method"], evaluator, config, entry["seed"],
+                                    run_id=entry["run_id"])
         _write_outcome(entry, evaluator, outcome, posted_factory, config, root, REPOSITORY)
     except KeyboardInterrupt:
         raise
@@ -1739,9 +1785,15 @@ def _provided_typed_source(task, job, override):
     if supplied is None:
         return None
     if isinstance(supplied, Path):
-        return supplied.resolve()
+        source = supplied.resolve()
+        cached = C.loads(source.read_text(encoding="utf-8"))
+        _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, cached,
+                                require_current_evaluator=job.require_current_evaluator)
+        R.record_bytes(cached)  # Preserve the existing canonical typed boundary.
+        return source
     source_bytes = R.record_bytes(supplied)
-    _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, supplied)
+    _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, supplied,
+                            require_current_evaluator=job.require_current_evaluator)
     job.workspace.mkdir(parents=True, exist_ok=False)
     source = job.workspace / "provided-typed-result.json"
     R.ArtifactWriter._replace_bytes(source, source_bytes)
@@ -2252,6 +2304,118 @@ def _verified_refinement_for_report(root, run_id, auxiliary_root, config):
     }, resources
 
 
+def _selection_vs_verdict_record(root: Path, run_id: str, evaluated: Mapping[str, C.EvaluationResult],
+                                 method: str) -> dict[str, Any]:
+    """Compare the *same selected program's* stored 0.25 and 0.125 mm evidence.
+
+    Nominal has no optimizer selection. Older fixture/legacy runs may also lack
+    one; both remain explicit null, never a guessed feasibility pass. A present
+    optimizer record is re-ranked from its immutable result/thresholds without
+    calling the simulator; an internally inconsistent record fails closed.
+    """
+    metrics_path = root / run_id / "metrics.json"
+    config_path = root / run_id / "config.json"
+    metrics = _json(metrics_path)
+    selection = metrics.get("selection") if isinstance(metrics, Mapping) else None
+    reason = None
+    candidate_id = theta_hash = None
+    selection_config_hash = None
+    feasible = None
+    if not isinstance(selection, Mapping):
+        reason = ("nominal-direct-hard-has-no-optimizer-selection-record" if method == "nominal-cam"
+                  else "legacy-run-no-optimizer-selection-record")
+    else:
+        config_doc = _json(config_path)
+        selection_config = config_doc.get("hard_selection")
+        try:
+            if not isinstance(selection_config, Mapping):
+                raise ValueError("run config has no hard selection policy")
+            thresholds = selection_config.get("resolved")
+            if thresholds != selection.get("hard_selection") or not isinstance(thresholds, Mapping):
+                raise ValueError("config/metrics selection thresholds differ")
+            policy = B.HardSelectionPolicy(**selection_config["policy"])
+            limits = B._restore_hard_selection({"selection_thresholds": thresholds}, policy)
+            candidate = C.CandidateResult(**metrics["best_candidate"])
+            rank = B._hard_rank(candidate, limits)
+            if rank is None:
+                raise ValueError("the selected candidate is not hard-rankable")
+            if not candidate.candidate_id.startswith(run_id + ":"):
+                raise ValueError("selected candidate belongs to another run identity")
+            feasible = rank[0] == 0
+            selection_config_hash = thresholds["config_hash"]
+            if selection_config_hash != config_doc.get("hard_selection_config_hash"):
+                raise ValueError("selection config hash differs")
+            candidate_id, theta_hash = candidate.candidate_id, candidate.theta_hash
+            if not isinstance(selection.get("no_improvement_over_initialization"), bool):
+                raise ValueError("missing boolean no-improvement record")
+        except (KeyError, TypeError, ValueError) as error:
+            raise RunnerError(f"invalid optimizer selection evidence for {run_id}: {error}") from error
+    by_dialect = {}
+    for dialect in C.Dialect:
+        evaluation = evaluated[dialect]
+        if evaluation.discretization["settings"]["max_step_mm"] != 0.125:
+            raise RunnerError("selection comparison requires 0.125 mm typed verdicts")
+        agree = None if feasible is None or evaluation.geometry_pass is None else (
+            feasible == evaluation.geometry_pass)
+        by_dialect[dialect.value] = {
+            "geometry_pass_at_0125": evaluation.geometry_pass,
+            "agree": agree,
+            "nc_hash": evaluation.nc_hash,
+            "verdict_step_mm": 0.125,
+        }
+    return {
+        "schema": "diffcam-selection-vs-verdict/1",
+        "run_id": run_id,
+        "feasible_at_025": feasible,
+        "reason": reason,
+        "selected_candidate_id": candidate_id,
+        "selected_candidate_theta_hash": theta_hash,
+        "selection_config_hash": selection_config_hash,
+        "no_improvement_over_initialization": (
+            None if not isinstance(selection, Mapping)
+            else selection["no_improvement_over_initialization"]),
+        "selection_source": {
+            "step_mm": 0.25,
+            "meaning": "stored optimizer hard-sim selection evidence, not a posted verdict recomputation",
+            "metrics_path": f"{run_id}/metrics.json",
+            "metrics_sha256": C.sha256_bytes(metrics_path.read_bytes()),
+            "config_path": f"{run_id}/config.json",
+            "config_sha256": C.sha256_bytes(config_path.read_bytes()) if reason is None else None,
+        },
+        "by_dialect": by_dialect,
+    }
+
+
+def _selection_verdict_summary(records: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    null_rows = sorted(run_id for run_id, record in records.items()
+                       if record["feasible_at_025"] is None)
+    summary = {
+        "total_runs": len(records),
+        "null_selection_runs_excluded_from_denominator": null_rows,
+        "null_selection_count": len(null_rows),
+        "known_selection_count": len(records) - len(null_rows),
+        "by_dialect": {},
+    }
+    for dialect in C.Dialect:
+        comparable = [run_id for run_id, record in records.items()
+                      if record["feasible_at_025"] is not None
+                      and record["by_dialect"][dialect.value]["geometry_pass_at_0125"] is not None]
+        agreement = [run_id for run_id in comparable
+                     if records[run_id]["by_dialect"][dialect.value]["agree"]]
+        unknown_verdict = sorted(run_id for run_id, record in records.items()
+                                 if record["feasible_at_025"] is not None
+                                 and record["by_dialect"][dialect.value]["geometry_pass_at_0125"] is None)
+        summary["by_dialect"][dialect.value] = {
+            "comparable_run_count": len(comparable),
+            "agreement_count": len(agreement),
+            "disagreement_count": len(comparable) - len(agreement),
+            "disagreement_run_ids": sorted(set(comparable) - set(agreement)),
+            "unknown_verdict_run_ids": unknown_verdict,
+            "unknown_verdict_count": len(unknown_verdict),
+        }
+    return summary
+
+
 def _pilot_report(config, root, auxiliary_root, *, bootstrap_replicates=2000):
     """Publish pilot verdicts only from fine posted evaluations in both dialects."""
     root = Path(root).resolve()
@@ -2295,6 +2459,7 @@ def _pilot_report(config, root, auxiliary_root, *, bootstrap_replicates=2000):
         raise RunnerError(f"primary runs have no fine verdict link/report: {missing}")
     verdicts, diagnostics, links = {}, {}, {}
     resources = {}
+    selection_records = {}
     report_tasks = dict(manifest.tasks)
     completion_sources = {}
     for run_id in sorted(primary_ids):
@@ -2332,6 +2497,8 @@ def _pilot_report(config, root, auxiliary_root, *, bootstrap_replicates=2000):
         diagnostics[run_id] = fields
         links[run_id] = link
         resources[run_id] = resource
+        selection_records[run_id] = _selection_vs_verdict_record(
+            root, run_id, evaluated, expected.method)
     if set(verdicts) != set(manifest.runs):
         raise RunnerError("fine typed verdicts did not cover every expected primary run")
     report_manifest = dataclasses.replace(manifest, tasks=report_tasks)
@@ -2345,6 +2512,12 @@ def _pilot_report(config, root, auxiliary_root, *, bootstrap_replicates=2000):
     report["refinement"]["completion_thresholds_mm3"] = {
         task_id: task_info.completion_residual_mm3 for task_id, task_info in report_tasks.items()}
     report["refinement"]["completion_threshold_sources"] = completion_sources
+    for row in report["runs"]:
+        if row["run_id"] not in selection_records:
+            raise RunnerError(f"missing selection comparison for primary run: {row['run_id']}")
+        row["selection_vs_verdict"] = selection_records[row["run_id"]]
+    report["refinement"]["selection_vs_verdict_by_run_id"] = selection_records
+    report["refinement"]["selection_vs_verdict_summary"] = _selection_verdict_summary(selection_records)
     return report
 
 

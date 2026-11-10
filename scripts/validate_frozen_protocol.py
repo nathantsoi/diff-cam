@@ -513,7 +513,9 @@ def check_budget(protocol: Mapping[str, Any], jobs: Sequence[Mapping[str, Any]])
         number(value, f"estimates.seconds_per_candidate_by_method.{condition}", 0, strict=True)
     for job in jobs:
         condition = job["condition"]
-        candidate_count = 1 if condition == "nominal-cam" else budget["candidate_evaluations"]
+        # Raw candidate_evaluations count search work. One preceding hard-forward
+        # init is an ordinary candidate, not a validation, for every optimizer.
+        candidate_count = 1 if condition == "nominal-cam" else budget["candidate_evaluations"] + 1
         validation_count = min(budget["max_validation_calls"], candidate_count // budget["validation_interval"])
         candidate_total += candidate_count
         validation_total += validation_count
@@ -1021,7 +1023,8 @@ def execute_dry_runs(declaration: Mapping[str, Any], output: Path,
         require(observed[0].get("run_id") == expected_id and
                 observed[0].get("method") == job["condition"] and observed[0].get("seed") == job["seed"],
                 f"{label}: runner run identity was not preserved: {observed!r} versus expected {expected_id}")
-        expected_budget = 1 if job["condition"] == "nominal-cam" else declaration["protocol"]["budget"]["candidate_evaluations"]
+        expected_budget = (1 if job["condition"] == "nominal-cam"
+                           else declaration["protocol"]["budget"]["candidate_evaluations"] + 1)
         expected_validations = min(declaration["protocol"]["budget"]["max_validation_calls"],
                                    expected_budget // declaration["protocol"]["budget"]["validation_interval"])
         require(cost.get("planned_run_count") == 1 and len(cost.get("costs", [])) == 1,

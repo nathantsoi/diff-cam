@@ -196,11 +196,12 @@ def test_dry_run_counts_cost_uncertainty_and_nominal_subset(tmp_path):
     assert not (output / "nominal-cam").exists()
     per_run = {row["run_id"]: row for row in planned["costs"]}
     fixed = next(row for row in per_run.values() if row["run_id"].startswith("fixed-adam-s0-"))
-    assert fixed["candidate_evaluations"] == 4
+    assert fixed["candidate_evaluations"] == 5
     assert fixed["validation_calls"] == 2
-    assert fixed["estimated_run_wall_time_s"] == pytest.approx(7.5)
+    assert fixed["estimated_run_wall_time_s"] == pytest.approx(8.75)
     unknown = next(row for row in per_run.values() if row["run_id"].startswith("hard-cmaes-s0-"))
     assert unknown["estimated_run_wall_time_s"] is None
+    assert unknown["candidate_evaluations"] == 5 and unknown["validation_calls"] == 2
     assert "unknown without a real child measurement" in unknown["jit_warmup"]
     manifest = json.loads((output / "manifest.json").read_text())
     assert manifest["runner"]["planned_not_executed"] is True
@@ -272,6 +273,94 @@ def test_nominal_one_hard_call_is_not_an_optimizer_generation():
     }
     with pytest.raises(runner.RunnerError, match="does not match one hard"):
         runner._evaluate_outcome("nominal-cam", evaluator, {}, 0)
+
+
+def test_optimizer_accounting_run_id_and_artifact_evidence(tmp_path):
+    """Interface-only zero-gradient objective; never a production geometry result."""
+    import dataclasses
+    from algorithms import objectives as O
+    from algorithms import run_artifacts as R
+
+    task, motion, parameterization = runner._prototype()
+    task = dataclasses.replace(task, tolerances=C.Tolerances(
+        completion_residual_mm3=1.0, gouge_volume_mm3=0.0,
+        local_surface_error_mm=1.0, clearance_mm=0.0))
+
+    class ScalarVector:
+        def __init__(self, value): self.value = value
+        def __getitem__(self, key): return self
+        def to_list(self): return list(self.value)
+
+    class Evaluator:
+        def __init__(self):
+            self.task = task
+            self.motion = motion
+            self.parameterization = parameterization
+            self.spec = {"kind": "accounting-interface-unit"}
+            tool_start = ((np.asarray(parameterization.initial_position_mm) - np.asarray(task.grid.origin_mm))
+                          / np.asarray(task.grid.extent_mm))
+            self.sim = SimpleNamespace(k={}, precision="f64", tool_start=ScalarVector(tool_start.tolist()),
+                                       precision_metadata=_precision_metadata_stub)
+            self.ledger = R.ComputeLedger()
+            self.hard_fraction_denominators_mm3 = {"gouge": 1.0, "residual": 1.0}
+
+        def evaluate_candidate(self, theta, candidate_id, objective_kind="smooth"):
+            theta = np.asarray(theta, dtype=float)
+            self.ledger.start_candidate(candidate_id, objective_kind)
+            self.ledger.finish_candidate(valid=True, forward_calls=1, backward_calls=0,
+                                         segment_steps=1, voxel_steps=1)
+            return C.CandidateResult(
+                candidate_id=candidate_id, theta_hash=C.content_hash(theta.tolist()),
+                objective_kind=objective_kind, objective=0.0, valid=True,
+                components={"gouge_fraction": 0.0, "residual_fraction": 0.0,
+                            "holder_overlap_fraction": 0.0})
+
+        def evaluate_candidate_with_gradient(self, theta, candidate_id="gradient"):
+            result = self.evaluate_candidate(theta, candidate_id, "smooth")
+            self.ledger.entries[-1]["backward_calls"] = 1
+            self.ledger.backward_calls += 1
+            result = dataclasses.replace(result, gradient_available=True)
+            return O.CandidateEvaluation(result, np.zeros(self.parameterization.num_params))
+
+        def candidate_motion(self, theta):
+            return motion
+
+    adam_eval = Evaluator()
+    adam_out = runner._evaluate_outcome(
+        "fixed-adam", adam_eval,
+        {"candidate_evaluations": 1, "validation_interval": 1, "max_validation_calls": 1,
+         "learning_rate": 0.01, "k_fixed": 40.0, "max_generations": None},
+        seed=0, run_id="accounting-adam")
+    assert (adam_out.evaluations, adam_out.optimizer_result.gradient_updates, adam_out.forward_calls,
+            adam_out.backward_calls, adam_out.validation_calls) == (2, 1, 3, 1, 1)
+    assert adam_out.optimizer_result is not None
+    assert adam_out.optimizer_result.initial_candidate_id == "accounting-adam:init"
+    assert adam_out.optimizer_result.no_improvement_over_initialization
+    assert [entry["candidate_id"] for entry in adam_eval.ledger.entries].count("accounting-adam:init") == 1
+
+    record = runner._write_outcome(
+        {"run_id": "accounting-adam"}, adam_eval, adam_out, None, {"source": "unit"},
+        tmp_path / "artifact", runner.REPOSITORY)
+    assert record.status == C.RunStatus.INCOMPLETE
+    config_doc = json.loads((tmp_path / "artifact/accounting-adam/config.json").read_text())
+    metrics_doc = json.loads((tmp_path / "artifact/accounting-adam/metrics.json").read_text())
+    assert config_doc["budgets"]["spent"]["candidate_evaluations"] == 2
+    assert config_doc["hard_selection_config_hash"] == (
+        metrics_doc["selection"]["hard_selection"]["config_hash"])
+    assert metrics_doc["selection"]["initial_candidate"]["candidate_id"] == "accounting-adam:init"
+    assert metrics_doc["selection"]["no_improvement_over_initialization"] is True
+
+    cma_eval = Evaluator()
+    cma_out = runner._evaluate_outcome(
+        "hard-cmaes", cma_eval,
+        {"candidate_evaluations": 2, "population_size": 2, "validation_interval": 1,
+         "max_validation_calls": 0, "max_generations": None, "sigma0": 0.01},
+        seed=3, run_id="accounting-cma")
+    assert (cma_out.evaluations, cma_out.generations, cma_out.forward_calls,
+            cma_out.backward_calls, cma_out.validation_calls) == (3, 1, 3, 0, 0)
+    assert cma_out.optimizer_result.initial_candidate_id == "accounting-cma:init"
+    assert cma_eval.ledger.entries[0]["candidate_id"] == "accounting-cma:init"
+    assert cma_eval.ledger.entries[0]["objective_kind"] == "hard"
 
 
 def test_resume_rejects_condition_identity_changes(tmp_path):
@@ -515,7 +604,7 @@ def test_timing_probe_calls_each_kind_and_projects_all_seven(tmp_path, monkeypat
     assert len(costs) == 7
     assert all(row["estimated_run_wall_time_s"] is not None for row in costs)
     cma = next(row for row in costs if row["run_id"].startswith("hard-cmaes-s0-"))
-    assert (cma["candidate_evaluations"], cma["validation_calls"]) == (4, 2)
+    assert (cma["candidate_evaluations"], cma["validation_calls"]) == (5, 2)
 
     # Explicit arithmetic: screen posts overlap, so their batch wall time is
     # max(0.5, 0.75) rather than their serial 1.25 s sum. Fine and convergence
@@ -541,6 +630,18 @@ def test_timing_probe_calls_each_kind_and_projects_all_seven(tmp_path, monkeypat
     assert cost["other_worker_seconds"] == pytest.approx(2.0)
     assert cost["posted_seconds"] == pytest.approx(0.75)
     assert cost["estimated_run_wall_time_s"] == pytest.approx(9.75)
+    assert cost["initialization_seconds"] == 0.0
+    smooth = next(item for item in costs if item["run_id"].startswith("smooth-cmaes-"))
+    assert smooth["candidate_seconds"] == pytest.approx(
+        float(report["candidate_seconds"]["smooth_forward"]) * (smooth["candidate_evaluations"] - 1))
+    assert smooth["initialization_seconds"] == pytest.approx(
+        float(report["candidate_seconds"]["hard_forward"]))
+    assert smooth["estimated_run_wall_time_s"] == pytest.approx(
+        smooth["constructor_seconds"] + smooth["candidate_seconds"]
+        + smooth["initialization_seconds"] + smooth["validation_seconds"]
+        + smooth["posted_seconds"] + smooth["other_worker_seconds"])
+    assert runner._budget(config, "smooth-cmaes").candidate_evaluations == (
+        config["candidate_evaluations"] + 1)
 
     missing = dict(report)
     missing.pop("constructor_seconds")
@@ -672,7 +773,7 @@ def _typed_evaluation(task, nc_bytes, dialect=C.Dialect.RS274, *, geometry_pass=
 
 
 def _pilot_refinement_fixture(root: Path, *, method="fixed-adam", seed=0, residual_mm3=None,
-                              primary_geometry_pass=True):
+                              primary_geometry_pass=True, selected_feasible=True):
     """Make real typed task/motion/NC/artifact files with a typed input result."""
     import dataclasses
     from algorithms import objectives as O
@@ -702,19 +803,44 @@ def _pilot_refinement_fixture(root: Path, *, method="fixed-adam", seed=0, residu
         haas = dataclasses.replace(haas, metrics=primary.metrics)
     files = dict(posting.files)
     position = parameterization.positions(np.zeros(parameterization.num_params))
+    config_doc = {
+        **R.build_run_config(
+            entry["run_id"], task, motion, seed=0, parameterization=parameterization,
+            objective=O.ObjectiveSpec(k=40.0),
+            budgets={"limits": {}, "spent": {"candidate_evaluations": 1}},
+            repository=runner.REPOSITORY),
+        "simulator": _precision_metadata_stub()}
+    metrics_doc = {"best_candidate": None, "execution": {"subprocess": 0}, "selection": None}
+    if method != "nominal-cam":  # Explicit schema fixture, not a production simulation.
+        components = {"gouge_fraction": 0.0,
+                      "residual_fraction": 0.0 if selected_feasible else 0.5,
+                      "holder_overlap_fraction": 0.0}
+        candidate = C.CandidateResult(
+            candidate_id=f"{entry['run_id']}:init", theta_hash=C.content_hash([0.0]),
+            objective_kind="hard", objective=0.0 if selected_feasible else 1.0,
+            valid=True, components=components)
+        selection_policy = runner.B.HardSelectionPolicy(
+            max_gouge_fraction=0.0, max_residual_fraction=0.1)
+        limits = runner.B.ResolvedHardSelection(
+            0.0, 0.1, 0.0, 0.0, "lexicographic", 0.0, 0.1, 1.0, 1.0, 1.0)
+        resolved = limits.metadata()
+        config_doc["hard_selection"] = {
+            "policy": dataclasses.asdict(selection_policy), "resolved": resolved}
+        config_doc["hard_selection_config_hash"] = resolved["config_hash"]
+        metrics_doc["best_candidate"] = runner.B._candidate_dict(candidate)
+        metrics_doc["selection"] = runner.B._selection_metadata(SimpleNamespace(
+            initial_candidate_id=candidate.candidate_id, initial_candidate=candidate,
+            initial_candidate_status="feasible" if selected_feasible else "infeasible",
+            no_improvement_over_initialization=True,
+            selection_reason="no improvement over initialization",
+            selection_thresholds=resolved))
+    files["config.json"] = R.json_bytes(config_doc)
+    files["metrics.json"] = R.json_bytes(metrics_doc)
     files.update({
-        "config.json": R.json_bytes({
-            **R.build_run_config(
-                entry["run_id"], task, motion, seed=0, parameterization=parameterization,
-                objective=O.ObjectiveSpec(k=40.0),
-                budgets={"limits": {}, "spent": {"candidate_evaluations": 1}},
-                repository=runner.REPOSITORY),
-            "simulator": _precision_metadata_stub()}),
         "history.json": R.json_bytes({"history": [], "ledger": {"candidate_evaluations": 1,
                                                                "forward_calls": 1,
                                                                "backward_calls": 0,
                                                                "validation_calls": 0}}),
-        "metrics.json": R.json_bytes({"best_candidate": None, "execution": {"subprocess": 0}}),
         "motion_plan.json": R.record_bytes(motion),
         "initial_trajectory.npy": R.numpy_bytes(position),
         "trajectory.npy": R.numpy_bytes(position),
@@ -735,6 +861,36 @@ def _pilot_refinement_fixture(root: Path, *, method="fixed-adam", seed=0, residu
     runner._atomic(root / "manifest.json", runner._manifest(config, task, [entry], root, planned=False))
     runner._atomic(root / "frozen_config.json", {"raw_config": config, "identity": entry["identity"]})
     return root, config, record, original_run, primary
+
+
+def test_selection_verdict_unknown_and_malformed_evidence_remain_distinct(tmp_path):
+    import dataclasses
+    root, config, record, _, primary = _pilot_refinement_fixture(
+        tmp_path / "primary", method="fixed-adam", selected_feasible=True)
+    unknown = dataclasses.replace(
+        primary, geometry_pass=None,
+        discretization={**primary.discretization,
+                        "settings": {**primary.discretization["settings"], "max_step_mm": 0.125}})
+    comparison = runner._selection_vs_verdict_record(
+        root, record.run_id, {dialect: dataclasses.replace(unknown, dialect=dialect)
+                              for dialect in C.Dialect}, record.run_id.split("-s0-")[0])
+    assert comparison["feasible_at_025"] is True
+    assert comparison["by_dialect"]["rs274"]["geometry_pass_at_0125"] is None
+    assert comparison["by_dialect"]["rs274"]["agree"] is None
+    summary = runner._selection_verdict_summary({record.run_id: comparison})
+    assert summary["known_selection_count"] == 1
+    assert summary["null_selection_count"] == 0
+    assert summary["by_dialect"]["rs274"]["comparable_run_count"] == 0
+    assert summary["by_dialect"]["rs274"]["unknown_verdict_count"] == 1
+
+    metrics_path = root / record.run_id / "metrics.json"
+    metrics = json.loads(metrics_path.read_text())
+    metrics["selection"]["hard_selection"]["thresholds_used"]["max_residual_fraction"] = 99.0
+    metrics_path.write_text(json.dumps(metrics))
+    with pytest.raises(runner.RunnerError, match="invalid optimizer selection evidence"):
+        runner._selection_vs_verdict_record(
+            root, record.run_id, {dialect: dataclasses.replace(unknown, dialect=dialect)
+                                  for dialect in C.Dialect}, record.run_id.split("-s0-")[0])
 
 
 def test_refinement_sidecar_metadata_and_audit_report_are_real_files(tmp_path):
@@ -976,7 +1132,7 @@ def test_primary_pilot_report_uses_only_fine_dialects_and_fails_closed(tmp_path)
         tmp_path / "nominal-source", method="nominal-cam", residual_mm3=0.0)
     fixed_root, fixed_config, fixed, fixed_bytes, _ = _pilot_refinement_fixture(
         tmp_path / "fixed-source", method="fixed-adam", residual_mm3=9.375,
-        primary_geometry_pass=False)
+        primary_geometry_pass=False, selected_feasible=False)
     root = tmp_path / "primary"
     shutil.copytree(nominal_root, root)
     shutil.copytree(fixed_root / fixed.run_id, root / fixed.run_id)
@@ -1017,6 +1173,29 @@ def test_primary_pilot_report_uses_only_fine_dialects_and_fails_closed(tmp_path)
     assert rows[fixed.run_id]["verdict_evaluations"]["haas"]["max_step_mm"] == 0.125
     assert fixed_bytes == (root / fixed.run_id / "run.json").read_bytes()
     assert nominal_bytes == (root / nominal.run_id / "run.json").read_bytes()
+    comparisons = report["refinement"]["selection_vs_verdict_by_run_id"]
+    assert comparisons[nominal.run_id]["feasible_at_025"] is None
+    assert comparisons[nominal.run_id]["reason"] == (
+        "nominal-direct-hard-has-no-optimizer-selection-record")
+    assert comparisons[fixed.run_id]["feasible_at_025"] is False
+    assert comparisons[fixed.run_id]["selected_candidate_id"] == f"{fixed.run_id}:init"
+    assert comparisons[fixed.run_id]["selection_source"]["metrics_sha256"] == C.sha256_bytes(
+        (root / fixed.run_id / "metrics.json").read_bytes())
+    for dialect in C.Dialect:
+        entry = comparisons[fixed.run_id]["by_dialect"][dialect.value]
+        assert entry["geometry_pass_at_0125"] is True
+        assert entry["agree"] is False
+        assert comparisons[nominal.run_id]["by_dialect"][dialect.value]["agree"] is None
+    assert rows[fixed.run_id]["selection_vs_verdict"] == comparisons[fixed.run_id]
+    summary = report["refinement"]["selection_vs_verdict_summary"]
+    assert summary["total_runs"] == 2 and summary["known_selection_count"] == 1
+    assert summary["null_selection_runs_excluded_from_denominator"] == [nominal.run_id]
+    for dialect in C.Dialect:
+        counted = summary["by_dialect"][dialect.value]
+        assert counted["comparable_run_count"] == 1
+        assert counted["agreement_count"] == 0
+        assert counted["disagreement_count"] == 1
+        assert counted["disagreement_run_ids"] == [fixed.run_id]
 
     haas_path = aux_root / f"{fixed.run_id}-verdict" / "eval_posted_haas.json"
     haas_original = haas_path.read_bytes()
@@ -1312,7 +1491,11 @@ def test_configured_typed_reuse_is_explicit_and_hash_checked(tmp_path):
     root, config, record, _, _ = _pilot_refinement_fixture(tmp_path / "primary")
     nc = (root / record.run_id / "rs274.nc").read_bytes()
     primary_task = C.TaskSpec.from_dict(json.loads((root / record.run_id / "config.json").read_text())["task"])
-    cached_bytes = R.record_bytes(_typed_evaluation(primary_task, nc, step=0.125))
+    import dataclasses
+    matching = dataclasses.replace(
+        _typed_evaluation(primary_task, nc, step=0.125),
+        evaluator_id=runner.EVALUATOR_ID, evaluator_revision=runner._revision())
+    cached_bytes = R.record_bytes(matching)
     source = tmp_path / "explicit-historical-rs274.json"
     source.write_bytes(cached_bytes)
     config["reuse_typed_evaluations"] = {
@@ -1360,6 +1543,43 @@ def test_configured_typed_reuse_is_explicit_and_hash_checked(tmp_path):
     with pytest.raises(runner.RunnerError, match="declared source hash differs"):
         runner._normalized_config(config_path)
     assert source.read_bytes() == before
+
+
+def test_reused_typed_result_requires_current_evaluator_identity(tmp_path):
+    """Typed reuse identity test, not another evaluation or physical measurement."""
+    import dataclasses
+    root, config, record, _, _ = _pilot_refinement_fixture(tmp_path / "primary")
+    nc = (root / record.run_id / "rs274.nc").read_bytes()
+    task = C.TaskSpec.from_dict(
+        json.loads((root / record.run_id / "config.json").read_text())["task"])
+    settings = runner._phase_settings(task, config, C.Dialect.RS274, nc, "verdict")
+    current = dataclasses.replace(
+        _typed_evaluation(task, nc, step=0.125),
+        evaluator_id=runner.EVALUATOR_ID, evaluator_revision=runner._revision())
+    matching_path = tmp_path / "current-typed-result.json"
+    matching_path.write_bytes(R.record_bytes(current))
+
+    def job(source, label):
+        return runner.PostedJob("verdict", C.Dialect.RS274, nc, settings,
+                                tmp_path / label, source)
+
+    accepted, metadata = runner._posted_job_process(
+        task, job(matching_path, "matching-reuse-job"), config)
+    assert accepted.evaluator_revision == runner._revision()
+    assert metadata["status"] == "reused_typed_evaluation"
+    assert metadata["worker_peak_rss_kib"] is None
+    assert not (tmp_path / "matching-reuse-job").exists()
+
+    stale_revision = "stale-posted-evaluator/1+old-source-revision"
+    stale = dataclasses.replace(current, evaluator_revision=stale_revision)
+    stale_path = tmp_path / "stale-typed-result.json"
+    stale_path.write_bytes(R.record_bytes(stale))
+    with pytest.raises(runner.RunnerError, match="evaluator identity/revision mismatch") as caught:
+        runner._posted_job_process(task, job(stale_path, "stale-reuse-job"), config)
+    assert runner.EVALUATOR_ID in str(caught.value)
+    assert runner._revision() in str(caught.value)
+    assert stale_revision in str(caught.value)
+    assert not (tmp_path / "stale-reuse-job").exists()
 
 
 @pytest.mark.parametrize("case", ["missing", "mixed"])
@@ -1578,10 +1798,11 @@ def test_real_pilot_one_generation_per_condition(tmp_path, condition):
     assert record.status == C.RunStatus.COMPLETE, record.failure_reason
     metrics = json.loads((output / run_id / "metrics.json").read_text())
     spent = json.loads((output / run_id / "config.json").read_text())["budgets"]["spent"]
-    assert spent["candidate_evaluations"] == config["candidate_evaluations"]
-    # Nominal is one direct hard evaluation, not an optimizer generation.
+    expected_total = 1 if condition == "nominal-cam" else config["candidate_evaluations"] + 1
+    assert spent["candidate_evaluations"] == expected_total
+    # Nominal is one direct hard evaluation; every optimizer adds one init forward.
     expected_calls = (0, 1, 0) if condition == "nominal-cam" else (
-        (1, 2, 1) if condition.endswith("adam") else (1, 2, 0))
+        (1, 3, 1) if condition.endswith("adam") else (1, 3, 0))
     assert (spent["generations"], spent["forward_calls"], spent["backward_calls"]) == expected_calls
     assert (output / run_id / "eval_posted.json").is_file()
     for dialect in C.Dialect:

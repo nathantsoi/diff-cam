@@ -232,13 +232,15 @@ Required native production controls and exact-NC settings are immutable: samplin
 | Budget/counter | Frozen value | Evidence/relationship |
 |---|---|---|
 | Candidate evaluations per non-nominal run | `<positive integer>` | `<integer exactly, not an optional hidden second engine budget>` |
+| Hard initialization candidate | exactly 1 per non-nominal run before any update | `<one ordinary hard-forward evaluation, <run_id>:init; included in the candidate total, not an additional validation call>` |
+| Raw search-count convention | `<positive candidate_evaluations value, excluding init>` | `<native total = configured search count + one init for every optimizer; nominal stays one direct hard call; CMA generations exclude init>` |
 | Nominal CAM candidate evaluation | exactly 1 | `<deterministic single recorded hard call; not optimizer generations>` |
 | Population size | `<integer >= 2>` | `<CMA-specific positive population>` |
 | Validation interval | `<positive integer>` | `<period in candidate evaluations>` |
 | Maximum validation calls | `<nonnegative integer>` | `<max/min across the declared hard cap>` |
 | Maximum generations | `<positive integer or explicit null>` | `<candidate budget still forces a bounded run>` |
 | Per-child `timeout_s` | `<positive seconds>` | `<matched per-child timeout, not a guaranteed global wall deadline>` |
-| Total wall-time budget | `<positive seconds>` | `<must cover declared serial worker-second/largest-job estimates>` |
+| Total wall-time budget | `<positive seconds>` | `<declared worker-second estimate <= total_wall_time_s (equality allowed); per-job timeout >= largest-job estimate>` |
 | Run count | `<explicit integer>` | `<must equal sum of explicit primary cases and small-variant cases>` |
 | Worker seconds | `<finite total or explicit null>` | `<sum of per-method (candidate+validation) estimates; unknown timing stays null>` |
 | CPU RSS estimate per job | `<positive bytes, not above 8 GiB>` | `<estimate basis and uncertainty, not a measured or guaranteed peak>` |
