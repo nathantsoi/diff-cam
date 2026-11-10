@@ -1460,13 +1460,26 @@ def resume_continuation_adam(path: str | Path, evaluator: Any, *,
         raise AttributeError("continuation resume requires explicit loss-shift support")
     setter(float(document["continuation_state"]["loss_shift"]))
     document = _read_adam_checkpoint(source, evaluator)
-    base = _restore_state(document, evaluator, budget=budget, run_id=run_id)
-    state = _continuation_from_adam(base, config, document["continuation_state"])
-    B._restore_ledger_payload(document, evaluator)
-    state.observation = _unpack_continuation_observation(document, evaluator.task.grid)
-    packed_hard = document["continuation_state"].get("hard_result")
-    state.hard_result = None if packed_hard is None else C.CandidateResult(**packed_hard)
-    _validate_retained_continuation(document, base, state)
+    try:
+        base = _restore_state(document, evaluator, budget=budget, run_id=run_id)
+        state = _continuation_from_adam(base, config, document["continuation_state"])
+        state.observation = _unpack_continuation_observation(document, evaluator.task.grid)
+        packed_hard = document["continuation_state"].get("hard_result")
+        state.hard_result = None if packed_hard is None else C.CandidateResult(**packed_hard)
+        _validate_retained_continuation(document, base, state)
+        # Only validated retained evidence is eligible to affect the new ledger.
+        B._restore_ledger_payload(document, evaluator)
+    except BaseException:
+        if hasattr(evaluator, "clear_evaluation_k"):
+            evaluator.clear_evaluation_k()
+        elif hasattr(getattr(evaluator, "spec", None), "k"):
+            evaluator.sim.k[None] = evaluator.spec.k
+        clear = getattr(evaluator, "clear_evaluation_loss_shift", None)
+        if clear is not None:
+            clear()
+        elif hasattr(evaluator, "set_evaluation_loss_shift"):
+            evaluator.set_evaluation_loss_shift(0.0)
+        raise
     return _run_continuation_with_cleanup(
         state, evaluator, Path(checkpoint_dir) if checkpoint_dir is not None else None)
 

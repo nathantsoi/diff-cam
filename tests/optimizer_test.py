@@ -815,13 +815,27 @@ def test_continuation_resume_does_not_apply_shift_twice(tmp_path):
 def test_continuation_checkpoint_tamper_is_rejected(tmp_path):
     path = tmp_path / "checkpoints"
     opt.solve_continuation_adam(
-        ContinuationObjective(), np.zeros(3), _continuation_config(), budget=_budget(2),
+        ContinuationObjective(), np.zeros(3), _continuation_config(), budget=_budget(2, interval=1, max_validation=1),
         run_id="tamper", checkpoint_dir=path)
     document = json.loads((path / "final.json").read_text())
     document["continuation_state"]["loss_shift"] = 0.25
     (path / "tampered.json").write_text(json.dumps(document))
     with pytest.raises(opt.B.BlackBoxError, match="checksum mismatch"):
         opt.resume_continuation_adam(path / "tampered.json", ContinuationObjective())
+
+    # Even a recomputed outer checksum must not permit an inconsistent paired
+    # hard result or restore a misleading historical ledger/ambient field shift.
+    mismatch = json.loads((path / "final.json").read_text())
+    mismatch["continuation_state"]["hard_result"]["objective"] = 1.0
+    mismatch.pop("payload_hash")
+    mismatch["payload_hash"] = C.content_hash(mismatch)
+    (path / "inconsistent-pair.json").write_text(json.dumps(mismatch))
+    untouched = ContinuationObjective()
+    with pytest.raises(opt.B.BlackBoxError, match="cached hard objective"):
+        opt.resume_continuation_adam(path / "inconsistent-pair.json", untouched)
+    assert untouched.ledger.snapshot()["candidate_evaluations"] == 0
+    assert untouched.evaluation_loss_shift is None
+    assert untouched._evaluation_k_override is None
 
 
 def test_continuation_real_stock_field_path_and_empty_band_are_safe():
