@@ -136,7 +136,7 @@
       "status": "blocked",
       "owner": "diffcam-worker-2 (runner T4.1a) / coordinator (real pilot T4.1b)",
       "branch": "task/T4.1-runner",
-      "blocker": "pilot re-run waits on T3.xc-runner and T3.xd-wiring (D-11)",
+      "blocker": "pilot re-run waits on T3.xd-wiring only",
       "next": "re-run pilot with declared efficiency weight; report selection-vs-verdict agreement per arm",
       "note": "T4.1a runner merged (7-run pilot plan: CAM, fixed Adam, annealed Adam, hard CMA x2, smooth CMA x2). T4.1b real pilot (coordinator) blocked on T2.2 pilot task + T1.3 posted evaluator. | T4.1b-wiring (runner -> real pilot pocket + production posted evaluator + measured timings) to worker-2; coordinator launches pilot. | DECISION: pilot posted eval at task production max_step 1.0 mm (declared), + 0.125 mm refinement re-check of each condition's final RS274 program. Measured posted eval 137 s @1.0 mm (vs 1085 s @0.125 mm default); 7-run forecast ~37 min. | Pilot launches after worker-2 R1-R3 (refinement verdict conservative combination); does not wait for T3.4b (no-op for baselines). Record core SHA in pilot artifacts. | DECISION 2026-11-09: pilot launches as an infrastructure/cost pilot once w2 gates are green; fixed/annealed-Adam (gradient) rows are PROVISIONAL until T3.3b characterizes the systematic AD/FD mismatch; if T3.3b finds a real backward bug, Adam rows are rerun after the fix. | D-2026-11-09-04 (reports/decisions.md): pilot verdicts from 0.125 mm posted eval (both dialects); 1.0 mm = screen/diagnostic only; 0.25 mm RS274 convergence point recorded. Pilot 1 (core 9656e29) finding: 0/5 optimizer arms pass 0.125mm geometry; CAM seed perfect; causes = init never scored (D-09) + geometry-only objective (D-10). Pilot re-run after T3.xc+T3.xd, before T4.2."
     },
@@ -380,7 +380,7 @@
       "status": "in_progress",
       "owner": "diffcam-worker-3 (seeds); runner conditions later",
       "branch": "task/T4.0-noinit-seeds",
-      "note": "D-08: cam/seeds.py straight_line/random MotionPlans from T4.2a declarations; runner wiring after T3.xc-runner. Seeds merged (3ac95e6). Remaining: runner conditions/init axis wiring (runner lease, after T3.xc-runner)."
+      "note": "D-08: cam/seeds.py straight_line/random MotionPlans from T4.2a declarations; runner wiring after T3.xc-runner. Seeds merged (3ac95e6). Remaining: runner conditions/init axis wiring (runner lease, after T3.xc-runner). Runner conditions folded into T3.xd-wiring."
     },
     "T3.xc": {
       "status": "done",
@@ -420,10 +420,11 @@
       "tip": "995ae40"
     },
     "T3.xc-runner": {
-      "status": "in_progress",
+      "status": "done",
       "owner": "diffcam-worker-1",
       "branch": "task/T3.xc-runner",
-      "note": "runner budget +1 init, cost, selection artifacts, run_id, selection_vs_verdict record; REAL_* gates."
+      "note": "runner budget +1 init, cost, selection artifacts, run_id, selection_vs_verdict record; REAL_* gates. Merged; merged full 758p/11s.",
+      "tip": "5534ff4"
     },
     "T2.3b": {
       "status": "done",
@@ -433,9 +434,9 @@
       "note": "Merged. 39/39 cheap-qualified; min design distance 0.5 (thr 0.25)."
     },
     "T3.xd-wiring": {
-      "status": "todo",
+      "status": "in_progress",
       "owner": "diffcam-worker-1 (after T3.xc-runner merges)",
-      "note": "D-11: runner weights + task-constant reference + None-rejection + validator rule + pilot provisional weights 0.01/0.01. Starts after T3.xc-runner merges (T4.0-noinit-b merged)."
+      "note": "D-11: runner weights + task-constant reference + None-rejection + validator rule + pilot provisional weights 0.01/0.01. Starts after T3.xc-runner merges (T4.0-noinit-b merged). Also includes D-08 no-init runner conditions + configs/pilot_init.json (efficiency mode: no REAL gates)."
     },
     "T4.0-noinit-b": {
       "status": "done",
