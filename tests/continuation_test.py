@@ -615,6 +615,19 @@ def test_acceptance_rank_uses_raw_hard_objective_not_scalar_additions_of_shift()
     assert_same_state(also_rolled_back.snapshot, start)
 
 
+def test_production_rank_override_keeps_legacy_constraints_unmodified():
+    mechanism, _start, _seen = make_controller()
+    ordinary = M.assess_constraints(pair().hard, M.ConstraintPolicy())
+    assert ordinary.status is M.Feasibility.FEASIBLE
+    assert ordinary.hard_rank is None
+    assert mechanism._rank(ordinary, 0.0, 0.8) == (0, 0.0, 0.0, 0.8)
+    exact = (0, 0.0, 0.0, 0.0, 0.375)
+    attached = M.ConstraintAssessment(M.Feasibility.FEASIBLE, 0.0, (), exact)
+    assert mechanism._rank(attached, 999.0, 0.8) == exact
+    unknown = M.ConstraintAssessment(M.Feasibility.UNKNOWN, 0.0, ("missing",))
+    assert mechanism._rank(unknown, 0.0, 0.1) is None
+
+
 def test_dev_ablation_is_a_plan_only_with_paired_settings():
     plan = M.dev_ablation_plan()
     assert plan["status"] == "planned_only_not_executed"
