@@ -93,12 +93,12 @@
       "note": "T2.2 + T2.2b merged. Pilot pocket: T = P \u222a four r=2 mm corner fillets; excluded 18.0 mm\u00b3 grid-exact (continuous 20.60 diagnostic); 0.25 mm pitch. Nominal (line-only seed): production safety+geometry True, residual/gouge/surface 0 (coordinator re-verified rs274). Retained: runs/retained/pilot-pocket-20261109-t22b-exact-exclusion. COST: one posted evaluation \u2248 1085 s on CPU at 0.25 mm -> pilot budget concern."
     },
     "T2.3": {
-      "status": "in_progress",
+      "status": "complete",
       "owner": "diffcam-worker-2 (T2.3b expansion)",
       "branch": null,
       "blocker": null,
       "next": "set counts after T4.1b pilot",
-      "note": "Bootstrap merged d5e320b: 3 families (facing/asymmetric stock, pocket-island contour, variable width/depth) x 1 dev + 1 test; T \u2287 P only finite-radius corner fillets, grid-exact exclusion tol 0; all 12 production evals safety+geometry True; audit clean. Seed generator gained a generic cap-clearing pass after a qualification failure (task unchanged, failure retained). Suite COUNTS pending pilot cost (target 3 dev / 10 test per family). Bootstrap (1+1/family) merged. T2.3b: generator v2 with declared counts (default 3 dev/10 test/family), cheap gates; posted qualification batch by coordinator later."
+      "note": "Bootstrap merged d5e320b: 3 families (facing/asymmetric stock, pocket-island contour, variable width/depth) x 1 dev + 1 test; T \u2287 P only finite-radius corner fillets, grid-exact exclusion tol 0; all 12 production evals safety+geometry True; audit clean. Seed generator gained a generic cap-clearing pass after a qualification failure (task unchanged, failure retained). Suite COUNTS pending pilot cost (target 3 dev / 10 test per family). Bootstrap (1+1/family) merged. T2.3b: generator v2 with declared counts (default 3 dev/10 test/family), cheap gates; posted qualification batch by coordinator later. Suite complete: 39 tasks (3 families x (3 dev + 10 test)), all posted-qualified."
     },
     "T3.0": {
       "status": "complete",
@@ -446,10 +446,11 @@
       "tip": "4ddcbdb"
     },
     "T2.3c": {
-      "status": "in_progress",
+      "status": "done",
       "owner": "diffcam-worker-2",
       "branch": "task/T2.3c-posted-qualification",
-      "note": "0.125mm dual-dialect posted qualification of 39 nominal seeds; 4 concurrent; ~6.5h."
+      "note": "0.125mm dual-dialect posted qualification of 39 nominal seeds; 4 concurrent; ~6.5h. Merged: 39/39 qualified, 24.6 min at 8 concurrent.",
+      "tip": "82c08d2"
     }
   }
 }
