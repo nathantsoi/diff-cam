@@ -4,6 +4,10 @@ Authority: [tasks.md](tasks.md). Scientific context: [experimental plan](reports
 Scope: planning implementation and experiments; this document does not report any task as implemented.  
 Concurrency limit: **one coordinator plus at most three workers**.
 
+### Active override: CAM-RUST direct strategy ports (2026-11-10)
+
+The user has superseded the old campaign-launch continuation: stop old runs and directly port RustCNC Face, Contour 2D, Pocket 2D and Adaptive 2D as replacement nominal starts, using coarse chords and a complete-program cap. The active allocation is CAM-RUST-1/2/3 to workers-1/2/3 respectively, with coordinator-owned CAM-RUST-4 integration and rerun. See `tasks.md`, `docs/rustcnc_strategy_port.md`, and decision D-2026-11-10-16 in `reports/decisions.md` for the authoritative cards, acceptance and source pins. Existing cards and completed results remain historical; no unfinished run, Exp1b launch, packet export or final results build proceeds under the old frozen seeds. T4.2 requires a fresh seed/protocol amendment and T4.3 a fresh bounded campaign after a new dev integration pilot.
+
 ## 1. Coordination and ownership
 
 The coordinator maintains the integration checkout on `core`, approves interface revisions, owns `tasks.md`, this file, dependency files, and the campaign registry, and verifies integration gates. Agents receive one bounded card at a time, not “implement the paper.” A worker may take a new role after finishing a card.

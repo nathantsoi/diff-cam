@@ -5,6 +5,8 @@
 **Implementation status:** Exp2 campaign config bound and launched (see §2); Exp1 config bound and launched.  
 **No broader authorization:** this is not launch permission, an execution report, a physical machining certificate, or a claim that an external implementation exists.
 
+> **2026-11-10 user-directive addendum:** the old-seed campaigns described below were stopped and must not be resumed, extended through Exp1b, or presented as a completed final cohort. Their existing bindings remain historical evidence. The direct RustCNC strategy port under D-2026-11-10-16 and `docs/rustcnc_strategy_port.md` requires new nominal-motion qualification, a new dev integration pilot, a replacement configuration/manifest identity and fresh output roots before another experiment. Pending packet/final results exports likewise await that new cohort. No replacement protocol has yet been frozen.
+
 This document, together with the exact executable configurations and their hashes below, is the protocol of record. It does not create a half-valid `configs/frozen_benchmark.json`, does not extend the legacy T4.2a schema, and does not treat prototype execution as execution of the 39-task suite. No validator invocation is required by the coordinator's 2026-11-10 routing decision. Exact configurations shall be checked before launch by the coordinator.
 
 ## 1. Decision identity and scope

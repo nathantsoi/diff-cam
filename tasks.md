@@ -265,3 +265,35 @@ Config includes source commit/dirty patch hash, dependencies, seed, task/split, 
 - **Owns:** `scripts/build_paper_artifacts.py`, `manuscript/` integration, `reports/final_audit.md`.
 - **Work:** build tables/figures from audited records, including no-cut and nominal CAM anchors, failures, uncertainty, soft/hard/posted disagreement and resource costs. State evaluator/model limitations and actual external baseline coverage. Preserve unfavorable findings. If physical data or policy evidence is absent, omit those empirical claims explicitly. Reproduction includes tracked manifests, configs and dataset acquisition instructions.
 - **Gate:** clean artifact regeneration, trace every claimed result to run/task/NC hashes, validate family-level statistical units and exclusions. Confirm literature/novelty against primary sources before submission; no predetermined curve or algorithm ranking.
+
+## User-directed RustCNC CAM starting-program replacement
+
+This section was added on 2026-11-10 at the user's direction. It pauses the old-start campaigns; it does not erase their completed historical records. Detailed implementation state and immutable inputs live in `docs/rustcnc_strategy_port.md`; the source ports retain reference provenance rather than becoming clean-room/MIT code by copying.
+
+### CAM-RUST-1 — Face and Contour 2D direct port
+
+- **Depends on:** RustCNC source pinned in `docs/rustcnc_strategy_port.md`; existing typed task/motion contracts.
+- **Owns:** `cam/rustcnc_face_contour.py`, `tests/rustcnc_face_contour_test.py` (worker-1), exclusively for this card.
+- **Work:** port the relevant Face band/depth ladder/approach and Contour 2D offset/lead core for the current analytic rectangular family. Expose a reusable Contour finishing emitter. Preserve source constants/order and label all coarse/novel parameter choices explicitly. Closed unsupported shapes are preferable to invented output.
+- **Gate:** source-derived tests, deterministic typed plans, safe approach/retract, valid feeds/frames, coarse chords and complete ≤72-segment output; explicit over-cap refusal with no trimmed machining, focused and full default tests, and an exact retained-pad/topology coverage report.
+
+### CAM-RUST-2 — Pocket 2D direct port
+
+- **Depends on:** pinned RustCNC Pocket 2D source and typed task/motion contracts; no need to await an unrelated worker file.
+- **Owns:** `cam/rustcnc_pocket2d.py`, `tests/rustcnc_pocket2d_test.py` (worker-2), exclusively for this card.
+- **Work:** directly port pocket offsets, pass/depth entry and links for rectangular open/retained-pad tasks. Separate the roughing operation from the coordinator's Contour finish. A lower retained-pad cap requires its explicit clearing phase, never bottom-level gouging.
+- **Gate:** source-derived and retained-pad tests, all attempted task/topology outcomes, safe valid complete plans under the hard cap, and focused plus full default tests. No optimizer-performance filtering or legacy-raster fallback.
+
+### CAM-RUST-3 — Adaptive 2D direct port
+
+- **Depends on:** pinned RustCNC Adaptive 2D source, including its explicitly unpinned stand-ins and limitations.
+- **Owns:** `cam/rustcnc_adaptive2d.py`, `tests/rustcnc_adaptive2d_test.py` (worker-3), exclusively for this card.
+- **Work:** port the tool-centre erosion, top-down levels, entry helix/circle, clearing frontier and clear-link-or-retract logic. Coarsely sample finite chords under a declared entry recipe. Explicitly clear a lower retained-pad cap before any lower-floor clearing. Do not claim constant-engagement or Fusion parity beyond the source evidence.
+- **Gate:** source-level algorithm tests plus over-cap/entry/link/retained-pad cases; report how every current family task fits or explicitly refuses the total 72-segment cap. Deterministic safe typed plans, focused and full default tests, no path truncation and no physical execution.
+
+### CAM-RUST-4 — Seed replacement, integration qualification and replacement experiments
+
+- **Depends on:** CAM-RUST-1..3 and a reviewed integration decision for any unsupported current task; CAM-RUST-4 alone does not resurrect stopped runs.
+- **Owns:** coordinator's existing CAM seed/suite/qualification leases, fresh generated suite manifests/protocol/configs/output roots, and the integration handoff.
+- **Work:** route typed families to the sourced strategies, compose Pocket roughing with Contour finish without redundant/gouging cuts, include explicit pad-cap phases, and record the port/chord/cap identity. Replace default nominal starts while preserving old outputs as old protocol. Regenerate qualified evidence and a new config/manifest identity, run a new dev pilot, amend T4.2, and only then execute a fresh bounded campaign; regenerate final results and physical-review packets from the new evidence.
+- **Gate:** full suite plus actual nominal stock/target and both-dialect checks on the claimed integration cohort, complete cap/coverage accounting, no skipped current task based on performance, a frozen amended protocol/dry-run, new dev integration pilot, and completed replacement runs with signed absolute and relative cycle deltas. Never reinterpret stopped non-complete entries as failures or successes. Finish with the user's requested Slack MCP verifier handoff; no physical trials are implied.
