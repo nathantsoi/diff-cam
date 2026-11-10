@@ -227,10 +227,10 @@
     },
     "T7.2": {
       "status": "in_progress",
-      "owner": "diffcam-worker-3",
+      "owner": "diffcam-worker-1 (T7.2b)",
       "branch": "task/T7.2-artifacts",
       "blocker": null,
-      "next": "after T4.3",
+      "next": "T7.2b real results package in reports/results from campaign + pilot2 + T3.3",
       "note": "scaffold merged f07c254 (claim-to-evidence per cell, failure/unavailable/refinement rows, precision + decision-ID matching, byte-identical regeneration; never writes manuscript/). Real tables after T4.3."
     },
     "T1.0b": {
