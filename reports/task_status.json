@@ -395,10 +395,11 @@
       "blocker": "T1.xs (simulator tool_occ sign fix) must merge first"
     },
     "T1.3g": {
-      "status": "in_progress",
+      "status": "done",
       "owner": "diffcam-worker-3",
       "branch": "task/T1.3g-air-fraction",
-      "note": "posted air_fraction (feed time with zero removal / cycle time) + air_cut_time_s, rapid_time_s."
+      "note": "posted air_fraction (feed time with zero removal / cycle time) + air_cut_time_s, rapid_time_s. Merged to core; METRIC_UNITS registered. Nominal CAM air_fraction 0.2054.",
+      "tip": "9fddcde"
     },
     "T1.xs": {
       "status": "in_progress",
