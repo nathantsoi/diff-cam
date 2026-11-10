@@ -205,3 +205,10 @@ DECISION:
 - Experiment 2 (solver comparison) keeps the existing K=12 spline-on-CAM representation.
 - The frozen protocol states that θ is unbounded at scale 1 mm (backlog note from Z1).
 - Routing: runner side → worker-2 (with the continuation-adam hook, same runner lease); seeds already produce full MotionPlans.
+
+## D-2026-11-10-14 — Protocol of record for the campaign (efficiency mode)
+The T4.2a frozen_benchmark schema cannot yet express continuation-adam, the suite_manifest source, the D-08 add.4 floor-diagonal
+endpoints, the D-13 shared K=T representation, or the typed collapse offset. Per the user's efficiency directive, it is NOT extended
+before the campaign. The frozen protocol of record is reports/protocol_decision.md plus the SHA-256 of the exact executed configs
+(campaign + Experiment 1), recorded at launch. The schema gaps are listed there as known tooling limitations. Missing values:
+budget.total_wall_time_s = 172800 (48 h cap); random_init root_seed = 17.
