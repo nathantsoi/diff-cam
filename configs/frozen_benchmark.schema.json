@@ -293,7 +293,7 @@
     "positive_integer": {"type": "integer", "minimum": 1},
     "nonnegative_number": {"type": "number", "minimum": 0},
     "positive_number": {"type": "number", "exclusiveMinimum": 0},
-    "condition": {"enum": ["nominal-cam", "fixed-adam", "annealed-adam", "hard-cmaes", "smooth-cmaes"]},
+    "condition": {"enum": ["nominal-cam", "fixed-adam", "annealed-adam", "hard-cmaes", "smooth-cmaes", "continuation-adam"]},
     "init": {
       "enum": ["cam", "straight_line", "random"], "default": "cam",
       "description": "Independent initialization axis. Omission means CAM initialization; no-init conditions require all three declaration objects at protocol root."

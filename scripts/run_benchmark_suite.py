@@ -31,6 +31,7 @@ from typing import Any, Mapping, Optional, Sequence
 import numpy as np
 
 from algorithms import blackbox as B
+from algorithms.continuation import SurfaceBand
 from algorithms import objectives as O
 from algorithms import optimize as adam
 from algorithms import parameterization as P
@@ -44,7 +45,8 @@ from simulator.csg_simulator import CSGSimulatorDelta
 
 EXPERIMENTS = ("pilot", "initialization", "solvers", "mechanics", "all")
 SPLITS = ("dev", "test", "external")
-CONDITIONS = ("nominal-cam", "fixed-adam", "annealed-adam", "hard-cmaes", "smooth-cmaes")
+CONDITIONS = ("nominal-cam", "fixed-adam", "annealed-adam", "hard-cmaes", "smooth-cmaes",
+              "continuation-adam")
 RUNNER_SCHEMA = "diffcam-benchmark-runner/1"
 PENDING_REASON = "Posted evaluation is unavailable until T1.3"
 REPOSITORY = Path(__file__).resolve().parent.parent
@@ -950,6 +952,42 @@ def _budget(config: Mapping[str, Any], method: str) -> B.OptimizationBudget:
     )
 
 
+def _make_continuation_config(config: Mapping[str, Any], adam_cfg: adam.AdamConfig) -> adam.ContinuationConfig:
+    """Build and validate the fully declared continuation identity.
+
+    Raw n_steps follows _initial_state exactly: max_generations if declared,
+    otherwise (raw candidates + one initialization) - one initialization.
+    This defaults k without calling _budget again or hiding another θ0.
+    """
+    if not isinstance(adam_cfg, adam.AdamConfig) or adam_cfg.mode != "annealed":
+        raise RunnerError("continuation-adam requires a bounded annealed AdamConfig")
+    block = config.get("continuation_adam", {})
+    if not isinstance(block, Mapping):
+        raise RunnerError("continuation_adam must be an object of declared mechanism settings")
+    unknown = sorted(set(block) - {field.name for field in dataclasses.fields(adam.ContinuationConfig)} - {"adam"})
+    if unknown:
+        raise RunnerError(f"unknown continuation_adam fields: {unknown}")
+    if "adam" in block:
+        raise RunnerError("nested continuation_adam.adam is not supported; use the shared Adam configuration")
+    values = dict(block)
+    if adam_cfg.n_steps is None:
+        # Mirrors Adam's default: budget candidates - 1, with θ0 added exactly
+        # once. No optimizer or simulator is started for this schedule pass.
+        n_steps = config.get("n_steps")
+        if n_steps is None:
+            max_generations = config.get("max_generations")
+            n_steps = max_generations if max_generations is not None else config["candidate_evaluations"]
+        values["adam"] = dataclasses.replace(adam_cfg, n_steps=n_steps)
+    else:
+        values["adam"] = adam_cfg
+    if isinstance(values.get("calibration_band"), Mapping):
+        values["calibration_band"] = SurfaceBand(**values["calibration_band"])
+    try:
+        return adam.ContinuationConfig(**values)
+    except (TypeError, ValueError) as error:
+        raise RunnerError(f"invalid continuation-adam configuration: {error}") from error
+
+
 def _identity(task: C.TaskSpec, config: Mapping[str, Any], split: str,
               reference_motion: Optional[C.MotionPlan] = None) -> str:
     if reference_motion is None:
@@ -974,6 +1012,12 @@ def _identity(task: C.TaskSpec, config: Mapping[str, Any], split: str,
         "max_generations": config.get("max_generations"),
         "hard_init_accounting": "one ordinary hard candidate before every optimizer update",
         "hard_selection_policy": dataclasses.asdict(B.HardSelectionPolicy()),
+        "continuation_adam": _make_continuation_config(config, adam.AdamConfig(
+            "annealed", learning_rate=config["learning_rate"],
+            max_gradient_norm=config.get("max_gradient_norm", 0.5),
+            k_start=config["k_anneal_start"], k_end=config["k_anneal_end"],
+            n_steps=config.get("n_steps"),
+        )).metadata(),
         "efficiency": efficiency,
         "initialization": config.get("initialization"),
     }
@@ -1125,7 +1169,7 @@ def _plan_runs(config: Mapping[str, Any], task: C.TaskSpec, split: str, only: Op
     identity = _identity(task, config, split)
     initial_entries = []
     for condition in CONDITIONS:
-        seeds = (0,) if condition in ("nominal-cam", "fixed-adam", "annealed-adam") else config["seeds"]
+        seeds = (0,) if condition in ("nominal-cam", "fixed-adam", "annealed-adam", "continuation-adam") else config["seeds"]
         for seed in seeds:
             initial_entries.append({
                 "run_id": f"{condition}-s{seed}-{task.task_hash[7:19]}-{identity[7:19]}",
@@ -1805,6 +1849,19 @@ def _evaluate_outcome(condition: str, evaluator: Any, config: Mapping[str, Any],
     cfg = adam.AdamConfig(mode, learning_rate=config["learning_rate"],
                           max_gradient_norm=config.get("max_gradient_norm", 0.5),
                           k_start=k_start, k_end=k_end)
+    if condition == "continuation-adam":
+        cfg = dataclasses.replace(cfg, n_steps=config.get("n_steps"))
+        continued = _make_continuation_config(config, cfg)
+        result = adam.solve_continuation_adam(
+            evaluator, zeros, continued, budget=_budget(config, condition), seed=seed,
+            run_id=run_id)
+        if result.best is None:
+            raise RunnerError(f"{condition}: no valid hard-selected candidate "
+                              f"(termination_reason={result.termination_reason})")
+        return Outcome(seed, result.best, result.best_theta, result.initial_theta, result.budget,
+                       result.evaluations, result.validation_calls, result.gradient_updates,
+                       result.forward_calls, result.backward_calls, result.invalid_evaluations,
+                       result.termination_reason, result.history, optimizer_result=result)
     result = adam.solve_adam(evaluator, _budget(config, condition), cfg, seed=seed,
                              x0=zeros, run_id=run_id)
     if result.best is None:
@@ -1939,6 +1996,13 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
         "trajectory_deltas.npy": R.numpy_bytes(np.diff(best, axis=0)),
     })
     evaluated = {}
+    if entry.get("method") == "continuation-adam":
+        continuation_metadata = adam.continuation_result_metadata(outcome.optimizer_result)
+        config_out["continuation_adam"] = continuation_metadata
+        files["config.json"] = R.json_bytes(config_out)
+        metrics = json.loads(files["metrics.json"])
+        metrics["continuation_adam"] = continuation_metadata
+        files["metrics.json"] = R.json_bytes(metrics)
     if posted_factory is not None:
         evaluator_for_posts = posted_factory(task, config)
         if isinstance(evaluator_for_posts, PilotPostedEvaluator):

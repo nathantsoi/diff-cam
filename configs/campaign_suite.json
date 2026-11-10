@@ -12,6 +12,7 @@
     {"condition": "nominal-cam", "seeds": [0]},
     {"condition": "fixed-adam", "seeds": [0]},
     {"condition": "annealed-adam", "seeds": [0]},
+    {"condition": "continuation-adam", "seeds": [0]},
     {"condition": "hard-cmaes", "seeds": [0, 1]},
     {"condition": "smooth-cmaes", "seeds": [0, 1]}
   ],
@@ -48,6 +49,24 @@
       "poll_interval_s": 1.0,
       "timeout_s": 10800.0
     },
+    "continuation_adam": {
+      "shift": "on",
+      "backtracking": "on",
+      "calibration_eta": 0.25,
+      "calibration_delta_max": 0.25,
+      "calibration_disagreement_floor": 0.000001,
+      "calibration_band": {
+        "region": "stock",
+        "minimum_mm": 0.0,
+        "maximum_mm": 2.0,
+        "rationale": "Explicit physical near-surface band in millimetres; no automatic widening or trust-region claim"
+      },
+      "backtracking_retries": 2,
+      "backtracking_shrink": 0.5,
+      "backtracking_learning_rate_min": 0.0000625,
+      "backtracking_learning_rate_max": 0.01,
+      "initial_loss_shift": 0.0
+    },
     "campaign_verdict_only": true,
     "validation_interval": 4,
     "max_validation_calls": 6,
@@ -72,14 +91,16 @@
       "fixed-adam": 12.0,
       "annealed-adam": 12.0,
       "hard-cmaes": 5.0,
-      "smooth-cmaes": 12.0
+      "smooth-cmaes": 12.0,
+      "continuation-adam": 12.0
     },
     "fixed_overhead_seconds_by_condition": {
       "nominal-cam": 120.0,
       "fixed-adam": 180.0,
       "annealed-adam": 180.0,
       "hard-cmaes": 180.0,
-      "smooth-cmaes": 180.0
+      "smooth-cmaes": 180.0,
+      "continuation-adam": 180.0
     },
     "aggregate_bootstrap_replicates": 2000,
     "aggregate_bootstrap_seed": 20261108
