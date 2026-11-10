@@ -142,10 +142,10 @@
     },
     "T3.4": {
       "status": "in_progress",
-      "owner": "diffcam-worker-1",
+      "owner": "diffcam-worker-2 (T3.4c solver)",
       "branch": "task/T3.4-continuation",
       "blocker": "T3.3b AD/FD characterization before dev ablations",
-      "next": "dev ablations after pilot",
+      "next": "T3.4c end-to-end continuation-adam solver; runner hook after T3.xd-wiring; dev ablation in pilot re-run 2",
       "note": "mechanism merged 2e8690e (signed EMA shift calibration on identical paths, constrained backtracking, rollback, infeasible start, bounded measures; 21 tests). Dev ablations NOT run \u2014 after T4.1b pilot. | Reviewer verified T3.4b (K1/K2 closed). Ablation-driver requirement: catch empty-band ValueError and record an inconclusive calibration step (don't abort)."
     },
     "T3.3": {
@@ -451,6 +451,11 @@
       "branch": "task/T2.3c-posted-qualification",
       "note": "0.125mm dual-dialect posted qualification of 39 nominal seeds; 4 concurrent; ~6.5h. Merged: 39/39 qualified, 24.6 min at 8 concurrent.",
       "tip": "82c08d2"
+    },
+    "T3.4c": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T3.4c-continuation-solver"
     }
   }
 }
