@@ -107,7 +107,8 @@ def test_frozen_config_selects_real_grid_and_declared_zero_tolerance():
     with pytest.raises(runner.RunnerError, match="approved 8 GiB"):
         runner._refinement_policy(config)
     phases["max_rss_bytes_per_job"] = original_limit
-    assert config["posted_memory_evidence"]["observed_screen_peak_bytes_per_job"] == 3689144320
+    assert config["posted_memory_evidence"]["observed_posted_peak_bytes_per_job_max"] == 449273856
+    assert "observed_screen_peak_bytes_per_job" not in config["posted_memory_evidence"]  # withdrawn L1 artifact
     assert config["precision"] == "f64"
 
     task = pilot_task.build_pilot_task()
