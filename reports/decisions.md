@@ -229,3 +229,8 @@ DECLARED NOW, before the full results:
    selection-vs-verdict analysis.
 4. Diagnostic (worker-1): re-evaluate several Adam iterates from history.json on 1–2 tasks to separate "steps leave the feasible set
    (zero gouge tolerance)" from "no feasible improvement exists" before any claim about gradient methods.
+D-15 item 4 result (T4.3c, worker-1): on 2 facing dev tasks, all 12 annealed-adam hard-validation iterates are infeasible. The first step
+already gouges (9 voxels with residual passing on one task; 206 voxels plus residual 0.11 on the other). Later iterates reach zero gouge
+but with growing residual. Interpretation for the paper: gradient steps at lr 0.005 (|Δθ| ≈ 6·lr per step) leave the zero-gouge
+feasible set immediately, and the sampled trade-off is gouge ↔ residual. This shows "steps leave the feasible set", NOT "no feasible
+direction exists". The claim must stay at that level. Continuation's rejected proposals are not persisted (logging gap, backlog).
