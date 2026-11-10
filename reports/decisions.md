@@ -80,3 +80,8 @@ The plan already requires it, so this is not a scope change. DECISION:
   the runner conditions and the cam/seeds `straight_line`/`random` seeds (new card). These conditions are not part of the
   running 7-run pilot.
 Override: the user may instead scope Experiment 1 and insight (1) out of the first paper; that would be recorded as a superseding decision.
+D-08 addendum (review P2): three items must be pinned in the frozen protocol before any no-init run: (a) the `random` init
+distribution (θ or delta space, scale and its reference, seed derivation); (b) the `straight_line` endpoints and segment placement;
+(c) an operational `collapse` criterion (for example, the 0.125 mm verdict fails geometry or completion, or the residual exceeds
+X × the CAM-init residual, with no hard-loss improvement over the run's own initial path). The T4.2a validator requires all three
+whenever init ≠ cam and rejects placeholders in a frozen config. The values themselves are chosen at the T4.2 freeze.
