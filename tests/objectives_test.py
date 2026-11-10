@@ -17,21 +17,28 @@ from benchmarks import contracts as C
 from simulator.csg_simulator import CSGSimulatorDelta
 
 
-def _prototype(seed=7):
-    ti.init(arch=ti.cpu, offline_cache=False)
-    initial = np.array([-4.0, -4.0, 2.0])
+def _prototype(seed=7, *, spec=None, precision="f32", initial_position_mm=None, residual_mm=None):
+    if precision not in ("f32", "f64"):
+        raise ValueError("precision must be f32 or f64")
+    ti.init(arch=ti.cpu, offline_cache=False,
+            default_fp=ti.f32 if precision == "f32" else ti.f64)
+    initial = np.array([-4.0, -4.0, 2.0] if initial_position_mm is None else initial_position_mm)
+    residuals = np.array([[0, 0, -6], [3, 3, -6]] if residual_mm is None else residual_mm,
+                         dtype=np.float64)
+    if initial.shape != (3,) or residuals.shape != (2, 3):
+        raise ValueError("fixture needs one 3D initial position and two 3D residuals")
     task = C.example_pocket_task()
     part = C.GeometrySource(kind="analytic", params={"primitive": "sphere", "center": [0.5, 0.5, 0.5],
                                                    "radius_mm": 6.0})
     tool = dataclasses.replace(task.tool, holder_bottom_mm=task.tool.flute_length_mm)
     to_machine = task.work_to_machine.apply
     start = to_machine(initial)
-    p1 = to_machine(initial + [0, 0, -6])
-    p2 = to_machine(initial + [3, 3, -12])
+    p1 = to_machine(initial + residuals[0])
+    p2 = to_machine(initial + residuals[0] + residuals[1])
     state = C.MachineState(position_mm=start, frame=C.Frame.MACHINE)
     segments = (
         C.Segment(id="plunge", kind=C.SegmentKind.FEED, start_mm=start, end_mm=p1,
-                  duration_s=0.6, feed_mm_s=10.0, tag="plunge"),
+                  duration_s=math.dist(start, p1) / 10, feed_mm_s=10.0, tag="plunge"),
         C.Segment(id="slot", kind=C.SegmentKind.FEED, start_mm=p1, end_mm=p2,
                   duration_s=math.dist(p1, p2) / 10, feed_mm_s=10.0),
     )
@@ -45,7 +52,7 @@ def _prototype(seed=7):
     sim = CSGSimulatorDelta(
         resolution=16, max_steps=2, stock_size_mm=25.4, voxel_size_mm=task.grid.voxel_mm,
         target_shape="sphere", tool_start=tuple(normalized), enforce_speed_limits=False,
-        init_taichi=False, k_init=40,
+        init_taichi=False, k_init=40, precision=precision,
     )
     sim.tool_radius[None] = task.tool.cutter_radius_mm
     sim.tool_height[None] = task.tool.flute_length_mm
@@ -54,10 +61,10 @@ def _prototype(seed=7):
     sim.holder_height[None] = task.tool.holder_height_mm
     sim.set_target_params(radius_mm=6.0)
     sim.bake_target_grid()
-    mapper = P.DeltaResidual([[0, 0, -6], [3, 3, -6]], scale_mm=1.0,
+    mapper = P.DeltaResidual(residuals, scale_mm=1.0,
                              bounds=(-0.05, 0.05), initial_position_mm=initial)
     evaluator = O.CandidateEvaluator(task, motion, mapper, sim,
-                                     spec=O.ObjectiveSpec(), seed=seed)
+                                     spec=spec or O.ObjectiveSpec(), seed=seed)
     return evaluator
 
 
