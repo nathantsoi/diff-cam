@@ -38,7 +38,7 @@ from algorithms import run_artifacts as R
 from benchmarks import audit as audit
 from benchmarks import contracts as C
 from benchmarks import pilot_task as pilot_io
-from cam.posted_evaluator import PostedEvaluator, RefinementSettings, _analytic_mask
+from cam.posted_evaluator import PostedEvaluator, RefinementSettings, _analytic_mask, _revision, EVALUATOR_ID
 from cam.posts import post_motion_plan
 from simulator.csg_simulator import CSGSimulatorDelta
 
@@ -416,9 +416,16 @@ def _phase_settings(task, config, dialect, nc_bytes, role, *, primary=None, cont
         raise RunnerError(f"invalid {role} posted settings: {error}") from error
 
 
-def _validate_posted_result(task, nc_bytes, dialect, settings, result):
+def _validate_posted_result(task, nc_bytes, dialect, settings, result,
+                            *, require_current_evaluator=False):
     if not isinstance(result, C.EvaluationResult):
         raise RunnerError("posted worker did not return a typed EvaluationResult")
+    if require_current_evaluator:
+        expected = f"{EVALUATOR_ID}/{_revision()}"
+        actual = f"{result.evaluator_id}/{result.evaluator_revision}"
+        if actual != expected:
+            raise RunnerError(
+                f"reused result evaluator identity/revision mismatch: current {expected}, reused {actual}")
     if result.dialect is not dialect or result.nc_hash != C.nc_hash(nc_bytes):
         raise RunnerError("posted result has the wrong dialect or exact NC hash")
     if result.task_hash != task.task_hash or result.tool_setup_hash != task.tool_setup_hash:
@@ -436,6 +443,14 @@ class PostedJob:
     settings: Mapping[str, Any]
     workspace: Path
     reused_source: Optional[Path] = None
+    # Infer only at construction. Later supplied unit-test override files are
+    # not historical cache and keep the initial False setting. Declared cached
+    # sources, including direct PostedJob(path) uses, require current identity.
+    require_current_evaluator: Optional[bool] = None
+
+    def __post_init__(self):
+        if self.require_current_evaluator is None:
+            object.__setattr__(self, "require_current_evaluator", self.reused_source is not None)
 
 
 def _prepare_posted_job(task, job):
@@ -529,7 +544,8 @@ def _posted_job_process(task, job, config):
     if job.reused_source is not None:
         source = job.reused_source.read_bytes()
         result = C.loads(source.decode("utf-8"))
-        _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, result)
+        _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, result,
+                                require_current_evaluator=job.require_current_evaluator)
         if R.record_bytes(result) != source:
             raise RunnerError("cached typed refinement is not canonical production evidence")
         return result, {
@@ -1769,9 +1785,15 @@ def _provided_typed_source(task, job, override):
     if supplied is None:
         return None
     if isinstance(supplied, Path):
-        return supplied.resolve()
+        source = supplied.resolve()
+        cached = C.loads(source.read_text(encoding="utf-8"))
+        _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, cached,
+                                require_current_evaluator=job.require_current_evaluator)
+        R.record_bytes(cached)  # Preserve the existing canonical typed boundary.
+        return source
     source_bytes = R.record_bytes(supplied)
-    _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, supplied)
+    _validate_posted_result(task, job.nc_bytes, job.dialect, job.settings, supplied,
+                            require_current_evaluator=job.require_current_evaluator)
     job.workspace.mkdir(parents=True, exist_ok=False)
     source = job.workspace / "provided-typed-result.json"
     R.ArtifactWriter._replace_bytes(source, source_bytes)

@@ -1491,7 +1491,11 @@ def test_configured_typed_reuse_is_explicit_and_hash_checked(tmp_path):
     root, config, record, _, _ = _pilot_refinement_fixture(tmp_path / "primary")
     nc = (root / record.run_id / "rs274.nc").read_bytes()
     primary_task = C.TaskSpec.from_dict(json.loads((root / record.run_id / "config.json").read_text())["task"])
-    cached_bytes = R.record_bytes(_typed_evaluation(primary_task, nc, step=0.125))
+    import dataclasses
+    matching = dataclasses.replace(
+        _typed_evaluation(primary_task, nc, step=0.125),
+        evaluator_id=runner.EVALUATOR_ID, evaluator_revision=runner._revision())
+    cached_bytes = R.record_bytes(matching)
     source = tmp_path / "explicit-historical-rs274.json"
     source.write_bytes(cached_bytes)
     config["reuse_typed_evaluations"] = {
@@ -1539,6 +1543,43 @@ def test_configured_typed_reuse_is_explicit_and_hash_checked(tmp_path):
     with pytest.raises(runner.RunnerError, match="declared source hash differs"):
         runner._normalized_config(config_path)
     assert source.read_bytes() == before
+
+
+def test_reused_typed_result_requires_current_evaluator_identity(tmp_path):
+    """Typed reuse identity test, not another evaluation or physical measurement."""
+    import dataclasses
+    root, config, record, _, _ = _pilot_refinement_fixture(tmp_path / "primary")
+    nc = (root / record.run_id / "rs274.nc").read_bytes()
+    task = C.TaskSpec.from_dict(
+        json.loads((root / record.run_id / "config.json").read_text())["task"])
+    settings = runner._phase_settings(task, config, C.Dialect.RS274, nc, "verdict")
+    current = dataclasses.replace(
+        _typed_evaluation(task, nc, step=0.125),
+        evaluator_id=runner.EVALUATOR_ID, evaluator_revision=runner._revision())
+    matching_path = tmp_path / "current-typed-result.json"
+    matching_path.write_bytes(R.record_bytes(current))
+
+    def job(source, label):
+        return runner.PostedJob("verdict", C.Dialect.RS274, nc, settings,
+                                tmp_path / label, source)
+
+    accepted, metadata = runner._posted_job_process(
+        task, job(matching_path, "matching-reuse-job"), config)
+    assert accepted.evaluator_revision == runner._revision()
+    assert metadata["status"] == "reused_typed_evaluation"
+    assert metadata["worker_peak_rss_kib"] is None
+    assert not (tmp_path / "matching-reuse-job").exists()
+
+    stale_revision = "stale-posted-evaluator/1+old-source-revision"
+    stale = dataclasses.replace(current, evaluator_revision=stale_revision)
+    stale_path = tmp_path / "stale-typed-result.json"
+    stale_path.write_bytes(R.record_bytes(stale))
+    with pytest.raises(runner.RunnerError, match="evaluator identity/revision mismatch") as caught:
+        runner._posted_job_process(task, job(stale_path, "stale-reuse-job"), config)
+    assert runner.EVALUATOR_ID in str(caught.value)
+    assert runner._revision() in str(caught.value)
+    assert stale_revision in str(caught.value)
+    assert not (tmp_path / "stale-reuse-job").exists()
 
 
 @pytest.mark.parametrize("case", ["missing", "mixed"])
