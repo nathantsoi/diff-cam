@@ -52,7 +52,10 @@
         "residual_weight": {"$ref": "#/$defs/nonnegative_number"},
         "holder_weight": {"$ref": "#/$defs/nonnegative_number"},
         "holder_margin_mm": {"$ref": "#/$defs/nonnegative_number"},
-        "loss_shift_voxels": {"type": "number"}
+        "loss_shift_voxels": {"type": "number"},
+        "time_weight": {"$ref": "#/$defs/nonnegative_number"},
+        "air_time_weight": {"$ref": "#/$defs/nonnegative_number"},
+        "reference_rule": {"const": "task_nominal_cam_cycle_time"}
       }
     },
     "thresholds": {

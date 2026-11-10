@@ -42,8 +42,8 @@ def test_time_air_weights_configurable_and_change_spec_hash():
     evaluator.spec = weighted
     assert B._setup_signature(evaluator, "hard") != first_hash
     evaluator._configure()
-    assert evaluator.sim.w_time[None] == pytest.approx(0.7 / reference)
-    assert evaluator.sim.w_air_time[None] == pytest.approx(0.3 / reference)
+    assert evaluator.sim.w_time[None] == pytest.approx(0.7 * evaluator.parameterization.num_steps / reference)
+    assert evaluator.sim.w_air_time[None] == pytest.approx(0.3 * evaluator.parameterization.num_steps / reference)
     assert evaluator.sim.w_air[None] == 0.0
     with pytest.raises(ValueError, match="reference_cycle_time_s"):
         O.ObjectiveSpec(reference_cycle_time_s=0.0)
@@ -153,7 +153,8 @@ def test_native_time_is_a_documented_surrogate_not_exact_motion_duration():
     assert smooth.components["time_source_is_simulator_surrogate"] == 1.0
     native_mean_seconds = float(evaluator.sim.seg_time.to_numpy().mean())
     assert smooth.components["cycle_time_s"] == pytest.approx(native_mean_seconds)
-    assert smooth.objective == pytest.approx(native_mean_seconds)
+    assert smooth.objective == pytest.approx(
+        evaluator.parameterization.num_steps * native_mean_seconds)
     exact_seconds = _duration(evaluator.candidate_motion(theta))
     assert native_mean_seconds > 0.0 and exact_seconds > 0.0
     assert native_mean_seconds != pytest.approx(exact_seconds, rel=1e-6)
@@ -190,6 +191,65 @@ def test_efficiency_gradient_matches_finite_difference(time_weight, air_time_wei
     fd = (plus.objective - minus.objective) / (2 * epsilon)
     assert np.isfinite(fd) and abs(fd) > 1e-4
     assert ad == pytest.approx(fd, rel=1e-5, abs=1e-8)
+
+
+def test_positive_weight_requires_explicit_reference_with_narrow_test_fallback():
+    motion = C.MotionPlan(
+        frame=C.Frame.MACHINE,
+        initial_state=C.MachineState(frame=C.Frame.MACHINE, position_mm=(0.0, 0.0, 0.0)),
+        segments=(C.Segment(id="one", kind=C.SegmentKind.FEED,
+                            start_mm=(0.0, 0.0, 0.0), end_mm=(1.0, 0.0, 0.0),
+                            duration_s=1.0, feed_mm_s=1.0),),
+        timing_rule=C.TimingRule.EXACT_STOP_CONSTANT_SPEED,
+    )
+    weighted = O.ObjectiveSpec(time_weight=0.01, air_time_weight=0.01,
+                               reference_cycle_time_s=None)
+    with pytest.raises(ValueError, match="explicit reference_cycle_time_s"):
+        O._reference_time_seconds(weighted, motion)
+    assert O._reference_time_seconds(
+        weighted, motion, allow_reference_none_for_test=True) == pytest.approx(1.0)
+    # No-missing-reference production fallback simply uses an explicit total.
+    direct = dataclasses.replace(weighted, reference_cycle_time_s=1.0)
+    assert O._reference_time_seconds(direct, motion) == pytest.approx(1.0)
+    # Explicit zero weights retain the legacy reference-motion duration fallback.
+    assert O._reference_time_seconds(O.ObjectiveSpec(), motion) == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="must be a boolean"):
+        O._reference_time_seconds(weighted, motion, allow_reference_none_for_test="yes")
+
+
+def test_smooth_and_hard_time_terms_have_total_time_scale():
+    evaluator = _prototype(
+        precision="f64", initial_position_mm=(0.0, 0.0, 10.0),
+        residual_mm=((0.0, 0.0, -1.0), (1.0, 1.0, 1.0)))
+    reference = _duration(evaluator.motion)
+    spec = dataclasses.replace(
+        _efficiency_spec(reference, time_weight=0.01, air_time_weight=0.01), k=1000.0)
+    evaluator.spec = spec
+    smooth = evaluator.evaluate_candidate(np.zeros(6), "v1-time-smooth")
+    hard = evaluator.evaluate_candidate(np.zeros(6), "v1-time-hard", objective_kind="hard")
+    assert smooth.valid and hard.valid
+    steps = evaluator.parameterization.num_steps
+    expected_smooth = (spec.time_weight * steps / reference
+                       * smooth.components["cycle_time_s"])
+    expected_hard = spec.time_weight * _duration(evaluator.candidate_motion(np.zeros(6))) / reference
+    assert expected_smooth > 0 and expected_hard > 0
+    assert smooth.objective == pytest.approx(expected_smooth + spec.air_time_weight
+                                             * steps / reference * smooth.components["air_time_s"])
+    assert hard.objective == pytest.approx(
+        expected_hard + spec.air_time_weight * hard.components["air_time_s"] / reference)
+    # Native regression dt/feed caps need not equal exact-stop MotionPlan time.
+    # On this fixed high-k path, the native duration is shorter than the exact
+    # duration. Declare a broad bounded native-vs-exact factor that rejects the
+    # former mean-only scale (ratio/2 for these two steps), without pretending
+    # that the two timing regimes have numerical parity.
+    ratio = expected_smooth / expected_hard
+    assert 1.0 / 32.0 <= ratio <= 2.0
+    assert abs(ratio - 1.0 / steps) > 0.1
+    assert evaluator.sim.w_time[None] == pytest.approx(spec.time_weight * steps / reference)
+    assert evaluator.sim.w_air_time[None] == pytest.approx(spec.air_time_weight * steps / reference)
+    assert expected_smooth == pytest.approx(spec.time_weight / reference
+                                            * np.asarray(evaluator.sim.seg_time.to_numpy()).sum())
+    assert "n_segments/reference_time_s" in spec.smooth_efficiency_normalization
 
 
 def test_efficiency_unknown_candidate_does_not_fabricate_feasible_or_time():

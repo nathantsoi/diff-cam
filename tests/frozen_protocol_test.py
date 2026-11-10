@@ -842,3 +842,34 @@ def test_missing_tuning_evidence_file_fails_closed(tmp_path):
     evidence.unlink()  # Exact fixture file created by make_case; safe to remove once.
     with pytest.raises(V.ProtocolError, match="required evidence file"):
         run_case(case, tmp_path)
+
+
+def test_positive_efficiency_weight_requires_nominal_cam_reference_rule(tmp_path):
+    case = make_case(tmp_path)
+    case["objective"].update(time_weight=0.01, air_time_weight=0.01)
+    call = lambda current: V.validate(
+        current, repo_root=tmp_path / "repo", decisions_path=tmp_path / "decisions.md",
+        dry_run=False, protocol_sha256="sha256:" + "0" * 64)
+    with pytest.raises(V.ProtocolError, match="reference_rule"):
+        call(case)
+    case["objective"]["reference_rule"] = "initial_candidate_cycle_time"
+    with pytest.raises(V.ProtocolError, match="reference_rule"):
+        call(case)
+    case["objective"]["time_weight"] = -0.01
+    with pytest.raises(V.ProtocolError, match="time_weight"):
+        call(case)
+    case = make_case(tmp_path)
+    case["objective"].update(time_weight=0.01, air_time_weight=0.01,
+                             reference_rule="task_nominal_cam_cycle_time")
+    report = call(case)
+    job = {"condition": "annealed-adam", "seed": 0, "init": "cam", "exploratory": False}
+    native = V.native_config(job, case, "sha256:" + "0" * 64)
+    assert native["time_weight"] == native["air_time_weight"] == 0.01
+    assert native["reference_cycle_time_source"] == "task_nominal_cam_cycle_time"
+    assert report["dry_run_performed"] is False
+    case["objective"].update(time_weight=0.0, air_time_weight=0.0)
+    del case["objective"]["reference_rule"]  # Legacy unweighted declarations remain valid.
+    call(case)
+    case["objective"]["reference_rule"] = "different_rule"
+    with pytest.raises(V.ProtocolError, match="reference_rule"):
+        call(case)

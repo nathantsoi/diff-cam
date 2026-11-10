@@ -64,9 +64,10 @@ class ObjectiveSpec:
         "geometry+safety+time_weight*cycle_time_s/reference_time_s+"
         "air_time_weight*air_time_s/reference_time_s; exact MotionPlan duration and sharp engagement")
     smooth_efficiency_normalization: str = (
-        "geometry+safety+time_weight*mean(native seg_time)/reference_time_s+"
-        "air_time_weight*mean(native seg_time*sigmoid_air)/reference_time_s; "
-        "native local-regime/dt surrogates, NOT exact MotionPlan-duration or exact-stop parity")
+        "geometry+safety+time_weight*n_segments/reference_time_s*mean(native seg_time)+"
+        "air_time_weight*n_segments/reference_time_s*mean(native seg_time*sigmoid_air)+"
+        "legacy trajectory terms; the factor n restores total-time scale before native means")
+
     prototype: str = "analytic_target_until_T2.0_custom_target_and_T1.2_chronology"
 
     def __post_init__(self) -> None:
@@ -92,10 +93,24 @@ class CandidateEvaluation:
     diagnostics: Dict[str, Any] = field(default_factory=dict)
 
 
-def _reference_time_seconds(spec: ObjectiveSpec, motion: C.MotionPlan) -> float:
-    """Resolve an explicit reference or the caller's original MotionPlan duration."""
+def _reference_time_seconds(spec: ObjectiveSpec, motion: C.MotionPlan, *,
+                            allow_reference_none_for_test: bool = False) -> float:
+    """Resolve the declared task reference, with an explicit test-only opt-out.
+
+    Weighted production evaluation must supply ``reference_cycle_time_s``; it is
+    never inferred from an uninitialized/random candidate. The narrowly named
+    test flag preserves unit construction of local mocks that intentionally
+    fall back to their reference motion's duration. It is not runner API usage.
+    """
+    if not isinstance(allow_reference_none_for_test, bool):
+        raise ValueError("allow_reference_none_for_test must be a boolean")
     reference = spec.reference_cycle_time_s
     if reference is None:
+        if spec.time_weight > 0 or spec.air_time_weight > 0:
+            if not allow_reference_none_for_test:
+                raise ValueError("positive efficiency weights require an explicit reference_cycle_time_s")
+        # Preserve the legacy weight-zero fallback for unweighted objectives.
+        # The flag permits only explicit test fallbacks for weighted fixtures.
         reference = math.fsum(segment.duration_s for segment in motion.segments)
     _nonnegative_finite(reference, "reference_cycle_time_s")
     if reference == 0 and (spec.time_weight > 0 or spec.air_time_weight > 0):
@@ -261,9 +276,12 @@ class CandidateEvaluator:
         sim.w_residual[None] = spec.residual_weight
         sim.holder_penalty_weight[None] = spec.holder_weight
         sim.holder_margin[None] = spec.holder_margin_mm / sim.v
-        sim.w_time[None] = (spec.time_weight / self.reference_cycle_time_s
+        # Native smooth terms are per-segment MEANS. Restore total-time scale
+        # against the task's TOTAL nominal duration before that mean is taken.
+        n_segments = self.parameterization.num_steps
+        sim.w_time[None] = (spec.time_weight * n_segments / self.reference_cycle_time_s
                             if spec.time_weight > 0 else 0.0)
-        sim.w_air_time[None] = (spec.air_time_weight / self.reference_cycle_time_s
+        sim.w_air_time[None] = (spec.air_time_weight * n_segments / self.reference_cycle_time_s
                                 if spec.air_time_weight > 0 else 0.0)
         for descriptor in fields(spec.legacy_weights):
             getattr(sim, descriptor.name)[None] = getattr(spec.legacy_weights, descriptor.name)

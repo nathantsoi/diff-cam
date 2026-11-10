@@ -101,6 +101,59 @@ def _requested_precision(config, *, pilot=False):
     return precision
 
 
+_REFERENCE_SOURCE = "task_nominal_cam_cycle_time"
+
+
+def _validate_efficiency_values(config: Mapping[str, Any]) -> tuple[float, float]:
+    values = []
+    for name in ("time_weight", "air_time_weight"):
+        value = config.get(name, 0.0)
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
+            raise RunnerError(f"{name} must be finite and nonnegative")
+        values.append(float(value))
+    source = config.get("reference_cycle_time_source", _REFERENCE_SOURCE)
+    if source != _REFERENCE_SOURCE:
+        raise RunnerError(f"reference_cycle_time_source must be {_REFERENCE_SOURCE!r}")
+    if (any(v > 0 for v in values) and "reference_cycle_time_s" in config
+            and config["reference_cycle_time_s"] is None):
+        raise RunnerError("positive efficiency weights require an explicit task reference, not None")
+    return values[0], values[1]
+
+
+def _nominal_cycle_metadata(task: C.TaskSpec, motion: Optional[C.MotionPlan] = None) -> dict[str, Any]:
+    """Compute one nominal task reference, never a candidate/initializer reference."""
+    if motion is None:
+        from cam.seeds import seed_for_task
+        motion = seed_for_task(task)
+    return {
+        "reference_cycle_time_s": float(math.fsum(segment.duration_s for segment in motion.segments)),
+        "reference_cycle_time_source": _REFERENCE_SOURCE,
+        "reference_motion_hash": motion.motion_hash,
+    }
+
+
+def _objective_spec(config: Mapping[str, Any], task: C.TaskSpec,
+                    *, reference_metadata: Optional[Mapping[str, Any]] = None) -> tuple[O.ObjectiveSpec, dict[str, Any]]:
+    time_weight, air_time_weight = _validate_efficiency_values(config)
+    reference = (_nominal_cycle_metadata(task) if reference_metadata is None
+                 else dict(reference_metadata))
+    supplied = config.get("reference_cycle_time_s")
+    if supplied is not None and supplied != reference["reference_cycle_time_s"]:
+        raise RunnerError("reference cycle time differs from the task's immutable nominal CAM motion")
+    metadata = {
+        "time_weight": time_weight, "air_time_weight": air_time_weight,
+        **reference,
+    }
+    spec = dataclasses.replace(
+        O.ObjectiveSpec(k=float(config["k_smooth"])),
+        time_weight=time_weight,
+        air_time_weight=air_time_weight,
+        reference_cycle_time_s=reference["reference_cycle_time_s"],
+    )
+    return spec, metadata
+
+
 def _normalized_config(path: str | Path) -> dict[str, Any]:
     raw = _json(Path(path))
     if not isinstance(raw, dict) or raw.get("schema") != RUNNER_SCHEMA:
@@ -120,6 +173,7 @@ def _normalized_config(path: str | Path) -> dict[str, Any]:
         raise RunnerError("seeds must be a nonempty, unique list")
     for seed in seeds:
         _positive_int(seed, "seed", zero=True)
+    _validate_efficiency_values(raw)
     return raw
 
 
@@ -181,10 +235,15 @@ class PilotCandidateEvaluator(O.CandidateEvaluator):
     these are not interchangeable sources of geometry or identity hashes.
     """
 
-    def __init__(self, task, sampled_task, motion, parameterization, sim, config, seed, sources):
+    def __init__(self, task, sampled_task, motion, parameterization, sim, config, seed, sources,
+                 *, spec=None, efficiency_metadata=None):
+        spec = (spec if spec is not None else _objective_spec(
+            config, task, reference_metadata=efficiency_metadata)[0])
         super().__init__(task=sampled_task, motion=motion, parameterization=parameterization,
-                         simulator=sim, spec=O.ObjectiveSpec(k=float(config["k_smooth"])), seed=seed,
-        requested_precision=config["precision"])
+                         simulator=sim, spec=spec, seed=seed,
+                         requested_precision=config["precision"])
+        # Immutable D-11 reference and weights shared by every arm.
+        self.efficiency_metadata = efficiency_metadata
         if sampled_task.operation_target.geometry.kind != "sampled" or sim.target_shape != "sampled":
             raise RunnerError("pilot requires task and simulator to use the same sampled operation target")
         self.task = task                 # production analytic operation target
@@ -266,16 +325,20 @@ def _pilot_context(config, repository):
     if isinstance(pitch, bool) or not isinstance(pitch, (int, float)) or not math.isfinite(pitch) or pitch <= 0:
         raise RunnerError("grid_pitch_mm must be finite and positive")
     task = pilot_io.build_pilot_task(voxel_mm=float(pitch))
-    from cam.seeds import pocket_with_island_seed
-    motion = pocket_with_island_seed(task)
+    from cam.seeds import seed_for_task
+    motion = seed_for_task(task)
     motion.validate_for_task(task)
     parameterization = pilot_io.fit_parameterization(motion, controls=12)
+    reference_metadata = _nominal_cycle_metadata(task, motion)
     _sampled_pilot_sources(task, repository)
     _pilot_exclusion_tolerance(task, config)
-    return task, motion, parameterization, partial(_pilot_evaluator, repository=repository), _pilot_post_factory
+    return (task, motion, parameterization,
+            partial(_pilot_evaluator, repository=repository,
+                    reference_metadata=reference_metadata), _pilot_post_factory)
 
 
-def _pilot_evaluator(task, motion, parameterization, config, seed, *, repository=None):
+def _pilot_evaluator(task, motion, parameterization, config, seed, *, repository=None,
+                     reference_metadata=None):
     guard = os.environ.get("DIFFCAM_RUNNER_SIMULATOR", "0")
     if guard != "0":
         raise RunnerError("each pilot child must own exactly one simulator")
@@ -317,7 +380,10 @@ def _pilot_evaluator(task, motion, parameterization, config, seed, *, repository
         raw_target = np.load(stream, allow_pickle=False)
     if not np.array_equal(sim.target.to_numpy() < 0.0, raw_target < 0.0):
         raise RunnerError("simulator's baked target material mask differs from operation target T")
-    return PilotCandidateEvaluator(task, sampled_task, motion, parameterization, sim, config, seed, sources)
+    spec, efficiency_metadata = _objective_spec(
+        config, task, reference_metadata=reference_metadata)
+    return PilotCandidateEvaluator(task, sampled_task, motion, parameterization, sim, config, seed, sources,
+                                   spec=spec, efficiency_metadata=efficiency_metadata)
 
 
 def _pilot_post_factory(task, config):
@@ -755,6 +821,13 @@ class PilotPostedEvaluator(PostedEvaluator):
 
 
 
+def _reference_for_task(task: C.TaskSpec, config: Mapping[str, Any], motion: C.MotionPlan) -> dict[str, Any]:
+    """Use nominal CAM for production, and the actual base fixture for legacy prototypes."""
+    if config.get("task_source", "pilot_pocket") == "pilot_pocket":
+        return _nominal_cycle_metadata(task)
+    return _nominal_cycle_metadata(task, motion)
+
+
 def _prototype_evaluator(task, motion, parameterization, config, seed):
     """One runtime and exactly one simulator, created inside one child process."""
     guard = os.environ.get("DIFFCAM_RUNNER_SIMULATOR", "0")
@@ -782,9 +855,12 @@ def _prototype_evaluator(task, motion, parameterization, config, seed):
     sim.holder_height[None] = task.tool.holder_height_mm
     sim.set_target_params(radius_mm=6.0)
     sim.bake_target_grid()
-    return O.CandidateEvaluator(task, motion, parameterization, sim,
-                                spec=O.ObjectiveSpec(k=float(config["k_smooth"])), seed=seed,
-                                requested_precision=precision)
+    spec, metadata = _objective_spec(
+        config, task, reference_metadata=_reference_for_task(task, config, motion))
+    evaluator = O.CandidateEvaluator(task, motion, parameterization, sim,
+                                     spec=spec, seed=seed, requested_precision=precision)
+    evaluator.efficiency_metadata = metadata
+    return evaluator
 
 
 def _budget(config: Mapping[str, Any], method: str) -> B.OptimizationBudget:
@@ -800,7 +876,17 @@ def _budget(config: Mapping[str, Any], method: str) -> B.OptimizationBudget:
     )
 
 
-def _identity(task: C.TaskSpec, config: Mapping[str, Any], split: str) -> str:
+def _identity(task: C.TaskSpec, config: Mapping[str, Any], split: str,
+              reference_motion: Optional[C.MotionPlan] = None) -> str:
+    if reference_motion is None:
+        reference_motion = _context(config, REPOSITORY)[1]
+    efficiency = {
+        "time_weight": config.get("time_weight", 0.0),
+        "air_time_weight": config.get("air_time_weight", 0.0),
+        **_reference_for_task(task, config, reference_motion),
+        "smooth_weight_scale": "w_time=time_weight*n_executed_segments/reference_time_s; "
+                               "w_air_time=air_time_weight*n_executed_segments/reference_time_s",
+    }
     payload = {
         "task_hash": task.task_hash, "task_split": task.split.value, "split": split,
         "experiment": config["experiment"], "task_source": config.get("task_source", "prototype_analytic"),
@@ -814,20 +900,174 @@ def _identity(task: C.TaskSpec, config: Mapping[str, Any], split: str) -> str:
         "max_generations": config.get("max_generations"),
         "hard_init_accounting": "one ordinary hard candidate before every optimizer update",
         "hard_selection_policy": dataclasses.asdict(B.HardSelectionPolicy()),
+        "efficiency": efficiency,
+        "initialization": config.get("initialization"),
     }
     return C.content_hash(payload)
 
 
-def _plan_entries(config: Mapping[str, Any], task: C.TaskSpec, split: str, only: Optional[str]) -> list[dict[str, Any]]:
+def _initializers(config: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Parse explicit D-08 arms, keeping exploratory CAM perturbations separate."""
+    block = config.get("initialization")
+    if block is None:
+        return [], []
+    if not isinstance(block, Mapping):
+        raise RunnerError("initialization must be an object with declarations and cases")
+    allowed = {"straight_line_init", "random_init", "methods", "exploratory_cam_perturbation",
+               "provisional", "notes"}
+    unknown = sorted(set(block) - allowed)
+    if unknown:
+        raise RunnerError(f"unrecognized initialization fields: {unknown}")
+    if "provisional" in block and block["provisional"] is not True:
+        raise RunnerError("initialization.provisional must be explicitly true when supplied")
+    if "notes" in block and (not isinstance(block["notes"], str) or not block["notes"].strip()):
+        raise RunnerError("initialization.notes must be nonempty text when supplied")
+    for name in ("methods", "exploratory_cam_perturbation"):
+        if not isinstance(block.get(name, []), list):
+            raise RunnerError(f"initialization.{name} must be a list")
+    if any(case.get("init") == "straight_line" for case in block.get("methods", [])):
+        if not isinstance(block.get("straight_line_init"), Mapping):
+            raise RunnerError("straight_line requires its full straight_line_init declaration")
+    if any(case.get("init") == "random" for case in block.get("methods", [])):
+        if (not isinstance(block.get("random_init"), Mapping)
+                or not isinstance(block.get("straight_line_init"), Mapping)):
+            raise RunnerError("random initialization requires random_init and its straight_line_init anchors")
+    cases = []
+    for case in block.get("methods", []):
+        if not isinstance(case, Mapping):
+            raise RunnerError("each initialization case must be an object")
+        condition, init = case.get("condition"), case.get("init", "cam")
+        if condition not in ("annealed-adam", "hard-cmaes"):
+            raise RunnerError("non-CAM initialization supports only annealed-adam and hard-cmaes")
+        if init not in ("cam", "straight_line", "random"):
+            raise RunnerError("init must be exactly cam, straight_line, or random; cam_perturbed is a separate override")
+        if "variant" in case and not isinstance(case["variant"], str):
+            raise RunnerError("initializer variants must have string identities")
+        seeds = case.get("seeds")
+        if not isinstance(seeds, list) or not seeds:
+            raise RunnerError(f"{condition}/{init}: declarations require a nonempty seed list")
+        if init == "straight_line" and len(seeds) != 1:
+            raise RunnerError("straight_line is deterministic: exactly one seed slot is allowed")
+        if any(isinstance(seed, bool) or not isinstance(seed, int) or seed < 0 for seed in seeds):
+            raise RunnerError("initializer seeds must be nonnegative integers")
+        normalized = dict(case, condition=condition, init=init, seeds=list(seeds))
+        cases.append(normalized)
+    sidecars = []
+    for case in block.get("exploratory_cam_perturbation", []):
+        if not isinstance(case, Mapping):
+            raise RunnerError("exploratory CAM perturbation must be a declared case object")
+        declaration = case.get("cam_perturbed_init")
+        if not isinstance(declaration, Mapping) or declaration.get("parameter_space") != "theta":
+            raise RunnerError("exploratory cam_perturbed_init must use normalized theta space")
+        if declaration.get("exploratory") is not True or declaration.get("excluded_from_init_axis_claims") is not True:
+            raise RunnerError("CAM perturbation must be exploratory and excluded from init-axis claims")
+        parent = case.get("parent")
+        if not isinstance(parent, Mapping) or parent.get("condition") not in CONDITIONS:
+            raise RunnerError("CAM perturbation requires a named plain-CAM parent condition")
+        if parent["condition"] == "nominal-cam":
+            raise RunnerError("exploratory CAM perturbation cannot replace the nominal CAM anchor")
+        if parent.get("init", "cam") != "cam":
+            raise RunnerError("exploratory CAM perturbation must attach to a plain CAM parent, not a no-init arm")
+        suffix = case.get("variant_suffix", "cam_perturbed")
+        if not isinstance(suffix, str) or not re.fullmatch(
+                r"cam_perturbed(?:[-_][A-Za-z0-9_.-]+)?", suffix):
+            raise RunnerError("CAM perturbation suffix must begin cam_perturbed and be filename-safe")
+        sidecars.append(dict(case, parent=parent, variant_suffix=suffix,
+                             cam_perturbed_init=declaration))
+    return cases, sidecars
+
+
+def _initializer_k_override(case: Mapping[str, Any]) -> dict[str, float]:
+    if "k" not in case:
+        return {}
+    value = case["k"]
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise RunnerError("explicit initializer K must be finite and positive")
+    value = float(value)
+    return {"k_fixed": value, "k_smooth": value,
+            "k_anneal_start": value, "k_anneal_end": value}
+
+
+def _extend_initializers(config: Mapping[str, Any], task: C.TaskSpec, identity: str,
+                         entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cases, sidecars = _initializers(config)
+    result = list(entries)
+    parents = {(entry["method"], entry["variant"], entry["seed"]): entry["run_id"]
+               for entry in entries if entry["init"] == "cam"}
+    seen = {entry["run_id"] for entry in result}
+    duplicate_slots = {}
+    for case in cases:
+        condition, init = case["condition"], case["init"]
+        for seed in case["seeds"]:
+            suffix = "" if init == "cam" else f"-{init}"
+            if case.get("variant") is not None:
+                variant = case["variant"]
+                if not isinstance(variant, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", variant):
+                    raise RunnerError("initializer variant identity must be filename-safe")
+                suffix += f"-{variant}"
+            condition_id = f"{condition}-s{seed}-{task.task_hash[7:19]}-{identity[7:19]}"
+            base_id = condition_id + suffix
+            if init == "cam" and base_id in seen:
+                raise RunnerError(f"explicit initializer case duplicates retained CAM run: {base_id}")
+            key = (condition, init, seed, case.get("variant"))
+            slot = duplicate_slots.get(key, 0)
+            duplicate_slots[key] = slot + 1
+            run_id = base_id + (f"-slot{slot}" if slot else "")
+            if run_id in seen:
+                raise RunnerError(f"duplicate initializer run identity: {run_id}")
+            seed_info = {"ordinal": slot, "duplicate_requested_position": slot > 0}
+            result.append({
+                "run_id": run_id, "method": condition, "seed": seed,
+                "task_id": task.task_id, "identity": identity,
+                "init": init, "variant": case.get("variant"),
+                "scope": "optimizer", "seed_slot": seed_info,
+                "config_override": _initializer_k_override(case),
+            })
+            seen.add(run_id)
+    for case in sidecars:
+        parent = case["parent"]
+        seed = parent.get("seed", 0)
+        if isinstance(seed, bool) or not isinstance(seed, int) or seed < 0:
+            raise RunnerError("exploratory parent seed must be a nonnegative integer")
+        parent_variant = parent.get("variant")
+        key = (parent["condition"], parent_variant, seed)
+        if key not in parents:
+            raise RunnerError(f"exploratory parent must identify an existing CAM run: {key}")
+        run_id = parents[key] + "-" + case["variant_suffix"]
+        if run_id in seen:
+            raise RunnerError(f"duplicate exploratory CAM perturbation identity: {run_id}")
+        result.append({
+            "run_id": run_id, "method": parent["condition"], "seed": seed,
+            "task_id": task.task_id, "identity": identity,
+            "init": "cam", "variant": parent_variant, "variant_suffix": case["variant_suffix"],
+            "scope": "exploratory_cam_perturbation",
+            "parent_run_id": parents[key], "cam_perturbed_init": case["cam_perturbed_init"],
+        })
+        seen.add(run_id)
+    return result
+
+
+def _plan_runs(config: Mapping[str, Any], task: C.TaskSpec, split: str, only: Optional[str]) -> list[dict[str, Any]]:
     identity = _identity(task, config, split)
-    entries = []
+    initial_entries = []
     for condition in CONDITIONS:
         seeds = (0,) if condition in ("nominal-cam", "fixed-adam", "annealed-adam") else config["seeds"]
         for seed in seeds:
-            run_id = f"{condition}-s{seed}-{task.task_hash[7:19]}-{identity[7:19]}"
-            if only is None or fnmatch.fnmatchcase(run_id, only):
-                entries.append({"run_id": run_id, "method": condition, "seed": seed,
-                                "task_id": task.task_id, "identity": identity})
+            initial_entries.append({
+                "run_id": f"{condition}-s{seed}-{task.task_hash[7:19]}-{identity[7:19]}",
+                "method": condition, "seed": seed, "task_id": task.task_id,
+                "identity": identity, "init": "cam", "variant": None,
+                "scope": "primary", "config_override": {},
+            })
+    return _extend_initializers(config, task, identity, initial_entries)
+
+
+def _plan_entries(config: Mapping[str, Any], task: C.TaskSpec, split: str, only: Optional[str]) -> list[dict[str, Any]]:
+    # Expand with the complete family before selection, preserving sidecar parent
+    # links; each worker subprocess still receives exactly one selected identity.
+    entries = _plan_runs(config, task, split, only)
+    if only is not None:
+        entries = [entry for entry in entries if fnmatch.fnmatchcase(entry["run_id"], only)]
     if not entries:
         raise RunnerError(f"--only {only!r} selects none of the requested runs")
     if not all(character.isalnum() or character in "-_."
@@ -1415,9 +1655,24 @@ def _measure_timing_subprocess(config, root):
     return data
 
 
+def _entry_initialization_metadata(entry: Mapping[str, Any]) -> dict[str, Any]:
+    scope = entry.get("scope", "primary")
+    document = {
+        "init": entry.get("init", "cam"), "scope": scope,
+        "exploratory": scope == "exploratory_cam_perturbation",
+        "excluded_from_init_axis_claims": scope == "exploratory_cam_perturbation",
+    }
+    for name in ("variant", "variant_suffix", "seed_slot", "parent_run_id"):
+        if entry.get(name) is not None:
+            document[name] = entry[name]
+    if entry.get("config_override"):
+        document["k_override"] = dict(entry["config_override"])
+    return document
+
+
 def _manifest(config: Mapping[str, Any], task: C.TaskSpec, entries: Sequence[Mapping[str, Any]],
               root: Path, *, planned: bool) -> dict[str, Any]:
-    return {"schema_version": 1,
+    document = {"schema_version": 1,
             "tasks": [{"task_id": task.task_id, "family": task.family, "task_hash": task.task_hash,
                        "task_split": task.split.value}],
             "expected_runs": [{"run_id": entry["run_id"], "task_id": entry["task_id"],
@@ -1431,6 +1686,9 @@ def _manifest(config: Mapping[str, Any], task: C.TaskSpec, entries: Sequence[Map
                        "adam_conditions": "one_deterministic_replicate_each",
                        "cma_conditions": "one_run_per_declared_seed",
                        "nominal_cam": "one_deterministic_run"}}
+    document["initialization_cases"] = [_entry_initialization_metadata(entry)
+                                         | {"run_id": entry["run_id"]} for entry in entries]
+    return document
 
 
 def _evaluate_outcome(condition: str, evaluator: Any, config: Mapping[str, Any], seed: int,
@@ -1486,8 +1744,19 @@ def _evaluate_outcome(condition: str, evaluator: Any, config: Mapping[str, Any],
 
 def _write_failure(entry: Mapping[str, Any], task: C.TaskSpec, motion: C.MotionPlan,
                    config: Mapping[str, Any], status: C.RunStatus, reason: str,
-                   root: Path) -> C.RunRecord:
+                   root: Path, *, seed_result: Optional[Mapping[str, Any]] = None) -> C.RunRecord:
     """Keep a typed failed/interrupted artifact even if no valid candidate exists."""
+    config_body = {"task_hash": task.task_hash, "identity": entry["identity"],
+                   "condition": entry["method"], "seed": entry["seed"],
+                   "run_status": status.value, "message": reason,
+                   "initialization": _entry_initialization_metadata(entry)}
+    if seed_result is not None:
+        if not isinstance(seed_result, Mapping):
+            raise RunnerError("failed initializer result must be a mapping, not a substituted plan")
+        config_body["initialization"]["seed_outcome"] = seed_result
+        config_body["motion_plan_role"] = (
+            "reference-only typed MotionPlan; it is NOT a valid evaluated initialization or optimizer result")
+        config_body["initialization_seed_result_file"] = "initialization_seed_result.json"
     run_dir = root / entry["run_id"]
     if run_dir.exists():
         raise RunnerError(f"cannot commit failed state over existing partial data: {run_dir}")
@@ -1495,11 +1764,12 @@ def _write_failure(entry: Mapping[str, Any], task: C.TaskSpec, motion: C.MotionP
         C.PostedProgram(dialect, C.PostStatus.UNSUPPORTED, reason=f"{status.value}: {reason}")
         for dialect in C.Dialect))
     files = {
-        "config.json": R.json_bytes({"task_hash": task.task_hash, "identity": entry["identity"],
-                                     "condition": entry["method"], "seed": entry["seed"],
-                                     "run_status": status.value, "message": reason}),
+        "config.json": R.json_bytes(config_body),
         "history.json": R.json_bytes({"entries": []}),
-        "metrics.json": R.json_bytes({"status": status.value, "reason": reason}),
+        "metrics.json": R.json_bytes({"status": status.value, "reason": reason,
+                                      "initialization": config_body["initialization"],
+                                      "motion_plan_role": config_body.get("motion_plan_role"),
+                                      "optimizer_executed": False if seed_result is not None else None}),
         "motion_plan.json": R.record_bytes(motion),
         "initial_trajectory.npy": R.numpy_bytes(np.zeros((1, 3))),
         "trajectory.npy": R.numpy_bytes(np.zeros((1, 3))),
@@ -1508,6 +1778,8 @@ def _write_failure(entry: Mapping[str, Any], task: C.TaskSpec, motion: C.MotionP
             dialect.value: {"dialect": dialect.value, "status": "unsupported", "reason": reason}
             for dialect in C.Dialect}}),
     }
+    if seed_result is not None:
+        files["initialization_seed_result.json"] = R.json_bytes(seed_result)
     record = R.assemble_record(entry["run_id"], task, status, posting=posting,
                                artifact_names=tuple(sorted(files)), failure_reason=reason)
     R.ArtifactWriter().write(str(run_dir), record, files)
@@ -1528,6 +1800,30 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
                                                        "backward_calls": outcome.backward_calls,
                                                        "generations": outcome.generations}},
                                     repository=repository)
+    reference = getattr(evaluator, "efficiency_metadata", None)
+    if reference is None:
+        reference = {
+            "time_weight": float(getattr(evaluator.spec, "time_weight", config.get("time_weight", 0.0))),
+            "air_time_weight": float(getattr(evaluator.spec, "air_time_weight", config.get("air_time_weight", 0.0))),
+            **_nominal_cycle_metadata(task, evaluator.motion),
+        }
+    if not isinstance(reference, Mapping):
+        raise RunnerError("efficiency metadata is missing or invalid")
+    evaluator_time_weight = float(getattr(evaluator.spec, "time_weight", reference["time_weight"]))
+    evaluator_air_weight = float(getattr(evaluator.spec, "air_time_weight", reference["air_time_weight"]))
+    evaluator_reference = float(getattr(evaluator, "reference_cycle_time_s", reference["reference_cycle_time_s"]))
+    if (evaluator_time_weight != float(reference["time_weight"])
+            or evaluator_air_weight != float(reference["air_time_weight"])
+            or evaluator_reference != float(reference["reference_cycle_time_s"])):
+        raise RunnerError("evaluator and emitted efficiency metadata differ")
+    config_out["efficiency"] = dict(
+        reference,
+        time_weight_n_over_reference=(
+            evaluator_time_weight * evaluator.parameterization.num_steps / evaluator_reference),
+        air_time_weight_n_over_reference=(
+            evaluator_air_weight * evaluator.parameterization.num_steps / evaluator_reference),
+    )
+    config_out["initialization"] = _entry_initialization_metadata(entry)
     optimized = outcome.optimizer_result
     config_out["hard_selection"] = (
         None if optimized is None else {
@@ -1537,12 +1833,19 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
     config_out["hard_selection_config_hash"] = (
         None if optimized is None or optimized.selection_thresholds is None
         else optimized.selection_thresholds["config_hash"])
+    config_out["time_weight"] = reference["time_weight"]
+    config_out["air_time_weight"] = reference["air_time_weight"]
+    config_out["reference_cycle_time_s"] = reference["reference_cycle_time_s"]
+    config_out["reference_cycle_time_source"] = reference["reference_cycle_time_source"]
+    config_out["reference_motion_hash"] = reference["reference_motion_hash"]
     initial = evaluator.parameterization.positions(outcome.initial_theta)
     best = evaluator.parameterization.positions(outcome.best_theta)
     files = dict(posting.files)
     files.update({
         "config.json": R.json_bytes(config_out),
-        "history.json": R.json_bytes({"history": outcome.history, "ledger": evaluator.ledger.snapshot()}),
+        "history.json": R.json_bytes({"history": outcome.history,
+                                      "ledger": evaluator.ledger.snapshot(),
+                                      "initialization": _entry_initialization_metadata(entry)}),
         "metrics.json": R.json_bytes({"best_candidate": B._candidate_dict(outcome.best),
                                       "termination_reason": outcome.termination_reason,
                                       "invalid_candidates": outcome.invalid_candidates,
@@ -1609,14 +1912,73 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
 
 
 
+def _initializer_motion(config: Mapping[str, Any], task: C.TaskSpec,
+                        cam_motion: C.MotionPlan, cam_parameterization: Any,
+                        entry: Mapping[str, Any]):
+    """Resolve the declared init once, preserving failure at its original slot."""
+    from cam.seeds import random_seed, straight_line_seed, cam_perturbed_seed
+    init = entry.get("init", "cam")
+    if entry.get("scope") == "exploratory_cam_perturbation":
+        result = cam_perturbed_seed(
+            task, {"cam_perturbed_init": entry["cam_perturbed_init"]}, entry["seed"])
+    elif init == "cam":
+        return cam_motion, cam_parameterization, None
+    else:
+        block = config.get("initialization")
+        if not isinstance(block, Mapping):
+            raise RunnerError("non-CAM initialization requires its declaration block")
+        declaration = block.get(f"{init}_init")
+        if not isinstance(declaration, Mapping):
+            raise RunnerError(f"{init} requires its exact declaration")
+        if init == "straight_line":
+            result = straight_line_seed(task, declaration)
+        elif init == "random":
+            result = random_seed(task, {
+                "random_init": declaration,
+                "straight_line_init": block["straight_line_init"],
+            }, entry["seed"])
+        else:
+            raise RunnerError("unsupported initializer axis value")
+    if not result.valid:
+        return None, None, result.to_record()
+    try:
+        motion = result.require_plan()
+    except ValueError as error:
+        # A valid structure can still be explicitly diagnostic-only. Do not
+        # salt an evaluable initial point from another plan in that situation.
+        record = result.to_record()
+        record["require_plan_failure"] = str(error)
+        return None, None, record
+    # Plain CAM returned above. Every constructed non-parent trajectory,
+    # including a CAM perturbation sidecar, needs its own fitted θ0.
+    parameters = _fit_initializer_parameterization(motion)
+    return motion, parameters, result.to_record()
+
+
+def _fit_initializer_parameterization(motion: C.MotionPlan):
+    from benchmarks import pilot_task as pilot_io
+    return pilot_io.fit_parameterization(motion, controls=12)
+
+
 def _child(config: Mapping[str, Any], entry: Mapping[str, Any], root: Path) -> None:
     task, motion, params, evaluator_factory, posted_factory = _context(config, root)
     if entry["identity"] != _identity(task, config, "dev"):
         raise RunnerError("child task identity differs from frozen parent manifest")
     if config.get("__test_interrupt__") == entry["run_id"]:
         raise KeyboardInterrupt("injected child interruption; parent must retain the status")
-    evaluator = evaluator_factory(task, motion, params, config, entry["seed"])
+    seed_result = None
     try:
+        reference_motion = motion
+        config = dict(config, **entry.get("config_override", {}))
+        motion, params, seed_result = _initializer_motion(
+            config, task, motion, params, entry)
+        if motion is None:
+            reason = seed_result.get("invalid_reason") or seed_result.get("require_plan_failure")
+            _write_failure(entry, task, reference_motion, config, C.RunStatus.FAILED,
+                           reason or "declared initialization could not produce an executable plan",
+                           root, seed_result=seed_result)
+            return  # a failed child record; no call, redraw or substituting path
+        evaluator = evaluator_factory(task, motion, params, config, entry["seed"])
         outcome = _evaluate_outcome(entry["method"], evaluator, config, entry["seed"],
                                     run_id=entry["run_id"])
         _write_outcome(entry, evaluator, outcome, posted_factory, config, root, REPOSITORY)
@@ -1626,7 +1988,11 @@ def _child(config: Mapping[str, Any], entry: Mapping[str, Any], root: Path) -> N
         _write_failure(entry, task, motion, config, C.RunStatus.BLOCKED, str(error), root)
         raise
     except Exception as error:
-        _write_failure(entry, task, motion, config, C.RunStatus.FAILED, str(error), root)
+        failure_reason = str(error)
+        if seed_result is not None:
+            failure_reason = f"{seed_result.get('invalid_reason', 'initialization accepted')} -> {failure_reason}"
+        _write_failure(entry, task, reference_motion, config, C.RunStatus.FAILED, failure_reason,
+                       root, seed_result=seed_result)
         raise
 
 

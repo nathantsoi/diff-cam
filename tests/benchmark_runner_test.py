@@ -1397,6 +1397,222 @@ def test_refinement_timing_is_separate_from_primary_and_parallel_forecast(tmp_pa
         for item in projection["levels"][role]["artifacts"].values():
             assert (tmp_path / item["evaluation_path"]).is_file()
             assert C.sha256_bytes((tmp_path / item["evaluation_path"]).read_bytes()) == item["evaluation_sha256"]
+    _refinement_timing_projection_followup(config, phases, entries, evidence, tmp_path)
+
+
+# D-08/D-11: structural runner wiring tests. No optimizer run or measured timing
+# is claimed by these fixtures.
+def test_pilot_init_plan_has_unique_slots_parents_and_one_task_reference(tmp_path):
+    config = json.loads((CONFIG.parent / "pilot_init.json").read_text())
+    task, cam_motion, _parameterization, _factory, _posted = runner._context(config, tmp_path)
+    entries = runner._plan_entries(config, task, "dev", None)
+    assert len(entries) == 14  # seven unchanged CAM arms + six D-08 arms + one sidecar
+    assert len({entry["run_id"] for entry in entries}) == len(entries)
+    for selected in entries:
+        assert runner._plan_entries(config, task, "dev", selected["run_id"]) == [selected]
+    assert all((entry.get("init"), entry.get("variant_suffix"))
+               != ("cam_perturbed", None) for entry in entries)
+    non_cam = [entry for entry in entries if entry.get("init") != "cam"]
+    assert {entry["method"] for entry in non_cam} == {"annealed-adam", "hard-cmaes"}
+    assert {entry["init"] for entry in non_cam} == {"straight_line", "random"}
+    sidecar = next(entry for entry in entries if entry.get("scope") == "exploratory_cam_perturbation")
+    parents = {entry["run_id"]: entry for entry in entries}
+    parent = parents[sidecar["parent_run_id"]]
+    assert parent["init"] == "cam" and parent.get("scope") == "primary"
+    assert sidecar["init"] == "cam" and sidecar["cam_perturbed_init"]["parameter_space"] == "theta"
+    assert sidecar["cam_perturbed_init"]["excluded_from_init_axis_claims"] is True
+    metadata = runner._entry_initialization_metadata(sidecar)
+    assert metadata["exploratory"] and metadata["excluded_from_init_axis_claims"]
+
+    expected_seconds = sum(segment.duration_s for segment in cam_motion.segments)
+    for entry in entries:
+        arm_config = dict(config, **entry.get("config_override", {}))
+        spec, metadata = runner._objective_spec(arm_config, task)
+        assert (spec.time_weight, spec.air_time_weight) == (0.01, 0.01)
+        assert spec.reference_cycle_time_s == expected_seconds
+        assert metadata["reference_cycle_time_source"] == "task_nominal_cam_cycle_time"
+        assert metadata["reference_motion_hash"] == cam_motion.motion_hash
+        assert metadata["reference_cycle_time_s"] == expected_seconds
+    selected_constructors = [sidecar]
+    for init in ("straight_line", "random"):
+        selected_constructors.append(next(entry for entry in entries if entry.get("init") == init))
+    for entry in selected_constructors:
+        constructed, fitted, result = runner._initializer_motion(
+            dict(config, **entry.get("config_override", {})),
+            task, cam_motion, _parameterization, entry)
+        assert result["valid"] is True, result
+        constructed.validate_for_task(task)
+        expected_positions = np.asarray([constructed.initial_state.position_mm]
+                                        + [segment.end_mm for segment in constructed.segments])
+        np.testing.assert_allclose(
+            fitted.positions(np.zeros(fitted.num_params)), expected_positions, rtol=0.0, atol=1e-12)
+        assert fitted.num_steps == len(constructed.segments)
+        if entry is sidecar:
+            assert constructed.motion_hash != cam_motion.motion_hash
+            assert not np.array_equal(
+                fitted.positions(np.zeros(fitted.num_params)),
+                _parameterization.positions(np.zeros(_parameterization.num_params)))
+    assert "initialization" not in json.loads(CONFIG.read_text())
+
+
+def test_initializer_identity_preserves_duplicate_requested_seed(tmp_path):
+    config = _base()
+    config["initialization"] = {
+        "random_init": {"declaration": "the identity test never constructs a path"},
+        "straight_line_init": {"declaration": "line anchors for the delta initializer"},
+        "methods": [
+            {"condition": "annealed-adam", "init": "random", "seeds": [7, 7]},
+            {"condition": "hard-cmaes", "init": "random", "seeds": [7]},
+        ],
+    }
+    task = runner._context(config, tmp_path)[0]
+    entries = [entry for entry in runner._plan_entries(config, task, "dev", None)
+               if entry.get("init") == "random"]
+    assert len(entries) == 3 and len({entry["run_id"] for entry in entries}) == 3
+    assert [entry["seed"] for entry in entries] == [7, 7, 7]
+    assert entries[0]["seed_slot"]["ordinal"] == 0
+    assert entries[1]["seed_slot"] == {"ordinal": 1, "duplicate_requested_position": True}
+    assert entries[1]["run_id"].endswith("-slot1")
+    for bad_condition in ("fixed-adam", "smooth-cmaes", "nominal-cam"):
+        damaged = dict(config, initialization=dict(
+            config["initialization"], methods=[{
+                "condition": bad_condition, "init": "random", "seeds": [0]}]))
+        with pytest.raises(runner.RunnerError, match="only annealed-adam and hard-cmaes"):
+            runner._plan_entries(damaged, task, "dev", None)
+    damaged = dict(config, initialization=dict(
+        config["initialization"],
+        methods=[{"condition": "annealed-adam", "init": "cam_perturbed", "seeds": [0]}]))
+    with pytest.raises(runner.RunnerError, match="init must be exactly"):
+        runner._plan_entries(damaged, task, "dev", None)
+
+
+def test_failed_initializer_preserves_original_seed_without_redraw(tmp_path, monkeypatch):
+    from cam import seeds
+
+    config = _base()
+    config["initialization"] = {
+        "random_init": {"declaration": "constructor is replaced by a single invalid typed result"},
+        "straight_line_init": {"declaration": "line anchors for the delta initializer"},
+        "methods": [{"condition": "annealed-adam", "init": "random", "seeds": [7]}],
+    }
+    task, motion, _parameterization, _factory, _posted = runner._context(config, tmp_path)
+    entry = next(entry for entry in runner._plan_entries(config, task, "dev", None)
+                 if entry.get("init") == "random")
+    calls = []
+
+    def invalid_once(actual_task, declaration, requested_seed):
+        calls.append((actual_task.task_hash, declaration, requested_seed))
+        return seeds.SeedResult(
+            plan=None, declaration_hash="sha256:" + "a" * 64,
+            derivation='{"case":"unit-invalid-realization","no_redraw":true}',
+            seed=requested_seed, invalid_reason="declared free vertex outside machine envelope")
+
+    monkeypatch.setattr(seeds, "random_seed", invalid_once)
+    root = tmp_path / "failed-init"
+    root.mkdir()
+    runner._child(config, entry, root)
+    assert len(calls) == 1 and calls[0][2] == 7
+    record = C.loads((root / entry["run_id"] / "run.json").read_text())
+    assert record.status == C.RunStatus.FAILED
+    saved_motion = C.loads((root / entry["run_id"] / "motion_plan.json").read_text())
+    assert saved_motion.motion_hash == motion.motion_hash  # audit reference, never the sampled candidate
+    saved_seed = json.loads((root / entry["run_id"] / "initialization_seed_result.json").read_text())
+    assert saved_seed["seed"] == 7 and saved_seed["valid"] is False
+    assert saved_seed["status"] == "failed_instance" and saved_seed["motion"] is None
+    assert saved_seed["declaration_hash"] == "sha256:" + "a" * 64
+    assert saved_seed["derivation"]["no_redraw"] is True
+    assert saved_seed["invalid_reason"] == "declared free vertex outside machine envelope"
+    saved_config = json.loads((root / entry["run_id"] / "config.json").read_text())
+    assert "reference-only" in saved_config["motion_plan_role"]
+    assert saved_config["initialization"]["seed_outcome"] == saved_seed
+    metrics = json.loads((root / entry["run_id"] / "metrics.json").read_text())
+    assert metrics["optimizer_executed"] is False
+    history = json.loads((root / entry["run_id"] / "history.json").read_text())
+    assert history["entries"] == []
+    runner._atomic(root / "manifest.json", runner._manifest(config, task, [entry], root, planned=False))
+    _reports, audit = A.audit_runs(root, A.load_manifest(root / "manifest.json"))
+    assert audit["reconciliation"]["exact_id_reconciliation"] is True
+    assert not (root / entry["run_id"] / "rs274.nc").exists()
+
+
+def _synthetic_pilot_timing_for_dry_run(config, root):
+    """Satisfy timing-report structure without any real process/time measurement."""
+    from benchmarks import pilot_task
+    from cam.seeds import seed_for_task
+
+    task = pilot_task.build_pilot_task()
+    posting = R.post_motion(task, seed_for_task(task))
+    posted_files = {dialect: posting.files[C.DIALECT_ARTIFACTS[dialect][0]] for dialect in C.Dialect}
+    levels = {}
+    for index, role in enumerate(("screen", "verdict", "convergence"), 1):
+        processes, artifacts = [], {}
+        dialects = (C.Dialect.RS274,) if role == "convergence" else tuple(C.Dialect)
+        for dialect in dialects:
+            nc = posted_files[dialect]
+            result = _typed_evaluation(task, nc, dialect=dialect,
+                                       step=config["refinement_check"][f"{role}_step_mm"])
+            nc_path = root / "synthetic-timing" / role / f"{dialect.value}.nc"
+            eval_path = root / "synthetic-timing" / role / C.DIALECT_ARTIFACTS[dialect][1]
+            nc_path.parent.mkdir(parents=True, exist_ok=True)
+            nc_path.write_bytes(nc)
+            eval_path.write_bytes(R.record_bytes(result))
+            artifacts[dialect.value] = {
+                "nc_path": str(nc_path.relative_to(root)), "nc_hash": C.nc_hash(nc),
+                "evaluation_path": str(eval_path.relative_to(root)),
+                "evaluation_sha256": C.sha256_bytes(eval_path.read_bytes()),
+            }
+            processes.append({
+                "role": role, "dialect": dialect.value, "status": "complete",
+                "worker_pid": 900000 + index, "worker_peak_rss_kib": 1,
+                "evaluator_wall_seconds": 0.01, "process_wall_seconds": 0.02,
+                "evaluation_sha256": artifacts[dialect.value]["evaluation_sha256"],
+                "evaluation_path": str(eval_path), "source": str(eval_path),
+                "max_step_mm": result.discretization["settings"]["max_step_mm"],
+                "expected_nc_hash": C.nc_hash(nc),
+                "synthetic_structural_fixture": True,
+            })
+        levels[role] = {"phase_wall_seconds": 0.1, "processes": processes, "artifacts": artifacts}
+    return {
+        "schema": "diffcam-pilot-timing/2",
+        "evidence_scope": "synthetic dry-run structure only; no measured process, wall time, RSS, or physical result",
+        "in_process_unit_override": False,
+        "task_hash": task.task_hash, "tool_setup_hash": task.tool_setup_hash,
+        "candidate_seconds": {"smooth_forward": 0.01, "smooth_gradient": 0.01, "hard_forward": 0.01},
+        "posted_seconds": [0.05, 0.05],
+        "posted_seconds_dialects": [{"dialect": dialect.value, "wall_seconds": 0.05}
+                                    for dialect in C.Dialect],
+        "constructor_seconds": 0.01, "worker_wall_seconds": 0.5,
+        "optimizer_parent_peak_rss_kib": 1,
+        "simulator_precision": _precision_metadata_stub("f64"),
+        "posted_evaluation_levels": levels,
+        "config_sha256": C.sha256_bytes(R.json_bytes(config)),
+        "code_sha256": runner._timing_module_hashes(),
+    }
+
+
+def test_pilot_init_config_dry_run_with_synthetic_timing_structure(tmp_path):
+    config_path = CONFIG.parent / "pilot_init.json"
+    config = json.loads(config_path.read_text())
+    root = tmp_path / "pilot-init-dry-run"
+    config["measure_budget"] = False
+    config["timing_evidence"] = _synthetic_pilot_timing_for_dry_run(config, root)
+    task = runner._context(config, tmp_path / "source-cache")[0]
+    entries = runner._plan_entries(config, task, "dev", None)
+    runner._atomic(root / "frozen_config.json",
+                   {"raw_config": config, "identity": entries[0]["identity"]})
+    runner._atomic(root / "manifest.json", runner._manifest(config, task, entries, root, planned=True))
+    completed = _invoke(config, root, extra=("--dry-run", "--resume"), timeout=120)
+    assert '"pilot_launched": false' in completed.stdout
+    dry_run = json.loads((root / "dry_run.json").read_text())
+    assert dry_run["planned_run_count"] == 14
+    assert dry_run["timing_evidence"]["evidence_scope"].startswith("synthetic dry-run structure")
+    assert not dry_run["serialization"]["pilot_launched"]
+    manifest = json.loads((root / "manifest.json").read_text())
+    assert len(manifest["expected_runs"]) == 14
+    assert len({row["run_id"] for row in manifest["expected_runs"]}) == 14
+
+
+def _refinement_timing_projection_followup(config, phases, entries, evidence, tmp_path):
     changed_durations = json.loads(json.dumps(phases["screen"]["processes"]))
     changed_durations[0]["evaluator_wall_seconds"] += 1.0
     phases["screen"]["processes"] = changed_durations
@@ -1702,7 +1918,21 @@ assert actual.dtype == np.float64
 assert np.array_equal(actual, expected), np.max(np.abs(actual - expected))
 assert np.any(actual != actual.astype(np.float32).astype(np.float64)), "fixture cannot distinguish f32 input narrowing"
 precision = R.simulator_precision_metadata(evaluator.sim, requested_precision=config["precision"])
-output.mkdir()
+outcome = runner.Outcome(
+    seed=0, best=result, best_theta=theta, initial_theta=theta,
+    budget=runner.B.OptimizationBudget(candidate_evaluations=1, population_size=None),
+    evaluations=1, validation_calls=0, generations=0, forward_calls=1, backward_calls=0,
+    invalid_candidates=0, termination_reason="unit_f64_efficiency_artifact", history=[])
+runner._write_outcome({"run_id": "efficiency-f64-interface"}, evaluator, outcome,
+                      None, config, output, repository)
+recorded_efficiency = json.loads((output / "efficiency-f64-interface/config.json").read_text())
+assert recorded_efficiency["time_weight"] == config["time_weight"] == 0.01
+assert recorded_efficiency["air_time_weight"] == config["air_time_weight"] == 0.01
+assert recorded_efficiency["reference_cycle_time_source"] == "task_nominal_cam_cycle_time"
+assert recorded_efficiency["reference_cycle_time_s"] == evaluator.reference_cycle_time_s
+assert recorded_efficiency["efficiency"]["time_weight_n_over_reference"] == (
+    config["time_weight"] * parameterization.num_steps / evaluator.reference_cycle_time_s)
+output.mkdir(exist_ok=True)
 np.save(output / "actual.npy", actual, allow_pickle=False)
 np.save(output / "expected.npy", expected, allow_pickle=False)
 (output / "identity.json").write_text(json.dumps({"precision": precision, "dtype": str(actual.dtype)},
