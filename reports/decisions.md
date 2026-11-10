@@ -158,3 +158,13 @@ hard terms are totals over the reference. At equal declared weights, smooth arms
 (≈1/75 on the pilot path). objectives `_configure` sets sim.w_time = time_weight · n / reference and sim.w_air_time likewise, so the
 smooth term is on the same total-time scale as the hard term. The factor is recorded in the normalisation metadata. Regression: on a
 fixed path at high k, the smooth/hard time-term ratio is O(1) within a declared band for the documented native-vs-exact gap.
+D-08 addendum 2 (review W1–W3, 2026-11-10):
+- W1: the D-08 `random` init arm uses **parameter_space = delta only**, anchored on the straight-line path (endpoints from the task's CAM
+  start/end only, no CAM interior). Noise added to the CAM fit (theta space) is renamed **`cam_perturbed`**. It is an exploratory
+  perturbation ablation, explicitly excluded from the init-axis claim (insight 1). The validator rejects theta-space `random` declarations
+  in D-08 arms.
+- W2: random paths are **iid positional noise per vertex around the straight-line base** (start pinned; end pinned to the declared
+  endpoint), not a cumulative random walk, so the declared scale bounds per-vertex deviation independently of T. Each seed records its
+  realised max and RMS deviation from the base.
+- W3: an invalid draw (`valid=False`) is a recorded failed instance at that seed index. It is never redrawn, replaced or skipped
+  (the same rule as invalid CMA members).
