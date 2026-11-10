@@ -11,7 +11,7 @@ simulated displacements share the same physical execution contract.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, Mapping, Optional, Sequence
 
 import numpy as np
@@ -21,6 +21,29 @@ from benchmarks import contracts as C
 from .run_artifacts import ComputeLedger, simulator_array, simulator_precision_metadata
 
 
+def _nonnegative_finite(value: Any, name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be finite and non-negative")
+
+
+@dataclass(frozen=True)
+class LegacyTrajectoryWeights:
+    """Existing optional trajectory penalties; disabled explicitly by default."""
+    w_air: float = 0.0
+    w_jerk: float = 0.0
+    w_step: float = 0.0
+    w_len: float = 0.0
+    w_air_late: float = 0.0
+    w_prox: float = 0.0
+    w_traj_prox: float = 0.0
+    w_break: float = 0.0
+    w_tool_gouge: float = 0.0
+
+    def __post_init__(self) -> None:
+        for descriptor in fields(self):
+            _nonnegative_finite(getattr(self, descriptor.name), descriptor.name)
+
+
 @dataclass(frozen=True)
 class ObjectiveSpec:
     k: float = 40.0
@@ -28,17 +51,33 @@ class ObjectiveSpec:
     residual_weight: float = 1.0
     holder_weight: float = 50.0
     holder_margin_mm: float = 0.0
+    time_weight: float = 0.0
+    air_time_weight: float = 0.0
+    reference_cycle_time_s: Optional[float] = None
+    legacy_weights: LegacyTrajectoryWeights = field(default_factory=LegacyTrajectoryWeights)
+    time_normalization: str = "reference_cycle_seconds"
     geometry_normalization: str = "1/N followed by squared per-voxel occupancy penalties"
     hard_geometry_normalization: str = ("w_gouge*gouge_fraction^2 + w_residual*residual_fraction^2; "
                                         "gouge over |initial∧T|, residual over |initial∧¬T| (csg_metrics parity)")
     hard_holder_normalization: str = "w_holder*hard_holder_overlap_fraction^2 (proxy)"
+    hard_efficiency_normalization: str = (
+        "geometry+safety+time_weight*cycle_time_s/reference_time_s+"
+        "air_time_weight*air_time_s/reference_time_s; exact MotionPlan duration and sharp engagement")
+    smooth_efficiency_normalization: str = (
+        "geometry+safety+native w_time and w_air_time surrogate terms / reference_time_s; "
+        "NOT exact MotionPlan-duration parity")
     prototype: str = "analytic_target_until_T2.0_custom_target_and_T1.2_chronology"
 
     def __post_init__(self) -> None:
-        for name in ("k", "gouge_weight", "residual_weight", "holder_weight", "holder_margin_mm"):
-            value = getattr(self, name)
-            if not math.isfinite(value) or value < 0:
-                raise ValueError(f"{name} must be finite and non-negative")
+        for name in ("k", "gouge_weight", "residual_weight", "holder_weight", "holder_margin_mm",
+                     "time_weight", "air_time_weight"):
+            _nonnegative_finite(getattr(self, name), name)
+        if self.time_normalization != "reference_cycle_seconds":
+            raise ValueError("time_normalization must be 'reference_cycle_seconds'")
+        if self.reference_cycle_time_s is not None:
+            _nonnegative_finite(self.reference_cycle_time_s, "reference_cycle_time_s")
+            if self.reference_cycle_time_s == 0:
+                raise ValueError("reference_cycle_time_s must be positive when supplied")
 
 
 @dataclass
@@ -46,6 +85,17 @@ class CandidateEvaluation:
     result: C.CandidateResult
     gradient_theta: Optional[np.ndarray] = None
     diagnostics: Dict[str, Any] = field(default_factory=dict)
+
+
+def _reference_time_seconds(spec: ObjectiveSpec, motion: C.MotionPlan) -> float:
+    """Resolve an explicit reference or the caller's original MotionPlan duration."""
+    reference = spec.reference_cycle_time_s
+    if reference is None:
+        reference = math.fsum(segment.duration_s for segment in motion.segments)
+    _nonnegative_finite(reference, "reference_cycle_time_s")
+    if reference == 0 and (spec.time_weight > 0 or spec.air_time_weight > 0):
+        raise ValueError("positive efficiency weights require a positive reference cycle time")
+    return float(reference)
 
 
 def reset_simulator(sim: Any) -> None:
@@ -105,6 +155,7 @@ class CandidateEvaluator:
         self.sim = simulator
         self.simulator_precision = simulator_precision_metadata(simulator, requested_precision=requested_precision)
         self.spec = spec or ObjectiveSpec()
+        self.reference_cycle_time_s = _reference_time_seconds(self.spec, self.motion)
         self._evaluation_k_override: Optional[float] = None
         # Optional, per-run signed field offset in INTERNAL VOXEL SDF units.
         # None restores the neutral zero shift; it is not a scalar loss offset.
@@ -205,9 +256,12 @@ class CandidateEvaluator:
         sim.w_residual[None] = spec.residual_weight
         sim.holder_penalty_weight[None] = spec.holder_weight
         sim.holder_margin[None] = spec.holder_margin_mm / sim.v
-        for name in ("w_air", "w_jerk", "w_step", "w_len", "w_air_time", "w_air_late",
-                     "w_prox", "w_traj_prox", "w_break", "w_time", "w_tool_gouge"):
-            getattr(sim, name)[None] = 0.0
+        sim.w_time[None] = (spec.time_weight / self.reference_cycle_time_s
+                            if spec.time_weight > 0 else 0.0)
+        sim.w_air_time[None] = (spec.air_time_weight / self.reference_cycle_time_s
+                                if spec.air_time_weight > 0 else 0.0)
+        for descriptor in fields(spec.legacy_weights):
+            getattr(sim, descriptor.name)[None] = getattr(spec.legacy_weights, descriptor.name)
         # Every physical execution is the un-clipped parameterized delta sequence.
         sim.enforce_speed_limits[None] = 0
         sim.enforce_z_floor[None] = 0
@@ -242,6 +296,48 @@ class CandidateEvaluator:
         plan.validate_for_task(self.task)
         return plan
 
+    def _hard_time_metrics(self, theta: Any) -> tuple[float, float, float]:
+        """Use exact motion durations with sharp per-segment engagement, not native feed rates."""
+        motion = self.candidate_motion(theta)
+        steps = len(motion.segments)
+        self.sim.compute_traj_diagnostics_hard(steps)
+        engagement = np.asarray(self.sim.seg_engage.to_numpy(), dtype=np.float64).reshape(-1)
+        durations = np.asarray([segment.duration_s for segment in motion.segments], dtype=np.float64)
+        if engagement.size != steps or durations.size != steps:
+            raise ValueError("hard timing and engagement segment counts differ")
+        if not np.all(np.isfinite(engagement)) or not np.all(np.isfinite(durations)):
+            raise ValueError("non-finite hard timing or engagement data")
+        cells = self.sim.Nx * self.sim.Ny * self.sim.Nz
+        if cells <= 0:
+            raise ValueError("air-time classification requires a nonempty simulator grid")
+        air = engagement <= 0.5 / cells
+        cycle_time_s = math.fsum(durations.tolist())
+        air_time_s = math.fsum(durations[air].tolist())
+        air_fraction = air_time_s / cycle_time_s if cycle_time_s > 0 else 0.0
+        if (air_time_s < 0 or cycle_time_s < 0 or air_time_s > cycle_time_s
+                or not all(math.isfinite(value) for value in (cycle_time_s, air_time_s, air_fraction))):
+            raise ValueError("invalid exact candidate time/air-time components")
+        return cycle_time_s, air_time_s, air_fraction
+
+    def _native_time_metrics(self) -> tuple[float, float, float]:
+        """Seconds from the native differentiable surrogate, including its regime/dt limits."""
+        steps = self.parameterization.num_steps
+        seg_time = np.asarray(self.sim.seg_time.to_numpy(), dtype=np.float64).reshape(-1)
+        engagement = np.asarray(self.sim.seg_engage.to_numpy(), dtype=np.float64).reshape(-1)
+        if seg_time.size != steps or engagement.size != steps:
+            raise ValueError("native timing and engagement segment counts differ")
+        if not np.all(np.isfinite(seg_time)) or not np.all(np.isfinite(engagement)):
+            raise ValueError("non-finite native timing or engagement data")
+        cells = self.sim.Nx * self.sim.Ny * self.sim.Nz
+        inv_voxel = 1.0 / cells
+        temperature = max(1e-5, 0.25 * inv_voxel)
+        argument = np.clip((engagement - inv_voxel) / temperature, -50.0, 50.0)
+        is_air = 1.0 / (1.0 + np.exp(argument))
+        cycle_time_s = float(seg_time.mean()) if steps else 0.0
+        air_time_s = float((seg_time * is_air).mean()) if steps else 0.0
+        air_fraction = air_time_s / cycle_time_s if cycle_time_s > 0 else 0.0
+        return cycle_time_s, air_time_s, air_fraction
+
     def _invalid(self, candidate_id: str, theta: Any, kind: str, reason: str) -> CandidateEvaluation:
         return CandidateEvaluation(C.CandidateResult(
             candidate_id=candidate_id, theta_hash=_theta_hash(theta), objective_kind=kind,
@@ -261,6 +357,7 @@ class CandidateEvaluator:
                   with_gradient: bool) -> CandidateEvaluation:
         if objective_kind not in ("smooth", "hard"):
             raise ValueError("objective_kind must be smooth or hard")
+        spec = self.spec
         self.ledger.start_candidate(candidate_id, objective_kind)
         forward_calls = backward_calls = 0
         steps = self.parameterization.num_steps
@@ -293,7 +390,16 @@ class CandidateEvaluator:
                     "residual_soft": float(self.sim.diag_residual[None]),
                     "holder_soft": float(self.sim.diag_holder[None]),
                     "final_stock": self.sim.stock.to_numpy()[steps].copy(),
+                    "time_source_is_simulator_surrogate": 1.0,
                 }
+                native_metrics = spec.time_weight > 0 or spec.air_time_weight > 0
+                native_metrics = (native_metrics or spec.legacy_weights.w_air_late > 0
+                                  or spec.legacy_weights.w_break > 0)
+                diagnostics["efficiency_timing_evaluated"] = float(native_metrics)
+                if native_metrics:
+                    native_cycle, native_air, native_fraction = self._native_time_metrics()
+                    diagnostics.update(cycle_time_s=native_cycle, air_time_s=native_air,
+                                       air_fraction=native_fraction)
             else:
                 self.sim.forward_hard(steps + 1, clip_speeds=False)
                 target = self.sim.target.to_numpy() < 0
@@ -315,12 +421,34 @@ class CandidateEvaluator:
                 geometry = (self.spec.gouge_weight * gouge_fraction ** 2
                             + self.spec.residual_weight * residual_fraction ** 2)
                 safety = self.spec.holder_weight * holder_fraction ** 2
-                objective = geometry + safety
+                cycle_time_s, air_time_s, air_fraction = self._hard_time_metrics(theta)
+                reference_s = self.reference_cycle_time_s
+                if reference_s > 0:
+                    time_term = self.spec.time_weight * cycle_time_s / reference_s
+                    air_term = self.spec.air_time_weight * air_time_s / reference_s
+                else:
+                    time_term = air_term = 0.0
+                objective = geometry + safety + time_term + air_term
+                voxel_volume_mm3 = self.task.grid.voxel_mm ** 3
+                gouge_limit = self.task.tolerances.gouge_volume_mm3 / (in_target * voxel_volume_mm3)
+                residual_limit = self.task.tolerances.completion_residual_mm3 / (
+                    removal_target * voxel_volume_mm3)
+                constraint_violation = (holder_fraction + max(0.0, gouge_fraction - gouge_limit)
+                                        + max(0.0, residual_fraction - residual_limit))
+                feasible = float(holder_fraction == 0 and gouge_fraction <= gouge_limit
+                                 and residual_fraction <= residual_limit)
                 diagnostics = {
                     "gouge_fraction": gouge_fraction,
                     "residual_fraction": residual_fraction,
                     "holder_overlap_fraction": holder_fraction,
                     "geometry": geometry, "holder_proxy": safety, "final_stock": stock.copy(),
+                    "cycle_time_s": cycle_time_s, "air_time_s": air_time_s,
+                    "air_fraction": air_fraction, "efficiency": objective,
+                    "efficiency_time_term": time_term, "efficiency_air_time_term": air_term,
+                    "gouge_fraction_limit": gouge_limit,
+                    "residual_fraction_limit": residual_limit,
+                    "constraint_violation": constraint_violation, "feasible": feasible,
+                    "time_source_is_simulator_surrogate": 0.0,
                 }
             if not math.isfinite(objective):
                 raise FloatingPointError("simulator returned a non-finite objective")
@@ -333,6 +461,8 @@ class CandidateEvaluator:
                 "loss_shift_mm": self._loss_shift_mm(),
                 "prototype_incomplete_final_target_and_posted_coverage": 1.0,
             }
+            components["efficiency"] = objective
+            components["reference_cycle_time_s"] = self.reference_cycle_time_s
             for name, value in diagnostics.items():
                 if name != "final_stock":
                     components[name] = float(value)

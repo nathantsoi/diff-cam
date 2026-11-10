@@ -17,8 +17,11 @@ from benchmarks import contracts as C
 from simulator.csg_simulator import CSGSimulatorDelta
 
 
-def _prototype(seed=7):
-    ti.init(arch=ti.cpu, offline_cache=False)
+def _prototype(seed=7, *, spec=None, precision="f32"):
+    if precision not in ("f32", "f64"):
+        raise ValueError("precision must be f32 or f64")
+    ti.init(arch=ti.cpu, offline_cache=False,
+            default_fp=ti.f32 if precision == "f32" else ti.f64)
     initial = np.array([-4.0, -4.0, 2.0])
     task = C.example_pocket_task()
     part = C.GeometrySource(kind="analytic", params={"primitive": "sphere", "center": [0.5, 0.5, 0.5],
@@ -45,7 +48,7 @@ def _prototype(seed=7):
     sim = CSGSimulatorDelta(
         resolution=16, max_steps=2, stock_size_mm=25.4, voxel_size_mm=task.grid.voxel_mm,
         target_shape="sphere", tool_start=tuple(normalized), enforce_speed_limits=False,
-        init_taichi=False, k_init=40,
+        init_taichi=False, k_init=40, precision=precision,
     )
     sim.tool_radius[None] = task.tool.cutter_radius_mm
     sim.tool_height[None] = task.tool.flute_length_mm
@@ -57,7 +60,7 @@ def _prototype(seed=7):
     mapper = P.DeltaResidual([[0, 0, -6], [3, 3, -6]], scale_mm=1.0,
                              bounds=(-0.05, 0.05), initial_position_mm=initial)
     evaluator = O.CandidateEvaluator(task, motion, mapper, sim,
-                                     spec=O.ObjectiveSpec(), seed=seed)
+                                     spec=spec or O.ObjectiveSpec(), seed=seed)
     return evaluator
 
 
