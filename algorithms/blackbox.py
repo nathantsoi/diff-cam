@@ -133,7 +133,9 @@ def _setup_signature(evaluator: Any, objective_kind: str) -> str:
         spec = dataclasses.asdict(spec)
     task = getattr(evaluator, "task", None)
     motion = getattr(evaluator, "motion", None)
+    simulator = getattr(evaluator, "sim", None)
     data = {
+        "simulator_precision": R.simulator_precision_metadata(simulator) if simulator is not None else None,
         "evaluator_type": f"{type(evaluator).__module__}.{type(evaluator).__name__}",
         "objective_kind": objective_kind,
         "objective_spec": spec,
@@ -232,7 +234,7 @@ def _read_checkpoint(path: Path, evaluator: Any, objective_kind: str) -> dict[st
     if document.get("objective_kind") != objective_kind:
         raise BlackBoxError("checkpoint objective kind differs")
     if document.get("setup_hash") != _setup_signature(evaluator, objective_kind):
-        raise BlackBoxError("checkpoint task/tool/motion/parameterization/objective identity differs")
+        raise BlackBoxError("checkpoint task/tool/motion/parameterization/objective/simulator-precision identity differs")
     return document
 
 
@@ -426,7 +428,7 @@ def emit_optimization_artifacts(result: CmaRunResult, evaluator: Any, run_dir: s
     posting = R.post_motion(task, motion)
     config = R.build_run_config(result.run_id, task, motion, seed=result.seed,
                                 parameterization=evaluator.parameterization,
-                                objective=evaluator.spec,
+                                objective=evaluator.spec, simulator=evaluator.sim,
                                 budgets={
                                     "limits": dataclasses.asdict(result.budget),
                                     "spent": {"candidate_evaluations": result.evaluations,

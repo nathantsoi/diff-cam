@@ -244,7 +244,11 @@ def _reference_prefix_child(precision: str, output_dir: Path, *, steps: int):
     record["shared_driver_args_match_except_named_precision"] = {
         "steps": steps, "smoothing": "canonical", "runtime_backend": "cpu",
         "ti_init_call_count_by_this_driver": 1, "csgsimulator_instances": 1,
-        "input_deltas": "external normalized deltas assigned float32 by canonical objectives.py into the selected fields",
+        "input_deltas": (
+            "canonical external normalized deltas converted by "
+            "algorithms.run_artifacts.simulator_array to the selected simulator dtype; "
+            "f64 preserves the float64 theta/parameterization path"
+        ),
         "source_geometry": "np.float32 source arrays with immutable source hashes; selected simulator fields carry declared dtype",
     }
     record["owner_protocol"] = "self-contained in tests/precision_test.py, derived from reviewed T3.3b prefix; no external helper worktree is executed"
@@ -268,7 +272,12 @@ def test_full_f64_matches_shared_prefix_index_two_direction(tmp_path):
     epsilon = next(row for row in report["fd"] if row["epsilon"] == 0.00625)
     gradient = report["ad"]["gradient"]
     assert gradient == pytest.approx(-0.34076470567421824, abs=5e-7)
-    assert epsilon["central"] == pytest.approx(-0.34076627325215547, abs=5e-7)
+    # True-f64 theta/tool-delta inputs at epsilon=0.00625. At f6569fc, the isolated
+    # legacy-input control (normalized float32 cast restored) reproduced
+    # -0.34076627324900244; the un-narrowed f64 input path produced this value.
+    # Evidence: /tmp/diffcam-t41b-fd-cast-control.QNU6Ln/prefix-48-f64-legacy-cast/.
+    # The separate AD/FD agreement threshold below is deliberately unchanged.
+    assert epsilon["central"] == pytest.approx(-0.3407654171104779, abs=5e-7)
     # Reference delta 1.57e-6, with a tight 2e-6 bound from worker-3's protocol.
     assert abs(gradient - epsilon["central"]) < 2e-6
     assert report["native_precision"]["requested_precision"] == "f64"

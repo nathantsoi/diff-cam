@@ -33,6 +33,36 @@ class AuditInputError(ValueError):
     """A malformed manifest, run directory, or aggregation request."""
 
 
+def _validate_verdict_evaluations(values, manifest):
+    """Validate the fine typed evaluations that alone supply pilot verdicts."""
+    if values is None:
+        return None
+    if not isinstance(values, Mapping):
+        raise AuditInputError("verdict evaluations must be a mapping by run ID")
+    unknown = set(values) - set(manifest.runs)
+    if unknown:
+        raise AuditInputError(f"verdict evaluations for unknown run IDs: {sorted(map(str, unknown))}")
+    if set(values) != set(manifest.runs):
+        raise AuditInputError("every expected primary run needs both fine dialect evaluations")
+    result = {}
+    for run_id, dialects in values.items():
+        if not isinstance(dialects, Mapping) or set(dialects) != {item.value for item in C.Dialect}:
+            raise AuditInputError(f"run {run_id}: verdict evaluations require both rs274 and haas")
+        task_id = manifest.runs[run_id].task_id
+        task_hash = manifest.tasks[task_id].task_hash
+        result[run_id] = {}
+        for dialect, evaluation in dialects.items():
+            if not isinstance(evaluation, C.EvaluationResult) or evaluation.dialect is not C.Dialect(dialect):
+                raise AuditInputError(f"run {run_id}, {dialect}: verdict evaluation is not the same typed dialect")
+            if evaluation.task_hash != task_hash:
+                raise AuditInputError(f"run {run_id}, {dialect}: verdict task hash differs from the primary task")
+            settings = evaluation.discretization.get("settings")
+            if not isinstance(settings, Mapping) or settings.get("max_step_mm") != 0.125:
+                raise AuditInputError(f"run {run_id}, {dialect}: verdict source must explicitly use max_step_mm=0.125")
+            result[run_id][dialect] = evaluation
+    return result
+
+
 @dataclass(frozen=True)
 class TaskInfo:
     task_id: str
@@ -571,7 +601,12 @@ def _observation(
     expected: ExpectedRun,
     audits: Mapping[str, RunAudit],
     dialect: C.Dialect,
+    verdict_evaluations=None,
 ) -> Optional[C.EvaluationResult]:
+    if verdict_evaluations is not None:
+        if expected.run_id not in verdict_evaluations or dialect.value not in verdict_evaluations[expected.run_id]:
+            raise AuditInputError(f"missing fine verdict evaluation: {expected.run_id}/{dialect.value}")
+        return verdict_evaluations[expected.run_id][dialect.value]
     run = audits.get(expected.run_id)
     if run is None or not run.complete_and_audited:
         return None
@@ -639,10 +674,11 @@ def _outcome_by_task(
     dialect: C.Dialect,
     outcome: str,
     tasks: Mapping[str, TaskInfo],
+    verdict_evaluations=None,
 ) -> dict[str, dict[str, Any]]:
     collapsed: dict[str, dict[str, Any]] = {}
     for expected in expected_runs:
-        evaluation = _observation(expected, audits, dialect)
+        evaluation = _observation(expected, audits, dialect, verdict_evaluations)
         entry = collapsed.setdefault(
             expected.task_id,
             {"known": [], "unknown_or_missing_observations": 0},
@@ -670,6 +706,7 @@ def _metric_by_task(
     dialect: C.Dialect,
     metric_name: str,
     tasks: Mapping[str, TaskInfo],
+    verdict_evaluations=None,
 ) -> dict[str, dict[str, Any]]:
     grouped: dict[str, list[ExpectedRun]] = defaultdict(list)
     for expected in expected_runs:
@@ -679,7 +716,7 @@ def _metric_by_task(
         values: list[float] = []
         reasons: Counter[str] = Counter()
         for expected in runs:
-            evaluation = _observation(expected, audits, dialect)
+            evaluation = _observation(expected, audits, dialect, verdict_evaluations)
             if evaluation is None:
                 reason = "recorded_noncomplete" if _recorded_noncomplete(expected, audits) else "missing_or_invalid_evidence"
                 reasons[reason] += 1
@@ -945,6 +982,7 @@ def _comparison_rows(
     seed: int,
     replicates: int,
     confidence: float,
+    verdict_evaluations=None,
 ) -> dict[str, Any]:
     allowed_runs = [
         run for run in manifest.runs.values()
@@ -973,8 +1011,10 @@ def _comparison_rows(
     }
     key_prefix = f"{spec.name}|{family or 'overall'}|{spec.dialect.value}"
     for metric_name in spec.metrics:
-        method_values = _metric_by_task(method_runs, audits, spec.dialect, metric_name, manifest.tasks)
-        baseline_values = _metric_by_task(baseline_runs, audits, spec.dialect, metric_name, manifest.tasks)
+        method_values = _metric_by_task(
+            method_runs, audits, spec.dialect, metric_name, manifest.tasks, verdict_evaluations)
+        baseline_values = _metric_by_task(
+            baseline_runs, audits, spec.dialect, metric_name, manifest.tasks, verdict_evaluations)
         methods: list[float] = []
         baselines: list[float] = []
         families: list[str] = []
@@ -1002,10 +1042,10 @@ def _comparison_rows(
 
     for outcome in OUTCOMES:
         method_outcomes = _outcome_by_task(
-            method_runs, audits, spec.dialect, outcome, manifest.tasks
+            method_runs, audits, spec.dialect, outcome, manifest.tasks, verdict_evaluations
         )
         baseline_outcomes = _outcome_by_task(
-            baseline_runs, audits, spec.dialect, outcome, manifest.tasks
+            baseline_runs, audits, spec.dialect, outcome, manifest.tasks, verdict_evaluations
         )
         methods: list[float] = []
         baselines: list[float] = []
@@ -1043,6 +1083,7 @@ def aggregate_evaluations(
     bootstrap_seed: int = 20261108,
     bootstrap_replicates: int = 2000,
     confidence: float = 0.95,
+    verdict_evaluations=None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if isinstance(bootstrap_seed, bool) or not isinstance(bootstrap_seed, int):
         raise AuditInputError("bootstrap_seed must be an integer")
@@ -1050,6 +1091,7 @@ def aggregate_evaluations(
         raise AuditInputError("bootstrap_replicates must be an integer >= 100")
     if not 0.0 < confidence < 1.0:
         raise AuditInputError("confidence must be between 0 and 1")
+    validated_outcomes = _validate_verdict_evaluations(verdict_evaluations, manifest)
     rows: list[dict[str, Any]] = []
     p_value_rows: list[dict[str, Any]] = []
     for spec in manifest.comparisons:
@@ -1060,7 +1102,7 @@ def aggregate_evaluations(
         for family in ([None] if len(families) == 1 else [*families, None]):
             row = _comparison_rows(
                 spec, family, manifest, audits, bootstrap_seed,
-                bootstrap_replicates, confidence,
+                bootstrap_replicates, confidence, validated_outcomes,
             )
             p_value_rows.extend(row.pop("_p_value_rows"))
             rows.append(row)
@@ -1190,6 +1232,56 @@ def render_markdown(report: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _campaign_precision(manifest, audits, required_precision):
+    """Verify the per-run simulator identity before a precision cohort is compared."""
+    found, issues = {}, []
+    for run_id in manifest.runs:
+        audited = audits.get(run_id)
+        if (audited is None or audited.record is None
+                or "config.json" not in audited.record.artifacts):
+            issues.append(_issue("missing_simulator_precision_artifact",
+                                 f"{run_id}: required config.json is absent or invalid"))
+            continue
+        path = _artifact_path(Path(audited.run_dir), "config.json")
+        try:
+            config = _json_load(path)
+            metadata = config.get("simulator") if isinstance(config, Mapping) else None
+            if not isinstance(metadata, Mapping) or metadata.get("schema_version") != "simulator-precision-identity/1":
+                raise AuditInputError("config.simulator must use simulator-precision-identity/1")
+            metadata = dict(metadata)
+            signature = metadata.pop("precision_identity_sha256", None)
+            if not _valid_hash(signature) or signature != C.content_hash(metadata):
+                raise AuditInputError("precision_identity_sha256 does not match the recorded identity")
+            precision = metadata.get("requested_precision")
+            if precision not in ("f32", "f64"):
+                raise AuditInputError("requested_precision must be f32 or f64")
+            if (metadata.get("declared_default_fp") != precision
+                    or metadata.get("runtime_default_fp") != precision):
+                raise AuditInputError("requested and actual runtime precision differ")
+            policy = metadata.get("policy")
+            if not isinstance(policy, Mapping) or policy.get("default_fp") != precision:
+                raise AuditInputError("precision policy/default_fp mismatch")
+            if (policy.get("field_scope") != "all_float_fields"
+                    or policy.get("kernel_scope") != "all_float_kernels_and_adjoints"):
+                raise AuditInputError("precision does not cover all float fields, kernels and adjoints")
+            if not isinstance(metadata.get("backend_arch"), str) or not metadata["backend_arch"]:
+                raise AuditInputError("actual runtime backend is missing")
+            if precision != required_precision:
+                raise AuditInputError(
+                    f"precision {precision!r} differs from the required campaign {required_precision!r}")
+            metadata["precision_identity_sha256"] = signature
+            found[run_id] = metadata
+        except (OSError, ValueError, TypeError, AuditInputError) as error:
+            issues.append(_issue("invalid_simulator_precision", f"{run_id}: {error}", str(path)))
+    return {
+        "required_precision": required_precision,
+        "declaration_source": "required config.json['simulator'] in every expected run",
+        "metadata_by_run_id": found,
+        "issues": issues,
+        "evidence_complete": not issues and len(found) == len(manifest.runs),
+    }
+
+
 def generate_report(
     runs_root: str | Path,
     manifest_value: Mapping[str, Any] | str | Path | Manifest,
@@ -1197,29 +1289,89 @@ def generate_report(
     bootstrap_seed: int = 20261108,
     bootstrap_replicates: int = 2000,
     confidence: float = 0.95,
+    verdict_evaluations=None,
+    screen_disagreements=None,
+    required_precision=None,
 ) -> tuple[dict[str, Any], Manifest]:
     manifest = manifest_value if isinstance(manifest_value, Manifest) else load_manifest(manifest_value)
+    if required_precision not in (None, "f32", "f64"):
+        raise AuditInputError("required campaign precision must be f32 or f64")
+    fine = _validate_verdict_evaluations(verdict_evaluations, manifest)
+    diagnostics = {}
+    if fine is not None:
+        allowed = {"safety_pass", "geometry_pass", "completion_pass", "efficiency_eligible", "coverage"}
+        if not isinstance(screen_disagreements, Mapping) or set(screen_disagreements) != set(fine):
+            raise AuditInputError("fine verdict evidence requires screen diagnostics for every run")
+        for run_id, fields in screen_disagreements.items():
+            if (not isinstance(fields, (list, tuple, set)) or isinstance(fields, (str, bytes))
+                    or len(set(fields)) != len(fields) or not set(fields) <= allowed):
+                raise AuditInputError(f"invalid screen diagnostic fields for {run_id}")
+            diagnostics[run_id] = sorted(fields)
     run_reports, audit = audit_runs(runs_root, manifest)
+    if fine and not audit["summary"]["auditor_passed"]:
+        raise AuditInputError("fine verdict reporting requires a clean primary screen audit")
+    for row in run_reports:
+        if fine is not None:
+            expected = manifest.runs[row["run_id"]]
+            row["verdict_evaluations"] = {}
+            for dialect, evaluation in fine[row["run_id"]].items():
+                task_info = manifest.tasks[expected.task_id]
+                primary_evaluation = audit["_audits_by_id"][row["run_id"]].dialects[dialect].evaluation
+                if (not isinstance(primary_evaluation, C.EvaluationResult)
+                        or primary_evaluation.nc_hash != evaluation.nc_hash):
+                    raise AuditInputError(f"run {run_id}, {dialect}: fine exact-NC identity differs from the primary")
+                if primary_evaluation.tool_setup_hash != evaluation.tool_setup_hash:
+                    raise AuditInputError(f"run {run_id}, {dialect}: fine tool setup identity differs from the primary")
+                row["verdict_evaluations"][dialect] = {
+                    "evaluator_revision": evaluation.evaluator_revision,
+                    "nc_hash": evaluation.nc_hash,
+                    "coverage": evaluation.coverage.value,
+                    "safety_pass": evaluation.safety_pass,
+                    "geometry_pass": evaluation.geometry_pass,
+                    "completion_pass": _completion_value(evaluation, task_info),
+                    "efficiency_eligible": _outcome_value(evaluation, task_info, "efficiency_eligible"),
+                    "max_step_mm": evaluation.discretization["settings"]["max_step_mm"],
+                }
+    precision_evidence = None
+    audits_by_id = audit.pop("_audits_by_id")
+    if required_precision is not None:
+        precision_evidence = _campaign_precision(manifest, audits_by_id, required_precision)
+        if not precision_evidence["evidence_complete"]:
+            reasons = "; ".join(issue["message"] for issue in precision_evidence["issues"])
+            raise AuditInputError(f"campaign precision evidence is incomplete; no verdict report is published: {reasons}")
     comparisons, policy = aggregate_evaluations(
-        manifest,
-        audit.pop("_audits_by_id"),
-        bootstrap_seed=bootstrap_seed,
-        bootstrap_replicates=bootstrap_replicates,
-        confidence=confidence,
+        manifest, audits_by_id,
+        bootstrap_seed=bootstrap_seed, bootstrap_replicates=bootstrap_replicates,
+        confidence=confidence, verdict_evaluations=fine,
     )
     report = {
-        "schema_version": REPORT_SCHEMA,
-        "runs_root": str(runs_root),
-        "task_count": len(manifest.tasks),
-        "expected_run_count": len(manifest.runs),
-        "expected_vs_observed": audit["reconciliation"],
-        "summary": audit["summary"],
+        "schema_version": REPORT_SCHEMA, "runs_root": str(runs_root),
+        "task_count": len(manifest.tasks), "expected_run_count": len(manifest.runs),
+        "expected_vs_observed": audit["reconciliation"], "summary": audit["summary"],
         "evidence_complete": audit["summary"]["evidence_complete"],
         "all_runs_completed": audit["summary"]["all_runs_completed"],
-        "policy": policy,
-        "runs": run_reports,
-        "comparisons": comparisons,
+        "policy": policy, "runs": run_reports, "comparisons": comparisons,
     }
-    # Disallow NaN at the serialization boundary even if a future statistic is changed.
+    if precision_evidence is not None:
+        report["precision"] = precision_evidence
+        report["summary"]["precision_evidence_complete"] = precision_evidence["evidence_complete"]
+        report["evidence_complete"] = bool(report["evidence_complete"] and precision_evidence["evidence_complete"])
+        report["summary"]["evidence_complete"] = report["evidence_complete"]
+    if fine is not None:
+        counts = Counter({manifest.runs[run_id].method: 0 for run_id in fine})
+        for run_id, fields in diagnostics.items():
+            if fields:
+                counts[manifest.runs[run_id].method] += 1
+        report["refinement"] = {
+            "producer": "both 0.125 mm posted evaluations joined to the primary screen audit by run ID",
+            "verdict_source": {"max_step_mm": 0.125, "dialects": [item.value for item in C.Dialect]},
+            "screen_role": "1.0 mm fidelity diagnostic only; never ANDed into pilot verdicts",
+            "convergence_point": {"max_step_mm": 0.25, "dialect": C.Dialect.RS274.value,
+                                  "role": "evidence only; no monotonicity/error-bound or verdict claim"},
+            "screen_disagreements_by_run_id": diagnostics,
+            "screen_disagreement_by_condition": {
+                method: {"count": count} for method, count in sorted(counts.items())},
+            "applied_run_ids": sorted(fine),
+        }
     json.dumps(report, allow_nan=False)
     return report, manifest
