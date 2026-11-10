@@ -59,7 +59,7 @@ def _seconds(value, name):
     return float(value)
 
 
-def _conditions(document):
+def _conditions(document, *, experiment=None):
     if not isinstance(document, list):
         raise CampaignError("conditions must be a list")
     raw = document
@@ -88,8 +88,13 @@ def _conditions(document):
         result.append((method, tuple(seeds)))
     if not result:
         raise CampaignError("campaign requires at least one condition")
-    if not dict(result).get("nominal-cam") and len(result) > 1:
+    if experiment != "experiment1" and not dict(result).get("nominal-cam") and len(result) > 1:
         raise CampaignError("paired campaign comparisons require nominal-cam")
+    if experiment == "experiment1" and not set(dict(result)).issubset({"annealed-adam", "continuation-adam"}):
+        raise CampaignError("experiment1 allows only annealed-adam and continuation-adam")
+    if experiment == "experiment1" and set(result) != {
+            ("annealed-adam", (0,)), ("continuation-adam", (0,))}:
+        raise CampaignError("experiment1 requires one annealed-adam seed-0 and one continuation-adam seed-0 condition")
     return tuple(result)
 
 
@@ -112,8 +117,13 @@ def _load(path: Path) -> dict[str, Any]:
     template = copy.deepcopy(_mapping(document.get("runner_config"), "runner_config"))
     if template.get("task_source", source) != source or "task_id" in template:
         raise CampaignError("task_source must be selected once by the campaign config, not a task_id override")
-    if template.get("initialization"):
-        raise CampaignError("this campaign driver supports the existing CAM init axis only")
+    if document.get("experiment") == "experiment1":
+        if template.get("initialization"):
+            raise CampaignError("Exp1 initializer declarations belong at campaign root only")
+        template["initialization"] = copy.deepcopy(
+            _mapping(document.get("initialization"), "initialization"))
+    elif template.get("initialization") or document.get("initialization") is not None:
+        raise CampaignError("initializer declarations require the explicit experiment1 selector")
     template["task_source"] = source
     template["experiment"] = "pilot"
     if source == "suite_manifest":
@@ -130,7 +140,7 @@ def _load(path: Path) -> dict[str, Any]:
         if not isinstance(values, list) or any(
                 not isinstance(value, str) or not value or "/" in value or "\\" in value for value in values):
             raise CampaignError(f"task_filter.{name} must contain safe string identifiers")
-    conditions = _conditions(document.get("conditions"))
+    conditions = _conditions(document.get("conditions"), experiment=document.get("experiment"))
     if source == "prototype_analytic":
         if splits != ["dev"] or filters.get("task_ids"):
             raise CampaignError("prototype unit campaign selects the one supplied dev task")
@@ -172,19 +182,41 @@ def _task_rows(loaded):
     return sorted(selected)
 
 
-def _selected_entries(task, config, conditions):
+def _selected_entries(task, config, conditions, *, experiment=None):
     entries = runner._plan_entries(config, task, task.split.value, None)
     wanted = {(method, seed) for method, seeds in conditions for seed in seeds}
-    selected = [entry for entry in entries
-                if entry.get("init", "cam") == "cam" and (entry["method"], entry["seed"]) in wanted]
-    if len(selected) != len(wanted):
+    if experiment == "experiment1":
+        wanted_init_slots = {
+            ("experiment1_cam", 0), ("straight_line", 0), ("random", 0), ("random", 1),
+        }
+        expected = {(method, init, seed)
+                    for method, _seed in wanted
+                    for init, seed in wanted_init_slots}
+        selected = [entry for entry in entries
+                    if (entry["method"], entry.get("init", "cam"), entry["seed"]) in expected]
+        actual = {(entry["method"], entry.get("init", "cam"), entry["seed"])
+                  for entry in selected}
+        if actual != expected or len(selected) != len(expected):
+            raise CampaignError(
+                f"task {task.task_id}: Exp1 requires exactly experiment1_cam/straight_line seed 0 "
+                "and random seeds 0/1 for both Adam methods; plain CAM and CAM perturbations are excluded")
+    else:
+        # Exp2 and legacy callers retain all plain CAM initializers exactly as before.
+        selected = [entry for entry in entries
+                    if entry.get("init", "cam") == "cam" and (entry["method"], entry["seed"]) in wanted]
+    if experiment != "experiment1" and len(selected) != len(wanted):
         raise CampaignError(f"task {task.task_id}: runner did not plan every requested condition/seed")
     order = {method: index for index, method in enumerate(runner.CONDITIONS)}
     selected.sort(key=lambda entry: (order[entry["method"]], entry["seed"], entry["run_id"]))
     return selected
 
 
-def _comparisons(conditions, dialects=C.Dialect):
+def _comparisons(conditions, dialects=C.Dialect, *, experiment=None):
+    if experiment == "experiment1":
+        # Generic audit groups by baseline method only. The separately owned
+        # initializer-aware results builder must pair same-task/same-solver
+        # initializers against experiment1_cam; method-only rows are insufficient.
+        return []
     methods = list(dict.fromkeys(method for method, _seeds in conditions if method != "nominal-cam"))
     return [
         {"name": f"{method}-versus-nominal-{dialect.value}", "method": method,
@@ -220,7 +252,8 @@ def _prepare(loaded, root: Path, *, resume: bool, dry_run: bool):
         config["seeds"] = cma_seeds or [0]
         runner._refinement_policy(config)
         runner._campaign_verdict_only(config)
-        entries = _selected_entries(task, config, loaded["conditions"])
+        entries = _selected_entries(task, config, loaded["conditions"],
+                                    experiment=loaded["document"].get("experiment"))
         task_root = root / "tasks" / task.task_id
         config_path = task_root / "campaign-runner-config.json"
         document = {"task": task, "entries": entries, "config": config,
@@ -239,6 +272,8 @@ def _prepare(loaded, root: Path, *, resume: bool, dry_run: bool):
                 for job in jobs]
     plan_core = {
         "schema": CAMPAIGN_SCHEMA, "campaign_id": loaded["document"].get("campaign_id", "unnamed-campaign"),
+        **({"experiment": loaded["document"]["experiment"]}
+           if loaded["document"].get("experiment") is not None else {}),
         "source": loaded["source"], "suite_manifest_sha256": runner._SUITE_MANIFEST_SHA256,
         "config_sha256": loaded["config_sha256"],
         "conditions": [[method, list(seeds)] for method, seeds in loaded["conditions"]],
@@ -247,7 +282,8 @@ def _prepare(loaded, root: Path, *, resume: bool, dry_run: bool):
                         "config_sha256": C.sha256_bytes(R.json_bytes(job["config"])),
                         "run_id": job["entry"]["run_id"], "identity": job["entry"]["identity"]}
                        for job in jobs],
-        "comparisons": _comparisons(loaded["conditions"]),
+        "comparisons": _comparisons(loaded["conditions"],
+                                    experiment=loaded["document"].get("experiment")),
     }
     fingerprint = C.content_hash(plan_core)
     if resume:

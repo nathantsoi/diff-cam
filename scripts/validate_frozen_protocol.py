@@ -46,7 +46,7 @@ THRESHOLD_FIELDS = (
     "completion_residual_mm3", "gouge_volume_mm3", "local_surface_error_mm",
     "clearance_mm", "rapid_penetration_mm",
 )
-SINGLE_SEED_METHODS = ("nominal-cam", "fixed-adam", "annealed-adam")
+SINGLE_SEED_METHODS = ("nominal-cam", "fixed-adam", "annealed-adam", "continuation-adam")
 FORBIDDEN_GATE_KEYS = {
     "strict_improvement", "strict_improvement_required",
     "require_strict_improvement", "must_improve",
@@ -745,7 +745,7 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
         method_names.add(condition)
         seeds = seed_list(method["seeds"], where + ".seeds")
         if condition in SINGLE_SEED_METHODS and selected_init == "cam":
-            require(seeds == [0], f"{condition} requires deterministic seed 0, not independent CAM/Adam replicas")
+            require(seeds == [0], f"{condition} requires deterministic seed 0 for this CAM initialization")
         if selected_init == "straight_line":
             require(len(seeds) == 1,
                     f"{where}: straight_line is deterministic and requires exactly one declared run")

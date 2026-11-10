@@ -1024,6 +1024,30 @@ def _identity(task: C.TaskSpec, config: Mapping[str, Any], split: str,
     return C.content_hash(payload)
 
 
+def _experiment1_declaration(block) -> bool:
+    """Validate the executable Exp1 representation declaration when present."""
+    if not isinstance(block, Mapping):
+        return False
+    declaration = block.get("representation")
+    if declaration is None:
+        if any(isinstance(case, Mapping) and case.get("init") == "experiment1_cam"
+               for case in block.get("methods", [])):
+            raise RunnerError("experiment1_cam requires its explicit representation declaration")
+        return False
+    expected = {
+        "kind": "delta_residual_k_equals_t", "base": "zero",
+        "scale_mm": 1.0, "bounds": None,
+    }
+    if not isinstance(declaration, Mapping) or set(declaration) != set(expected):
+        raise RunnerError("representation must contain exactly kind, base, scale_mm and bounds")
+    if any(declaration[key] != expected[key] for key in ("kind", "base", "bounds")):
+        raise RunnerError("Exp1 requires a zero-base K=T DeltaResidual at 1 mm and no bounds")
+    scale = declaration["scale_mm"]
+    if (isinstance(scale, bool) or not isinstance(scale, (int, float)) or scale != 1.0):
+        raise RunnerError("Exp1 requires a zero-base K=T DeltaResidual at 1 mm and no bounds")
+    return True
+
+
 def _initializers(config: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Parse explicit D-08 arms, keeping exploratory CAM perturbations separate."""
     block = config.get("initialization")
@@ -1032,7 +1056,7 @@ def _initializers(config: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list
     if not isinstance(block, Mapping):
         raise RunnerError("initialization must be an object with declarations and cases")
     allowed = {"straight_line_init", "random_init", "methods", "exploratory_cam_perturbation",
-               "provisional", "notes"}
+               "provisional", "notes", "representation"}
     unknown = sorted(set(block) - allowed)
     if unknown:
         raise RunnerError(f"unrecognized initialization fields: {unknown}")
@@ -1051,13 +1075,17 @@ def _initializers(config: Mapping[str, Any]) -> tuple[list[dict[str, Any]], list
                 or not isinstance(block.get("straight_line_init"), Mapping)):
             raise RunnerError("random initialization requires random_init and its straight_line_init anchors")
     cases = []
+    exp1 = _experiment1_declaration(block)
     for case in block.get("methods", []):
         if not isinstance(case, Mapping):
             raise RunnerError("each initialization case must be an object")
         condition, init = case.get("condition"), case.get("init", "cam")
-        if condition not in ("annealed-adam", "hard-cmaes"):
+        allowed_methods = ("annealed-adam", "continuation-adam") if exp1 else ("annealed-adam", "hard-cmaes")
+        if condition not in allowed_methods:
+            if exp1:
+                raise RunnerError("Exp1 initializers support only annealed-adam and continuation-adam")
             raise RunnerError("non-CAM initialization supports only annealed-adam and hard-cmaes")
-        if init not in ("cam", "straight_line", "random"):
+        if init not in ("cam", "experiment1_cam", "straight_line", "random"):
             raise RunnerError("init must be exactly cam, straight_line, or random; cam_perturbed is a separate override")
         if "variant" in case and not isinstance(case["variant"], str):
             raise RunnerError("initializer variants must have string identities")
@@ -1773,7 +1801,7 @@ def _measure_timing_subprocess(config, root):
     return data
 
 
-def _entry_initialization_metadata(entry: Mapping[str, Any]) -> dict[str, Any]:
+def _entry_initialization_metadata(entry: Mapping[str, Any], parameterization: Any = None) -> dict[str, Any]:
     scope = entry.get("scope", "primary")
     document = {
         "init": entry.get("init", "cam"), "scope": scope,
@@ -1785,6 +1813,11 @@ def _entry_initialization_metadata(entry: Mapping[str, Any]) -> dict[str, Any]:
             document[name] = entry[name]
     if entry.get("config_override"):
         document["k_override"] = dict(entry["config_override"])
+    representation = getattr(parameterization, "experiment1_metadata", None)
+    if representation is not None:
+        document["experiment1"] = {
+            key: value for key, value in representation.items() if key != "initial_theta"
+        }
     return document
 
 
@@ -1813,7 +1846,18 @@ def _evaluate_outcome(condition: str, evaluator: Any, config: Mapping[str, Any],
                       run_id: Optional[str] = None) -> Outcome:
     run_id = run_id or condition
     dims = evaluator.parameterization.num_params
+    representation = getattr(evaluator.parameterization, "experiment1_metadata", None)
+    if representation is not None and condition not in ("annealed-adam", "continuation-adam"):
+        raise RunnerError("experiment1 supports only annealed-adam and continuation-adam")
     zeros = np.zeros(dims)
+    if representation is not None:
+        zeros = np.asarray(representation.get("initial_theta"), dtype=np.float64)
+        if (zeros.ndim != 1 or zeros.shape != (dims,) or not np.all(np.isfinite(zeros))
+                or not evaluator.parameterization.in_bounds(zeros)
+                or representation.get("initial_theta_sha256") != C.content_hash(zeros.tolist())
+                or representation.get("scale_mm") != 1.0
+                or representation.get("bounds") is not None):
+            raise RunnerError("invalid Exp1 shared DeltaResidual initialization identity")
     if condition == "nominal-cam":
         best = evaluator.evaluate_candidate(zeros, "nominal-once", "hard")
         ledger = evaluator.ledger.snapshot()
@@ -1954,7 +1998,7 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
         air_time_weight_n_over_reference=(
             evaluator_air_weight * evaluator.parameterization.num_steps / evaluator_reference),
     )
-    config_out["initialization"] = _entry_initialization_metadata(entry)
+    config_out["initialization"] = _entry_initialization_metadata(entry, evaluator.parameterization)
     optimized = outcome.optimizer_result
     config_out["hard_selection"] = (
         None if optimized is None else {
@@ -1976,7 +2020,8 @@ def _write_outcome(entry: Mapping[str, Any], evaluator: Any, outcome: Outcome, p
         "config.json": R.json_bytes(config_out),
         "history.json": R.json_bytes({"history": outcome.history,
                                       "ledger": evaluator.ledger.snapshot(),
-                                      "initialization": _entry_initialization_metadata(entry)}),
+                                      "initialization": _entry_initialization_metadata(
+                                          entry, evaluator.parameterization)}),
         "metrics.json": R.json_bytes({"best_candidate": B._candidate_dict(outcome.best),
                                       "termination_reason": outcome.termination_reason,
                                       "invalid_candidates": outcome.invalid_candidates,
@@ -2057,6 +2102,18 @@ def _initializer_motion(config: Mapping[str, Any], task: C.TaskSpec,
     """Resolve the declared init once, preserving failure at its original slot."""
     from cam.seeds import random_seed, straight_line_seed, cam_perturbed_seed
     init = entry.get("init", "cam")
+    experiment1 = (init in ("experiment1_cam", "straight_line", "random")
+                   and _experiment1_declaration(config.get("initialization")))
+    if experiment1 and entry.get("method") not in ("annealed-adam", "continuation-adam"):
+        raise RunnerError("experiment1 supports only annealed-adam and continuation-adam")
+    if init == "experiment1_cam":
+        # No fitted surrogate and no synthetic seed result for the actual CAM plan.
+        cam_motion.validate_for_task(task)
+        parameters = _experiment1_parameterization(cam_motion, task)
+        return cam_motion, parameters, {
+            "constructor": "experiment1_cam",
+            "experiment1": dict(parameters.experiment1_metadata),
+        }
     if entry.get("scope") == "exploratory_cam_perturbation":
         result = cam_perturbed_seed(
             task, {"cam_perturbed_init": entry["cam_perturbed_init"]}, entry["seed"])
@@ -2082,16 +2139,67 @@ def _initializer_motion(config: Mapping[str, Any], task: C.TaskSpec,
         return None, None, result.to_record()
     try:
         motion = result.require_plan()
-    except ValueError as error:
-        # A valid structure can still be explicitly diagnostic-only. Do not
-        # salt an evaluable initial point from another plan in that situation.
+    except (TypeError, ValueError) as error:
+        # Diagnostic-only and invalid realizations stay diagnostic; they never
+        # obtain or repair an evaluable θ0 from another path.
         record = result.to_record()
         record["require_plan_failure"] = str(error)
         return None, None, record
+    if experiment1:
+        motion.validate_for_task(task)
+        parameters = _experiment1_parameterization(motion, task)
+        record = dict(result.to_record(), experiment1=dict(parameters.experiment1_metadata))
+        return motion, parameters, record
     # Plain CAM returned above. Every constructed non-parent trajectory,
     # including a CAM perturbation sidecar, needs its own fitted θ0.
     parameters = _fit_initializer_parameterization(motion)
     return motion, parameters, result.to_record()
+
+
+def _experiment1_parameterization(motion: C.MotionPlan, task: C.TaskSpec):
+    """Shared zero-base, full-capacity representation for Exp1 only.
+
+    K=T with no numerical bound. Init motion and segment-kind/feed templates
+    remain distinct evidence and are not folded into this shared parameterization.
+    """
+    if motion.frame != C.Frame.MACHINE:
+        raise RunnerError("experiment1 initialization requires a machine-frame MotionPlan")
+    positions = np.asarray([motion.initial_state.position_mm,
+                            *[segment.end_mm for segment in motion.segments]], dtype=np.float64)
+    if positions.shape != (len(motion.segments) + 1, 3) or not np.all(np.isfinite(positions)):
+        raise RunnerError("initializer does not expose finite (T+1,3) positions")
+    initial_work = np.asarray(task.work_to_machine.inverse().apply(positions[0]), dtype=np.float64)
+    parameters = P.DeltaResidual(
+        np.zeros((len(motion.segments), 3), dtype=np.float64),
+        scale_mm=1.0, bounds=None, initial_position_mm=initial_work,
+    )
+    # No fit/interpolation: exact physical segment deltas at 1 mm per θ unit.
+    theta0 = np.diff(positions, axis=0).reshape(-1).astype(np.float64)
+    if theta0.shape != (parameters.num_params,) or not parameters.in_bounds(theta0):
+        raise RunnerError("experiment1 initial deltas do not match shared K=T representation")
+    reconstructed = np.asarray(parameters.positions(theta0), dtype=np.float64)
+    expected_work = np.asarray([task.work_to_machine.inverse().apply(point) for point in positions],
+                               dtype=np.float64)
+    np.testing.assert_allclose(reconstructed, expected_work, rtol=0.0, atol=1e-10)
+    parameters.experiment1_metadata = {
+        "representation": "delta_residual_k_equals_t_zero_base",
+        "n_segments": parameters.num_steps,
+        "scale_mm": 1.0, "bounds": None,
+        "reference_start_mm_work": initial_work.tolist(),
+        "initial_theta_sha256": C.content_hash(theta0.tolist()),
+        "source_motion_hash": motion.motion_hash,
+        "parameterization_sha256": C.content_hash(R.parameterization_metadata(parameters)),
+        "feed_and_kind_template": [
+            {"id": segment.id, "kind": segment.kind.value,
+             "feed_mm_s": segment.feed_mm_s, "tag": segment.tag,
+             "source_line": segment.source_line}
+            for segment in motion.segments
+        ],
+        # Runtime θ is a separate mutable optimizer state, not fixed controller
+        # motion source bytes nor an approved machine toolpath.
+        "initial_theta": theta0.tolist(),
+    }
+    return parameters
 
 
 def _fit_initializer_parameterization(motion: C.MotionPlan):
