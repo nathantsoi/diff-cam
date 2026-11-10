@@ -589,6 +589,7 @@ class FixedStudyConfig:
     sweep_root_seed: int
     max_wall_time_s: float
     max_rss_bytes: int = STUDY_MAX_RSS_BYTES
+    reuse_k_independent_hard: bool = False
 
 
 def _study_positive(value, where, *, allow_zero=False):
@@ -614,7 +615,7 @@ def study_config_from_json(document) -> FixedStudyConfig:
                "time_weight", "air_time_weight", "efficiency_path_ids", "zero_weight_path_id",
                "study_only_efficiency", "epsilon_theta", "fd_indices", "sigma_theta", "pairs",
                "reference_pairs", "hard_root_seed", "path_root_seed", "scale_sweep", "max_wall_time_s")
-    if set(document) != set(require):
+    if set(document) - set(require) - {"reuse_k_independent_hard"}:
         raise ValueError(f"study config requires exactly the declared fields; extra={sorted(set(document)-set(require))}")
     if document["schema"] != STUDY_SCHEMA or document["study_only"] is not True:
         raise ValueError("this is a study-only fixed-path declaration, not a frozen protocol or campaign")
@@ -690,6 +691,7 @@ def study_config_from_json(document) -> FixedStudyConfig:
         sweep_reference_kind=sweep["reference_kind"], sweep_fractions=tuple(sweep["fractions"]),
         sweep_seeds=tuple(sweep["seeds"]), sweep_root_seed=sweep["root_seed"],
         max_wall_time_s=document["max_wall_time_s"],
+        reuse_k_independent_hard=document.get("reuse_k_independent_hard", False),
     )
     validate_fixed_study(config)
     return config
@@ -740,6 +742,8 @@ def validate_fixed_study(config: FixedStudyConfig) -> None:
         _study_index(seed, "scale_sweep.seed")
     if config.max_rss_bytes != STUDY_MAX_RSS_BYTES:
         raise ValueError("D-07 process memory ceiling cannot be raised in this study")
+    if not isinstance(config.reuse_k_independent_hard, bool):
+        raise ValueError("reuse_k_independent_hard must be an explicit boolean")
 
 
 def _straight_declaration() -> dict[str, Any]:
@@ -821,7 +825,7 @@ def _prepare_study_path(path, task, base_evaluator, config: FixedStudyConfig) ->
     theta = np.zeros(parameterization.num_params, dtype=np.float64)
     interim = type(base_evaluator)(task, motion, parameterization, base_evaluator.sim,
                                    spec=base_evaluator.spec, ledger=base_evaluator.ledger,
-                                   seed=base_evaluator.seed)
+                                   seed=base_evaluator.seed, requested_precision="f64")
     fixed_motion = interim.candidate_motion(theta)
     source_points = np.asarray(motion.waypoints_mm(), dtype=np.float64)
     fixed_points = np.asarray(fixed_motion.waypoints_mm(), dtype=np.float64)
@@ -952,6 +956,21 @@ def _objective_spec(config: FixedStudyConfig, case, reference_duration_s: float)
                          reference_cycle_time_s=reference_duration_s)
 
 
+def _hard_probe_key(case, path, config: FixedStudyConfig) -> str:
+    """Hard-mode identity excludes smoothing k and preserves all changing scopes."""
+    return C.content_hash({
+        "schema": "diffcam-shared-hard-probe-key/1", "task_id": config.task_id,
+        "path_id": path["id"], "fixed_motion_hash": path["fixed_motion_hash"],
+        "source_motion_hash": path["source_hash"], "theta_hash": path["theta_hash"],
+        "basis_sha256": path["basis_sha256"], "objective_mode": case["objective_mode"],
+        "precision": config.precision, "voxel_mm": config.voxel_mm,
+        "sigma_theta": config.sigma_theta, "pairs": config.pairs,
+        "reference_pairs": config.reference_pairs, "path_index": case["path_index"],
+        "source": "same path, fixed theta, objective, sigma, grid and precision",
+        "k_is_not_used_by_forward_hard": True,
+    })
+
+
 def _study_budget_guard(config: FixedStudyConfig, started: float, where: str) -> None:
     if time.perf_counter() - started > config.max_wall_time_s:
         raise TimeoutError(f"declared study wall-time budget reached before {where}")
@@ -959,7 +978,8 @@ def _study_budget_guard(config: FixedStudyConfig, started: float, where: str) ->
         raise MemoryError(f"own-process VmHWM exceeded D-07 {config.max_rss_bytes} bytes before {where}")
 
 
-def _run_fixed_case(case, path, base_evaluator, ledger, config: FixedStudyConfig, *, study_started: float):
+def _run_fixed_case(case, path, base_evaluator, ledger, config: FixedStudyConfig, *, study_started: float,
+                    hard_probes: dict):
     record = {"case": dict(case), "status": "started", "source_path": _public_path(path),
               "errors": [], "objective_mode": case["objective_mode"], "optimizer_steps": 0}
     if path["status"] != "ready":
@@ -972,7 +992,8 @@ def _run_fixed_case(case, path, base_evaluator, ledger, config: FixedStudyConfig
     evaluator = type(base_evaluator)(base_evaluator.task, path["motion"], path["parameterization"],
                                      base_evaluator.sim,
                                      spec=_objective_spec(config, case, reference_seconds),
-                                     ledger=ledger, seed=base_evaluator.seed)
+                                     ledger=ledger, seed=base_evaluator.seed,
+                                     requested_precision="f64")
     setup = {
         "precision": config.precision, "voxel_mm": config.voxel_mm,
         "k": case["k"], "objective_spec": asdict(evaluator.spec),
@@ -989,6 +1010,7 @@ def _run_fixed_case(case, path, base_evaluator, ledger, config: FixedStudyConfig
     record["setup"] = setup
     record["sigma"] = {"theta_units": config.sigma_theta, "normalized_parameter_space": "T2.1 theta; mm per unit = 1 for these fits"}
     first_index = len(ledger.entries)
+    reused = False
     started = time.perf_counter()
     try:
         smooth_started = time.perf_counter()
@@ -997,6 +1019,9 @@ def _run_fixed_case(case, path, base_evaluator, ledger, config: FixedStudyConfig
                                      indices=config.fd_indices, ledger=ledger,
                                      require_path_identity=True)
         ad = np.asarray(smooth["ad_gradient"], dtype=np.float64)
+        observed_precision = _dtype_information(evaluator.sim)
+        if not all(field["is_float64"] for field in observed_precision.values()):
+            raise TypeError(f"study requires f64 primal and adjoint fields: {observed_precision}")
         fd_errors = []
         for fd in smooth["fd"]:
             item = {"status": fd["status"], "epsilon_normalized_theta": fd["epsilon"][config.fd_indices].tolist()}
@@ -1015,27 +1040,75 @@ def _run_fixed_case(case, path, base_evaluator, ledger, config: FixedStudyConfig
             "fd_is_selected_subset_not_full_fd": True,
             "fd_alignment_and_coordinate_errors": fd_errors,
             "wall_time_s": time.perf_counter() - smooth_started,
-            "precision_fields_after_real_ad": _dtype_information(evaluator.sim),
+            "precision_fields_after_real_ad": observed_precision,
             "precision_metadata": evaluator.simulator_precision,
         }
         hard_started = time.perf_counter()
         _study_budget_guard(config, study_started, "randomized hard estimator")
-        seed = np.random.SeedSequence([config.hard_root_seed, case["path_index"], case["k_index"],
-                                       {"geometry": 0, "zero_weights": 1, "study_efficiency": 2}[case["objective_mode"]]])
-        estimate = gm.estimate_with_reference(evaluator, theta, config.sigma_theta,
-                                              config.pairs, config.reference_pairs,
-                                              seed=seed, ledger=ledger)
-        record["declaration_of_streams"] = {"tiered_entropy": list(seed.entropy),
+        probe_key = _hard_probe_key(case, path, config)
+        probe = (hard_probes.get(probe_key)
+                 if config.reuse_k_independent_hard else None)
+        if probe is None:
+            seed_parts = ([config.hard_root_seed, case["path_index"],
+                           {"geometry": 0, "zero_weights": 1, "study_efficiency": 2}[case["objective_mode"]]]
+                          if config.reuse_k_independent_hard else
+                          [config.hard_root_seed, case["path_index"], case["k_index"],
+                           {"geometry": 0, "zero_weights": 1, "study_efficiency": 2}[case["objective_mode"]]])
+            seed = np.random.SeedSequence(seed_parts)
+            estimate = gm.estimate_with_reference(evaluator, theta, config.sigma_theta,
+                                                  config.pairs, config.reference_pairs,
+                                                  seed=seed, ledger=ledger)
+            source_info = {
+                "schema": "diffcam-source-hard-probe/1", "case_index": case["case_index"],
+                "precision": config.precision, "voxel_mm": config.voxel_mm,
+                "segment_count": len(path["motion"].segments),
+                "simulator_precision_metadata": evaluator.simulator_precision,
+                "path_id": path["id"], "objective_mode": case["objective_mode"],
+                "objective_spec": asdict(evaluator.spec),
+                "fixed_motion_hash": path["fixed_motion_hash"],
+                "fixed_theta_hash": path["theta_hash"], "basis_sha256": path["basis_sha256"],
+                "sigma_theta": config.sigma_theta, "epsilon_theta_units": "normalized T2.1 theta",
+                "seed_entropy": list(seed.entropy), "k_when_first_evaluated": case["k"],
+                "k_is_not_used_by_forward_hard": True,
+                "primary_noise_sha256": estimate["primary"].noise_sha256,
+                "reference_noise_sha256": estimate["reference"].noise_sha256,
+                "primary_gradient": _verify_json(estimate["primary"].gradient),
+                "reference_gradient": _verify_json(estimate["reference"].gradient),
+                "primary_standard_error": _verify_json(estimate["primary"].standard_error),
+                "reference_standard_error": _verify_json(estimate["reference"].standard_error),
+            }
+            probe = {"source_info": source_info,
+                     "probe_hash": C.content_hash(source_info), "estimate": estimate,
+                     "execution_wall_time_s": time.perf_counter() - hard_started,
+                     "execution_ledger_delta": estimate["ledger_delta"]}
+            if config.reuse_k_independent_hard:
+                hard_probes[probe_key] = probe
+            new_hard_count = 2 * config.pairs + 2 * config.reference_pairs
+        else:
+            estimate = probe["estimate"]
+            new_hard_count = 0
+        reused = probe is not None and new_hard_count == 0
+        record["declaration_of_streams"] = {
+            "tiered_entropy": probe["source_info"]["seed_entropy"],
             "primary_and_reference_are_spawned_independently": True,
-            "no_reused_samples": True, "pair_count_source": "declared per path/k/objective case"}
+            "no_reused_samples_across_probes": True,
+            "pair_count_source": "declared primary and 64-pair reference",
+            "reused_across_k": reused,
+        }
         record["randomized_hard"] = {
             "primary": gm.estimate_to_json(estimate["primary"]),
             "reference": gm.estimate_to_json(estimate["reference"]),
             "primary_reference_comparison": estimate["comparison"],
-            "ledger_delta": estimate["ledger_delta"],
+            "ledger_delta": probe["execution_ledger_delta"],
             "exact_hard_evaluations_primary": 2 * config.pairs,
             "exact_hard_evaluations_reference": 2 * config.reference_pairs,
-            "wall_time_s": time.perf_counter() - hard_started,
+            "new_hard_evaluations_this_case": new_hard_count,
+            "reused_across_k": reused,
+            "source_probe_hash": probe["probe_hash"],
+            "source_probe": probe["source_info"],
+            "source_probe_execution_wall_time_s": probe["execution_wall_time_s"],
+            "reuse_lookup_wall_time_s": time.perf_counter() - hard_started,
+            "reuse_scope": "same task/path/fixed-theta/objective/sigma/f64/grid; no k dependence",
         }
         if estimate["primary"].status == "ok" and estimate["reference"].status == "ok":
             record["ad_vs_primary_hard"] = gm.gradient_alignment(ad, estimate["primary"].gradient)
@@ -1063,11 +1136,32 @@ def _run_fixed_case(case, path, base_evaluator, ledger, config: FixedStudyConfig
         record["ledger_entry_range"] = [first_index, last_index]
         record["actual_candidate_evaluations"] = last_index - first_index
         record["expected_complete_candidate_evaluations"] = (
-            2 + 2 * len(config.epsilon_theta) * len(config.fd_indices) + 2 * config.pairs + 2 * config.reference_pairs)
+            2 + 2 * len(config.epsilon_theta) * len(config.fd_indices)
+            + (0 if reused else 2 * config.pairs + 2 * config.reference_pairs))
         record["wall_time_s"] = time.perf_counter() - started
         record["memory"] = _process_memory()
         record["rows_unavailable_or_failed_are_not_replaced"] = True
+        if (record["status"] == "complete" and
+                record["actual_candidate_evaluations"] != record["expected_complete_candidate_evaluations"]):
+            record["status"] = "partial_failed"
+            record["reason"] = (f"evaluation accounting mismatch: expected {record['expected_complete_candidate_evaluations']}, "
+                                f"observed {record['actual_candidate_evaluations']}")
+            record["errors"].append({"kind": "candidate_count_mismatch"})
     return record
+
+
+def _expected_study_evaluations(config: FixedStudyConfig, paths) -> int | None:
+    if any(path["status"] != "ready" for path in paths):
+        return None
+    used_probes = set()
+    total = 0
+    for case in _fixed_cases(config):
+        total += 2 + 2 * len(config.epsilon_theta) * len(config.fd_indices)
+        key = _hard_probe_key(case, paths[case["path_index"]], config)
+        if not config.reuse_k_independent_hard or key not in used_probes:
+            total += 2 * config.pairs + 2 * config.reference_pairs
+            used_probes.add(key)
+    return total
 
 
 def _write_table(path: Path, rows: Sequence[Mapping[str, Any]], columns: Sequence[str]) -> None:
@@ -1102,7 +1196,13 @@ def run_fixed_gradient_study(output: Path, config_path: Path, *, mode="full") ->
     _new_json(output / "matrix-plan.json", {"configuration_sha256": raw_sha,
         "study_only": True, "precision": "f64", "cpu_max_num_threads": config.cpu_max_num_threads,
         "k_values": list(config.k_values), "cases": plan,
-        "expected_evaluations_per_complete_case": (
+        "reuse_k_independent_hard": config.reuse_k_independent_hard,
+        "per_complete_case_new_probe_evaluations": (
+            2 + 2 * len(config.epsilon_theta) * len(config.fd_indices)
+            + 2 * config.pairs + 2 * config.reference_pairs),
+        "per_case_reused_probe_evaluations": (
+            2 + 2 * len(config.epsilon_theta) * len(config.fd_indices)),
+        "per_case_with_fresh_hard_probe_evaluations": (
             2 + 2 * len(config.epsilon_theta) * len(config.fd_indices)
             + 2 * config.pairs + 2 * config.reference_pairs)})
     ledger = ComputeLedger()
@@ -1124,6 +1224,15 @@ def run_fixed_gradient_study(output: Path, config_path: Path, *, mode="full") ->
                           "status": "invalid_source_motion", "reason": str(error),
                           "traceback": traceback.format_exc()})
     _new_json(output / "paths.json", [_public_path(path) for path in paths])
+    expected_evaluations = _expected_study_evaluations(config, paths)
+    _new_json(output / "evaluation-plan.json", {
+        "schema": "diffcam-evaluation-plan/1", "reuse_k_independent_hard": config.reuse_k_independent_hard,
+        "primary_pairs_per_source": config.pairs, "reference_pairs_per_source": config.reference_pairs,
+        "hard_evaluations_per_source_primary": 2 * config.pairs,
+        "hard_evaluations_per_source_reference": 2 * config.reference_pairs,
+        "planned_total_new_evaluations_if_all_sources_valid": expected_evaluations,
+        "accounting": "reused rows contribute zero new evaluations; the source probe's actual 2N evaluations appear exactly once in the raw total",
+    })
     sweep = scale_validity_sweep(task, config)
     _new_json(output / "delta-scale-validity.json", sweep)
     if mode == "sweep":
@@ -1133,6 +1242,7 @@ def run_fixed_gradient_study(output: Path, config_path: Path, *, mode="full") ->
         _new_json(output / "summary.json", report)
         return report
     results = []
+    hard_probes = {}
     stop_reason = None
     if mode == "preflight":
         path = next((path for path in paths if path["kind"] == "cam" and path["status"] == "ready"), None)
@@ -1187,7 +1297,8 @@ def run_fixed_gradient_study(output: Path, config_path: Path, *, mode="full") ->
                             "reason": stop_reason, "source_path": _public_path(path),
                             "actual_candidate_evaluations": 0})
             continue
-        result = _run_fixed_case(case, path, evaluator, ledger, config, study_started=started)
+        result = _run_fixed_case(case, path, evaluator, ledger, config,
+                                 study_started=started, hard_probes=hard_probes)
         results.append(result)
         _new_json(output / f"case-{case['case_index']:03d}-{case['path_id']}-k{case['k']:g}-{case['objective_mode']}.json", result)
         print(json.dumps({"case": case["case_index"], "path": case["path_id"], "k": case["k"],
@@ -1237,8 +1348,8 @@ def run_fixed_gradient_study(output: Path, config_path: Path, *, mode="full") ->
         "ad_fd_same_smooth_objective": True,
         "hard_antithetic_evaluations_per_case": 2 * config.pairs,
         "reference_antithetic_evaluations_per_case": 2 * config.reference_pairs,
-        "expected_complete_evaluations_total": len(plan) * (2 + 2 * len(config.epsilon_theta) * len(config.fd_indices)
-                                                             + 2 * config.pairs + 2 * config.reference_pairs),
+        "expected_complete_evaluations_total": expected_evaluations,
+        "hard_probe_sources": [probe["source_info"] for probe in hard_probes.values()],
         "actual_candidate_evaluations": ledger.snapshot()["candidate_evaluations"],
         "actual_backward_evaluations": ledger.snapshot()["backward_calls"],
         "setup": metadata, "scale_sweep_summary": sweep["summaries"],
@@ -1254,13 +1365,10 @@ def run_fixed_gradient_study(output: Path, config_path: Path, *, mode="full") ->
         "ledger": {key: value for key, value in ledger.snapshot().items() if key != "entries"},
         "per_candidate_ledger": ledger.entries,
     }
-    if isinstance(report["actual_candidate_evaluations"], int):
-        fully_complete = sum(item["status"] == "complete" for item in results)
-        expected = fully_complete * (
-            2 + 2 * len(config.epsilon_theta) * len(config.fd_indices)
-            + 2 * config.pairs + 2 * config.reference_pairs)
-        if report["actual_candidate_evaluations"] != expected:
-            raise AssertionError(f"ledger {report['actual_candidate_evaluations']} != executed rows {expected}")
+    if all(item["status"] == "complete" for item in results):
+        if expected_evaluations != report["actual_candidate_evaluations"]:
+            raise AssertionError("raw ledger does not match the declared deduplicated evaluation plan")
+        fully_complete = len(results)
         if report["actual_backward_evaluations"] != fully_complete:
             raise AssertionError("exactly one true AD backward call is expected per complete fixed case")
     _new_json(output / "summary.json", report)

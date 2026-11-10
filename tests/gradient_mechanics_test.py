@@ -617,7 +617,7 @@ def test_fixed_path_source_and_fixed_theta_hashes_stay_distinct():
     from benchmarks.pilot_task import build_pilot_task
 
     class FixedPathFactory:
-        def __init__(self, task, motion, parameterization, sim, *, spec=None, ledger=None, seed=0):
+        def __init__(self, task, motion, parameterization, sim, *, spec=None, ledger=None, seed=0, requested_precision=None):
             self.motion = motion
 
         def candidate_motion(self, theta):
@@ -655,3 +655,27 @@ def test_study_thread_cap_validation_happens_before_any_runtime_or_files(tmp_pat
             build_pilot_evaluator(output, config=CostConfig(voxel_mm=2.0),
                                   precision="f64", max_cpu_threads=maximum)
         assert not output.exists()
+
+
+def test_k_independent_hard_reuse_scope_and_evaluation_accounting():
+    from scripts import run_gradient_mechanics as R
+    from dataclasses import replace
+    config = R.study_config_from_json(_declared_fixed_study_document())
+    reused = replace(config, reuse_k_independent_hard=True)
+    paths = [{"status": "ready", "id": item["id"], "source_hash": f"{item['id']}-source",
+              "fixed_motion_hash": f"{item['id']}-fixed", "theta_hash": f"{item['id']}-theta",
+              "basis_sha256": f"{item['id']}-basis"} for item in config.paths]
+    cases = R._fixed_cases(config)
+    # Hard is independent of smoothing k: these two rows intentionally share a probe.
+    assert R._hard_probe_key(cases[0], paths[0], reused) == R._hard_probe_key(cases[1], paths[0], reused)
+    assert R._hard_probe_key(cases[0], paths[0], reused) != R._hard_probe_key(cases[4], paths[1], reused)
+    assert R._hard_probe_key(cases[0], paths[0], reused) != R._hard_probe_key(
+        dict(cases[0], objective_mode="study_efficiency"), paths[0], reused)
+    assert R._hard_probe_key(cases[0], paths[0], reused) != R._hard_probe_key(
+        cases[0], paths[0], replace(reused, sigma_theta=0.025))
+    assert R._expected_study_evaluations(config, paths) == 3204
+    assert R._expected_study_evaluations(reused, paths) == 1284
+    assert reused.reuse_k_independent_hard is True
+    alt = paths[0], paths[1], paths[2], paths[3]
+    alt[0]["status"] = "invalid_source_motion"
+    assert R._expected_study_evaluations(reused, alt) is None
