@@ -418,6 +418,9 @@ class ConstraintAssessment:
     status: Feasibility
     violation: float
     missing: tuple[str, ...] = ()
+    # Optional exact production ordering for a ranked executor. The legacy
+    # adapter leaves this None and uses its original constraint aggregation.
+    hard_rank: Optional[tuple[float, ...]] = None
 
 
 def assess_constraints(state: HardObservation, policy: ConstraintPolicy) -> ConstraintAssessment:
@@ -811,7 +814,7 @@ class BacktrackingMechanism:
             return StepOutcome(base, "blocked", str(error), spent={})
         snapshot = base.with_observation(observation)
         spent = {name: self._spent[name] - before[name] for name in self._spent}
-        assessment = assess_constraints(observation.hard, self.constraints)
+        assessment = self._constraint_assessment(observation.hard)
         if assessment.status is Feasibility.UNKNOWN:
             return StepOutcome(snapshot, "blocked", "initial_hard_validation_unknown", spent=spent)
         status = "initialized_feasible" if assessment.status is Feasibility.FEASIBLE else "initialized_infeasible"
@@ -826,8 +829,17 @@ class BacktrackingMechanism:
             raise ValueError("initialize the observed initial state before stepping")
         return self._observe(snapshot.theta, context, True)
 
+    def _constraint_assessment(self, state: HardObservation) -> ConstraintAssessment:
+        """Legacy policy assessment; an executor may provide its exact rank."""
+        return assess_constraints(state, self.constraints)
+
     def _rank(self, assessment: ConstraintAssessment, residual: float, loss: float):
-        # Domain feasibility dominates the least-violation and objective terms.
+        if assessment.hard_rank is not None:
+            # An explicitly provided production rank is itself the ordering;
+            # never replace it with summed violations or a scalar-shifted loss.
+            return assessment.hard_rank
+        if assessment.status is Feasibility.UNKNOWN:
+            return None        # Domain feasibility dominates the least-violation and objective terms.
         # The latter terms avoid treating a signed Dice gap as a safe denominator.
         domain = 0 if assessment.status is Feasibility.FEASIBLE else 1
         return (domain, assessment.violation, residual, loss)
@@ -870,11 +882,11 @@ class BacktrackingMechanism:
 
         try:
             incumbent = self._incumbent(base, context)
-        except _BudgetExhausted as error:
+        except (_BudgetExhausted, _ContextMismatch) as error:
             return StepOutcome(base, "blocked", str(error), spent=delta())
         if incumbent.soft.gradient is None:
             return StepOutcome(base, "blocked", "gradient_unavailable", spent=delta())
-        initial_assessment = assess_constraints(incumbent.hard, self.constraints)
+        initial_assessment = self._constraint_assessment(incumbent.hard)
         if initial_assessment.status is Feasibility.UNKNOWN:
             return StepOutcome(base, "blocked", "initial_hard_validation_unknown",
                                spent=delta(), history=(initial_assessment.missing,))
@@ -907,7 +919,7 @@ class BacktrackingMechanism:
                 return StepOutcome(base, "blocked", "raw_hard_validation_objective_unavailable",
                                    attempts=attempt + 1, retries=attempt,
                                    history=tuple(history), spent=delta())
-            candidate_assessment = assess_constraints(candidate.hard, self.constraints)
+            candidate_assessment = self._constraint_assessment(candidate.hard)
             if candidate_assessment.status is Feasibility.UNKNOWN:
                 history.append({"attempt": attempt, "lr": learning_rate,
                                 "candidate": "unknown_constraints",
