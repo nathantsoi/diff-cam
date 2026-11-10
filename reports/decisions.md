@@ -133,3 +133,6 @@ D-10 addendum (review S1/S2):
 - S2: selection feasibility is judged on the 0.25 mm hard sim, while the verdict is the 0.125 mm posted evaluation (D-04). Selection
   thresholds are declared as ≤ the verdict thresholds, with an optional declared margin. The margin value is frozen at T4.2.
   The pilot re-run reports selection-vs-verdict feasibility agreement per arm.
+D-10 clarification (2026-11-10): the default `lexicographic` infeasible-set ranking (holder → gouge → residual → objective) supersedes
+the earlier phrase "lower total constraint violation wins", which now applies only to the `tolerance_normalised_sum` mode. In that
+mode a zero tolerance uses a recorded `zero_tolerance_scale` (default 1.0, i.e. the raw fraction), which is part of the config hash.
