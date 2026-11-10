@@ -189,12 +189,12 @@
       "note": "T5.2 adapters merged (1070c1c): isolated OCP 7.7.2 STEP import of Titan-M1 (inch->mm verified), sampled P/T, bounded native partial-roughing pilot. Production eval UNSUPPORTED for sampled P/T -> T1.3f (worker-3). Excluded-volume convention decided (grid-resolved, tol 0; native 82.20 mm3 diagnostic; grid 139.29 mm3 declared). Titan provenance/license still unknown (local only). | Production evaluation now runs (T1.3f): geometry False / safety null honestly reported; Titan nominal is a partial roughing pilot only. | T5.2b merged: independent analytic bore raster (plug \u2229 nominal source void, native face z-ranges recorded) matches 68/68 cells; negative r=0.875 \u2192 56 mismatches; RESOLUTION LIMIT at 1.27 mm: small bore D=2.057 mm \u22481.6 cells, 1.25\u00d7 radius undetectable (documented). Artifacts data/external/titan-m1-t52b."
     },
     "T4.2": {
-      "status": "in_progress",
+      "status": "done_exp2_bound",
       "owner": "coordinator (values) / diffcam-worker-3 (T4.2a tooling)",
       "branch": null,
-      "blocker": "pilot re-run after T3.xc/T3.xd (D-09/D-10); then freeze incl. Q1 collapse relative to same-solver CAM-init + typed any/all predicate",
+      "blocker": null,
       "next": null,
-      "note": "Protocol must state: real-simulator objectives reproduce only to ~1 float32 ulp (Taichi CPU atomics, e.g. holder_overlap_total); same-seed CMA runs are approximately (not bitwise) repeatable since ulp ties can flip rankings; replay agreement uses rel 1e-5. Option to make hard-path reductions deterministic (fixed-order f64) if exact repeatability is required. | H4: RTX 5070 Ti consumer GPU has low f64 throughput and 2x VRAM; if T4.3 shards use GPU, re-measure f64 cost there before freezing; runners keep init_taichi=False (sim's own init auto-selects GPU when CUDA exists). | T4.2a tooling to worker-3."
+      "note": "Protocol of record reports/protocol_decision.md (D-14); Exp2 config hash bound at launch; Exp1 binding pending D-13 config."
     },
     "T4.3": {
       "status": "in_progress",
