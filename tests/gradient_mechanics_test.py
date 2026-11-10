@@ -7,11 +7,13 @@ physical evidence. The separate opt-in test runs real Taichi pocket execution.
 from __future__ import annotations
 
 from dataclasses import replace
+import json
 import math
 import os
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -490,3 +492,163 @@ print(report["status"])
         assert array.shape == (120, 80, 24)
         assert np.isfinite(array).all()
         assert report["task_and_geometry"][f"{side}_sha256"] == "sha256:" + hashlib.sha256(payload.read_bytes()).hexdigest()
+
+
+def _declared_fixed_study_document():
+    """Small explicit study declaration, not a frozen protocol or optimizer sweep."""
+    def path(identifier, kind, **values):
+        return {"id": identifier, "kind": kind, **values}
+    return {
+        "schema": "diffcam-fixed-path-gradient-study/1", "study_only": True,
+        "task_id": "dev-pocket-island-000-v2", "voxel_mm": 0.25, "precision": "f64",
+        "cpu_max_num_threads": 8, "k_values": [20.0, 40.0, 80.0, 160.0],
+        "paths": [
+            path("cam", "cam"),
+            path("cam-perturb-17", "cam_perturbed", scale_fraction=0.001, seed=17,
+                 reference_kind="cam_delta_norm", distribution="gaussian", exploratory=True),
+            path("cam-perturb-29", "cam_perturbed", scale_fraction=0.002, seed=29,
+                 reference_kind="cam_delta_norm", distribution="gaussian", exploratory=True),
+            path("delta-line", "delta", scale_fraction=0.0005, seed=11,
+                 reference_kind="stock_xy_extent", distribution="gaussian", exploratory=True),
+        ],
+        "gouge_weight": 2.0, "residual_weight": 1.0, "holder_weight": 50.0, "holder_margin_mm": 0.0,
+        "time_weight": 0.15, "air_time_weight": 0.025,
+        "efficiency_path_ids": ["cam"], "zero_weight_path_id": "cam", "study_only_efficiency": True,
+        "epsilon_theta": [0.025, 0.00625], "fd_indices": [0, 1, 2, 35], "sigma_theta": 0.05,
+        "pairs": 16, "reference_pairs": 64, "hard_root_seed": 2026, "path_root_seed": 101,
+        "scale_sweep": {"reference_kind": "stock_xy_extent",
+                        "fractions": [0.0005, 0.0025, 0.01, 0.05, 0.1],
+                        "seeds": list(range(30)), "root_seed": 303},
+        "max_wall_time_s": 7200.0,
+    }
+
+
+def test_fixed_study_config_and_minimal_case_partition():
+    from scripts import run_gradient_mechanics as R
+    config = R.study_config_from_json(_declared_fixed_study_document())
+    cases = R._fixed_cases(config)
+    assert config.pairs == 16 and config.reference_pairs == 64
+    assert config.k_values == (20.0, 40.0, 80.0, 160.0)
+    assert len(cases) == 18
+    regular = [case for case in cases if case["objective_mode"] == "geometry"]
+    assert len(regular) == 16
+    assert [(case["path_id"], case["k"]) for case in regular[:4]] == [
+        ("cam", 20.0), ("cam", 40.0), ("cam", 80.0), ("cam", 160.0)]
+    supplemental = [case for case in cases if case["objective_mode"] != "geometry"]
+    assert [(case["objective_mode"], case["k"]) for case in supplemental] == [
+        ("zero_weights", 40.0), ("study_efficiency", 40.0)]
+    expected = 2 + 2 * len(config.epsilon_theta) * len(config.fd_indices) + 2 * 16 + 2 * 64
+    assert expected == 178
+    zero = R._objective_spec(config, supplemental[0], 1.5)
+    assert zero.k == 40.0
+    assert zero.gouge_weight == zero.residual_weight == zero.holder_weight == 0.0
+    assert zero.time_weight == zero.air_time_weight == 0.0
+    efficient = R._objective_spec(config, supplemental[1], 231.5)
+    assert efficient.time_weight == 0.15 and efficient.air_time_weight == 0.025
+    for field, value in (("k_values", [10.0, 20.0, 40.0, 80.0, 160.0]),
+                         ("pairs", 8), ("cpu_max_num_threads", 9),
+                         ("voxel_mm", 0.5), ("precision", "f32")):
+        document = _declared_fixed_study_document()
+        document[field] = value
+        with pytest.raises(ValueError):
+            R.study_config_from_json(document)
+
+
+def test_fixed_study_null_relative_errors_and_dtype_evidence():
+    from scripts import run_gradient_mechanics as R
+    first, second = np.array([0.0, 1.0, 0.0, 4.0]), np.array([0.0, 3.0, 2.0, -4.0])
+    rows = R._coordinate_errors(first, second, [0, 1, 2, 3])
+    assert [row["relative_error"] for row in rows] == [None, 2.0, None, 2.0]
+    assert [row["absolute_error"] for row in rows] == [0.0, 2.0, 2.0, 8.0]
+    assert all(row["epsilon_abs"] == 1e-12 for row in rows)
+    with pytest.raises(ValueError):
+        R._coordinate_errors(np.array([np.nan]), np.array([0.0]), [0])
+    field = SimpleNamespace(dtype=np.dtype("<f8"), grad=SimpleNamespace(dtype=np.dtype("<f8")))
+    sim = SimpleNamespace(loss=field, stock=field, tool_delta=field)
+    dtypes = R._dtype_information(sim)
+    assert len(dtypes) == 6 and all(row["is_float64"] for row in dtypes.values())
+    assert all(row["dtype"] == "<f8" for row in dtypes.values())
+
+
+def test_scale_sweep_preserves_all_declared_indices_and_physical_failures():
+    from scripts import run_gradient_mechanics as R
+    from types import SimpleNamespace
+    from benchmarks.pilot_task import build_pilot_task
+    config = R.study_config_from_json(_declared_fixed_study_document())
+    calls = []
+
+    def controlled(declaration, seed):
+        fraction = declaration["random_init"]["scale"]["fraction"]
+        calls.append((fraction, seed))
+        valid = not (fraction >= 0.05 and seed % 7 == 0)
+        sigma = fraction * 72.11102550927978
+        derivation = {
+            "scale": {"scale_mm": sigma},
+            "deviations": {"count": 74, "max_deviation_mm": 0.02, "rms_deviation_mm": 0.003,
+                           "max_abs_coordinate_deviation_mm": 0.01},
+            "parameter_map": {"steps": 75},
+            "noise_scale": {"filter_applied": False, "unit": "mm"},
+            "seed_derivation": {"requested_seed": seed, "unit_test_only": True},
+        }
+        return SimpleNamespace(valid=valid, plan=(None if not valid else
+                                                  SimpleNamespace(motion_hash=f"mock-{fraction}-{seed}")),
+                               invalid_reason=(None if valid else "machine envelope violation; no clipping"),
+                               declaration_hash="sha256:" + "a" * 64, derivation=json.dumps(derivation))
+
+    report = R.scale_validity_sweep(build_pilot_task(), config, generator=controlled)
+    assert len(report["rows"]) == len(calls) == 150
+    assert len(report["summaries"]) == 5
+    assert [(row["fraction"], row["seed"]) for row in report["rows"]] == [
+        (fraction, seed) for fraction in config.sweep_fractions for seed in config.sweep_seeds]
+    for summary in report["summaries"]:
+        assert summary["attempted"] == summary["valid"] + summary["failed"] == 30
+        assert 0 <= summary["valid_rate"] <= 1
+    failures = [row for row in report["rows"] if not row["valid"]]
+    assert failures and all("envelope" in row["invalid_reason"] for row in failures)
+    assert all(row["status"] == "failed_physical_constraint" for row in failures)
+    assert all(row["deviations"]["rms_deviation_mm"] == 0.003 for row in failures)
+    assert all(row["T"] == 75 for row in failures)
+    # This controlled generator is deliberately a unit oracle, not physics/e2e evidence.
+    assert report["physical_validity_only"] is True
+
+
+def test_fixed_path_source_and_fixed_theta_hashes_stay_distinct():
+    from scripts import run_gradient_mechanics as R
+    from benchmarks.pilot_task import build_pilot_task
+
+    class FixedPathFactory:
+        def __init__(self, task, motion, parameterization, sim, *, spec=None, ledger=None, seed=0):
+            self.motion = motion
+
+        def candidate_motion(self, theta):
+            assert np.asarray(theta).shape == (36,)
+            return SimpleNamespace(motion_hash="unit-fixed-theta-path",
+                                   waypoints_mm=self.motion.waypoints_mm)
+
+    config = R.study_config_from_json(_declared_fixed_study_document())
+    task = build_pilot_task()  # Analytic metadata only; no simulator/runtime started.
+    base = FixedPathFactory(task, None, None, object())
+    base.sim, base.spec, base.ledger, base.seed = object(), None, None, 0
+    ready = R._prepare_study_path(config.paths[1], task, base, config)
+    assert ready["status"] == "ready"
+    assert ready["source_motion"].frame == C.Frame.MACHINE
+    assert ready["motion"].motion_hash == "unit-fixed-theta-path"
+    assert ready["segment_count"] == 75
+    assert ready["parameter_shape"] == [12, 3]
+    assert ready["theta"].shape == (36,) and np.all(ready["theta"] == 0)
+    assert ready["source_hash"] == ready["source_motion"].motion_hash
+    assert ready["fixed_motion_hash"] == "unit-fixed-theta-path"
+    assert ready["source_record"]["derivation"]["exploratory"] is True
+    assert ready["source_record"]["derivation"]["excluded_from_init_axis_claims"] is True
+    assert ready["declaration"]["noise_scale_metadata"]["unit"] == "normalized_theta"
+    assert ready["source_to_fixed_path_max_error_mm"] == 0.0
+
+
+def test_study_thread_cap_validation_happens_before_any_runtime_or_files(tmp_path):
+    from scripts.run_gradient_mechanics import build_pilot_evaluator, CostConfig
+    for maximum in (0, 9, 8.0):
+        output = tmp_path / f"invalid-{maximum}"
+        with pytest.raises(ValueError, match="max_cpu_threads"):
+            build_pilot_evaluator(output, config=CostConfig(voxel_mm=2.0),
+                                  precision="f64", max_cpu_threads=maximum)
+        assert not output.exists()
