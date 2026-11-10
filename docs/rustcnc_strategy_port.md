@@ -1,7 +1,16 @@
 # RustCNC strategy port — active implementation plan
 
-Status: **implementation in progress; no ported strategy is integrated yet** (2026-11-10).
+Status: **implementation and qualification in progress; the ported strategies are not activated** (2026-11-10).
 Authority: `tasks.md` CAM-RUST-1..4, the per-worker cards in `~/src/cnc/dispatch/diffcam/`, and decision D-2026-11-10-16 in `reports/decisions.md`.
+
+## Current integration state
+
+- Worker-1's bounded Face/Contour implementation (`ee560b6`) is merged. Its 14 focused tests pass and all 13 Facing programs construct within 23–72 segments after replacing the under-clearing 3R pitch with bounded 2R pitch and sourced stay-down links.
+- A real independent-reference check of `procedural-facing_asymmetric-dev-case-00-offset_square_lower_step_pad` is **NOT qualified: residual 61.078125 mm³ >2.0 mm³**. CAM-RUST-1b is assigned to correct the physical adapter. Cap/contract checks are not qualification.
+- Worker-1's full default run was 856 passed, 11 skipped, 1 failed. The standalone f32 precision failure (`-0.3401482105255127`) was reproduced on the integration base at `TI_CPU_MAX_NUM_THREADS=4` (70.41s), so it is shared/base redness. The full suite is not green.
+- Coordinator composition/qualification seams contribute four mock-only tests plus one explicit seed-factory test; integrated focused checks across them and Face/Contour are 19 passing. Independent-reference coverage remains incomplete.
+- Pocket 2D has a checkpoint but no final handoff. Adaptive 2D is interim only: it is fixing large cap overruns, retained-region clearing and its serialized motion continuity. Neither is activated or merged into `core`.
+- No nominal dispatch, registered manifest, frozen protocol or old experiment is being silently replaced by this partial code. The old stopped cohorts remain historical and all replacement experiments await the remaining qualified ports.
 
 ## User decisions and scope
 

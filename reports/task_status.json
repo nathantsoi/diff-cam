@@ -489,33 +489,33 @@
       "status": "in_progress",
       "owner": "diffcam-worker-1",
       "branch": "task/CAM-RUST-1-face-contour",
-      "blocker": null,
-      "next": "Directly port Face + Contour 2D into cam/rustcnc_face_contour.py with coarse chords, total cap 72, own tests and explicit topology coverage.",
-      "note": "Card ~/src/cnc/dispatch/diffcam/CAM-RUST-1-diffcam-worker-1.md; clean source snapshot 5fc4717a. No implementation merged yet."
+      "blocker": "Actual lower-step Face residual 61.078125 mm3 >2.0 on procedural-facing_asymmetric-dev-case-00; follow-up CAM-RUST-1b assigned",
+      "next": "Correct the bounded Face physical adapter from independent remaining-material masks; rerun affected evaluator and focused tests before activating nominal Face.",
+      "note": "ee560b6 implemented Face/Contour; all 13 Facing typed plans fit 23–72 segments with 2R pitch + sourced stay-down correction. Focused 14 passed. Full default 856p/11s/1f shared f32 precision; exact failure reproduced on integration base at 4 threads, not attributed to port, but full suite is not green. Merged as groundwork only through 08a7db3; no active seed or qualified cohort."
     },
     "CAM-RUST-2": {
       "status": "in_progress",
       "owner": "diffcam-worker-2",
       "branch": "task/CAM-RUST-2-pocket",
-      "blocker": null,
-      "next": "Directly port Pocket 2D into cam/rustcnc_pocket2d.py with retained-pad handling, coarse chords, total cap 72 and own tests.",
-      "note": "Card ~/src/cnc/dispatch/diffcam/CAM-RUST-2-diffcam-worker-2.md; old Exp1b work cancelled; clean source snapshot 5fc4717a. No implementation merged yet."
+      "blocker": "Complete retained-pad emission, cap/coverage checks and final validation",
+      "next": "Finish direct Pocket 2D bounded rectangle implementation and hand off tested committed files.",
+      "note": "Checkpoint 0c5b6e1 exists, but it is not a final accepted handoff or geometric qualification. Continue tests/all-pocket task attempts and record actual failures; no new experiments."
     },
     "CAM-RUST-3": {
       "status": "in_progress",
       "owner": "diffcam-worker-3",
       "branch": "task/CAM-RUST-3-adaptive",
-      "blocker": null,
-      "next": "Directly port Adaptive 2D into cam/rustcnc_adaptive2d.py, disclose unpinned source stand-ins, handle retained pads/entry coils within total cap 72 and test.",
-      "note": "Card ~/src/cnc/dispatch/diffcam/CAM-RUST-3-diffcam-worker-3.md; clean source snapshot 5fc4717a. No implementation merged yet."
+      "blocker": "Large cap overruns, some retained-pad wave cuts, lower-cap frontier residue and serialized chunk continuity under correction",
+      "next": "Complete typed Adaptive2D adapter/retained-pad paths and full coarse-plan validation before handing back.",
+      "note": "Interim writeup, not ready handoff. Entry/pad filtering, links and zero-material handling improved. First focused run 8 passed/6 failed with acknowledged fixture errors still being fixed; no full suite, no committed final tip, no activation."
     },
     "CAM-RUST-4": {
-      "status": "ready",
+      "status": "in_progress",
       "owner": "diffcam-orchestrator",
       "branch": "core",
-      "blocker": "CAM-RUST-1..3 committed handoffs and any supported-topology decisions.",
-      "next": "Review/merge strategy modules, compose Pocket + Contour finish, replace nominal dispatch, bind a new manifest/protocol/config, independently qualify, run new dev pilot then fresh bounded experiments.",
-      "note": "Active plan tasks.md + docs/rustcnc_strategy_port.md + D-2026-11-10-16. No old partial campaign is promoted to a final dataset. End with bounded implementations + actual experiments + Slack MCP verifier handoff; no physical trial claim."
+      "blocker": "CAM-RUST-1b lower-Face residual fix + final Pocket and Adaptive handoffs + complete nominal qualification",
+      "next": "Integrate final ports, actually compose Pocket+Contour and qualify, replace nominal dispatch only on supported cohort, bind a new manifest/protocol/config and run a new dev pilot.",
+      "note": "Composition/seam helper f6c76af, Face handoff plus qualification plumbing 08a7db3 published. Focused integrated checks 19 passing; actual lower-Face reference check failed and has a correction card. Merged ports are not active seeds. No new frozen protocol/manifest and no resumption of the stopped experiments."
     }
   }
 }
