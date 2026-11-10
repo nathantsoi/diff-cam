@@ -278,6 +278,16 @@ def test_valid_schema_runs_every_primary_and_variant_case_with_exact_provenance(
     assert not (out / "plan" / "manifest.json").exists()
     with (ROOT / "configs/frozen_benchmark.schema.json").open() as stream:
         schema = json.load(stream)
+    def check_required_properties(node):
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                assert set(node.get("required", ())) <= set(node.get("properties", {}))
+            for child in node.values():
+                check_required_properties(child)
+        elif isinstance(node, list):
+            for child in node:
+                check_required_properties(child)
+    check_required_properties(schema)
     definitions = schema["$defs"]
     assert definitions["random_init"]["properties"]["parameter_space"]["const"] == "delta"
     assert definitions["random_init"]["properties"]["scale"]["properties"]["reference"]["properties"]["units"]["const"] == "mm"
@@ -288,6 +298,18 @@ def test_valid_schema_runs_every_primary_and_variant_case_with_exact_provenance(
     assert sidecar["additionalProperties"] is False
     assert sidecar["properties"]["exploratory"]["const"] is True
     assert sidecar["properties"]["excluded_from_init_axis_claims"]["const"] is True
+    for reference in (
+        definitions["random_init"]["properties"]["scale"]["properties"]["reference"],
+        sidecar["properties"]["scale"]["properties"]["reference"],
+    ):
+        # Required reference fields must not disappear from this strict schema,
+        # even with no external JSON Schema dependency available.
+        assert set(reference["required"]) == set(reference["properties"])
+        assert set(reference["properties"]) == {"kind", "description", "units"}
+        assert reference["properties"]["units"]["const"] == "mm"
+        assert reference["additionalProperties"] is False
+    assert sidecar["properties"]["scale"]["properties"]["reference"]["properties"]["kind"]["enum"] == [
+        "stock_xy_extent", "cam_delta_norm"]
     assert definitions["straight_line_init"]["properties"]["start"]["const"] == "cam_start"
     assert definitions["straight_line_init"]["properties"]["end"]["const"] == "cam_end"
 

@@ -317,6 +317,8 @@
               "type": "object", "additionalProperties": false,
               "required": ["kind", "description", "units"],
               "properties": {
+                "kind": {"enum": ["stock_xy_extent", "cam_delta_norm", "other_declared"]},
+                "description": {"$ref": "#/$defs/nonempty_text"},
                 "units": {"const": "mm"}
               }
             }
@@ -348,7 +350,22 @@
             "detail": {"$ref": "#/$defs/nonempty_text"}
           }
         },
-        "scale": {"$ref": "#/$defs/random_init/properties/scale"},
+        "scale": {
+          "type": "object", "additionalProperties": false,
+          "required": ["fraction", "reference"],
+          "properties": {
+            "fraction": {"$ref": "#/$defs/positive_number"},
+            "reference": {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "description", "units"],
+              "properties": {
+                "kind": {"enum": ["stock_xy_extent", "cam_delta_norm"]},
+                "description": {"$ref": "#/$defs/nonempty_text"},
+                "units": {"const": "mm"}
+              }
+            }
+          }
+        },
         "seed_derivation_rule": {
           "type": "object", "additionalProperties": false,
           "required": ["algorithm", "root_seed", "input", "per_seed_rule"],
