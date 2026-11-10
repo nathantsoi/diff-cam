@@ -15,7 +15,7 @@ This file is a checklist, not a scientific decision, measured result, or launch 
 - Why this bounded evaluation is being performed, including negative/null hypotheses: `<written aims, not an expected ranking>`
 - Allowed conclusions: `accept`, `reject`, `narrow`; strict-improvement gate required: `false`, always.
 
-Maintain historical decision context, including D-2026-11-09-03 (gradient provisional history), D-2026-11-09-04 (fidelity), D-2026-11-09-05 (full-f64 comparisons), D-2026-11-09-06 (where precision is recorded), and D-2026-11-09-07 (posted worker memory ceilings), plus newer amendments. An amendment after inspecting results requires an explicit reason, new IDs/hashes, and affected-run reruns; never silently replace an inconvenient run.
+Maintain historical decision context, including D-2026-11-09-03 (gradient provisional history), D-2026-11-09-04 (fidelity), D-2026-11-09-05 (full-f64 comparisons), D-2026-11-09-06 (where precision is recorded), D-2026-11-09-07 (posted worker memory ceilings), and D-2026-11-10-08 (independent initialization, predeclared recipes/collapse rules, and unavailable CEM), plus newer amendments. An amendment after inspecting results requires an explicit reason, new IDs/hashes, and affected-run reruns; never silently replace an inconvenient run.
 
 ## 2. Task source, splits and manifest identities
 
@@ -45,15 +45,15 @@ Record original part, reachable operation target, excluded volume, finite-cutter
 
 ## 3. Conditions, primary K and bounded subset
 
-| Retained condition | Runner experiment/split | Task ID/hash | Allowed seeds | Precision config/hash | Fixed budget/variant roles |
-|---|---|---|---|---|---|
-| `nominal-cam` | `<...>` | `<...>` | exactly `[0]`, one deterministic anchor | `<...>` | `<primary only unless explicitly selected>` |
-| `fixed-adam` | `<...>` | `<...>` | exactly `[0]` under the current runner | `<...>` | `<primary and/or selected variant>` |
-| `annealed-adam` | `<...>` | `<...>` | exactly `[0]` under current runner | `<...>` | `<...>` |
-| `hard-cmaes` | `<...>` | `<...>` | `<explicit nonnegative integer seeds>` | `<...>` | `<...>` |
-| `smooth-cmaes` | `<...>` | `<...>` | `<explicit nonnegative integer seeds>` | `<...>` | `<...>` |
+| Retained condition | Init | Runner experiment/split | Task ID/hash | Allowed seeds | Precision config/hash | Fixed budget/variant roles |
+|---|---|---|---|---|---|---|
+| `nominal-cam` | `cam` only | `<...>` | `<...>` | exactly `[0]`, one deterministic anchor | `<...>` | `<primary only unless explicitly selected>` |
+| `fixed-adam` | `cam` only | `<...>` | `<...>` | exactly `[0]` under the current runner | `<...>` | `<primary and/or selected variant>` |
+| `annealed-adam` | `<cam / straight_line / random>` | `<...>` | `<...>` | `<CAM exactly [0]; non-CAM rules below>` | `<...>` | `<...>` |
+| `hard-cmaes` | `<cam / straight_line / random>` | `<...>` | `<...>` | `<explicit nonnegative integer seeds>` | `<...>` | `<...>` |
+| `smooth-cmaes` | `cam` only | `<...>` | `<...>` | `<explicit nonnegative integer seeds>` | `<...>` | `<...>` |
 
-No duplicate condition entries or seed repetitions masquerading as extra independent CAM/Adam results. CMA runs are once per declared seed. Name all retained experiment condition IDs; unknown runner condition names are forbidden. A concept/experiment not present in the runner is either registered with evidence or unavailable, not masked by a similar known condition.
+No duplicate `(condition, init)` entries or seed repetitions masquerade as extra independent CAM/Adam results. Distinct initializers for the same solver are explicit separate entries. CMA runs are once per declared seed for each init; additional task seeds do not create independent tasks. Name all retained experiment condition/init IDs; unknown runner condition names are forbidden. A concept/experiment not present in the runner is either registered with evidence or unavailable, not masked by a similar known condition.
 
 | Objective/control | Frozen declaration |
 |---|---|
@@ -67,13 +67,86 @@ No duplicate condition entries or seed repetitions masquerading as extra indepen
 
 ### Small K/dimensionality/ablation subset (1–3 explicit variants, never automatic Cartesian expansion)
 
-| Variant label | Task ID/hash | Retained condition + seed | K (distinct from primary K) | Exact rationale/budget |
-|---|---|---|---|---|
-| `<filename-safe-label>` | `<...>` | `<...>` | `<positive value>` | `<...>` |
-| `<optional second>` | `<...>` | `<...>` | `<positive value>` | `<...>` |
-| `<optional third>` | `<...>` | `<...>` | `<positive value>` | `<...>` |
+| Variant label | Task ID/hash | Retained condition + seed | Init | K (distinct from primary K) | Exact rationale/budget |
+|---|---|---|---|---|---|
+| `<filename-safe-label>` | `<...>` | `<...>` | `<cam / straight_line / random>` | `<positive value>` | `<...>` |
+| `<optional second>` | `<...>` | `<...>` | `<...>` | `<positive value>` | `<...>` |
+| `<optional third>` | `<...>` | `<...>` | `<...>` | `<positive value>` | `<...>` |
 
 Document which physical/design dimension is being varied, why its count is bounded, and how each variant contributes to hypothesis acceptance/rejection. Do not silently generate a task × K × method grid, stepwise-explore new knobs after seeing external/test results, or call repeated CAM runs independent evidence. All selected conditions and variant task identities must exist in the registered manifest; current prototype execution can't silently handle another task source.
+
+### 3.1 D-08 initialization, predeclared recipes, and pending runner support
+
+The `init` axis is independent of solver selection, with enum `cam | straight_line | random`. Omitting all `init` fields preserves the legacy all-CAM declaration. An optional protocol-level `init` supplies the default for otherwise unannotated method/variant rows; an explicit row-level `init` overrides it. Use **cam** for every existing condition unless the coordinator explicitly adds an independent initialization case. Every primary entry must uniquely select **(condition, init)**, and every primary run must uniquely select **(condition, init, seed)**. Repeating an optimizer with different initializers is allowed; splitting one identical solver/init/seed selection across entries is not.
+
+| Coordinator decision | Required frozen declaration |
+|---|---|
+| Nominal CAM initialization | `cam`; a non-CAM nominal anchor is rejected |
+| Non-CAM optimizer compatibility | `straight_line` or `random` only with `annealed-adam` (the annealed/smooth-Adam recipe) or `hard-cmaes`; both initializer kinds may be used with either allowed solver; fixed Adam, smooth CMA-ES and nominal CAM reject them |
+| Straight-line multiplicity | deterministic, exactly one run per declared selection; a multi-seed selection is rejected, not interpreted as multiple deterministic replicas |
+| Random multiplicity | one run per explicitly declared nonnegative seed; nonzero random-initializer seeds for annealed Adam are permitted in declarations even though the current CAM/Adam runner is single-seeded |
+| Matched task/budget settings | `<task and immutable identity, primary K or explicitly bounded variant K, precision, objective weights, candidate/validation and wall-clock budgets, 0.125 mm verdict and hold-out rules>` |
+| Variant source link | each variant's `(condition, init)` must exist as a retained primary selection and its registered task/hash, K distinction and rationale are checked |
+| Comparison source links | optional `method_init` and `baseline_init`, default `cam`, select the exact retained primary axes; same-solver CAM versus non-CAM comparisons are supported, identical method/init and baseline/init are rejected |
+| Dev tuning source links | optional `tuning.rounds[].init`, default `cam`, must match the named retained primary selection; no dev path/hash check can excuse an unretained initializer spending report |
+
+**Whenever any effective or protocol-level `init` is not `cam`, all three objects below are mandatory and nonempty, even if a particular configuration has only straight-line or only random cases.** The values are not chosen by this tooling. The following is a blank coordinator form, **not** a valid frozen JSON file. Any remaining `TO-BE-FROZEN`, `TODO`, `TBD`, or `<...>` placeholder is rejected by the semantic validator, including placeholders inside unused declaration blocks. Empty/whitespace-only text, missing fields, unknown fields and incorrect types are also rejected.
+
+```json
+"random_init": {
+  "parameter_space": "TO-BE-FROZEN: theta or delta",
+  "distribution": {
+    "kind": "TO-BE-FROZEN: gaussian, uniform or other_declared",
+    "detail": "TO-BE-FROZEN: complete sampling distribution and any antithetic/correlation rule"
+  },
+  "scale": {
+    "fraction": "TO-BE-FROZEN: finite positive multiplier X",
+    "reference": {
+      "kind": "TO-BE-FROZEN: stock_xy_extent, cam_delta_norm or other_declared",
+      "description": "TO-BE-FROZEN: exactly which extent/norm and parameterization are used",
+      "units": "TO-BE-FROZEN: physical or dimensionless reference units"
+    }
+  },
+  "seed_derivation_rule": {
+    "algorithm": "TO-BE-FROZEN: exact reproducible deterministic algorithm",
+    "root_seed": "TO-BE-FROZEN: replace with a nonnegative integer",
+    "input": "TO-BE-FROZEN: exact inputs and ordering to the derivation",
+    "per_seed_rule": "TO-BE-FROZEN: how every listed run seed obtains its initializer stream"
+  }
+}
+```
+
+```json
+"straight_line_init": {
+  "start": "TO-BE-FROZEN: explicit CAM start/reference station or endpoints",
+  "end": "TO-BE-FROZEN: explicit CAM end/reference station or endpoints",
+  "segment_placement": "TO-BE-FROZEN: uniform resampling or other exact rule using CAM segment count and same K parameterization",
+  "feed_and_rapid_entry": "TO-BE-FROZEN: precise safe rapid-entry and feed handling for the selected task",
+  "same_segment_count_and_k": true,
+  "safe_rapid_entry": true,
+  "respect_task_feed_limits": true,
+  "efficiency_not_required": true
+}
+```
+
+No-init runner seeds must produce valid task MotionPlans with the same segment count/K parameterization, a safe rapid entry, and feed at or below task limits. They need not be efficiency-eligible. The required booleans are policy predeclarations, **not** evidence that construction, rapid clearance, safe machining, task feasibility, or a numeric speed limit has already been verified. Worker-2's later `cam/seeds` implementation must construct and validate those plans; this tooling does not generate them.
+
+```json
+"collapse_criterion": {
+  "geometry_or_completion_failure": true,
+  "residual_multiplier": "TO-BE-FROZEN: finite positive multiplier X",
+  "residual_operator": "TO-BE-FROZEN: gt or ge",
+  "require_no_hard_loss_improvement_over_initial": true,
+  "predicate": "TO-BE-FROZEN: at the 0.125 mm verdict, exact OR/AND clauses using geometry or completion failure and/or residual X times matched CAM-init residual, AND no hard-loss improvement over this run's own initial path",
+  "collapse_and_infeasibility_are_valid_recorded_outcomes": true
+}
+```
+
+This is the operational predicate chosen **before** running the experiment, not a before-run expectation that it will pass. The frozen form must make the comparison's CAM-residual reference, multiplier X, comparison operator, required terms and own-initial-path hard-loss test explicit. Keep the prose consistent with the structured fields. The validator requires nonempty declarations, finite positive X and fixed boolean policies; it does not parse natural-language logic or execute the predicate. Collapse or infeasibility is a recorded negative/inefficient scientific outcome, not a tooling failure, hidden exclusion, zero cost or successful efficiency result. Do not delete or edit it after observing the results without a versioned amendment and rerun policy.
+
+Current implementation status: no-init cases are **declared but not yet runnable**. For these cases the tool writes only `initialization-declaration.json`, carrying the exact initializer fields, task/K identities, budgets and hashes. Its report uses `declared_not_yet_runnable=true`, `native_dry_run_performed=false`, null run ID/candidate/validation values and `planned_run_count=0`. No runner invocation or optimizer/evaluator launch is made for these cases. Those rows must not be counted as native dry-runs or substituted for CAM evidence. Actual native CAM cases still run the real runner with `--dry-run`; `validated_run_count` includes only those, not pending declaration previews. A future task-source, experiment or initializer implementation requires its own registered integration and evidence; `--validate-only` cannot create execution capability.
+
+CEM is a declared **unavailable baseline**, not a condition or an alias for CMA-ES. The allowed literature statement is **zero-order (CMA-ES), not CEM**, under the explicit `external_baselines.cem` limitation record. Any later CEM implementation requires a protocol amendment and independent runner evidence.
 
 ## 4. D-05 precision and D-06 metadata
 

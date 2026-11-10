@@ -38,7 +38,10 @@ DECISION_PATTERN = re.compile(r"D-\d{4}-\d{2}-\d{2}-\d{2}")
 REQUIRED_DECISIONS = {
     "D-2026-11-09-01", "D-2026-11-09-02", "D-2026-11-09-03",
     "D-2026-11-09-04", "D-2026-11-09-05", "D-2026-11-09-06", "D-2026-11-09-07",
+    "D-2026-11-10-08",
 }
+INIT_VALUES = ("cam", "straight_line", "random")
+NON_CAM_SOLVERS = frozenset(("annealed-adam", "hard-cmaes"))
 THRESHOLD_FIELDS = (
     "completion_residual_mm3", "gouge_volume_mm3", "local_surface_error_mm",
     "clearance_mm", "rapid_penetration_mm",
@@ -126,8 +129,24 @@ def object_fields(value: Any, where: str, required: Sequence[str],
     return value
 
 
+def reject_placeholders(value: Any, where: str = "protocol") -> None:
+    """A coordinator's blank template can never become a frozen configuration."""
+    if isinstance(value, str):
+        stripped = value.strip()
+        require(not re.search(r"\b(?:TO[-_ ]BE[-_ ]FROZEN|TODO|TBD)\b", value, flags=re.IGNORECASE)
+                and not (stripped.startswith("<") and stripped.endswith(">")),
+                f"{where}: frozen configuration contains an unresolved placeholder")
+    elif isinstance(value, Mapping):
+        for key, child in value.items():
+            reject_placeholders(child, f"{where}.{key}")
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            reject_placeholders(child, f"{where}[{index}]")
+
+
 def text(value: Any, where: str) -> str:
     require(isinstance(value, str) and bool(value.strip()), f"{where}: expected nonempty text")
+    reject_placeholders(value, where)
     return value
 
 
@@ -286,8 +305,96 @@ def forbid_improvement_gate(value: Any, where: str = "") -> None:
             forbid_improvement_gate(child, f"{where}[{index}]")
 
 
-def validate_tuning(tuning: Mapping[str, Any], repo: Path) -> tuple[int, list[dict[str, Any]]]:
+def init_mode(protocol: Mapping[str, Any], entry: Mapping[str, Any],
+              condition: str, where: str) -> str:
+    """Resolve CAM's default independently from the optimizer condition."""
+    value = entry.get("init", protocol.get("init", "cam"))
+    require(isinstance(value, str) and value in INIT_VALUES,
+            f"{where}.init must be one of {list(INIT_VALUES)}, got {value!r}")
+    require(condition != "nominal-cam" or value == "cam",
+            "nominal-cam requires init=cam; non-CAM init is an optimizer condition")
+    require(value == "cam" or condition in NON_CAM_SOLVERS,
+            f"{where}: init={value} is allowed only with annealed-adam or hard-cmaes, not {condition}")
+    return value
+
+
+def validate_initializations(protocol: Mapping[str, Any]) -> list[str]:
+    """Validate the three mandatory, immutable D-08 no-init declarations.
+
+    These declarations define a future MotionPlan recipe; this tool neither
+    constructs a MotionPlan nor asserts geometric safety/efficiency eligibility.
+    """
+    explicit = [protocol.get("init", "cam")]
+    for key in ("methods", "dimensionality_subset"):
+        rows = protocol.get(key, [])
+        if isinstance(rows, list):
+            explicit.extend(row.get("init", protocol.get("init", "cam"))
+                            for row in rows if isinstance(row, Mapping))
+    if all(value == "cam" for value in explicit):
+        return []
+    for value in explicit:
+        require(value in INIT_VALUES, f"init must be one of {list(INIT_VALUES)}, got {value!r}")
+    return initializations(protocol)
+
+
+def initializations(protocol: Mapping[str, Any]) -> list[str]:
+    """Strong typing and content checks for all no-init declaration objects."""
+    for key in ("random_init", "straight_line_init", "collapse_criterion"):
+        require(isinstance(protocol.get(key), Mapping) and bool(protocol[key]),
+                f"{key}: a nonempty predeclared object is required when any init != cam")
+    random = object_fields(protocol["random_init"], "random_init",
+                           ("parameter_space", "distribution", "scale", "seed_derivation_rule"))
+    require(random["parameter_space"] in ("theta", "delta"),
+            "random_init.parameter_space must be theta or delta")
+    distribution = object_fields(random["distribution"], "random_init.distribution", ("kind", "detail"))
+    require(distribution["kind"] in ("gaussian", "uniform", "other_declared"),
+            "random_init.distribution.kind must be gaussian, uniform, or other_declared")
+    text(distribution["detail"], "random_init.distribution.detail")
+    scale = object_fields(random["scale"], "random_init.scale", ("fraction", "reference"))
+    number(scale["fraction"], "random_init.scale.fraction", 0, strict=True)
+    reference = object_fields(scale["reference"], "random_init.scale.reference",
+                              ("kind", "description", "units"))
+    require(reference["kind"] in ("stock_xy_extent", "cam_delta_norm", "other_declared"),
+            "random_init.scale.reference.kind must name a scale reference explicitly")
+    text(reference["description"], "random_init.scale.reference.description")
+    text(reference["units"], "random_init.scale.reference.units")
+    derivation = object_fields(random["seed_derivation_rule"], "random_init.seed_derivation_rule",
+                               ("algorithm", "root_seed", "input", "per_seed_rule"))
+    text(derivation["algorithm"], "random_init.seed_derivation_rule.algorithm")
+    integer(derivation["root_seed"], "random_init.seed_derivation_rule.root_seed")
+    text(derivation["input"], "random_init.seed_derivation_rule.input")
+    text(derivation["per_seed_rule"], "random_init.seed_derivation_rule.per_seed_rule")
+    straight = object_fields(protocol["straight_line_init"], "straight_line_init",
+                             ("start", "end", "segment_placement", "feed_and_rapid_entry",
+                              "same_segment_count_and_k", "safe_rapid_entry",
+                              "respect_task_feed_limits", "efficiency_not_required"))
+    for key in ("start", "end", "segment_placement", "feed_and_rapid_entry"):
+        text(straight[key], "straight_line_init." + key)
+    boolean(straight["same_segment_count_and_k"], "straight_line_init.same_segment_count_and_k", True)
+    boolean(straight["safe_rapid_entry"], "straight_line_init.safe_rapid_entry", True)
+    boolean(straight["respect_task_feed_limits"], "straight_line_init.respect_task_feed_limits", True)
+    boolean(straight["efficiency_not_required"], "straight_line_init.efficiency_not_required", True)
+    collapse = object_fields(protocol["collapse_criterion"], "collapse_criterion",
+                             ("geometry_or_completion_failure", "residual_multiplier", "residual_operator",
+                              "require_no_hard_loss_improvement_over_initial", "predicate",
+                              "collapse_and_infeasibility_are_valid_recorded_outcomes"))
+    boolean(collapse["geometry_or_completion_failure"],
+            "collapse_criterion.geometry_or_completion_failure", True)
+    number(collapse["residual_multiplier"], "collapse_criterion.residual_multiplier", 0, strict=True)
+    require(collapse["residual_operator"] in ("gt", "ge"),
+            "collapse_criterion.residual_operator must be gt or ge")
+    boolean(collapse["require_no_hard_loss_improvement_over_initial"],
+            "collapse_criterion.require_no_hard_loss_improvement_over_initial", True)
+    text(collapse["predicate"], "collapse_criterion.predicate")
+    boolean(collapse["collapse_and_infeasibility_are_valid_recorded_outcomes"],
+            "collapse_criterion.collapse_and_infeasibility_are_valid_recorded_outcomes", True)
+    return ["D-08 initialization is declared but has no runner/seed implementation yet; pending rows are not executable or measured outcomes."]
+
+
+def validate_tuning(tuning: Mapping[str, Any], repo: Path,
+                    init_selections: set[tuple[str, str]]) -> tuple[int, list[dict[str, Any]]]:
     object_fields(tuning, "tuning", ("total_candidate_evaluations", "rounds", "only_dev"))
+    require(tuning["only_dev"] is True, "tuning must be restricted to dev")
     require(tuning["only_dev"] is True, "tuning must be restricted to dev")
     require(isinstance(tuning["rounds"], list), "tuning.rounds must be a list")
     total = 0
@@ -295,13 +402,17 @@ def validate_tuning(tuning: Mapping[str, Any], repo: Path) -> tuple[int, list[di
     forbidden_parts = {"test", "external", "heldout", "held-out"}
     for index, row_value in enumerate(tuning["rounds"]):
         where = f"tuning.rounds[{index}]"
-        row = object_fields(row_value, where, ("split", "candidate_evaluations", "conditions", "changes", "evidence"))
+        row = object_fields(row_value, where, ("split", "candidate_evaluations", "conditions", "changes", "evidence"), ("init",))
+        mode = row.get("init", "cam")
+        require(mode in INIT_VALUES, f"{where}.init must be cam, straight_line, or random")
         require(row["split"] == "dev", f"{where}.split must be dev, never test/external")
         spend = integer(row["candidate_evaluations"], where + ".candidate_evaluations", 1)
         total += spend
         conditions = nonempty_names(row["conditions"], where + ".conditions")
         require(set(conditions) <= set(runner.CONDITIONS) and len(set(conditions)) == len(conditions),
                 f"{where}.conditions contains an unknown or duplicate condition")
+        require(all((condition, mode) in init_selections for condition in conditions),
+                f"{where}: conditions must match retained primary (condition, init) selections")
         require(isinstance(row["changes"], list), f"{where}.changes must be a list")
         for change in row["changes"]:
             text(change, where + ".changes")
@@ -320,7 +431,7 @@ def validate_tuning(tuning: Mapping[str, Any], repo: Path) -> tuple[int, list[di
             path = relative_file(repo, raw_path, ewhere + ".path")
             verify_asset_hash(path, expected_hash, ewhere)
             verified.append({"path": raw_path, "sha256": expected_hash, "split": "dev"})
-        rows.append({"split": "dev", "conditions": conditions, "candidate_evaluations": spend,
+        rows.append({"split": "dev", "conditions": conditions, "init": mode, "candidate_evaluations": spend,
                      "changes": list(row["changes"]), "evidence": verified})
     require(integer(tuning["total_candidate_evaluations"], "tuning.total_candidate_evaluations")
             == total, "tuning.total_candidate_evaluations must equal the sum of declared rounds")
@@ -384,7 +495,7 @@ def check_budget(protocol: Mapping[str, Any], jobs: Sequence[Mapping[str, Any]])
             "validation_calls": validation_total,
             "worker_seconds": total_seconds if not uncertain else None,
             "largest_job_seconds": largest_job_seconds,
-            "timing_unknown_jobs": [{"condition": job["condition"], "seed": job["seed"],
+            "timing_unknown_jobs": [{"condition": job["condition"], "init": job["init"], "seed": job["seed"],
                                      "scope": job["scope"]} for job in uncertain],
             "per_job": costed, "uncertainty_note": require_if_unknown_memory}
 
@@ -397,10 +508,11 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
         ("schema", "decision_ids", "task_manifest", "primary_task_id", "dimensionality_subset",
          "methods", "objective", "thresholds", "posted_evaluation", "memory", "budget",
          "estimates", "tuning", "comparisons", "multiplicity", "external_baselines",
-         "acceptance", "execution", "precision"), ("notes",))
+         "acceptance", "execution", "precision"),
+        ("notes", "init", "random_init", "straight_line_init", "collapse_criterion"))
     repo = no_manuscript(repo, "repository_root").resolve()
     protocol = config
-    require(repo.is_dir(), f"repository_root must be an existing directory: {repo}")
+    reject_placeholders(config)
     require(config["schema"] == PROTOCOL_SCHEMA,
             f"protocol.schema must be {PROTOCOL_SCHEMA}")
     forbid_improvement_gate(config)
@@ -519,22 +631,37 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
     require('precision' in inspect.signature(runner.CSGSimulatorDelta.__init__).parameters,
             "the installed public constructor must expose the f64 precision option")
 
+    initialization_warnings = validate_initializations(config)
+
     methods = config["methods"]
     require(isinstance(methods, list) and methods, "methods must be a nonempty list")
     method_names: set[str] = set()
+    primary_init_selections: set[tuple[str, str]] = set()
+    run_selections: set[tuple[str, str, int]] = set()
     jobs = []
     for index, entry in enumerate(methods):
         where = f"methods[{index}]"
-        method = object_fields(entry, where, ("condition", "seeds"))
+        method = object_fields(entry, where, ("condition", "seeds"), ("init",))
         condition = method["condition"]
         require(condition in runner.CONDITIONS, f"{where}.condition is not supported by the runner: {condition!r}")
-        require(condition not in method_names, f"duplicate primary condition {condition!r}")
+        selected_init = init_mode(config, method, condition, where)
+        selection = (condition, selected_init)
+        require(selection not in primary_init_selections,
+                f"duplicate primary (condition, init) selection {selection!r}; separate solver/init rows are allowed but not solver seed-splitting")
+        primary_init_selections.add(selection)
         method_names.add(condition)
         seeds = seed_list(method["seeds"], where + ".seeds")
-        if condition in SINGLE_SEED_METHODS:
+        if condition in SINGLE_SEED_METHODS and selected_init == "cam":
             require(seeds == [0], f"{condition} requires deterministic seed 0, not independent CAM/Adam replicas")
+        if selected_init == "straight_line":
+            require(len(seeds) == 1,
+                    f"{where}: straight_line is deterministic and requires exactly one declared run")
         for seed in seeds:
-            jobs.append({"scope": "primary", "condition": condition, "seed": seed,
+            run_selection = (condition, selected_init, seed)
+            require(run_selection not in run_selections,
+                    f"{where}: duplicate primary run (condition, init, seed) {run_selection!r}")
+            run_selections.add(run_selection)
+            jobs.append({"scope": "primary", "condition": condition, "init": selected_init, "seed": seed,
                          "task_id": primary_id, "task_hash": primary["task_hash"]})
 
     variants = config["dimensionality_subset"]
@@ -543,7 +670,7 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
     variant_names: set[str] = set()
     for index, entry in enumerate(variants):
         where = f"dimensionality_subset[{index}]"
-        variant = object_fields(entry, where, ("name", "task_id", "condition", "seed", "k", "rationale"))
+        variant = object_fields(entry, where, ("name", "task_id", "condition", "seed", "k", "rationale"), ("init",))
         name = text(variant["name"], where + ".name")
         require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) is not None,
                 f"{where}.name must be a filename-safe variant label")
@@ -553,16 +680,19 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
         require(variant["task_id"] == primary_id,
                 f"{where}: the current prototype adapter can run only its declared primary task; register alternate task sources before launch")
         condition = variant["condition"]
-        require(condition in method_names,
-                f"{where}: condition {condition!r} must be retained in methods")
+        require(condition in runner.CONDITIONS, f"{where}.condition is not supported by the runner: {condition!r}")
+        require(condition in method_names, f"{where}: condition {condition!r} must be retained in methods")
+        selected_init = init_mode(config, variant, condition, where)
+        require((condition, selected_init) in primary_init_selections,
+                f"{where}: (condition, init) {(condition, selected_init)!r} must be retained in primary methods")
         seed = integer(variant["seed"], where + ".seed")
-        if condition in SINGLE_SEED_METHODS:
+        if condition in SINGLE_SEED_METHODS and selected_init == "cam":
             require(seed == 0, f"{where}: {condition} requires seed 0")
         k = number(variant["k"], where + ".k", 0, strict=True)
         require(k != primary_k, f"{where}: variant repeats primary_k; it is not a distinct bounded ablation")
         text(variant["rationale"], where + ".rationale")
         jobs.append({"scope": "dimensionality_subset", "variant": name,
-                     "condition": condition, "seed": seed,
+                     "condition": condition, "init": selected_init, "seed": seed,
                      "task_id": primary_id, "task_hash": primary["task_hash"], "k": k})
 
     multiplicity = config["multiplicity"]
@@ -587,14 +717,20 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
                     "max_surface_error_mm", "removed_volume_mm3"}
     for index, raw_comparison in enumerate(config["comparisons"]):
         where = f"comparisons[{index}]"
-        comparison = object_fields(raw_comparison, where, ("name", "method", "baseline", "metrics", "dialects"))
+        comparison = object_fields(raw_comparison, where, ("name", "method", "baseline", "metrics", "dialects"),
+                                   ("method_init", "baseline_init"))
         name = text(comparison["name"], where + ".name")
         require(name not in comparison_names, f"duplicate comparison name {name!r}")
         comparison_names.add(name)
         method, baseline = comparison["method"], comparison["baseline"]
-        require(method in method_names and baseline in method_names,
-                f"{where}: method and baseline must be retained method names")
-        require(method != baseline, f"{where}: method and baseline must differ")
+        method_init = comparison.get("method_init", "cam")
+        baseline_init = comparison.get("baseline_init", "cam")
+        for condition, mode, role in ((method, method_init, "method"), (baseline, baseline_init, "baseline")):
+            require(mode in INIT_VALUES, f"{where}.{role}_init must be cam, straight_line, or random")
+            require((condition, mode) in primary_init_selections,
+                    f"{where}: {role} selection {(condition, mode)!r} is not a retained primary (condition, init)")
+        require((method, method_init) != (baseline, baseline_init),
+                f"{where}: method/init and baseline/init selections must differ")
         metrics = nonempty_names(comparison["metrics"], where + ".metrics")
         require(len(set(metrics)) == len(metrics), f"{where}: duplicate metric")
         require(set(metrics) <= metric_names, f"{where}: unknown metric(s) {sorted(set(metrics)-metric_names)}")
@@ -604,7 +740,15 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
 
     external = config["external_baselines"]
     object_fields(external, "external_baselines",
-                  ("cnc_net_executable", "camotics", "physical_claims", "policy_claims"))
+                  ("cnc_net_executable", "camotics", "cem", "physical_claims", "policy_claims"))
+    cem = object_fields(external["cem"], "external_baselines.cem",
+                        ("status", "allow_optimizer_condition", "claim_scope", "reason"))
+    require(cem["status"] == "unavailable",
+            "D-08 records CEM as an unavailable baseline, not an implemented optimizer")
+    boolean(cem["allow_optimizer_condition"], "external_baselines.cem.allow_optimizer_condition", False)
+    require(cem["claim_scope"] == "zero-order (CMA-ES), not CEM",
+            "D-08 requires zero-order (CMA-ES), not CEM claim scope")
+    text(cem["reason"], "external_baselines.cem.reason")
     for key, status, flag_name, expected_flag in (
         ("cnc_net_executable", "unsupported", "allow_success_claim", False),
         ("camotics", "supplementary", "primary_oracle", False),
@@ -620,10 +764,7 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
             "strict-improvement gating is forbidden")
     require(set(acceptance["allowed_conclusions"]) == {"accept", "reject", "narrow"},
             "acceptance must explicitly permit accept, reject, and narrow outcomes")
-    tuning_spend, tuning_rows = validate_tuning(config["tuning"], repo)
-    touched_by_tuning = {condition for row in tuning_rows for condition in row["conditions"]}
-    require(touched_by_tuning <= method_names,
-            f"tuning conditions not retained in primary methods: {sorted(touched_by_tuning-method_names)}")
+    tuning_spend, tuning_rows = validate_tuning(config["tuning"], repo, primary_init_selections)
     costs = check_budget(config, jobs)
     return {"task": task, "task_hash": task.task_hash, "primary_task_id": primary_id,
             "protocol": config,
@@ -636,6 +777,7 @@ def validate_declaration(config: Mapping[str, Any], repo: Path,
                 "D-05 f64 declaration is checked against the public precision option; this dry-run does not initialize f64 fields or prove an adjoint calculation.",
                 "D-04 fidelity and D-07 memory declarations are validated, but no posted evaluator or phase memory allocation is executed here.",
                 "No tuned or test-split results are inferred from incomplete optional timing or baseline coverage.",
+                *initialization_warnings,
             ], "tuning_spend": tuning_spend, "tuning_rounds": tuning_rows}
 
 
@@ -652,6 +794,8 @@ def native_config(job: Mapping[str, Any], declaration: Mapping[str, Any],
         "experiment": execution["experiment"],
         "task_source": execution["task_source"],
         "precision": declaration["precision"],
+        "init": job["init"],
+        "init_implementation_available": job["init"] == "cam",
         "arch": execution["architecture"],
         "seeds": [job["seed"]],
         "candidate_evaluations": budget["candidate_evaluations"],
@@ -689,9 +833,43 @@ def execute_dry_runs(declaration: Mapping[str, Any], output: Path,
     reports = []
     proto_task, _, _ = runner._prototype()
     for index, job in enumerate(declaration["jobs"]):
-        label = f"{index:03d}-{job['scope']}-{job['condition']}-s{job['seed']}"
+        label = f"{index:03d}-{job['scope']}-{job['condition']}-i{job['init']}-s{job['seed']}"
         root = destination / label
         root.mkdir(parents=True, exist_ok=False)
+        if job["init"] != "cam":
+            # D-08 runner/seeds belong to a separate downstream implementation.
+            # Do not call the CAM runner or imply that this declaration generated
+            # a valid MotionPlan, an executable configuration, or an outcome.
+            preview = {
+                "schema": "diffcam-initialization-declaration/1",
+                "declared_not_yet_runnable": True,
+                "scope": job["scope"], "condition": job["condition"],
+                "init": job["init"], "seed": job["seed"],
+                "variant": job.get("variant"),
+                "task_id": job["task_id"], "task_hash": job["task_hash"],
+                "k": job.get("k", declaration["protocol"]["objective"]["primary_k"]),
+                "objective": dict(declaration["protocol"]["objective"]),
+                "budget": dict(declaration["protocol"]["budget"]),
+                "precision": declaration["protocol"]["precision"],
+                "random_init": dict(declaration["protocol"]["random_init"]),
+                "straight_line_init": dict(declaration["protocol"]["straight_line_init"]),
+                "collapse_criterion": dict(declaration["protocol"]["collapse_criterion"]),
+                "protocol_reference_sha256": protocol_sha256,
+                "reason": "D-08 initializer/runner seed construction is not implemented yet; this is neither a native configuration nor an execution plan",
+            }
+            preview_path = root / "initialization-declaration.json"
+            preview_path.write_bytes(canonical_json(preview) + b"\n")
+            reports.append({
+                "scope": job["scope"], "condition": job["condition"], "init": job["init"],
+                "seed": job["seed"], "variant": job.get("variant"), "run_id": None,
+                "task_hash": job["task_hash"],
+                "initialization_declaration_sha256": file_sha(preview_path),
+                "declared_not_yet_runnable": True, "native_dry_run_performed": False,
+                "planned_run_count": 0, "candidate_evaluations": None, "validation_calls": None,
+                "estimated_wall_time_s": None, "planned_not_executed": True,
+                "reason": preview["reason"], "output_subdirectory": label,
+            })
+            continue
         native = native_config(job, declaration["protocol"], protocol_sha256)
         config_path = root / "runner-config.json"
         config_path.write_bytes(canonical_json(native) + b"\n")
@@ -751,7 +929,7 @@ def execute_dry_runs(declaration: Mapping[str, Any], output: Path,
                 budget.get("raw_config", {}).get("precision") == "f64",
                 f"{label}: frozen config lost f64 declaration")
         reports.append({
-            "scope": job["scope"], "condition": job["condition"], "seed": job["seed"],
+            "scope": job["scope"], "condition": job["condition"], "init": job["init"], "seed": job["seed"],
             "variant": job.get("variant"), "run_id": expected_id,
             "task_hash": job["task_hash"],
             "raw_runner_config_sha256": file_sha(config_path),
@@ -762,6 +940,7 @@ def execute_dry_runs(declaration: Mapping[str, Any], output: Path,
             "validation_calls": expected_validations,
             "estimated_wall_time_s": expected_seconds,
             "planned_not_executed": True, "output_subdirectory": label,
+            "declared_not_yet_runnable": False, "native_dry_run_performed": True,
         })
     return reports
 
@@ -792,6 +971,12 @@ def validate(config: Mapping[str, Any], *, repo_root: Path | None = None,
         "warnings": declaration["prototype_only_warnings"],
         "dry_run_performed": False,
         "dry_runs": [],
+        "declared_not_yet_runnable_count": sum(job["init"] != "cam" for job in declaration["jobs"]),
+        "initialization_declarations": [
+            {"scope": job["scope"], "condition": job["condition"], "init": job["init"],
+             "seed": job["seed"], "variant": job.get("variant"), "task_hash": job["task_hash"]}
+            for job in declaration["jobs"] if job["init"] != "cam"
+        ],
     }
     if dry_run and declaration["protocol"]["execution"]["experiment"] != "pilot":
         raise ProtocolError(
@@ -802,10 +987,10 @@ def validate(config: Mapping[str, Any], *, repo_root: Path | None = None,
             "use --validate-only for registered non-prototype task manifests or supply a matched task-source adapter")
     if dry_run:
         report["dry_runs"] = execute_dry_runs(declaration, output_dir, source_sha)
-        report["dry_run_performed"] = True
+        report["dry_run_performed"] = any(row["native_dry_run_performed"] for row in report["dry_runs"])
         require(len(report["dry_runs"]) == declaration["costs"]["jobs"],
-                "not every declared run/variant was dry-run validated")
-        report["validated_run_count"] = len(report["dry_runs"])
+                "not every declared run/variant was either natively checked or marked pending")
+        report["validated_run_count"] = sum(row["native_dry_run_performed"] for row in report["dry_runs"])
         if output_dir is not None:
             output = no_manuscript(output_dir, "dry-run report")
             (output / "validation-report.json").write_bytes(canonical_json(report) + b"\n")
@@ -836,6 +1021,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(json.dumps({
         "status": report["mode"], "dry_run_performed": report["dry_run_performed"],
         "validated_run_count": report.get("validated_run_count", 0),
+        "declared_not_yet_runnable_count": report["declared_not_yet_runnable_count"],
         "protocol_sha256": protocol_sha,
         "output_dir": str(args.output_dir.resolve()) if not args.validate_only else None,
     }, sort_keys=True, indent=1))

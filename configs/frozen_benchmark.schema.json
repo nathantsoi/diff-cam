@@ -136,6 +136,7 @@
             "required": ["split", "candidate_evaluations", "conditions", "changes", "evidence"],
             "properties": {
               "split": {"const": "dev"},
+              "init": {"$ref": "#/$defs/init"},
               "candidate_evaluations": {"$ref": "#/$defs/positive_integer"},
               "conditions": {
                 "type": "array", "minItems": 1,
@@ -160,6 +161,8 @@
           "name": {"$ref": "#/$defs/nonempty_text"},
           "method": {"$ref": "#/$defs/condition"},
           "baseline": {"$ref": "#/$defs/condition"},
+          "method_init": {"$ref": "#/$defs/init"},
+          "baseline_init": {"$ref": "#/$defs/init"},
           "metrics": {
             "type": "array", "minItems": 1, "uniqueItems": true,
             "items": {"enum": [
@@ -192,7 +195,7 @@
     },
     "external_baselines": {
       "type": "object", "additionalProperties": false,
-      "required": ["cnc_net_executable", "camotics", "physical_claims", "policy_claims"],
+      "required": ["cnc_net_executable", "camotics", "cem", "physical_claims", "policy_claims"],
       "properties": {
         "cnc_net_executable": {
           "type": "object", "additionalProperties": false,
@@ -200,6 +203,17 @@
           "properties": {
             "status": {"const": "unsupported"},
             "allow_success_claim": {"const": false}
+          }
+        },
+        "cem": {
+          "$comment": "CEM is an unavailable external baseline, never an implemented optimizer condition.",
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "allow_optimizer_condition", "claim_scope", "reason"],
+          "properties": {
+            "status": {"const": "unavailable"},
+            "allow_optimizer_condition": {"const": false},
+            "claim_scope": {"const": "zero-order (CMA-ES), not CEM"},
+            "reason": {"$ref": "#/$defs/nonempty_text"}
           }
         },
         "camotics": {
@@ -239,10 +253,29 @@
       }
     },
     "precision": {"const": "f64"},
+    "init": {"$ref": "#/$defs/init"},
+    "random_init": {"$ref": "#/$defs/random_init"},
+    "straight_line_init": {"$ref": "#/$defs/straight_line_init"},
+    "collapse_criterion": {"$ref": "#/$defs/collapse_criterion"},
     "notes": {"type": "array", "items": {"type": "string"}}
   },
+  "allOf": [
+    {
+      "if": {
+        "anyOf": [
+          {"required": ["init"], "properties": {"init": {"enum": ["straight_line", "random"]}}},
+          {"properties": {"methods": {"contains": {"required": ["init"], "properties": {"init": {"enum": ["straight_line", "random"]}}}}}},
+          {"properties": {"dimensionality_subset": {"contains": {"required": ["init"], "properties": {"init": {"enum": ["straight_line", "random"]}}}}}}
+        ]
+      },
+      "then": {"required": ["random_init", "straight_line_init", "collapse_criterion"]}
+    }
+  ],
   "$defs": {
-    "nonempty_text": {"type": "string", "minLength": 1},
+    "nonempty_text": {
+      "type": "string", "minLength": 1,
+      "not": {"pattern": "(?i)(^\\s*$|TO[-_ ]BE[-_ ]FROZEN|\\b(?:TODO|TBD)\\b|^\\s*<[^>]*>\\s*$)"}
+    },
     "repo_relative_path": {
       "type": "string", "minLength": 1,
       "description": "Relative POSIX-style path under the repository root. No absolute paths or .. traversal."
@@ -258,6 +291,78 @@
     "nonnegative_number": {"type": "number", "minimum": 0},
     "positive_number": {"type": "number", "exclusiveMinimum": 0},
     "condition": {"enum": ["nominal-cam", "fixed-adam", "annealed-adam", "hard-cmaes", "smooth-cmaes"]},
+    "init": {
+      "enum": ["cam", "straight_line", "random"], "default": "cam",
+      "description": "Independent initialization axis. Omission means CAM initialization; no-init conditions require all three declaration objects at protocol root."
+    },
+    "random_init": {
+      "type": "object", "additionalProperties": false,
+      "required": ["parameter_space", "distribution", "scale", "seed_derivation_rule"],
+      "properties": {
+        "parameter_space": {"enum": ["theta", "delta"]},
+        "distribution": {
+          "type": "object", "additionalProperties": false,
+          "required": ["kind", "detail"],
+          "properties": {
+            "kind": {"enum": ["gaussian", "uniform", "other_declared"]},
+            "detail": {"$ref": "#/$defs/nonempty_text"}
+          }
+        },
+        "scale": {
+          "type": "object", "additionalProperties": false,
+          "required": ["fraction", "reference"],
+          "properties": {
+            "fraction": {"$ref": "#/$defs/positive_number"},
+            "reference": {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "description", "units"],
+              "properties": {
+                "kind": {"enum": ["stock_xy_extent", "cam_delta_norm", "other_declared"]},
+                "description": {"$ref": "#/$defs/nonempty_text"},
+                "units": {"$ref": "#/$defs/nonempty_text"}
+              }
+            }
+          }
+        },
+        "seed_derivation_rule": {
+          "type": "object", "additionalProperties": false,
+          "required": ["algorithm", "root_seed", "input", "per_seed_rule"],
+          "properties": {
+            "algorithm": {"$ref": "#/$defs/nonempty_text"},
+            "root_seed": {"type": "integer", "minimum": 0},
+            "input": {"$ref": "#/$defs/nonempty_text"},
+            "per_seed_rule": {"$ref": "#/$defs/nonempty_text"}
+          }
+        }
+      }
+    },
+    "straight_line_init": {
+      "type": "object", "additionalProperties": false,
+      "required": ["start", "end", "segment_placement", "feed_and_rapid_entry", "same_segment_count_and_k", "safe_rapid_entry", "respect_task_feed_limits", "efficiency_not_required"],
+      "properties": {
+        "start": {"$ref": "#/$defs/nonempty_text"},
+        "end": {"$ref": "#/$defs/nonempty_text"},
+        "segment_placement": {"$ref": "#/$defs/nonempty_text"},
+        "feed_and_rapid_entry": {"$ref": "#/$defs/nonempty_text"},
+        "same_segment_count_and_k": {"const": true},
+        "safe_rapid_entry": {"const": true},
+        "respect_task_feed_limits": {"const": true},
+        "efficiency_not_required": {"const": true}
+      }
+    },
+    "collapse_criterion": {
+      "$comment": "Operational predicate for no-init runs; values are declared by the coordinator. It is not evaluated or passed as a valid no-init run by this tooling.",
+      "type": "object", "additionalProperties": false,
+      "required": ["geometry_or_completion_failure", "residual_multiplier", "residual_operator", "require_no_hard_loss_improvement_over_initial", "predicate", "collapse_and_infeasibility_are_valid_recorded_outcomes"],
+      "properties": {
+        "geometry_or_completion_failure": {"const": true},
+        "residual_multiplier": {"$ref": "#/$defs/positive_number"},
+        "residual_operator": {"enum": ["gt", "ge"]},
+        "require_no_hard_loss_improvement_over_initial": {"const": true},
+        "predicate": {"$ref": "#/$defs/nonempty_text"},
+        "collapse_and_infeasibility_are_valid_recorded_outcomes": {"const": true}
+      }
+    },
     "seed_list": {
       "type": "array", "minItems": 1, "uniqueItems": true,
       "items": {"type": "integer", "minimum": 0}
@@ -267,7 +372,8 @@
       "required": ["condition", "seeds"],
       "properties": {
         "condition": {"$ref": "#/$defs/condition"},
-        "seeds": {"$ref": "#/$defs/seed_list"}
+        "seeds": {"$ref": "#/$defs/seed_list"},
+        "init": {"$ref": "#/$defs/init"}
       }
     },
     "variant": {
@@ -279,7 +385,8 @@
         "condition": {"$ref": "#/$defs/condition"},
         "seed": {"type": "integer", "minimum": 0},
         "k": {"$ref": "#/$defs/positive_number"},
-        "rationale": {"$ref": "#/$defs/nonempty_text"}
+        "rationale": {"$ref": "#/$defs/nonempty_text"},
+        "init": {"$ref": "#/$defs/init"}
       }
     },
     "evidence": {

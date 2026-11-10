@@ -65,7 +65,8 @@ def make_case(tmp_path):
     return {
         "schema": "diffcam-frozen-benchmark/1",
         "decision_ids": ["D-2026-11-09-01", "D-2026-11-09-02", "D-2026-11-09-03",
-                         "D-2026-11-09-04", "D-2026-11-09-05", "D-2026-11-09-06", "D-2026-11-09-07"],
+                         "D-2026-11-09-04", "D-2026-11-09-05", "D-2026-11-09-06", "D-2026-11-09-07",
+                         "D-2026-11-10-08"],
         "task_manifest": {"path": str(manifest.relative_to(repo)), "sha256": sha(manifest),
                           "split_hashes": splits,
                           "acquisition": "registered prototype task for synthetic validation only"},
@@ -136,6 +137,9 @@ def make_case(tmp_path):
         "external_baselines": {
             "cnc_net_executable": {"status": "unsupported", "allow_success_claim": False},
             "camotics": {"status": "supplementary", "primary_oracle": False},
+            "cem": {"status": "unavailable", "allow_optimizer_condition": False,
+                    "claim_scope": "zero-order (CMA-ES), not CEM",
+                    "reason": "no CEM implementation; all synthetic zero-order runs are hard CMA-ES"},
             "physical_claims": "omit when no physical trials are provided",
             "policy_claims": "omit when no trained-policy evidence is provided",
         },
@@ -149,6 +153,66 @@ def make_case(tmp_path):
             "prototype_task_id": task.task_id, "prototype_task_hash": task.task_hash,
         },
     }
+
+
+def make_init_case(tmp_path):
+    """Structural D-08 fixture; these toy values are not coordinator decisions."""
+    case = make_case(tmp_path)
+    case["methods"] = [
+        {"condition": "nominal-cam", "seeds": [0]},
+        {"condition": "fixed-adam", "seeds": [0]},
+        {"condition": "annealed-adam", "init": "cam", "seeds": [0]},
+        {"condition": "annealed-adam", "init": "straight_line", "seeds": [0]},
+        {"condition": "annealed-adam", "init": "random", "seeds": [2, 7]},
+        {"condition": "hard-cmaes", "init": "cam", "seeds": [0, 1]},
+        {"condition": "hard-cmaes", "init": "straight_line", "seeds": [0]},
+        {"condition": "hard-cmaes", "init": "random", "seeds": [0, 1]},
+        {"condition": "smooth-cmaes", "seeds": [0, 1]},
+    ]
+    case["dimensionality_subset"].append({
+        "name": "straight-line-lower-k", "task_id": case["primary_task_id"],
+        "condition": "annealed-adam", "init": "straight_line", "seed": 0, "k": 25.0,
+        "rationale": "one bounded initializer/parameterization declaration; not an executable runner ablation",
+    })
+    case["random_init"] = {
+        "parameter_space": "delta",
+        "distribution": {"kind": "gaussian", "detail": "independent zero-mean normal draws per coordinate"},
+        "scale": {"fraction": 0.05, "reference": {
+            "kind": "cam_delta_norm",
+            "description": "L2 norm of each CAM delta under the selected parameterization",
+            "units": "dimensionless fraction of that norm",
+        }},
+        "seed_derivation_rule": {
+            "algorithm": "declared SeedSequence child streams",
+            "root_seed": 17, "input": "root seed, condition, initializer and listed run seed",
+            "per_seed_rule": "derive one independent child stream per explicitly listed run seed in declared order",
+        },
+    }
+    case["straight_line_init"] = {
+        "start": "CAM entry station after its safe rapid approach",
+        "end": "CAM final cutting station before its terminal retract",
+        "segment_placement": "uniform station resampling at the CAM segment count with unchanged K parameterization",
+        "feed_and_rapid_entry": "safe clearance-Z rapid entry, then feed bounded by the selected TaskSpec; no efficiency promise",
+        "same_segment_count_and_k": True, "safe_rapid_entry": True,
+        "respect_task_feed_limits": True, "efficiency_not_required": True,
+    }
+    case["collapse_criterion"] = {
+        "geometry_or_completion_failure": True,
+        "residual_multiplier": 1.5, "residual_operator": "gt",
+        "require_no_hard_loss_improvement_over_initial": True,
+        "collapse_and_infeasibility_are_valid_recorded_outcomes": True,
+        "predicate": "0.125 mm verdict fails geometry OR completion OR residual > 1.5 times CAM-initialization residual, AND hard loss does not improve over this run's initial path",
+    }
+    case["comparisons"].append({
+        "name": "straight_line_annealed_vs_cam_annealed", "method": "annealed-adam",
+        "baseline": "annealed-adam", "method_init": "straight_line", "baseline_init": "cam",
+        "metrics": ["completion_pass"], "dialects": ["rs274", "haas"],
+    })
+    # Seven no-init declarations are added to the eight native CAM cases.
+    case["estimates"].update({"run_count": 15, "candidate_evaluations": 57,
+                              "validation_calls": 28, "worker_seconds": 51.5})
+    case["budget"]["total_wall_time_s"] = 60.0
+    return case
 
 
 def run_case(case, tmp_path):
@@ -168,6 +232,8 @@ def test_valid_schema_runs_every_primary_and_variant_case_with_exact_provenance(
     assert doc["mode"] == "tooling_only_not_a_campaign_launch"
     assert doc["dry_run_performed"] is True
     assert doc["validated_run_count"] == 8
+    assert doc["declared_not_yet_runnable_count"] == 0
+    assert all(row["init"] == "cam" and row["native_dry_run_performed"] for row in report["dry_runs"])
     assert len(report["dry_runs"]) == 8
     assert doc["cost_accounting"]["candidate_evaluations"] == 29
     assert doc["cost_accounting"]["validation_calls"] == 14
@@ -188,6 +254,138 @@ def test_valid_schema_runs_every_primary_and_variant_case_with_exact_provenance(
     assert not (out / "plan" / "manifest.json").exists()
     with (ROOT / "configs/frozen_benchmark.schema.json").open() as stream:
         json.load(stream)
+
+
+def test_d08_init_axis_has_explicit_previews_not_cam_runner_evidence(tmp_path):
+    report = run_case(make_init_case(tmp_path), tmp_path)
+    out = tmp_path / "validation-output"
+    assert report["dry_run_performed"] is True
+    assert report["validated_run_count"] == 8
+    assert report["declared_not_yet_runnable_count"] == 7
+    assert len(report["dry_runs"]) == 15
+    assert report["cost_accounting"]["jobs"] == 15
+    assert report["cost_accounting"]["candidate_evaluations"] == 57
+    assert report["cost_accounting"]["validation_calls"] == 28
+    assert report["cost_accounting"]["worker_seconds"] == 51.5
+    pending = [row for row in report["dry_runs"] if row["declared_not_yet_runnable"]]
+    assert len(pending) == 7
+    assert {row["seed"] for row in pending
+            if row["condition"] == "annealed-adam" and row["init"] == "random"} == {2, 7}
+    for row in pending:
+        assert row["native_dry_run_performed"] is False
+        assert row["run_id"] is None and row["candidate_evaluations"] is None
+        assert row["validation_calls"] is None and row["planned_run_count"] == 0
+        root = out / row["output_subdirectory"]
+        assert not (root / "plan").exists()
+        assert not (root / "runner-config.json").exists()
+        preview = read(root / "initialization-declaration.json")
+        assert preview["declared_not_yet_runnable"] is True
+        assert preview["schema"] == "diffcam-initialization-declaration/1"
+        assert preview["random_init"] and preview["straight_line_init"]
+        assert preview["collapse_criterion"]["require_no_hard_loss_improvement_over_initial"] is True
+        assert row["initialization_declaration_sha256"] == sha(root / "initialization-declaration.json")
+    cam = next(row for row in report["dry_runs"] if not row["declared_not_yet_runnable"])
+    config = read(out / cam["output_subdirectory"] / "runner-config.json")
+    assert config["init"] == "cam" and config["init_implementation_available"] is True
+    assert config["precision"] == "f64" and config["simulator_precision"] == "f64"
+    assert (out / cam["output_subdirectory"] / "plan/manifest.json").is_file()
+
+
+@pytest.mark.parametrize("key", ["random_init", "straight_line_init", "collapse_criterion"])
+def test_d08_missing_initializer_declarations_fail_closed(tmp_path, key):
+    case = make_init_case(tmp_path)
+    del case[key]
+    with pytest.raises(V.ProtocolError, match=key + ".*nonempty predeclared object"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case[key] = {}
+    with pytest.raises(V.ProtocolError, match=key + ".*nonempty predeclared object"):
+        run_case(case, tmp_path)
+
+
+def test_d08_init_solver_and_deterministic_run_rules(tmp_path):
+    case = make_init_case(tmp_path)
+    case["methods"][0]["init"] = "random"
+    with pytest.raises(V.ProtocolError, match="nominal-cam requires init=cam"):
+        run_case(case, tmp_path)
+    for condition in ("fixed-adam", "smooth-cmaes"):
+        case = make_init_case(tmp_path)
+        case["methods"].append({"condition": condition, "init": "random", "seeds": [0]})
+        with pytest.raises(V.ProtocolError, match="only with annealed-adam or hard-cmaes"):
+            run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    row = next(row for row in case["methods"]
+               if row["condition"] == "hard-cmaes" and row["init"] == "straight_line")
+    row["seeds"] = [0, 1]
+    with pytest.raises(V.ProtocolError, match="deterministic.*exactly one"):
+        run_case(case, tmp_path)
+
+
+def test_d08_placeholder_scale_and_collapse_rules_are_enforced(tmp_path):
+    case = make_init_case(tmp_path)
+    case["random_init"]["distribution"]["detail"] = "TO-BE-FROZEN"
+    with pytest.raises(V.ProtocolError, match="unresolved placeholder"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["straight_line_init"]["segment_placement"] = "   "
+    with pytest.raises(V.ProtocolError, match="segment_placement.*nonempty"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["random_init"]["scale"]["fraction"] = 0.0
+    with pytest.raises(V.ProtocolError, match="scale.fraction.*> 0"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["random_init"]["parameter_space"] = "unspecified"
+    with pytest.raises(V.ProtocolError, match="parameter_space must be theta or delta"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["collapse_criterion"]["residual_multiplier"] = 0.0
+    with pytest.raises(V.ProtocolError, match="residual_multiplier.*> 0"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["random_init"]["seed_derivation_rule"]["root_seed"] = -1
+    with pytest.raises(V.ProtocolError, match="root_seed.*integer >= 0"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["collapse_criterion"]["collapse_and_infeasibility_are_valid_recorded_outcomes"] = False
+    with pytest.raises(V.ProtocolError, match="valid_recorded_outcomes.*true"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["random_init"]["seed_derivation_rule"]["per_seed_rule"] = ""
+    with pytest.raises(V.ProtocolError, match="per_seed_rule.*nonempty"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["collapse_criterion"]["residual_multiplier"] = None
+    with pytest.raises(V.ProtocolError, match="residual_multiplier.*finite number"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["collapse_criterion"]["require_no_hard_loss_improvement_over_initial"] = False
+    with pytest.raises(V.ProtocolError, match="require_no_hard_loss_improvement_over_initial.*true"):
+        run_case(case, tmp_path)
+
+
+def test_d08_init_specific_comparisons_tuning_and_unavailable_cem(tmp_path):
+    case = make_init_case(tmp_path)
+    case["comparisons"][1]["baseline_init"] = "random"
+    case["comparisons"][1]["baseline"] = "fixed-adam"
+    with pytest.raises(V.ProtocolError, match="baseline selection.*not a retained"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["tuning"]["rounds"][0].update({"conditions": ["hard-cmaes"], "init": "cam"})
+    declaration = V.validate_declaration(case, tmp_path / "repo", tmp_path / "decisions.md")
+    assert declaration["tuning_rounds"][0]["init"] == "cam"
+    case["tuning"]["rounds"][0].update({"conditions": ["fixed-adam"], "init": "random"})
+    with pytest.raises(V.ProtocolError, match="retained primary.*condition, init"):
+        V.validate_declaration(case, tmp_path / "repo", tmp_path / "decisions.md")
+    case = make_init_case(tmp_path)
+    case["methods"].append({"condition": "cem", "seeds": [0]})
+    with pytest.raises(V.ProtocolError, match="not supported by the runner"):
+        run_case(case, tmp_path)
+    case = make_init_case(tmp_path)
+    case["external_baselines"]["cem"]["status"] = "implemented"
+    with pytest.raises(V.ProtocolError, match="CEM as an unavailable baseline"):
+        run_case(case, tmp_path)
+
 
 
 def test_validate_all_root_fields_and_nested_additional_property_blocking(tmp_path):
