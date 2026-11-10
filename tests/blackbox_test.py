@@ -81,6 +81,59 @@ def _budget(count, population=4, **changes):
                                 max_validation_calls=changes.pop("max_validation_calls", 0), **changes)
 
 
+def test_hard_cma_tell_uses_feasible_rank_not_scalar_and_smooth_is_unchanged(monkeypatch):
+    class StrategyProbe:
+        opts = {}
+
+        def __init__(self):
+            self.told = []
+
+        def stop(self):
+            return False
+
+        def ask(self):
+            return [np.array([0.0, 0.0]), np.array([1.0, 1.0]), np.array([2.0, 2.0])]
+
+        def tell(self, candidates, fitness):
+            self.told.append(([candidate.tolist() for candidate in candidates], list(fitness)))
+
+    class Adversary(QuadraticObjective):
+        def evaluate_candidate(self, theta, candidate_id, objective_kind="smooth"):
+            if objective_kind != "hard" or candidate_id.endswith(":init"):
+                return super().evaluate_candidate(theta, candidate_id, objective_kind)
+            theta = np.asarray(theta, dtype=float)
+            self.ledger.start_candidate(candidate_id, objective_kind)
+            if theta[0] >= 1.5:
+                self.ledger.finish_candidate(valid=False, forward_calls=0, backward_calls=0,
+                                             segment_steps=0, voxel_steps=0)
+                return C.CandidateResult(candidate_id, C.content_hash(theta.tolist()), "hard",
+                                         None, False, "injected invalid member")
+            feasible, objective = theta[0] < 0.5, 100.0 if theta[0] < 0.5 else -100.0
+            self.ledger.finish_candidate(valid=True, forward_calls=1, backward_calls=0,
+                                         segment_steps=1, voxel_steps=1)
+            return C.CandidateResult(
+                candidate_id, C.content_hash(theta.tolist()), "hard", objective, True,
+                components={"holder_overlap_fraction": 0.0,
+                            "gouge_fraction": 0.0 if feasible else 0.2,
+                            "residual_fraction": 0.0})
+
+    probe = StrategyProbe()
+    monkeypatch.setattr(B, "_new_es", lambda *args: probe)
+    result = B.solve_cma_es(Adversary(), _budget(4, 3), objective_kind="hard",
+                            x0=np.zeros(2), run_id="rank-steering")
+    assert probe.told == [([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]],
+                           [0.0, 1.0, B.optimizer_invalid_penalty()])]
+    assert result.history[0]["fitness_semantics"] == "hard_rank_ordinal_within_population"
+    assert result.history[0]["best_fitness"] == -100.0  # Raw objective is retained diagnostically.
+    assert result.history[0]["invalid_members"] == 1
+
+    smooth_probe = StrategyProbe()
+    monkeypatch.setattr(B, "_new_es", lambda *args: smooth_probe)
+    B.solve_cma_es(QuadraticObjective(), _budget(4, 3), objective_kind="smooth",
+                   x0=np.zeros(2), run_id="smooth-tell-unchanged")
+    assert smooth_probe.told[0][1] == pytest.approx([0.13, 1.93, 7.73])
+
+
 def test_signed_scale_is_finite_and_invalid_policy_is_explicit():
     assert B.optimizer_invalid_penalty() > 0
     objective = QuadraticObjective()
