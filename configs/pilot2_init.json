@@ -1,0 +1,157 @@
+{
+  "schema": "diffcam-benchmark-runner/1",
+  "experiment": "pilot",
+  "task_source": "pilot_pocket",
+  "grid_pitch_mm": 0.25,
+  "posted_refinement": {
+    "max_step_mm": 1.0,
+    "subdivisions": null,
+    "compute_bounds": true,
+    "safety_screen": true,
+    "max_samples_per_segment": 4096,
+    "record_stations": false
+  },
+  "exclusion_tolerance_mm3": 0.0,
+  "require_grid_exclusion_tolerance": true,
+  "arch": "cpu",
+  "precision": "f64",
+  "notes": "D-08 initialization cases on the pilot pocket; provisional development inputs, not protocol or physical authorization | PILOT 2 (coordinator, 2026-11-10): real-but-modest search budget (24 candidates, CMA popsize 6, 6 validations) after D-09/D-10/D-11; provisional, not protocol.",
+  "seeded_by": "configs/pilot.json plus declared initialization cases; opt-in by explicit configuration path, not enabled in configs/pilot.json",
+  "seeds": [
+    0,
+    1
+  ],
+  "candidate_evaluations": 24,
+  "timeout_s": 10800.0,
+  "timing_timeout_s": 10800.0,
+  "population_size": 6,
+  "refinement_check": {
+    "enabled": true,
+    "verdict_step_mm": 0.125,
+    "screen_step_mm": 1.0,
+    "convergence_step_mm": 0.25,
+    "parallel_jobs": 2,
+    "max_rss_bytes_per_job": 8589934592,
+    "poll_interval_s": 1.0,
+    "timeout_s": 10800.0
+  },
+  "validation_interval": 4,
+  "max_validation_calls": 6,
+  "max_generations": null,
+  "learning_rate": 0.005,
+  "time_weight": 0.01,
+  "time_weight_note": "provisional dev pilot value (D-11), not protocol",
+  "air_time_weight": 0.01,
+  "air_time_weight_note": "provisional dev pilot value (D-11), not protocol",
+  "reference_cycle_time_source": "task_nominal_cam_cycle_time",
+  "max_gradient_norm": 0.5,
+  "k_fixed": 40.0,
+  "k_smooth": 40.0,
+  "k_anneal_start": 20.0,
+  "k_anneal_end": 120.0,
+  "sigma0": 0.01,
+  "posted_memory_evidence": {
+    "observed_posted_peak_bytes_per_job_max": 449273856,
+    "scope": "Recorded existing own-process VmHWM values; this file does not assert a new peak or fresh measurement.",
+    "cap_decision": "D-07 as amended: 8 GiB per posted job, at most two concurrent jobs."
+  },
+  "initialization": {
+    "provisional": true,
+    "notes": "provisional dev initialization cases (D-08/D-11), not protocol; invalid realizations remain failed at their requested seed, without redraw",
+    "straight_line_init": {
+      "start": "cam_start",
+      "end": "cam_end",
+      "segment_placement": "uniform",
+      "feed_and_rapid_entry": "retain each CAM feed_mm_s and the task rapid_mm_s; first endpoint pair must remain above the work-frame stock top",
+      "same_segment_count_and_k": true,
+      "safe_rapid_entry": true,
+      "respect_task_feed_limits": true,
+      "efficiency_not_required": true
+    },
+    "random_init": {
+      "parameter_space": "delta",
+      "distribution": {
+        "kind": "gaussian",
+        "detail": "iid"
+      },
+      "scale": {
+        "fraction": 0.01,
+        "reference": {
+          "kind": "stock_xy_extent",
+          "description": "Euclidean diagonal of the declared stock XY envelope in mm; Gaussian per-coordinate standard deviation, not a rejection cutoff",
+          "units": "mm"
+        }
+      },
+      "seed_derivation_rule": {
+        "algorithm": "sha256_v1",
+        "root_seed": 17,
+        "input": "task_hash,declaration_hash,root_seed,seed",
+        "per_seed_rule": "first_8_bytes_little_endian_uint64"
+      }
+    },
+    "methods": [
+      {
+        "condition": "annealed-adam",
+        "init": "straight_line",
+        "seeds": [
+          0
+        ]
+      },
+      {
+        "condition": "annealed-adam",
+        "init": "random",
+        "seeds": [
+          0,
+          1
+        ]
+      },
+      {
+        "condition": "hard-cmaes",
+        "init": "straight_line",
+        "seeds": [
+          0
+        ]
+      },
+      {
+        "condition": "hard-cmaes",
+        "init": "random",
+        "seeds": [
+          0,
+          1
+        ]
+      }
+    ],
+    "exploratory_cam_perturbation": [
+      {
+        "parent": {
+          "condition": "annealed-adam",
+          "seed": 0
+        },
+        "variant_suffix": "cam_perturbed",
+        "cam_perturbed_init": {
+          "parameter_space": "theta",
+          "distribution": {
+            "kind": "gaussian",
+            "detail": "iid"
+          },
+          "scale": {
+            "fraction": 0.0001,
+            "reference": {
+              "kind": "cam_delta_norm",
+              "description": "L2 norm of the nominal CAM seed's physical delta vectors in mm, separate from the D-08 random delta recipe",
+              "units": "mm"
+            }
+          },
+          "seed_derivation_rule": {
+            "algorithm": "sha256_v1",
+            "root_seed": 101,
+            "input": "task_hash,declaration_hash,root_seed,seed",
+            "per_seed_rule": "first_8_bytes_little_endian_uint64"
+          },
+          "exploratory": true,
+          "excluded_from_init_axis_claims": true
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "schema": "diffcam-benchmark-runner/1",
+  "experiment": "pilot",
+  "task_source": "pilot_pocket",
+  "grid_pitch_mm": 0.25,
+  "posted_refinement": {
+    "max_step_mm": 1.0,
+    "subdivisions": null,
+    "compute_bounds": true,
+    "safety_screen": true,
+    "max_samples_per_segment": 4096,
+    "record_stations": false
+  },
+  "exclusion_tolerance_mm3": 0.0,
+  "require_grid_exclusion_tolerance": true,
+  "arch": "cpu",
+  "precision": "f64",
+  "posted_memory_evidence": {
+    "observed_posted_peak_bytes_per_job_max": 449273856,
+    "scope": "Own-process VmHWM of real full-grid f64 posted jobs on 2026-11-09 (screen 1.0mm, verdict 0.125mm, convergence 0.25mm; rs274 and haas): max 438,744 KiB across the 5 re-measured 553a7d2 jobs and the e941ad0 REAL_PILOT_SMOKE jobs (runs/retained/t41b-l1-real-pilot-smoke-e941ad0). The earlier 3,689,144,320 B figure was the optimizer parent's ru_maxrss inherited by the child (T4.1b-L1) and is withdrawn.",
+    "cap_decision": "D-07 as amended on 2026-11-09: 8 GiB per posted job, at most two concurrent posted jobs (16 GiB ceiling), fatal if exceeded. This is a fail-closed ceiling, not an allocation; the measured peaks give it roughly 19x headroom."
+  },
+  "notes": "T4.1b real full-pocket pilot. Coordinator approves and launches the seven-run campaign. Use --dry-run for measured 0.25mm timings; not a physical machining certificate. | PILOT 2 (coordinator, 2026-11-10): real-but-modest search budget (24 candidates, CMA popsize 6, 6 validations) after D-09/D-10/D-11; provisional, not protocol.",
+  "seeds": [
+    0,
+    1
+  ],
+  "candidate_evaluations": 24,
+  "timeout_s": 10800.0,
+  "timing_timeout_s": 10800.0,
+  "population_size": 6,
+  "refinement_check": {
+    "enabled": true,
+    "verdict_step_mm": 0.125,
+    "screen_step_mm": 1.0,
+    "convergence_step_mm": 0.25,
+    "parallel_jobs": 2,
+    "max_rss_bytes_per_job": 8589934592,
+    "poll_interval_s": 1.0,
+    "timeout_s": 10800.0
+  },
+  "validation_interval": 4,
+  "max_validation_calls": 6,
+  "max_generations": null,
+  "learning_rate": 0.005,
+  "time_weight": 0.01,
+  "time_weight_note": "provisional dev pilot value (D-11), not protocol",
+  "air_time_weight": 0.01,
+  "air_time_weight_note": "provisional dev pilot value (D-11), not protocol",
+  "reference_cycle_time_source": "task_nominal_cam_cycle_time",
+  "max_gradient_norm": 0.5,
+  "k_fixed": 40.0,
+  "k_smooth": 40.0,
+  "k_anneal_start": 20.0,
+  "k_anneal_end": 120.0,
+  "sigma0": 0.01
+}
