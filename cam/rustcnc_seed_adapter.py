@@ -27,6 +27,18 @@ def _cap(value: int) -> int:
     return value
 
 
+def _contour_profile(task: C.TaskSpec, spec):
+    """Match contour2d_seed's explicit bounded thin-gap default profile."""
+    if spec is None or isinstance(spec, Mapping):
+        radius = float(task.tool.cutter_radius_mm)
+        profile = {"leadInRadius": radius / 2.0, "leadOutRadius": radius / 2.0,
+                   "leadInVerticalRadius": radius / 4.0, "leadOutVerticalRadius": radius / 4.0}
+        if spec is not None:
+            profile.update(spec)
+        return profile
+    return spec
+
+
 def _outer_loop(task: C.TaskSpec) -> tuple[tuple[float, float], ...]:
     params = task.original_part.params
     low, high = params["pocket_min_mm"], params["pocket_max_mm"]
@@ -76,6 +88,7 @@ def pocket_with_contour_seed(task: C.TaskSpec, spec=None, *, contour_spec=None,
     from cam import rustcnc_pocket2d as pocket
 
     derived = seed_spec_for_task(task)
+    profile = _contour_profile(task, contour_spec)
     roughing = pocket.emit_pocket_roughing(task, spec, max_segments=cap)
     wall = roughing.wall_finish_passes
     levels = [item.level for item in wall if isinstance(item.level, int)]
@@ -109,7 +122,7 @@ def pocket_with_contour_seed(task: C.TaskSpec, spec=None, *, contour_spec=None,
         if math.dist(left.end_mm, right.start_mm) > C.MotionPlan.CONTIGUITY_TOL_MM:
             raise ValueError("wall-finish replacement leaves disconnected roughing; a sourced bridge is required")
     added = contour.emit_contour_loop(
-        task, outer, spec=contour_spec, contour_z=float(task.original_part.params["pocket_min_mm"][2]),
+        task, outer, spec=profile, contour_z=float(task.original_part.params["pocket_min_mm"][2]),
         right_compensation=False, start_machine_mm=position,
         segment_id_prefix="pocket-contour-outer", max_segments=cap,
         additional_walls=(() if pad is None else (pad,)),
@@ -117,7 +130,7 @@ def pocket_with_contour_seed(task: C.TaskSpec, spec=None, *, contour_spec=None,
     combined.extend(added)
     if pad is not None:
         more = contour.emit_contour_loop(
-            task, pad, spec=contour_spec, contour_z=float(task.original_part.params["pocket_min_mm"][2]),
+            task, pad, spec=profile, contour_z=float(task.original_part.params["pocket_min_mm"][2]),
             right_compensation=False, start_machine_mm=combined[-1].end_mm,
             segment_id_prefix="pocket-contour-pad", max_segments=cap,
             additional_walls=(outer,),
@@ -145,6 +158,7 @@ def pocket_with_contour_seed(task: C.TaskSpec, spec=None, *, contour_spec=None,
             "complete_segment_count": len(combined),
             "max_segments": cap,
             "contour_source_commit": contour.RUSTCNC_SHA,
+            "contour_profile": _provenance(profile),
             "contour_source_sha256": contour.CONTOUR_SHA256,
             "truncated_or_dropped_regions_or_levels": False,
             "note": "Named deepest native finish passes are replaced by the sourced Contour2D finish, not machined twice; no region/level is omitted.",

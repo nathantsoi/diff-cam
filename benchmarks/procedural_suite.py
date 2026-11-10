@@ -552,8 +552,14 @@ def _require_seed(condition, reason):
         raise RuntimeError(f"unqualified procedural seed: {reason}")
 
 
-def _reference_qualify_seed(bundle):
+def _reference_qualify_seed(bundle, *, seed_factory=seed_for_task):
     """Run the nominal-motion cheap gate, with no G-code/post evaluation.
+
+    ``seed_factory`` is the explicit identity cross-check for an alternate
+    nominal generator. It defaults to the legacy/current repository dispatcher;
+    a port-integration probe supplies its selected typed-motion factory rather
+    than monkey-patching a global implementation or bypassing identity checks.
+
 
     The independent reference supplies its actual remaining/removed masks.
     Custom-target residual/gouge are then scored against source_fields'
@@ -568,7 +574,7 @@ def _reference_qualify_seed(bundle):
     _require_seed(design_parameters_from_task(task) == bundle.design_parameters,
                   "design parameters do not match the typed task source")
     motion.validate_for_task(task)
-    regenerated = seed_for_task(task)
+    regenerated = seed_factory(task)
     _require_seed(regenerated.motion_hash == motion.motion_hash,
                   "nominal recipe and retained motion identity differ")
     grid = task.grid
