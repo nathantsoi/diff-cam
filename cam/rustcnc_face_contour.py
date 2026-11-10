@@ -36,7 +36,7 @@ STEPOVER_GUARD_FACTOR = 1e-6
 DEFAULT_TOLERANCE_MM = 0.01
 FIT_ENCROACHMENT_MM = 0.01
 DEFAULT_CHORD_ANGLE_DEGREES = 45.0
-COARSE_FACE_STEPOVER_RADII = 3.0
+COARSE_FACE_STEPOVER_RADII = 2.0
 DEFAULT_MAX_SEGMENTS = 72
 
 Point2 = tuple[float, float]
@@ -200,6 +200,7 @@ class _Emitter:
         self.segments: list[C.Segment] = []
         self.stock_top = task.stock.params["max_mm"][2]
         self.ids: set[str] = set()
+        self.stay_down_fallbacks = 0
 
     def push_linear(self, kind: C.SegmentKind, end: Point3, tag: str,
                     feed_mm_s: float | None = None) -> None:
@@ -283,6 +284,11 @@ class FacePlan:
     axial_stock_to_leave: float = 0.0
     from_other_side: bool = False
     both_sides: bool = False
+    link_direction: float | None = None
+    transition_type: float | None = None
+    stay_down_distance: float | None = None
+    lead_in_vertical_radius: float | None = None
+    lead_out_vertical_radius: float | None = None
 
 
 # port: strategies/face.rs:943-973 depth_ladder; absolute z_low adapter made explicit
@@ -491,6 +497,122 @@ def stepover_data(distance: float, maximum_stepover: float) -> tuple[int, float]
     return n, distance / n
 
 
+# port: strategies/face.rs:624-672 push_arc, adapted to finite coarse chords
+def _push_face_arc(emitter: _Emitter, start: Point3, end: Point3, centre: Point3,
+                   clockwise: bool | None, feed: float, tag: str) -> None:
+    eps = 1e-9
+    plane_xz = abs(start[1] - end[1]) <= eps and abs(start[1] - centre[1]) <= eps
+    plane_xy = abs(start[2] - end[2]) <= eps and abs(start[2] - centre[2]) <= eps
+    if plane_xz:
+        pair = lambda point: (point[2], point[0])
+    elif plane_xy:
+        pair = lambda point: (point[0], point[1])
+    else:
+        raise ValueError("Face link arcs must lie in XY or XZ, not an arbitrary plane")
+    s, c, e = pair(start), pair(centre), pair(end)
+    us = (s[0] - c[0], s[1] - c[1])
+    ue = (e[0] - c[0], e[1] - c[1])
+    radius = math.hypot(*us)
+    if radius <= eps:
+        emitter.push_linear(C.SegmentKind.FEED, end, tag, feed)
+        return
+    cross = us[0] * ue[1] - us[1] * ue[0]
+    dot = us[0] * ue[0] + us[1] * ue[1]
+    theta = math.atan2(abs(cross), dot)
+    clockwise = cross < 0.0 if clockwise is None else _boolean(clockwise, "clockwise")
+    sweep = theta if clockwise == (cross < 0.0) else 2.0 * math.pi - theta
+    _push_arc(emitter, start, centre, end, -sweep if clockwise else sweep,
+              tag, feed, DEFAULT_CHORD_ANGLE_DEGREES)
+
+
+# port: strategies/face.rs:440-615 emit_level_stay_down
+def _emit_level_stay_down(task: C.TaskSpec, plan: FacePlan, band: Band,
+                          order: Sequence[tuple[int, int]], z_cut: float, z_feed: float,
+                          derived: Any, emitter: _Emitter, position: Point3 | None) -> None:
+    travel = band.travel_x()
+    r_in = RAMP_Z_CLEARANCE if plan.lead_in_vertical_radius is None else plan.lead_in_vertical_radius
+    r_out = RAMP_Z_CLEARANCE if plan.lead_out_vertical_radius is None else plan.lead_out_vertical_radius
+    clean_threshold = 10.0 * plan.tolerance
+    prev_exit = None
+    last_direction = travel
+    for k, (row, slice_) in enumerate(order):
+        forward = k % 2 == 0
+        p0, p1 = band.pass_ends(row, slice_)
+        start, end = (p0, p1) if forward else (p1, p0)
+        d = travel if forward else -travel
+        start3 = (start[0], start[1], z_cut)
+        end3 = (end[0], end[1], z_cut)
+        if k == 0:
+            col_x = start[0] - d * (r_in + band.lead_run(row))
+            if position is not None:
+                up = (position[0], position[1], plan.feed_height)
+                if position != up:
+                    emitter.push_linear(C.SegmentKind.RAPID, up, "approach-rapid", None)
+                across = (col_x, start[1], plan.feed_height)
+                if up != across:
+                    emitter.push_linear(C.SegmentKind.RAPID, across, "approach-rapid", None)
+            # As with the baseline, home can be at a different XY than the
+            # corpus's positioned column; the complete typed first rapid is
+            # still above stock top before descent to zHigh + Z_FEED.
+            emitter.push_linear(C.SegmentKind.RAPID, (col_x, start[1], z_feed),
+                                "approach-rapid" if position is None else "approach-descent", None)
+            emitter.push_linear(C.SegmentKind.FEED, (col_x, start[1], z_cut + r_in),
+                                "plunge", derived.plunge_mm_s)
+            arc_end = (col_x + d * r_in, start[1], z_cut)
+            _push_face_arc(emitter, (col_x, start[1], z_cut + r_in), arc_end,
+                           (arc_end[0], arc_end[1], z_cut + r_in), None,
+                           plan.feed, "lead-in-vertical")
+            if arc_end[0] != start3[0]:
+                emitter.push_linear(C.SegmentKind.FEED, start3, "lead-in-run", plan.feed)
+        else:
+            if prev_exit is None:
+                raise ValueError("stay-down link has no previous complete pass")
+            prev = prev_exit
+            chord = (start3[0] - prev[0], start3[1] - prev[1])
+            chord_length = math.hypot(*chord)
+            clean = abs(chord[0]) <= clean_threshold
+            capped = plan.stay_down_distance is not None and chord_length > plan.stay_down_distance
+            if clean and not capped:
+                centre = (prev[0] + chord[0] / 2.0, prev[1] + chord[1] / 2.0, z_cut)
+                clockwise = chord[1] * last_direction < 0.0
+                _push_face_arc(emitter, prev, start3, centre, clockwise, plan.feed, "stay-down-link")
+            else:
+                emitter.stay_down_fallbacks += 1
+                col_x = start[0] - d * (RAMP_Z_CLEARANCE + band.lead_run(row))
+                if prev[2] <= plan.z_high:
+                    emitter.push_linear(C.SegmentKind.FEED,
+                                        (prev[0], prev[1], plan.z_high + RAMP_Z_CLEARANCE),
+                                        "lead-out-safe-lift", plan.feed)
+                up = (prev[0], prev[1], plan.feed_height)
+                if prev != up:
+                    emitter.push_linear(C.SegmentKind.RAPID, up, "approach-rapid", None)
+                across = (col_x, start[1], plan.feed_height)
+                if up != across:
+                    emitter.push_linear(C.SegmentKind.RAPID, across, "approach-rapid", None)
+                emitter.push_linear(C.SegmentKind.RAPID, (col_x, start[1], z_feed),
+                                    "approach-descent", None)
+                emitter.push_linear(C.SegmentKind.FEED, (col_x, start[1], z_cut + RAMP_Z_CLEARANCE),
+                                    "plunge", derived.plunge_mm_s)
+                diag_end = (col_x + d * RAMP_Z_CLEARANCE, start[1], z_cut)
+                emitter.push_linear(C.SegmentKind.FEED, diag_end, "lead-in-diagonal", plan.feed)
+                if diag_end[0] != start3[0]:
+                    emitter.push_linear(C.SegmentKind.FEED, start3, "lead-in-run", plan.feed)
+        emitter.push_linear(C.SegmentKind.FEED, end3, "face-cut", plan.feed)
+        prev_exit = end3
+        last_direction = d
+    if prev_exit is not None:
+        lead_end = (prev_exit[0] + last_direction * r_out,
+                    prev_exit[1], z_cut + r_out)
+        _push_face_arc(emitter, prev_exit, lead_end,
+                       (prev_exit[0], prev_exit[1], z_cut + r_out), None,
+                       plan.feed, "lead-out")
+        if lead_end[2] <= plan.z_high:
+            lead_end = (lead_end[0], lead_end[1], plan.z_high + RAMP_Z_CLEARANCE)
+            emitter.push_linear(C.SegmentKind.FEED, lead_end, "lead-out-safe-lift", plan.feed)
+        emitter.push_linear(C.SegmentKind.RAPID, (lead_end[0], lead_end[1], plan.retract),
+                            "retract", None)
+
+
 # port: strategies/face.rs:308-410 baseline per-pass stream and final retract
 def _face_emit(task: C.TaskSpec, plan: FacePlan, loops: Sequence[PolyLoop], *,
                z_low: float, derived: Any, emitter: _Emitter, prefix: str) -> None:
@@ -511,6 +633,11 @@ def _face_emit(task: C.TaskSpec, plan: FacePlan, loops: Sequence[PolyLoop], *,
         z_cut = level.z
         z_plunge_to = z_cut + RAMP_Z_CLEARANCE
         z_feed = plan.z_high + Z_FEED
+        if plan.link_direction == 2.0:
+            _emit_level_stay_down(task, plan, band, order, z_cut, z_feed,
+                                  derived, emitter, position)
+            position = None
+            continue
         for row, slice_ in order:
             start, end = band.pass_ends(row, slice_)
             travel = band.travel_x()
@@ -553,7 +680,8 @@ def _face_emit(task: C.TaskSpec, plan: FacePlan, loops: Sequence[PolyLoop], *,
 
 _FACE_OPTIONS = {"maximum_stepover", "maximum_stepdown", "depth", "even_z_steps",
                  "finishing_stepdown", "axial_stock_to_leave", "from_other_side", "both_sides",
-                 "tolerance", "feed_mm_s", "plunge_mm_s", "lower_step_cap"}
+                 "tolerance", "feed_mm_s", "plunge_mm_s", "lower_step_cap", "linkDirection",
+                 "transitionType", "stayDownDistance", "leadInVerticalRadius", "leadOutVerticalRadius"}
 
 
 def face_seed(task: C.TaskSpec, spec: Any = None, *, max_segments=DEFAULT_MAX_SEGMENTS) -> C.MotionPlan:
@@ -564,7 +692,9 @@ def face_seed(task: C.TaskSpec, spec: Any = None, *, max_segments=DEFAULT_MAX_SE
     is an XOR hole. A lower pad is first cap-faced at its declared top with the
     hole absent, then its below-cap foot is protected by the ordinary floor Face.
     This bounded stage is explicit, never a substituted floor-level pad cut.
-    Coarse default stepover is 3R, explicitly tuned from Rust's R/2 for the 72-line budget.
+    Coarse default maximum stepover is 2R = cutter diameter; no uncut strip is
+    purchased with a greater-than-diameter pitch. Lower-pad floors default to
+    linkDirection=2 (source stay-down + baseline fallbacks) to fit the cap.
     """
     max_segments = _cap(max_segments, "cam.face")
     _validate_context(task)
@@ -572,9 +702,27 @@ def face_seed(task: C.TaskSpec, spec: Any = None, *, max_segments=DEFAULT_MAX_SE
     geom = _task_geometry(task, derived)
     radius = float(task.tool.cutter_radius_mm)
     stepover = _number(options.get("maximum_stepover", COARSE_FACE_STEPOVER_RADII * radius),
-                       "maximum_stepover", positive=True)  # explicit coarse tuning.
+                       "maximum_stepover", positive=True)
+    if stepover > 2.0 * radius:
+        raise ValueError("maximum_stepover must be at most cutter diameter (2R) for full coverage")
     maximum_stepdown = _number(options.get("maximum_stepdown", 0.0), "maximum_stepdown", nonnegative=True)
     depth = _number(options.get("depth", geom.pocket_lo[2]), "depth")
+    link_direction = options.get("linkDirection")
+    if link_direction is not None:
+        link_direction = _number(link_direction, "linkDirection")
+        if link_direction not in (0.0, 1.0, 2.0):
+            raise ValueError("linkDirection must be 0 (baseline), 1 (single direction), or 2 (stay-down)")
+    transition_type = options.get("transitionType")
+    if transition_type is not None:
+        transition_type = _number(transition_type, "transitionType")
+    if link_direction == 2.0 and transition_type not in (None, 2.0):
+        raise ValueError("transitionType must be the sourced arc link 2 in stay-down mode")
+    stay_down_distance = (None if options.get("stayDownDistance") is None else
+                          _number(options["stayDownDistance"], "stayDownDistance", positive=True))
+    lead_in_vertical = (None if options.get("leadInVerticalRadius") is None else
+                        _number(options["leadInVerticalRadius"], "leadInVerticalRadius", positive=True))
+    lead_out_vertical = (None if options.get("leadOutVerticalRadius") is None else
+                         _number(options["leadOutVerticalRadius"], "leadOutVerticalRadius", positive=True))
     even = _boolean(options.get("even_z_steps", False), "even_z_steps")
     finishing = _number(options.get("finishing_stepdown", -1.0), "finishing_stepdown")
     axial = _number(options.get("axial_stock_to_leave", 0.0), "axial_stock_to_leave")
@@ -596,13 +744,23 @@ def face_seed(task: C.TaskSpec, spec: Any = None, *, max_segments=DEFAULT_MAX_SE
     if pad_loop is not None and point_in_polygon(pad_loop.pts[0], outer) is False:
         raise ValueError("retained-pad tool-centre hole escapes the task pocket boundary")
     notes = ["tool-centre pocket inset + retained-pad outset by cutter radius",
-             "Face coarse maximumStepover=3R, an explicit 72-budget tuning, not Rust R/2 default",
+             "Face maximumStepover=2R, tuned from Rust R/2 and never greater than cutter diameter",
+             "lower-pad floor defaults to sourced linkDirection=2 stay-down; other levels use the baseline link stack",
              "below-stock lead-out columns receive a FEED lift to stock top + 1 before rapid"]
     config = {"maximum_stepover": stepover, "depth": depth, "maximum_stepdown": maximum_stepdown,
               "even_z_steps": even, "finishing_stepdown": finishing,
               "axial_stock_to_leave": axial, "from_other_side": other, "both_sides": both,
               "feed_mm_s": feed, "plunge_mm_s": plunge, "tolerance": tolerance,
               "lower_step_cap": lower_policy}
+    shared_link = {"link_direction": link_direction, "transition_type": transition_type,
+                   "stay_down_distance": stay_down_distance,
+                   "lead_in_vertical_radius": lead_in_vertical,
+                   "lead_out_vertical_radius": lead_out_vertical}
+    floor_link = dict(shared_link)
+    lower_stage = geom.retained and geom.pad_hi[2] < geom.top
+    if lower_stage and link_direction is None:
+        floor_link["link_direction"] = 2.0
+    fallback_links = 0
     segments, start = [], None
     if geom.retained and geom.pad_hi[2] < geom.top:
         if lower_policy == "refuse":
@@ -614,22 +772,30 @@ def face_seed(task: C.TaskSpec, spec: Any = None, *, max_segments=DEFAULT_MAX_SE
                             z_high=geom.top, maximum_stepdown=maximum_stepdown,
                             even_z_steps=even, finishing_stepdown=finishing,
                             axial_stock_to_leave=axial,
-                            from_other_side=other, both_sides=both)
+                            from_other_side=other, both_sides=both, **shared_link)
         emitter = _Emitter(task, derived, "face-pad-cap", None)
         _face_emit(task, cap_plan, [outer_loop], z_low=geom.pad_hi[2], derived=derived, emitter=emitter,
                    prefix="face-pad-cap")
         segments.extend(emitter.segments)
         start = emitter.machine
+        fallback_links += emitter.stay_down_fallbacks
         notes.append("lower-step pad: outer-only Face at pad top, then retained-pad floor Face")
     plan = FacePlan(radius, maximum_stepover=stepover, tolerance=tolerance,
                     retract=derived.home_z, feed_height=derived.clearance_z, feed=feed,
                     z_high=geom.top, maximum_stepdown=maximum_stepdown,
                     even_z_steps=even, finishing_stepdown=finishing,
-                    from_other_side=other, both_sides=both)
+                    from_other_side=other, both_sides=both, **floor_link)
     loops = [outer_loop] if pad_loop is None else [outer_loop, pad_loop]
     emitter = _Emitter(task, derived, "face-floor", start)
     _face_emit(task, plan, loops, z_low=depth, derived=derived, emitter=emitter, prefix="face-floor")
     segments.extend(emitter.segments)
+    fallback_links += emitter.stay_down_fallbacks
+    config.update(linkDirectionRequested=link_direction, transitionType=transition_type,
+                  stayDownDistance=stay_down_distance,
+                  leadInVerticalRadius=lead_in_vertical, leadOutVerticalRadius=lead_out_vertical,
+                  floor_link_direction=floor_link["link_direction"], stay_down_fallback_links=fallback_links)
+    if floor_link["link_direction"] == 2.0:
+        notes.append("stay-down fallbacks retain the baseline stack; actual fallback link count is recorded")
     return _plan(task, segments, "cam.face", config, derived, max_segments, notes)
 
 

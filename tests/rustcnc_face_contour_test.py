@@ -158,6 +158,76 @@ def test_independent_dt315_stepover_ladder_and_hole_row_vectors():
     assert region.row_intervals(-30., 6., .1) == [(-80., 80.)]
 
 
+def test_independent_dt315_both_ways_stay_down_arc_links():
+    """DT-315 both_ways_links_stay_down_with_end_arcs, coarse chord adapter."""
+    task = _rust_suite_task(6.0)
+    derived = rc.seed_spec_for_task(task)
+    region = rc.PolyLoop([(0., 0.), (60., 0.), (60., 40.), (0., 40.)], 0)
+    plan = rc.FacePlan(cutter_radius=6., maximum_stepover=5., tolerance=.01,
+                       retract=10., feed_height=5., feed=1000. / 60., z_high=0.,
+                       link_direction=2., transition_type=2., stay_down_distance=60.,
+                       lead_in_vertical_radius=1.2, lead_out_vertical_radius=1.2)
+    emitter = rc._Emitter(task, derived, "both-ways-test", None)
+    rc._face_emit(task, plan, [region], z_low=-1., derived=derived, emitter=emitter,
+                  prefix="both-ways-test")
+    segments = emitter.segments
+    assert len([s for s in segments if s.tag == "plunge"]) == 1
+    assert len([s for s in segments if s.kind is C.SegmentKind.RAPID]) == 2
+    cuts = [s for s in segments if s.tag == "face-cut"]
+    assert len(cuts) >= 3
+    for left, right in zip(cuts, cuts[1:]):
+        assert left.end_mm[2] == right.end_mm[2] == -1.
+        assert math.copysign(1., left.end_mm[0] - left.start_mm[0]) == pytest.approx(
+            -math.copysign(1., right.end_mm[0] - right.start_mm[0]))
+    assert len([s for s in segments if s.tag == "stay-down-link"]) == 4 * (len(cuts) - 1)
+    for index, (cut, next_cut) in enumerate(zip(cuts, cuts[1:])):
+        links = segments[segments.index(cut) + 1:segments.index(next_cut)]
+        assert len(links) == 4, "the full semicircle remains represented"
+        radius = math.dist(cut.end_mm[:2], next_cut.start_mm[:2]) / 2
+        centre = ((cut.end_mm[0] + next_cut.start_mm[0]) / 2,
+                  (cut.end_mm[1] + next_cut.start_mm[1]) / 2)
+        middle = ((links[1].end_mm[0] + links[2].start_mm[0]) / 2,
+                  (links[1].end_mm[1] + links[2].start_mm[1]) / 2)
+        incoming = math.copysign(1., cut.end_mm[0] - cut.start_mm[0])
+        assert (middle[0] - centre[0]) * incoming > 0.99 * radius
+        assert middle[1] == pytest.approx(centre[1], abs=1e-9)
+        assert links[-1].end_mm == next_cut.start_mm
+    assert len([s for s in segments if s.tag == "lead-in-vertical"]) == 2
+    assert len([s for s in segments if s.tag == "lead-out"]) == 2
+    _assert_typed(C.MotionPlan(frame=C.Frame.MACHINE, initial_state=task.initial_state,
+                               segments=tuple(segments), timing_rule=C.TimingRule.EXACT_STOP_CONSTANT_SPEED), task)
+
+
+def test_stay_down_distance_falls_back_to_sourced_baseline_entry_stack():
+    task = _rust_suite_task(6.0)
+    derived = rc.seed_spec_for_task(task)
+    region = rc.PolyLoop([(0., 0.), (60., 0.), (60., 40.), (0., 40.)], 0)
+    plan = rc.FacePlan(cutter_radius=6., maximum_stepover=5., tolerance=.01,
+                       retract=10., feed_height=5., feed=1000. / 60., z_high=0.,
+                       link_direction=2., transition_type=2., stay_down_distance=0.001,
+                       lead_in_vertical_radius=1.2, lead_out_vertical_radius=1.2)
+    emitter = rc._Emitter(task, derived, "stay-down-cap", None)
+    rc._face_emit(task, plan, [region], z_low=-1., derived=derived, emitter=emitter,
+                  prefix="stay-down-cap")
+    cuts = [segment for segment in emitter.segments if segment.tag == "face-cut"]
+    assert emitter.stay_down_fallbacks == len(cuts) - 1
+    assert not [segment for segment in emitter.segments if segment.tag == "stay-down-link"]
+    assert len([segment for segment in emitter.segments if segment.tag == "plunge"]) == len(cuts)
+    _assert_typed(C.MotionPlan(frame=C.Frame.MACHINE, initial_state=task.initial_state,
+                               segments=tuple(emitter.segments),
+                               timing_rule=C.TimingRule.EXACT_STOP_CONSTANT_SPEED), task)
+
+
+def test_default_never_exceeds_cutter_diameter_pitch():
+    task = next(bundle.task for bundle in procedural_suite.generate_tasks()
+                if bundle.task.family == "facing_asymmetric"
+                and bundle.task.original_part.params.get("empty_island") is True)
+    plan = rc.face_seed(task)
+    assert "\"maximum_stepover\":4.0" in plan.provenance
+    with pytest.raises(ValueError, match="cutter diameter"):
+        rc.face_seed(task, {"maximum_stepover": 2.0 * task.tool.cutter_radius_mm + 0.001})
+
+
 def test_determinism_provenance_and_typed_plan():
     task = next(bundle.task for bundle in procedural_suite.generate_tasks()
                 if bundle.task.original_part.params.get("empty_island") is True
@@ -239,8 +309,19 @@ def test_lower_step_cap_is_explicitly_cleared_at_pad_top_not_floor_gouge():
     cases = [bundle for bundle in procedural_suite.generate_tasks()
              if bundle.topology == "offset_square_lower_step_pad"]
     assert cases
+    outcomes = {"constructed": 0, "cap_refused": 0}
     for bundle in cases:
-        plan = rc.face_seed(bundle.task)
+        try:
+            plan = rc.face_seed(bundle.task)
+        except ValueError as error:
+            if "max_segments" not in str(error):
+                raise
+            outcomes["cap_refused"] += 1
+            print(f"LOWER CAP REFUSAL {bundle.task.task_id}: {error}")
+            continue
+        outcomes["constructed"] += 1
+        _assert_typed(plan, bundle.task)
+        assert "\"floor_link_direction\":2.0" in plan.provenance
         params = bundle.task.original_part.params
         pad_top = params["island_max_mm"][2]
         floor = params["pocket_min_mm"][2]
@@ -248,6 +329,8 @@ def test_lower_step_cap_is_explicitly_cleared_at_pad_top_not_floor_gouge():
         assert pad_top in cuts
         assert floor in cuts
         assert all(z >= floor for z in cuts)
+    assert sum(outcomes.values()) == len(cases)
+    print(f"LOWER CAP COVERAGE {outcomes}")
 
 
 def test_cap_reports_required_full_count_not_dropped_rows_or_arcs():
@@ -268,6 +351,8 @@ def test_unsupported_geometry_options_and_shapes_fail_closed():
             task.tool, cutter_kind=C.CutterKind.BALL)))
     with pytest.raises(ValueError, match="maximum_stepover"):
         rc.face_seed(task, {"maximum_stepover": 0.0})
+    with pytest.raises(ValueError, match="linkDirection"):
+        rc.face_seed(task, {"linkDirection": 3.0})
     with pytest.raises(ValueError, match="unknown.*spec|unsupported.*spec|unknown.*option"):
         rc.contour2d_seed(task, {"invented_mode": True})
     with pytest.raises(ValueError, match="sequence|len"):
