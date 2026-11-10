@@ -426,9 +426,11 @@
       "note": "runner budget +1 init, cost, selection artifacts, run_id, selection_vs_verdict record; REAL_* gates."
     },
     "T2.3b": {
-      "status": "in_progress",
+      "status": "done",
       "owner": "diffcam-worker-2",
-      "branch": "task/T2.3b-suite-expansion"
+      "branch": "task/T2.3b-suite-expansion",
+      "tip": "82389e1",
+      "note": "Merged. 39/39 cheap-qualified; min design distance 0.5 (thr 0.25)."
     },
     "T3.xd-wiring": {
       "status": "todo",
@@ -440,6 +442,12 @@
       "owner": "diffcam-worker-3",
       "branch": "task/T4.0-noinit-b",
       "note": "D-08 add.2: delta-only random arm, theta->cam_perturbed (exploratory), iid positional noise, invalid seeds recorded not redrawn; temp validator/schema lease."
+    },
+    "T2.3c": {
+      "status": "in_progress",
+      "owner": "diffcam-worker-2",
+      "branch": "task/T2.3c-posted-qualification",
+      "note": "0.125mm dual-dialect posted qualification of 39 nominal seeds; 4 concurrent; ~6.5h."
     }
   }
 }
