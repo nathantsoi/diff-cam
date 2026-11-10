@@ -56,8 +56,8 @@
     "provisional": true,
     "notes": "provisional dev initialization cases (D-08/D-11), not protocol; invalid realizations remain failed at their requested seed, without redraw",
     "straight_line_init": {
-      "start": "cam_start",
-      "end": "cam_end",
+      "start": "stock_bbox_min_at_cam_min_cutting_z",
+      "end": "stock_bbox_max_at_cam_min_cutting_z",
       "segment_placement": "uniform",
       "feed_and_rapid_entry": "retain each CAM feed_mm_s and the task rapid_mm_s; first endpoint pair must remain above the work-frame stock top",
       "same_segment_count_and_k": true,
@@ -72,7 +72,7 @@
         "detail": "iid"
       },
       "scale": {
-        "fraction": 0.0005,
+        "fraction": 0.05,
         "reference": {
           "kind": "stock_xy_extent",
           "description": "Euclidean diagonal of the declared stock XY envelope in mm; Gaussian per-coordinate standard deviation, not a rejection cutoff",
