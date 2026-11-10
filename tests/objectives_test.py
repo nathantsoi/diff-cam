@@ -17,20 +17,24 @@ from benchmarks import contracts as C
 from simulator.csg_simulator import CSGSimulatorDelta
 
 
-def _prototype(seed=7, *, spec=None, precision="f32"):
+def _prototype(seed=7, *, spec=None, precision="f32", initial_position_mm=None, residual_mm=None):
     if precision not in ("f32", "f64"):
         raise ValueError("precision must be f32 or f64")
     ti.init(arch=ti.cpu, offline_cache=False,
             default_fp=ti.f32 if precision == "f32" else ti.f64)
-    initial = np.array([-4.0, -4.0, 2.0])
+    initial = np.array([-4.0, -4.0, 2.0] if initial_position_mm is None else initial_position_mm)
+    residuals = np.array([[0, 0, -6], [3, 3, -6]] if residual_mm is None else residual_mm,
+                         dtype=np.float64)
+    if initial.shape != (3,) or residuals.shape != (2, 3):
+        raise ValueError("fixture needs one 3D initial position and two 3D residuals")
     task = C.example_pocket_task()
     part = C.GeometrySource(kind="analytic", params={"primitive": "sphere", "center": [0.5, 0.5, 0.5],
                                                    "radius_mm": 6.0})
     tool = dataclasses.replace(task.tool, holder_bottom_mm=task.tool.flute_length_mm)
     to_machine = task.work_to_machine.apply
     start = to_machine(initial)
-    p1 = to_machine(initial + [0, 0, -6])
-    p2 = to_machine(initial + [3, 3, -12])
+    p1 = to_machine(initial + residuals[0])
+    p2 = to_machine(initial + residuals[0] + residuals[1])
     state = C.MachineState(position_mm=start, frame=C.Frame.MACHINE)
     segments = (
         C.Segment(id="plunge", kind=C.SegmentKind.FEED, start_mm=start, end_mm=p1,
@@ -57,7 +61,7 @@ def _prototype(seed=7, *, spec=None, precision="f32"):
     sim.holder_height[None] = task.tool.holder_height_mm
     sim.set_target_params(radius_mm=6.0)
     sim.bake_target_grid()
-    mapper = P.DeltaResidual([[0, 0, -6], [3, 3, -6]], scale_mm=1.0,
+    mapper = P.DeltaResidual(residuals, scale_mm=1.0,
                              bounds=(-0.05, 0.05), initial_position_mm=initial)
     evaluator = O.CandidateEvaluator(task, motion, mapper, sim,
                                      spec=spec or O.ObjectiveSpec(), seed=seed)

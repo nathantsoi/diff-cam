@@ -158,12 +158,22 @@ def test_native_time_is_a_documented_surrogate_not_exact_motion_duration():
     assert native_mean_seconds != pytest.approx(exact_seconds, rel=1e-6)
 
 
-@pytest.mark.parametrize("time_weight,air_time_weight", [(0.35, 0.0), (0.0, 0.35)])
+@pytest.mark.parametrize("time_weight,air_time_weight", [(0.35, 0.0), (0.0, 0.75)])
 def test_efficiency_gradient_matches_finite_difference(time_weight, air_time_weight):
-    """Each efficiency-only channel must have a meaningful f64 AD/FD signal."""
-    evaluator = _prototype(precision="f64", spec=_efficiency_spec(
-        1.0, time_weight=time_weight, air_time_weight=air_time_weight))
-    theta = np.array([0.002, -0.001, 0.001, -0.001, 0.002, -0.002])
+    """Each efficiency-only channel must have a meaningful f64 AD/FD signal.
+
+    These two short above-stock moves stay below the native dt*rapid-speed cap.
+    The default in-material fixture instead saturates both native seg_time terms,
+    whose correctly-zero gradient would not establish gradient correctness.
+    """
+    evaluator = _prototype(
+        precision="f64", initial_position_mm=(0.0, 0.0, 10.0),
+        residual_mm=((0.0, 0.0, -1.0), (1.0, 1.0, 1.0)))
+    evaluator.spec = _efficiency_spec(
+        evaluator.reference_cycle_time_s,
+        time_weight=time_weight, air_time_weight=air_time_weight)
+    evaluator._configure()
+    theta = np.array([0.0004, -0.0003, 0.0006, -0.0003, 0.0005, -0.0002])
     taped = evaluator.evaluate_candidate_with_gradient(theta, "efficiency-gradient")
     assert taped.result.valid
     assert taped.gradient_theta.shape == theta.shape
