@@ -368,6 +368,18 @@
       ],
       "note": "Reassigned from worker-2 (stalled in API-timeout retries). Per-child VmHWM peak RSS, cap checks on child peak, >=1GiB-parent regression, re-measure posted phases; D-07 to be amended from real peaks. Coordinator took L1 at 17:50; fix + 2 regressions committed e7c5b3b (runner tests 38 passed/6 skipped); full suite + posted-phase re-measure running. Merged to core 9a6537b. Gates at e941ad0: full 639p/11s, REAL_PILOT_SMOKE 44p (runs/retained/t41b-l1-real-pilot-smoke-e941ad0), REAL_NOMINAL 11p.",
       "tip": "e941ad0"
+    },
+    "T4.2a": {
+      "status": "done",
+      "owner": "diffcam-worker-3",
+      "branch": "task/T4.2a-protocol-tooling",
+      "tip": "4a4a8ec",
+      "note": "Merged core 57f7761. Schema/validator/dry-run + D-08 init axis (declaration-only for non-CAM). Gates: focused 26p, full 665p/11s. No frozen values."
+    },
+    "T4.0-noinit": {
+      "status": "todo",
+      "owner": "diffcam-worker-2 (after pilot audit)",
+      "note": "D-08: runner conditions + cam/seeds straight_line/random MotionPlans (same T/K, safe rapid, feed<=max), validated against T4.2a declarations."
     }
   }
 }
