@@ -435,13 +435,14 @@
     "T3.xd-wiring": {
       "status": "todo",
       "owner": "diffcam-worker-1 (after T3.xc-runner merges)",
-      "note": "D-11: runner weights + task-constant reference + None-rejection + validator rule + pilot provisional weights 0.01/0.01. Starts after T3.xc-runner and T4.0-noinit-b merge."
+      "note": "D-11: runner weights + task-constant reference + None-rejection + validator rule + pilot provisional weights 0.01/0.01. Starts after T3.xc-runner merges (T4.0-noinit-b merged)."
     },
     "T4.0-noinit-b": {
-      "status": "in_progress",
+      "status": "done",
       "owner": "diffcam-worker-3",
       "branch": "task/T4.0-noinit-b",
-      "note": "D-08 add.2: delta-only random arm, theta->cam_perturbed (exploratory), iid positional noise, invalid seeds recorded not redrawn; temp validator/schema lease."
+      "note": "D-08 add.2: delta-only random arm, theta->cam_perturbed (exploratory), iid positional noise, invalid seeds recorded not redrawn; temp validator/schema lease. Merged; merged gate 81 passed. T4.2 note: valid-rate vs declared random scale must be characterised before freezing the scale (test uses 0.0005\u00d7ref).",
+      "tip": "4ddcbdb"
     },
     "T2.3c": {
       "status": "in_progress",
