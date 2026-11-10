@@ -234,3 +234,13 @@ already gouges (9 voxels with residual passing on one task; 206 voxels plus resi
 but with growing residual. Interpretation for the paper: gradient steps at lr 0.005 (|Δθ| ≈ 6·lr per step) leave the zero-gouge
 feasible set immediately, and the sampled trade-off is gouge ↔ residual. This shows "steps leave the feasible set", NOT "no feasible
 direction exists". The claim must stay at that level. Continuation's rejected proposals are not persisted (logging gap, backlog).
+
+## D-13 addendum (review BB1; declared at Exp1 launch, before any Exp1 result)
+Reach: Exp1 Adam steps move each θ coordinate ≤ ~lr per step (scale 1 mm), so over 24 candidates ≤ ~0.12 mm (≤ 0.24 mm at
+continuation lr_max 0.01). The CAM-vs-line θ0 difference is O(10 mm) per segment delta. DECLARED NOW:
+(a) The Exp1 report includes, per dev task and init, the reach ratio R = ‖θ0_cam − θ0_init‖∞ / (n_steps · lr_max), computed from θ0
+    alone. Where R ≫ 1, an Exp1 non-CAM outcome is reported as "unreachable within budget/step size", NOT as evidence that init quality
+    matters.
+(b) Exp1's primary claim is narrowed to: "under the Exp2 budget and step size, non-CAM initialisations do/do not reach feasibility".
+(c) Exploratory Exp1b (only if R ≫ 1): the same 9 dev tasks and arms with a single declared large step, lr = 1.0 (θ in mm;
+    24-step reach ≈ 24 mm, about the dev pocket extent), labelled exploratory, not a held-out claim. Launched after Exp1 completes.

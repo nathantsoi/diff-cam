@@ -335,3 +335,7 @@ are computed by the results builder, not by benchmarks/audit.py method pairing.
 Primary efficiency endpoint = posted Δcycle_time_s. Δair_fraction is secondary, and Δair without Δcycle is labelled
 "air→cut relabelling, not a speed-up". Limitation: positions-only optimisation with fixed feeds and segment kinds. Known sim-vs-posted
 air proxy mismatch (~2× at nominal).
+
+## Pre-declared Exp1 interpretation amendment (D-13 addendum / review BB1, at Exp1 launch, before results)
+Report the reach ratio R per task/init. R ≫ 1 ⇒ "unreachable within budget/step size", not "init quality matters". The primary Exp1
+claim is narrowed to the Exp2 budget/step size. The exploratory Exp1b (lr = 1.0, same arms and tasks) runs only if R ≫ 1.
