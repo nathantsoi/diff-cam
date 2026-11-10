@@ -377,9 +377,10 @@
       "note": "Merged core 57f7761. Schema/validator/dry-run + D-08 init axis (declaration-only for non-CAM). Gates: focused 26p, full 665p/11s. No frozen values."
     },
     "T4.0-noinit": {
-      "status": "todo",
-      "owner": "diffcam-worker-2 (after pilot audit)",
-      "note": "D-08: runner conditions + cam/seeds straight_line/random MotionPlans (same T/K, safe rapid, feed<=max), validated against T4.2a declarations."
+      "status": "in_progress",
+      "owner": "diffcam-worker-3 (seeds); runner conditions later",
+      "branch": "task/T4.0-noinit-seeds",
+      "note": "D-08: cam/seeds.py straight_line/random MotionPlans from T4.2a declarations; runner wiring after T3.xc-runner."
     },
     "T3.xc": {
       "status": "done",
