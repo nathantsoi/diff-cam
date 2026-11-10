@@ -815,6 +815,48 @@ def test_validate_only_accepts_future_experiment_metadata_without_execution(tmp_
     assert report["prototype_adapter_compatible"] is False
 
 
+def test_continuation_condition_enum_identity_and_native_dry_run(tmp_path, monkeypatch):
+    schema = read(ROOT / "configs/frozen_benchmark.schema.json")
+    assert "continuation-adam" in schema["$defs"]["condition"]["enum"]
+    case = make_case(tmp_path)
+    target = next(job for job in case["methods"] if job["condition"] == "annealed-adam")
+    target["condition"] = "continuation-adam"
+    case["estimates"]["seconds_per_candidate_by_method"].pop("annealed-adam")
+    case["estimates"]["seconds_per_candidate_by_method"]["continuation-adam"] = 0.5  # synthetic arithmetic unit only
+    report = run_case(case, tmp_path)
+    row = next(row for row in report["dry_runs"]
+               if row["condition"] == "continuation-adam" and row["scope"] == "primary")
+    assert row["native_dry_run_performed"] is True
+    assert row["seed"] == 0 and row["init"] == "cam"
+    assert row["candidate_evaluations"] == case["budget"]["candidate_evaluations"] + 1
+    assert row["validation_calls"] == min(
+        case["budget"]["max_validation_calls"],
+        case["budget"]["candidate_evaluations"] // case["budget"]["validation_interval"])
+
+    # Abi-level validation of the same native mapping used by dry-runs. Override
+    # sites that should not silently ignore undocumented continuation options.
+    job = dict(target, init="cam", seed=0)
+    native = V.native_config(job, case, sha(tmp_path / "protocol.json"))
+    adam_cfg = R.adam.AdamConfig(
+        "annealed", learning_rate=native["learning_rate"],
+        max_gradient_norm=native["max_gradient_norm"],
+        k_start=native["k_anneal_start"], k_end=native["k_anneal_end"],
+    )
+    continued = R._make_continuation_config(native, adam_cfg)
+    assert continued.shift == continued.backtracking == "on"
+    assert continued.calibration_delta_max == 0.25
+    assert continued.calibration_band.rationale
+    assert continued.adam.n_steps == native["candidate_evaluations"]
+    recorded = []
+    original_hash = R.C.content_hash
+    monkeypatch.setattr(R.C, "content_hash", lambda value: recorded.append(value) or original_hash(value))
+    R._identity(R._prototype()[0], native, "dev")
+    recorded_identity = next(value for value in recorded
+                             if isinstance(value, dict) and "continuation_adam" in value)
+    assert recorded_identity["continuation_adam"]["config_sha256"] == continued.config_hash
+    assert recorded_identity["continuation_adam"]["config"] == continued.metadata()["config"]
+
+
 def test_anneal_interval_and_evidence_file_constraints_are_checked(tmp_path):
     case = make_case(tmp_path)
     case["objective"]["anneal_end"] = case["objective"]["anneal_start"]

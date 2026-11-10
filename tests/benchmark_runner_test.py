@@ -1,7 +1,9 @@
 """T4.1a runner tests: frozen plan first, then small actual subprocess evidence."""
 
+import dataclasses
 import json
 import os
+import pathlib
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -157,7 +159,7 @@ def test_condition_ids_are_deterministic_and_manifest_nominal_once(tmp_path):
     config["experiment"] = "pilot"
     first = runner._plan_entries(config, runner._context(config, tmp_path)[0], "dev", None)
     second = runner._plan_entries(config, runner._context(config, tmp_path)[0], "dev", None)
-    assert len(first) == len(second) == 7
+    assert len(first) == len(second) == 8
     assert [entry["run_id"] for entry in first] == [entry["run_id"] for entry in second]
     for condition in ("nominal-cam", "fixed-adam", "annealed-adam"):
         assert sum(entry["method"] == condition for entry in first) == 1
@@ -192,7 +194,7 @@ def test_dry_run_counts_cost_uncertainty_and_nominal_subset(tmp_path):
     output = tmp_path / "dry"
     result = _invoke(config, output, extra=("--dry-run",), timeout=60)
     planned = json.loads((output / "dry_run.json").read_text())
-    assert planned["planned_run_count"] == 7
+    assert planned["planned_run_count"] == 8
     assert not (output / "nominal-cam").exists()
     per_run = {row["run_id"]: row for row in planned["costs"]}
     fixed = next(row for row in per_run.values() if row["run_id"].startswith("fixed-adam-s0-"))
@@ -361,6 +363,218 @@ def test_optimizer_accounting_run_id_and_artifact_evidence(tmp_path):
     assert cma_out.optimizer_result.initial_candidate_id == "accounting-cma:init"
     assert cma_eval.ledger.entries[0]["candidate_id"] == "accounting-cma:init"
     assert cma_eval.ledger.entries[0]["objective_kind"] == "hard"
+
+
+def _continuation_test_config():
+    config = _base()
+    config.update(candidate_evaluations=4, validation_interval=1,
+                  max_validation_calls=4, max_generations=1,
+                  continuation_adam={
+                      "shift": "off", "backtracking": "on",
+                      "calibration_eta": 0.5,
+                      "calibration_delta_max": 0.25,
+                      "calibration_disagreement_floor": 0.000001,
+                      "calibration_band": {"region": "both", "minimum_mm": 0.0,
+                                           "maximum_mm": 1.5, "rationale": "explicit scalar-unit band"},
+                      "backtracking_retries": 1,
+                      "backtracking_shrink": 0.5,
+                      "backtracking_learning_rate_min": 0.0000625,
+                      "backtracking_learning_rate_max": 0.01,
+                      "initial_loss_shift": 0.0,
+                  })
+    return config
+
+
+def test_continuation_identity_has_full_config_hash_and_one_deterministic_seed(tmp_path, monkeypatch):
+    config = _continuation_test_config()
+    task = runner._prototype()[0]
+    adam_cfg = runner.adam.AdamConfig("annealed", learning_rate=config["learning_rate"],
+                                      k_start=config["k_anneal_start"], k_end=config["k_anneal_end"])
+    continued = runner._make_continuation_config(config, adam_cfg)
+    document = continued.metadata()
+    assert document["config"]["shift"] == "off"
+    assert document["config"]["backtracking"] == "on"
+    assert document["config"]["calibration_eta"] == 0.5
+    assert document["config"]["calibration_band"] == {
+        "region": "both", "minimum_mm": 0.0, "maximum_mm": 1.5,
+        "rationale": "explicit scalar-unit band",
+    }
+    assert document["config"]["adam"]["n_steps"] == config["max_generations"]
+    assert document["config"]["adam"]["k_start"] == config["k_anneal_start"]
+    assert document["config_sha256"] == continued.config_hash
+    # The step schedule is the original AdamConfig plus actual resolved steps.
+    expected_adam = dataclasses.replace(adam_cfg, n_steps=config["max_generations"])
+    expected = dataclasses.replace(continued, adam=expected_adam)
+    assert continued == expected
+    calls = []
+    actual_hash = runner.C.content_hash
+    monkeypatch.setattr(runner.C, "content_hash", lambda value: calls.append(value) or actual_hash(value))
+    identity = runner._identity(task, config, "dev")
+    assert identity.startswith("sha256:")
+    assert calls[-1]["continuation_adam"] == document
+    entries = runner._plan_runs(config, task, "dev", None)
+    continued_entries = [entry for entry in entries if entry["method"] == "continuation-adam"]
+    assert len(continued_entries) == 1
+    assert continued_entries[0]["seed"] == 0
+    assert continued_entries[0]["run_id"].startswith("continuation-adam-s0-")
+    planned = runner._manifest(config, task, entries, tmp_path, planned=True)
+    assert planned["runner"]["adam_conditions"] == "one_deterministic_replicate_each"
+    doc = json.loads(pathlib.Path("configs/frozen_benchmark.schema.json").read_text())
+    assert "continuation-adam" in doc["$defs"]["condition"]["enum"]
+    invalid = _continuation_test_config()
+    invalid["continuation_adam"] = dict(invalid["continuation_adam"], unknown_setting=1.0)
+    with pytest.raises(runner.RunnerError, match="unknown continuation_adam fields"):
+        runner._identity(task, invalid, "dev")
+
+
+def _scalar_continuation_evaluator():
+    """Bookkeeping-only zero-gradient runner fixture, not physical geometry evidence."""
+    import dataclasses
+    from algorithms import objectives as O
+    from algorithms import run_artifacts as R
+
+    task, motion, parameterization = runner._prototype()
+    class ScalarVector:
+        def __init__(self, value): self.value = value
+        def __getitem__(self, key): return self
+        def to_list(self): return list(self.value)
+
+    class Evaluator:
+        def __init__(self):
+            self.task, self.motion, self.parameterization = task, motion, parameterization
+            self.spec = {"kind": "continuation-runner-interface-test"}
+            self._evaluation_k_override = None
+            tool_start = ((np.asarray(parameterization.initial_position_mm) - np.asarray(task.grid.origin_mm))
+                          / np.asarray(task.grid.extent_mm))
+            self.sim = SimpleNamespace(k=self._evaluation_k_override,
+                                       precision="f64", tool_start=ScalarVector(tool_start.tolist()),
+                                       precision_metadata=_precision_metadata_stub)
+            self.ledger = R.ComputeLedger()
+            self.hard_fraction_denominators_mm3 = {"gouge": 1.0, "residual": 1.0}
+            self._evaluation_k_override = None
+            self.shift = None
+            self.shifts = []
+            self.efficiency_metadata = dict(runner._nominal_cycle_metadata(task, motion),
+                                             time_weight=0.0, air_time_weight=0.0)
+
+        def set_evaluation_k(self, value):
+            self._evaluation_k_override = value
+            self.sim.k = value
+
+        def clear_evaluation_k(self):
+            self._evaluation_k_override = None
+
+        def set_evaluation_loss_shift(self, value):
+            self.shift = value
+            self.shifts.append(value)
+
+        def clear_evaluation_loss_shift(self):
+            self.shift = None
+
+        @property
+        def evaluation_loss_shift(self):
+            return self.shift
+
+        def evaluate_candidate(self, theta, candidate_id, objective_kind="smooth"):
+            theta = np.asarray(theta, dtype=float)
+            self.ledger.start_candidate(candidate_id, objective_kind)
+            self.ledger.finish_candidate(valid=True, forward_calls=1, backward_calls=0,
+                                         segment_steps=1, voxel_steps=1)
+            return C.CandidateResult(
+                candidate_id=candidate_id, theta_hash=C.content_hash(theta.tolist()),
+                objective_kind=objective_kind, objective=0.0, valid=True,
+                components={"gouge_fraction": 0.0, "residual_fraction": 0.0,
+                            "holder_overlap_fraction": 0.0})
+
+        def evaluate_candidate_with_gradient(self, theta, candidate_id="gradient"):
+            result = self.evaluate_candidate(theta, candidate_id, "smooth")
+            self.ledger.entries[-1]["backward_calls"] = 1
+            self.ledger.backward_calls += 1
+            return O.CandidateEvaluation(dataclasses.replace(result, gradient_available=True),
+                                         np.zeros(self.parameterization.num_params))
+
+        def candidate_motion(self, theta):
+            return motion
+
+    return Evaluator()
+
+
+def test_continuation_dispatch_off_off_identity_and_enabled_budget_artifacts(tmp_path):
+    config = _continuation_test_config()
+    task = _scalar_continuation_evaluator().task
+    neutral = dict(config, continuation_adam={
+        "shift": "off", "backtracking": "off",
+    })
+    neutral_evaluator = _scalar_continuation_evaluator()
+    neutral_outcome = runner._evaluate_outcome(
+        "continuation-adam", neutral_evaluator, neutral, seed=0, run_id="continuation-neutral")
+    assert not isinstance(neutral_outcome.optimizer_result, runner.adam.ContinuationResult)
+    assert isinstance(neutral_outcome.optimizer_result, runner.adam.AdamResult)
+    assert neutral_outcome.evaluations == 2
+    assert neutral_outcome.validation_calls == 1
+    assert neutral_outcome.optimizer_result.initial_candidate_id == "continuation-neutral:init"
+    baseline = runner.adam.solve_adam(
+        _scalar_continuation_evaluator(), runner._budget(neutral, "annealed-adam"),
+        neutral_outcome.optimizer_result.config, seed=0, x0=np.zeros(neutral_outcome.initial_theta.size),
+        run_id="continuation-neutral")
+    np.testing.assert_array_equal(neutral_outcome.best_theta, baseline.best_theta)
+    np.testing.assert_array_equal(neutral_outcome.optimizer_result.moments, baseline.moments)
+    np.testing.assert_array_equal(neutral_outcome.optimizer_result.velocities, baseline.velocities)
+    assert neutral_outcome.history == baseline.history
+
+    evaluator = _scalar_continuation_evaluator()
+    outcome = runner._evaluate_outcome(
+        "continuation-adam", evaluator, config, seed=0, run_id="continuation-enabled")
+    result = outcome.optimizer_result
+    assert isinstance(result, runner.adam.ContinuationResult)
+    assert result.continuation_config_hash
+    assert result.continuation_config["shift"] == "off"
+    assert result.continuation_config["backtracking"] == "on"
+    assert outcome.evaluations == 3 and outcome.validation_calls == 2
+    assert result.retry_state["accepted"] == 1
+    assert result.retry_state["retries"] == 0
+    assert result.purpose_spent["fresh_incumbent_candidate_calls"] == 1
+    assert result.purpose_spent["proposal_candidate_calls"] == 1
+    assert [entry["candidate_id"] for entry in evaluator.ledger.entries].count("continuation-enabled:init") == 1
+    assert outcome.generations == 1
+    assert result.backward_calls == 1
+    assert result.forward_calls == 5
+    entry = runner._plan_entries(config, task, "dev", "continuation-adam-*")[0]
+    root = tmp_path / "continuation-artifact"
+    record = runner._write_outcome(entry, evaluator, outcome, None, config, root, runner.REPOSITORY)
+    assert record.status == C.RunStatus.INCOMPLETE
+    config_doc = json.loads((root / record.run_id / "config.json").read_text())
+    metrics_doc = json.loads((root / record.run_id / "metrics.json").read_text())
+    for document in (config_doc, metrics_doc):
+        metadata = document["continuation_adam"]
+        assert metadata["condition"] == "continuation-adam"
+        assert metadata["continuation_configuration_sha256"] == result.continuation_config_hash
+        assert metadata["continuation_configuration"]["calibration_band"]["maximum_mm"] == 1.5
+        assert metadata["budget_spent"]["candidate_evaluations"] == outcome.evaluations
+        assert metadata["budget_spent"]["validation_calls"] == outcome.validation_calls
+        assert metadata["purpose_spent"]["proposal_validation_calls"] == 1
+        assert metadata["initialization"]["candidate_id"] == "continuation-enabled:init"
+        assert metadata["selection_thresholds"]["config_hash"]
+        assert metadata["optimizer_configuration"]["n_steps"] == config["max_generations"]
+        json.dumps(document, allow_nan=False)
+
+
+def test_continuation_missing_raw_field_is_inconclusive_not_a_fabricated_calibration():
+    config = _continuation_test_config()
+    config["continuation_adam"] = dict(config["continuation_adam"], shift="on", backtracking="off")
+    evaluator = _scalar_continuation_evaluator()
+    result = runner._evaluate_outcome(
+        "continuation-adam", evaluator, config, seed=0, run_id="missing-field")
+    extended = result.optimizer_result
+    assert extended.evaluations == 2 and extended.validation_calls == 1
+    assert extended.gradient_updates == 1
+    assert extended.calibration_events[0]["result"]["updated"] is False
+    assert extended.calibration_events[0]["result"]["reason"].startswith("inconclusive:")
+    assert extended.loss_shift == 0.0
+    assert extended.purpose_spent["calibration_candidate_calls"] == 1
+    assert extended.purpose_spent["calibration_validation_calls"] == 1
+    assert evaluator.evaluation_loss_shift is None
+    assert evaluator._evaluation_k_override is None
 
 
 def test_resume_rejects_condition_identity_changes(tmp_path):
@@ -565,7 +779,7 @@ def test_pilot_post_factory_is_task_bound_and_settings_are_frozen(tmp_path, monk
         evaluator.evaluate_posted_gcode(task, b"", C.Dialect.RS274, unsafe)
 
 
-def test_timing_probe_calls_each_kind_and_projects_all_seven(tmp_path, monkeypatch):
+def test_timing_probe_calls_each_kind_and_projects_all_eight(tmp_path, monkeypatch):
     """Coordination-only doubles, explicitly not real-task timing evidence."""
     config = _pilot_config()
     from benchmarks import pilot_task
@@ -626,7 +840,7 @@ def test_timing_probe_calls_each_kind_and_projects_all_seven(tmp_path, monkeypat
     assert report["config_sha256"].startswith("sha256:")
     entries = runner._plan_entries(config, task, "dev", None)
     costs = runner._pecent(dict(config, timing_evidence=report), entries)
-    assert len(costs) == 7
+    assert len(costs) == 8
     assert all(row["estimated_run_wall_time_s"] is not None for row in costs)
     cma = next(row for row in costs if row["run_id"].startswith("hard-cmaes-s0-"))
     assert (cma["candidate_evaluations"], cma["validation_calls"]) == (5, 2)
@@ -1396,7 +1610,7 @@ def test_refinement_timing_is_separate_from_primary_and_parallel_forecast(tmp_pa
     entries = runner._plan_entries(config, task, "dev", None)
     costs = runner._pecent(dict(config, timing_evidence=evidence), entries)
     projection = runner._refinement_projection(config, entries, evidence, tmp_path)
-    assert projection["expected_program_count"] == 7
+    assert projection["expected_program_count"] == 8
     # Rule stages explicitly differentiated for the arithmetic unit fixture:
     phases = evidence["posted_evaluation_levels"]
     phases["screen"]["phase_wall_seconds"] = 2.0
@@ -1409,12 +1623,12 @@ def test_refinement_timing_is_separate_from_primary_and_parallel_forecast(tmp_pa
     nominal = next(row for row in costs if row["run_id"].startswith("nominal-cam-"))
     assert nominal["estimated_run_wall_time_s"] == pytest.approx(26.0)
     projection = runner._refinement_projection(config, entries, evidence, tmp_path)
-    assert projection["levels"]["screen"]["estimated_phase_wall_time_s"] == 14.0
-    assert projection["levels"]["verdict"]["estimated_phase_wall_time_s"] == 21.0
-    assert projection["levels"]["convergence"]["estimated_phase_wall_time_s"] == 7.0
-    assert projection["estimated_phase_wall_time_s"] == 28.0
+    assert projection["levels"]["screen"]["estimated_phase_wall_time_s"] == 16.0
+    assert projection["levels"]["verdict"]["estimated_phase_wall_time_s"] == 24.0
+    assert projection["levels"]["convergence"]["estimated_phase_wall_time_s"] == 8.0
+    assert projection["estimated_phase_wall_time_s"] == 32.0
     serial = sum(row["serial_evaluation_work_seconds"] for row in projection["levels"].values())
-    assert serial == 5.0 * 7
+    assert serial == 5.0 * 8
     assert projection["screen_in_primary_estimates"] is True
     assert projection["serial_evaluation_work_seconds"] == pytest.approx(serial)
     for role in ("screen", "verdict", "convergence"):
@@ -1431,7 +1645,7 @@ def test_pilot_init_plan_has_unique_slots_parents_and_one_task_reference(tmp_pat
     config = json.loads((CONFIG.parent / "pilot_init.json").read_text())
     task, cam_motion, _parameterization, _factory, _posted = runner._context(config, tmp_path)
     entries = runner._plan_entries(config, task, "dev", None)
-    assert len(entries) == 14  # seven unchanged CAM arms + six D-08 arms + one sidecar
+    assert len(entries) == 15  # eight unchanged CAM arms + six D-08 arms + one sidecar
     assert len({entry["run_id"] for entry in entries}) == len(entries)
     for selected in entries:
         assert runner._plan_entries(config, task, "dev", selected["run_id"]) == [selected]
@@ -1629,12 +1843,12 @@ def test_pilot_init_config_dry_run_with_synthetic_timing_structure(tmp_path):
     completed = _invoke(config, root, extra=("--dry-run", "--resume"), timeout=120)
     assert '"pilot_launched": false' in completed.stdout
     dry_run = json.loads((root / "dry_run.json").read_text())
-    assert dry_run["planned_run_count"] == 14
+    assert dry_run["planned_run_count"] == 15
     assert dry_run["timing_evidence"]["evidence_scope"].startswith("synthetic dry-run structure")
     assert not dry_run["serialization"]["pilot_launched"]
     manifest = json.loads((root / "manifest.json").read_text())
-    assert len(manifest["expected_runs"]) == 14
-    assert len({row["run_id"] for row in manifest["expected_runs"]}) == 14
+    assert len(manifest["expected_runs"]) == 15
+    assert len({row["run_id"] for row in manifest["expected_runs"]}) == 15
 
 
 def _refinement_timing_projection_followup(config, phases, entries, evidence, tmp_path):
@@ -1647,8 +1861,8 @@ def _refinement_timing_projection_followup(config, phases, entries, evidence, tm
     for role, projection in changed_projection["levels"].items():
         assert projection["serial_evaluation_work_seconds"] == pytest.approx(
             sum(projection["per_program_seconds"].values()) * len(entries))
-    assert changed_projection["levels"]["screen"]["serial_evaluation_work_seconds"] == pytest.approx(14.0)
-    assert changed_projection["serial_evaluation_work_seconds"] == pytest.approx(42.0)
+    assert changed_projection["levels"]["screen"]["serial_evaluation_work_seconds"] == pytest.approx(16.0)
+    assert changed_projection["serial_evaluation_work_seconds"] == pytest.approx(48.0)
     damaged = dict(phases["verdict"]["artifacts"]["rs274"])
     damaged["evaluation_sha256"] = "sha256:" + "0" * 64
     phases["verdict"]["artifacts"]["rs274"] = damaged
