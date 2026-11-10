@@ -205,12 +205,12 @@
       "note": "Exp2 campaign launching from clean core: configs/campaign_suite.json sha256 460ae8d648dc2506c17556a9d7a98215d8c4e04da4f802cadf1b1bc01bfdd5c4; 39 tasks x 8 runs = 312; concurrency 6, TI_CPU_MAX_NUM_THREADS=4; verdict-only 0.125mm both dialects. Exp1 launched: configs/campaign_exp1_dev.json sha256 206283fe...; 72 runs (9 dev tasks), concurrency 3."
     },
     "T6.1": {
-      "status": "in_progress",
+      "status": "done_rerun_pending",
       "owner": "diffcam-worker-3 (T6.1b)",
       "branch": "task/T6.1-packets",
       "blocker": null,
       "next": "T6.1b packets from campaign outputs; D-15 primary endpoint selection",
-      "note": "exporter merged (58cf85c+1e333a6): status 'simulation-qualified'/'pending setup review' only; nominal dev packet reproduced byte-identically; production_refinement slot (absent-with-reason for nominal; required for final). MUST re-check against the final T4.1b refinement-link schema (D-04 may bump to /4: verdicts from 0.125 mm both dialects) before final packets. Final packets after T4.2 freeze. No hardware authorized."
+      "note": "T6.1b merged 4e4ec07; rerun on final campaign into a fresh root. Physical setup profile (machine/stickout/fixtures/material/controller) is an outstanding USER/operator input."
     },
     "T6.2": {
       "status": "in_progress",
