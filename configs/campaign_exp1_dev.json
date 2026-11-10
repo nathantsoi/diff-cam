@@ -1,0 +1,134 @@
+{
+  "schema": "diffcam-campaign/1",
+  "campaign_id": "t34-experiment1-init-axis",
+  "experiment": "experiment1",
+  "task_source": "suite_manifest",
+  "task_manifest": "configs/task_manifest.json",
+  "task_filter": {
+    "splits": ["dev"],
+    "families": ["facing_asymmetric", "pocket_island", "variable_width_depth"]
+  },
+  "concurrency": 2,
+  "conditions": [
+    {"condition": "annealed-adam", "seeds": [0]},
+    {"condition": "continuation-adam", "seeds": [0]}
+  ],
+  "runner_config": {
+    "schema": "diffcam-benchmark-runner/1",
+    "experiment": "pilot",
+    "task_source": "suite_manifest",
+    "grid_pitch_mm": 0.25,
+    "posted_refinement": {
+      "max_step_mm": 1.0,
+      "subdivisions": null,
+      "compute_bounds": true,
+      "safety_screen": true,
+      "max_samples_per_segment": 4096,
+      "record_stations": false
+    },
+    "exclusion_tolerance_mm3": 0.0,
+    "require_grid_exclusion_tolerance": true,
+    "arch": "cpu",
+    "precision": "f64",
+    "notes": "Experiment 1 on exactly 9 dev tasks: shared full-capacity initialization representation. Provisional development inputs; not protocol, universal timing, safety certification, or authorization for physical CNC motion.",
+    "seeds": [0, 1],
+    "candidate_evaluations": 24,
+    "timeout_s": 10800.0,
+    "timing_timeout_s": 10800.0,
+    "population_size": 6,
+    "refinement_check": {
+      "enabled": false,
+      "verdict_step_mm": 0.125,
+      "screen_step_mm": 1.0,
+      "convergence_step_mm": 0.25,
+      "parallel_jobs": 2,
+      "max_rss_bytes_per_job": 8589934592,
+      "poll_interval_s": 1.0,
+      "timeout_s": 10800.0
+    },
+    "campaign_verdict_only": true,
+    "validation_interval": 4,
+    "max_validation_calls": 6,
+    "max_generations": null,
+    "learning_rate": 0.005,
+    "time_weight": 0.01,
+    "time_weight_note": "provisional dev pilot value (D-11), not protocol",
+    "air_time_weight": 0.01,
+    "air_time_weight_note": "provisional dev pilot value (D-11), not protocol",
+    "reference_cycle_time_source": "task_nominal_cam_cycle_time",
+    "max_gradient_norm": 0.5,
+    "k_fixed": 40.0,
+    "k_smooth": 40.0,
+    "k_anneal_start": 20.0,
+    "k_anneal_end": 120.0,
+    "sigma0": 0.01,
+    "continuation_adam": {
+      "shift": "on",
+      "backtracking": "on",
+      "calibration_eta": 0.25,
+      "calibration_delta_max": 0.25,
+      "calibration_disagreement_floor": 0.000001,
+      "calibration_band": {
+        "region": "stock",
+        "minimum_mm": 0.0,
+        "maximum_mm": 2.0,
+        "rationale": "Explicit physical near-surface band in millimetres; no automatic widening or trust-region claim"
+      },
+      "backtracking_retries": 2,
+      "backtracking_shrink": 0.5,
+      "backtracking_learning_rate_min": 0.0000625,
+      "backtracking_learning_rate_max": 0.01,
+      "initial_loss_shift": 0.0
+    }
+  },
+  "initialization": {
+    "provisional": true,
+    "notes": "Exp1 only: 9 dev tasks. Every arm uses zero-base DeltaResidual with K=T and 1 mm scale, unbounded at that scale. Each arm retains its own segment-kind/feed template. Invalid realizations remain failed at the requested seed without redraw.",
+    "representation": {
+      "kind": "delta_residual_k_equals_t",
+      "base": "zero",
+      "scale_mm": 1.0,
+      "bounds": null
+    },
+    "straight_line_init": {
+      "start": "stock_bbox_min_at_cam_min_cutting_z",
+      "end": "stock_bbox_max_at_cam_min_cutting_z",
+      "segment_placement": "uniform",
+      "feed_and_rapid_entry": "retain CAM feed values and require a safe above-stock rapid entry and plunge before floor-level motion",
+      "same_segment_count_and_k": true,
+      "safe_rapid_entry": true,
+      "respect_task_feed_limits": true,
+      "efficiency_not_required": true
+    },
+    "random_init": {
+      "parameter_space": "delta",
+      "distribution": {
+        "kind": "gaussian",
+        "detail": "iid"
+      },
+      "scale": {
+        "fraction": 0.05,
+        "reference": {
+          "kind": "stock_xy_extent",
+          "description": "Euclidean diagonal of the declared stock XY envelope in millimetres; Gaussian per-vertex standard deviation, not a rejection cutoff",
+          "units": "mm"
+        }
+      },
+      "seed_derivation_rule": {
+        "algorithm": "sha256_v1",
+        "root_seed": 17,
+        "input": "task_hash,declaration_hash,root_seed,seed",
+        "per_seed_rule": "first_8_bytes_little_endian_uint64"
+      }
+    },
+    "methods": [
+      {"condition": "annealed-adam", "init": "experiment1_cam", "seeds": [0]},
+      {"condition": "annealed-adam", "init": "straight_line", "seeds": [0]},
+      {"condition": "annealed-adam", "init": "random", "seeds": [0, 1]},
+      {"condition": "continuation-adam", "init": "experiment1_cam", "seeds": [0]},
+      {"condition": "continuation-adam", "init": "straight_line", "seeds": [0]},
+      {"condition": "continuation-adam", "init": "random", "seeds": [0, 1]}
+    ],
+    "exploratory_cam_perturbation": []
+  }
+}

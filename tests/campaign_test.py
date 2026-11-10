@@ -287,3 +287,90 @@ def test_prototype_dry_run_reports_declared_workload_not_execution(tmp_path):
     assert result["run_count"] == 2 and result["launched"] is False
     assert result["cost_estimate"]["estimated_wall_seconds"] == 34.0
     assert not list((tmp_path / "dry").glob("tasks/*/*/run.json"))
+
+
+def _exp1_prototype_config():
+    document = json.loads((ROOT / "configs/campaign_exp1_dev.json").read_text())
+    document.update(task_source="prototype_analytic", prototype_unit_test=True)
+    document["runner_config"]["task_source"] = "prototype_analytic"
+    document["runner_config"]["campaign_verdict_only"] = False
+    document.pop("task_manifest")
+    return document
+
+
+def test_experiment1_selector_excludes_plain_cam_sidecars_and_cmaes(tmp_path):
+    document = _exp1_prototype_config()
+    document["initialization"]["exploratory_cam_perturbation"] = [{
+        "variant_suffix": "cam_perturbed_test",
+        "parent": {"condition": "annealed-adam", "init": "cam", "seed": 0},
+        "cam_perturbed_init": {
+            "parameter_space": "theta",
+            "distribution": {"kind": "gaussian", "detail": "iid"},
+            "scale": {"fraction": 0.0001, "reference": {
+                "kind": "cam_delta_norm", "description": "unit-only sidecar exclusion",
+                "units": "mm"}},
+            "seed_derivation_rule": {
+                "algorithm": "sha256_v1", "root_seed": 101,
+                "input": "task_hash,declaration_hash,root_seed,seed",
+                "per_seed_rule": "first_8_bytes_little_endian_uint64"},
+            "exploratory": True, "excluded_from_init_axis_claims": True,
+        },
+    }]
+    path = _write_config(tmp_path, document)
+    prepared = campaign._prepare(campaign._load(path), tmp_path / "exp1", resume=False, dry_run=True)
+    assert len(prepared["jobs"]) == 8
+    footprints = {(job["entry"]["method"], job["entry"]["init"], job["entry"]["seed"])
+                  for job in prepared["jobs"]}
+    methods = ("annealed-adam", "continuation-adam")
+    assert footprints == {
+        (method, init, seed) for method in methods for init, seed in (
+            ("experiment1_cam", 0), ("straight_line", 0), ("random", 0), ("random", 1))
+    }
+    assert all(job["entry"].get("scope") != "exploratory_cam_perturbation"
+               for job in prepared["jobs"])
+    assert prepared["plan_core"]["experiment"] == "experiment1"
+    assert prepared["plan_core"]["comparisons"] == []
+    assert all(job["entry"]["run_id"].endswith("-" + job["entry"]["init"])
+               for job in prepared["jobs"])
+    raw_entries = runner._plan_entries(
+        prepared["jobs"][0]["config"], prepared["jobs"][0]["task"], "dev", None)
+    assert any(entry["init"] == "cam" for entry in raw_entries)
+    assert any(entry["scope"] == "exploratory_cam_perturbation" for entry in raw_entries)
+    assert all(job["entry"]["config_override"] == {} for job in prepared["jobs"])
+    invalid = _exp1_prototype_config()
+    invalid["conditions"].append({"condition": "hard-cmaes", "seeds": [0]})
+    with pytest.raises(campaign.CampaignError, match="experiment1 allows only"):
+        campaign._load(_write_config(tmp_path, invalid))
+
+
+def test_experiment1_dev_dry_run_has_72_runs_and_exp2_still_has_312(tmp_path):
+    exp1 = campaign._prepare(campaign._load(ROOT / "configs/campaign_exp1_dev.json"),
+                             tmp_path / "exp1", resume=False, dry_run=True)
+    assert len(exp1["tasks"]) == 9 and len(exp1["jobs"]) == 72
+    assert {row["task_split"] for row in exp1["tasks"]} == {"dev"}
+    per_task = {}
+    for job in exp1["jobs"]:
+        task_id = job["entry"]["task_id"]
+        per_task.setdefault(task_id, []).append(job["entry"])
+        assert job["entry"]["init"] in ("experiment1_cam", "straight_line", "random")
+        assert job["entry"]["method"] in ("annealed-adam", "continuation-adam")
+        assert job["entry"]["run_id"].endswith("-" + job["entry"]["init"])
+    assert len(per_task) == 9
+    for entries in per_task.values():
+        assert len(entries) == 8
+        for method in ("annealed-adam", "continuation-adam"):
+            counter = {(entry["init"], entry["seed"]) for entry in entries
+                       if entry["method"] == method}
+            assert counter == {("experiment1_cam", 0), ("straight_line", 0),
+                               ("random", 0), ("random", 1)}
+    exp2 = campaign._prepare(campaign._load(ROOT / "configs/campaign_suite.json"),
+                             tmp_path / "exp2", resume=False, dry_run=True)
+    assert len(exp2["jobs"]) == 312 and len(exp2["tasks"]) == 39
+    continuations = [job for job in exp2["jobs"] if job["entry"]["method"] == "continuation-adam"]
+    assert len(continuations) == 39
+    assert len({job["entry"]["task_id"] for job in continuations}) == 39
+    assert all(job["entry"]["init"] == "cam" and job["entry"]["seed"] == 0
+               for job in continuations)
+    assert all(job["config"]["time_weight"] == 0.01
+               and job["config"]["air_time_weight"] == 0.01 for job in exp2["jobs"])
+    assert "experiment" not in exp2["plan_core"]

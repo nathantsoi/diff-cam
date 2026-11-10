@@ -2,6 +2,7 @@
 
 import dataclasses
 import json
+import math
 import os
 import pathlib
 import subprocess
@@ -363,6 +364,135 @@ def test_optimizer_accounting_run_id_and_artifact_evidence(tmp_path):
     assert cma_out.optimizer_result.initial_candidate_id == "accounting-cma:init"
     assert cma_eval.ledger.entries[0]["candidate_id"] == "accounting-cma:init"
     assert cma_eval.ledger.entries[0]["objective_kind"] == "hard"
+
+
+def _exp1_variant_motion(task, motion, variant):
+    """Small valid typed coordinate variants; no physical performance claim."""
+    if variant in ("cam", "duplicated"):
+        return motion
+    positions = np.asarray([motion.initial_state.position_mm,
+                            *[segment.end_mm for segment in motion.segments]], dtype=np.float64).copy()
+    indices = np.arange(1, len(positions) - 1)
+    positions[1:-1, 0] += 0.01 * np.sin(indices * 1.7)
+    positions[1:-1, 1] += 0.005 * np.cos(indices * 0.6)
+    segments = []
+    for index, segment in enumerate(motion.segments):
+        feed_scale = 0.999 if variant == "slower" else 1.0
+        feed = None if segment.feed_mm_s is None else segment.feed_mm_s * feed_scale
+        start, end = positions[index], positions[index + 1]
+        speed = (feed if segment.kind == C.SegmentKind.FEED
+                 else task.limits.rapid_mm_s)
+        duration = math.dist(start, end) / speed
+        segments.append(C.Segment(
+            id=segment.id, kind=segment.kind, start_mm=tuple(start), end_mm=tuple(end),
+            duration_s=duration, feed_mm_s=feed, tag=segment.tag, source_line=segment.source_line,
+        ))
+    result = C.MotionPlan(frame=motion.frame, initial_state=motion.initial_state,
+                          segments=tuple(segments), timing_rule=motion.timing_rule,
+                          dt_s=motion.dt_s, provenance=f"typed Exp1 fixture: {variant}")
+    result.validate_for_task(task)
+    return result
+
+
+def test_experiment1_reconstructs_each_initializer_and_shares_parameterization_hashes():
+    task, motion, _params = runner._prototype()
+    motions = [_exp1_variant_motion(task, motion, variant)
+               for variant in ("cam", "duplicated", "perturbed", "slower")]
+    variants = [runner._experiment1_parameterization(source, task) for source in motions]
+    hashes = [C.content_hash(R.parameterization_metadata(parameterization))
+              for parameterization in variants]
+    assert len(set(hashes)) == 1
+    for source, parameterization in zip(motions, variants):
+        representation = parameterization.experiment1_metadata
+        assert representation["representation"] == "delta_residual_k_equals_t_zero_base"
+        assert representation["scale_mm"] == 1.0 and representation["bounds"] is None
+        assert representation["n_segments"] == len(source.segments)
+        assert parameterization.num_steps == len(source.segments)
+        theta = np.asarray(representation["initial_theta"], dtype=np.float64)
+        assert C.content_hash(theta.tolist()) == representation["initial_theta_sha256"]
+        source_positions = np.asarray([source.initial_state.position_mm,
+                                       *[segment.end_mm for segment in source.segments]])
+        np.testing.assert_allclose(theta.reshape((-1, 3)),
+                                   np.diff(source_positions, axis=0), rtol=0.0, atol=1e-12)
+        expected_work = np.asarray([
+            task.work_to_machine.inverse().apply(point) for point in source_positions
+        ])
+        np.testing.assert_allclose(parameterization.positions(theta),
+                                   expected_work, rtol=0.0, atol=1e-10)
+        assert representation["source_motion_hash"] == source.motion_hash
+        assert len(representation["feed_and_kind_template"]) == len(source.segments)
+        for segment, raw_template in zip(source.segments, representation["feed_and_kind_template"]):
+            assert raw_template["kind"] == segment.kind.value
+            assert raw_template["feed_mm_s"] == segment.feed_mm_s
+    paired_theta = [np.asarray(parameterization.experiment1_metadata["initial_theta"])
+                    for parameterization in variants]
+    assert paired_theta[0].tolist() == paired_theta[1].tolist()
+    assert not np.array_equal(paired_theta[0], paired_theta[2])
+    assert np.array_equal(paired_theta[2], paired_theta[-1])  # Same positions, different feeds.
+    assert all(np.all(np.isfinite(theta)) for theta in paired_theta)
+    assert variants[2].experiment1_metadata["feed_and_kind_template"] != variants[-1].experiment1_metadata["feed_and_kind_template"]
+
+
+def _experiment1_evaluator_from_motion(motion, task):
+    evaluator = _scalar_continuation_evaluator()
+    parameters = runner._experiment1_parameterization(motion, task)
+    evaluator.parameterization = parameters
+    return evaluator
+
+
+def test_experiment1_dispatch_uses_reconstructed_initial_theta_and_metadata():
+    task, motion, _params = runner._prototype()
+    evaluator = _experiment1_evaluator_from_motion(motion, task)
+    config = _continuation_test_config()
+    initial_theta = evaluator.parameterization.experiment1_metadata["initial_theta"]
+    outcome = runner._evaluate_outcome(
+        "annealed-adam", evaluator, config, seed=0, run_id="exp1_shared_start")
+    assert np.allclose(outcome.initial_theta, initial_theta, rtol=0.0, atol=1e-12)
+    assert outcome.optimizer_result.initial_candidate_id == "exp1_shared_start:init"
+    with pytest.raises(runner.RunnerError, match="experiment1 supports only annealed-adam and continuation-adam"):
+        runner._evaluate_outcome("hard-cmaes", evaluator, config, seed=0, run_id="not-experiment1")
+
+
+def test_experiment1_cam_initializer_and_declared_metadata_preserve_plain_cam():
+    task, motion, params = runner._prototype()
+    config = _base()
+    config["initialization"] = {
+        "representation": {"kind": "delta_residual_k_equals_t", "base": "zero",
+                           "scale_mm": 1.0, "bounds": None},
+        "methods": [{"condition": "annealed-adam", "init": "experiment1_cam", "seeds": [0]}],
+    }
+    entry = {"method": "annealed-adam", "init": "experiment1_cam", "seed": 0}
+    constructed, parameters, seed_record = runner._initializer_motion(
+        config, task, motion, params, entry)
+    assert constructed is motion
+    assert parameters.experiment1_metadata["source_motion_hash"] == motion.motion_hash
+    assert seed_record["experiment1"]["n_segments"] == len(motion.segments)
+    assert parameters.parameter_shape == (len(motion.segments), 3)
+    assert parameters.num_params == len(motion.segments) * 3
+    expected_work = np.asarray([
+        task.work_to_machine.inverse().apply(point) for point in (
+            [motion.initial_state.position_mm] + [segment.end_mm for segment in motion.segments])
+    ])
+    np.testing.assert_allclose(parameters.positions(np.zeros(parameters.num_params)),
+                               np.repeat(expected_work[:1], len(expected_work), axis=0),
+                               rtol=0.0, atol=1e-12)
+    np.testing.assert_allclose(parameters.positions(parameters.experiment1_metadata["initial_theta"]),
+                               expected_work, rtol=0.0, atol=1e-10)
+    metadata = runner._entry_initialization_metadata(entry, parameters)
+    assert metadata["excluded_from_init_axis_claims"] is False
+    assert metadata["experiment1"]["bounds"] is None
+    assert metadata["experiment1"]["feed_and_kind_template"]
+    assert "initial_theta" not in metadata["experiment1"]
+    assert metadata["experiment1"]["parameterization_sha256"] == C.content_hash(
+        R.parameterization_metadata(parameters))
+    for case in ({"base": "cam"}, {"scale_mm": 0.01}, {"scale_mm": True}, {"bounds": [-1.0, 1.0]}):
+        invalid = json.loads(json.dumps(config))
+        invalid["initialization"]["representation"].update(case)
+        with pytest.raises(runner.RunnerError, match="Exp1 requires a zero-base"):
+            runner._plan_entries(invalid, task, "dev", None)
+    unchanged_motion, unchanged_params, unchanged_seed = runner._initializer_motion(
+        _base(), task, motion, params, {"method": "annealed-adam", "init": "cam", "seed": 0})
+    assert unchanged_motion is motion and unchanged_params is params and unchanged_seed is None
 
 
 def _continuation_test_config():
