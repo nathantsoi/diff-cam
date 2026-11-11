@@ -41,6 +41,7 @@ from verification.simulator_export import (
     narrow_uuid_u64,
     reconstruct_motion_plan,
     safe_resolve_under,
+    serialize_plan_for_viewer,
 )
 
 
@@ -145,6 +146,15 @@ def test_export_rustcnc_container_matches_rustcnc_cam_contract(
         expected_cam_sha = hashlib.sha256(cam_bytes).hexdigest()
 
         for setup, entry in zip(cam_doc["setups"], manifest["entries"]):
+            stock_body = setup["stock"]["body"]
+            assert stock_body["mode"] == "fixed_box"
+            assert stock_body["x_mode"] == "model"
+            assert stock_body["y_mode"] == "model"
+            assert stock_body["z_mode"] == "model"
+            assert stock_body["ground_at_model_origin"] is True
+            assert "override_expr" in stock_body["x_offset"]
+            assert "override_expr" in stock_body["z_offset"]
+
             op = setup["operations"][0]
             assert entry["id"] == op["id"]
             assert entry["inputs"]["design"] == expected_design_sha
@@ -198,6 +208,20 @@ def test_export_camotics_and_watertight_binary_stl(tmp_path: Path, sample_test_b
                 directed_edges.add((u, v))
         for u, v in directed_edges:
             assert (v, u) in directed_edges
+
+
+def test_serialize_plan_for_viewer_includes_cwe_and_chipload_telemetry(sample_test_bundle) -> None:
+    plan_json = serialize_plan_for_viewer(sample_test_bundle, sample_test_bundle.nominal_motion)
+    eng = plan_json["engagement_summary"]
+    assert eng["engaged_time_s"] > 0.0
+    assert eng["air_cut_time_s"] > 0.0
+    assert eng["rapid_time_s"] > 0.0
+    assert eng["removed_volume_mm3"] > 1000.0
+    assert eng["engaged_pct"] + eng["air_cut_pct"] + eng["rapid_pct"] == pytest.approx(100.0, abs=0.05)
+    assert len(plan_json["segments"]) == len(sample_test_bundle.nominal_motion.segments)
+    cut_segs = [s for s in plan_json["segments"] if s["kind"] == "cut" and s["engaged"]]
+    assert len(cut_segs) > 10
+    assert all(s["hex_mm"] > 0.0 and s["ae_pct"] > 0.0 for s in cut_segs)
 
 
 def test_viewer_frontend_has_zero_unsafe_dom_or_storage_sinks() -> None:

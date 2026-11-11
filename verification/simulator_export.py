@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
+from algorithms.chipload_opt import SubsegmentedCWEModel, analyze_plan_engagement
 from algorithms.rl_policy import DirectSegmentActionMap
 from benchmarks import contracts as C
 from benchmarks.milling_suite import (
@@ -115,6 +116,10 @@ def reconstruct_motion_plan(
         return bundle.nominal_motion
 
     theta_arr = np.asarray(best_theta, dtype=np.float64).reshape(-1)
+    if method_name in ("DiffCAM-Chipload", "Chipload-STE"):
+        return SubsegmentedCWEModel(bundle).to_motion_plan(
+            theta_arr, provenance="diffcam:chipload_ste"
+        )
     task = bundle.task
     nom = bundle.nominal_motion
 
@@ -598,14 +603,14 @@ def _build_rustcnc_setup(
                 "x": {"default": "", "override_expr": _fmt_mm(lx)},
                 "y": {"default": "", "override_expr": _fmt_mm(ly)},
                 "z": {"default": "", "override_expr": _fmt_mm(lz)},
-                "x_mode": "center",
-                "y_mode": "center",
-                "z_mode": "center",
-                "x_offset": {"default": "0 mm"},
-                "y_offset": {"default": "0 mm"},
-                "z_offset": {"default": "0 mm"},
+                "x_mode": "model",
+                "y_mode": "model",
+                "z_mode": "model",
+                "x_offset": {"default": "0 mm", "override_expr": _fmt_mm(smin[0])},
+                "y_offset": {"default": "0 mm", "override_expr": _fmt_mm(smin[1])},
+                "z_offset": {"default": "0 mm", "override_expr": _fmt_mm(smin[2])},
                 "rounding": {"default": "0 mm"},
-                "ground_at_model_origin": False,
+                "ground_at_model_origin": True,
             },
             "axis_enabled": False,
             "specific_cutting_force": {"default": "1500 N/mm2"},
@@ -1042,16 +1047,60 @@ def translate_binary_stl_bytes(stl_bytes: bytes, offset_mm: Sequence[float]) -> 
     return stl_bytes[:84] + recs.tobytes()
 
 
-def serialize_plan_for_viewer(bundle: MillingTaskBundle, plan: C.MotionPlan) -> Dict[str, Any]:
-    """Serialize ``plan`` segments, cumulative timing, and cutter parameters for WebGL playback."""
+def _compute_xy_shift_vs_nominal(bundle: MillingTaskBundle, plan: C.MotionPlan) -> Tuple[float, float]:
+    """Compute ``(mean_xy_shift_mm, max_xy_shift_mm)`` of ``plan`` cutting waypoints vs. nominal."""
+    if plan == bundle.nominal_motion:
+        return 0.0, 0.0
     inv = bundle.task.work_to_machine.inverse().apply
+    nom_segs = [
+        (inv(s.start_mm), inv(s.end_mm))
+        for s in bundle.nominal_motion.segments
+        if s.kind != C.SegmentKind.RAPID
+    ]
+    if not nom_segs:
+        return 0.0, 0.0
+    a_xy = np.asarray([[p0[0], p0[1]] for p0, _ in nom_segs], dtype=np.float64)
+    b_xy = np.asarray([[p1[0], p1[1]] for _, p1 in nom_segs], dtype=np.float64)
+    d_xy = b_xy - a_xy
+    l2 = np.sum(d_xy * d_xy, axis=1)
+
+    dists: List[float] = []
+    for seg in plan.segments:
+        if seg.kind == C.SegmentKind.RAPID:
+            continue
+        for pt in (inv(seg.start_mm), inv(seg.end_mm)):
+            px, py = float(pt[0]), float(pt[1])
+            q = np.array([px, py], dtype=np.float64)
+            diff = q[None, :] - a_xy
+            proj = np.where(
+                l2 > 1e-12,
+                np.clip(np.sum(diff * d_xy, axis=1) / np.maximum(l2, 1e-12), 0.0, 1.0),
+                0.0,
+            )
+            closest = a_xy + proj[:, None] * d_xy
+            d_min = float(np.min(np.hypot(q[0] - closest[:, 0], q[1] - closest[:, 1])))
+            dists.append(d_min)
+    if not dists:
+        return 0.0, 0.0
+    return round(float(np.mean(dists)), 4), round(float(np.max(dists)), 4)
+
+
+def serialize_plan_for_viewer(bundle: MillingTaskBundle, plan: C.MotionPlan) -> Dict[str, Any]:
+    """Serialize ``plan`` segments, cumulative timing, CWE, and chipload telemetry for WebGL playback."""
+    inv = bundle.task.work_to_machine.inverse().apply
+    eng_report = analyze_plan_engagement(bundle, plan)
+    eng_segs = eng_report["segments"]
+    eng_summary = eng_report["summary"]
+    mean_xy_shift, max_xy_shift = _compute_xy_shift_vs_nominal(bundle, plan)
+
     t_cursor = 0.0
+    cum_removed = 0.0
     segments_json: List[Dict[str, Any]] = []
     cut_feeds: List[float] = []
     cut_len = 0.0
     rapid_len = 0.0
 
-    for seg in plan.segments:
+    for seg, se in zip(plan.segments, eng_segs):
         sw = inv(seg.start_mm)
         ew = inv(seg.end_mm)
         length = math.dist(sw, ew)
@@ -1063,6 +1112,8 @@ def serialize_plan_for_viewer(bundle: MillingTaskBundle, plan: C.MotionPlan) -> 
         else:
             cut_len += length
             cut_feeds.append(feed_mm_s)
+        rem_k = float(se["removed_mm3"])
+        cum_removed += rem_k
         segments_json.append(
             {
                 "id": seg.id,
@@ -1076,6 +1127,18 @@ def serialize_plan_for_viewer(bundle: MillingTaskBundle, plan: C.MotionPlan) -> 
                 "t0_s": round(t_cursor, 5),
                 "t1_s": round(t_cursor + dur, 5),
                 "duration_s": round(dur, 5),
+                "engaged": bool(se["engaged"]),
+                "engaged_fraction": float(se["engaged_fraction"]),
+                "engaged_time_s": float(se["engaged_time_s"]),
+                "air_cut_time_s": float(se["air_cut_time_s"]),
+                "removed_mm3": round(rem_k, 4),
+                "cum_removed_mm3": round(cum_removed, 3),
+                "mrr_mm3_s": float(se["mrr_mm3_s"]),
+                "ae_mm": float(se["ae_mm"]),
+                "ae_pct": float(se["ae_pct"]),
+                "phi_eng_deg": float(se["phi_eng_deg"]),
+                "fz_mm": float(se["fz_mm"]),
+                "hex_mm": float(se["hex_mm"]),
             }
         )
         t_cursor += dur
@@ -1089,6 +1152,9 @@ def serialize_plan_for_viewer(bundle: MillingTaskBundle, plan: C.MotionPlan) -> 
         "min_cut_feed_mm_s": round(min(cut_feeds), 3) if cut_feeds else 0.0,
         "max_cut_feed_mm_s": round(max(cut_feeds), 3) if cut_feeds else 0.0,
         "mean_cut_feed_mm_s": round(sum(cut_feeds) / len(cut_feeds), 3) if cut_feeds else 0.0,
+        "mean_xy_shift_mm": mean_xy_shift,
+        "max_xy_shift_mm": max_xy_shift,
+        "engagement_summary": eng_summary,
         "initial_pos": [
             round(float(inv(plan.initial_state.position_mm)[0]), 4),
             round(float(inv(plan.initial_state.position_mm)[1]), 4),
