@@ -649,3 +649,179 @@ def infer_case_nominal_doc_woc_mm(
         else:
             woc = 0.45 * cutter_diameter_mm
     return float(doc), float(woc)
+
+
+# ---------------------------------------------------------------------------
+# Multi-tool extensions (Drills, Spot Drills, Reamers, Chamfer & Face Mills)
+# ---------------------------------------------------------------------------
+DRILL_DIAMETER_IPT_TABLE_IN: Tuple[Tuple[float, float], ...] = (
+    (0.03937, 0.00045),  # 1.0 mm
+    (0.06250, 0.00075),  # 1/16"
+    (0.12500, 0.00145),  # 1/8"
+    (0.18750, 0.00210),  # 3/16"
+    (0.25000, 0.00275),  # 1/4"
+    (0.37500, 0.00385),  # 3/8"
+    (0.50000, 0.00480),  # 1/2"
+    (0.75000, 0.00640),  # 3/4"
+)
+
+
+@dataclass(frozen=True)
+class HoleMakingFeedsSpeedsResult:
+    """Solved spindle RPM, axial feed, peck schedule, and thrust/power for hole-making."""
+
+    stock_material_id: str
+    tool_material_id: str
+    operation_kind: str
+    diameter_mm: float
+    flutes: int
+    hole_depth_mm: float
+    spindle_rpm: float
+    surface_speed_sfm: float
+    fz_mm: float
+    feed_per_rev_mm: float
+    plunge_feed_mm_s: float
+    plunge_feed_mm_min: float
+    peck_required: bool
+    peck_depth_mm: float
+    num_pecks: int
+    spindle_power_kw: float
+    thrust_force_n: float
+    active_limit: str
+
+
+def lookup_drill_reference_ipt_in(diameter_in: float) -> float:
+    """Clamped piecewise-linear lookup ``Q(drill, D_in)`` in inches/flute."""
+    d = float(diameter_in)
+    table = DRILL_DIAMETER_IPT_TABLE_IN
+    if d <= table[0][0]:
+        return float(table[0][1])
+    if d >= table[-1][0]:
+        return float(table[-1][1])
+    for i in range(len(table) - 1):
+        d0, q0 = table[i]
+        d1, q1 = table[i + 1]
+        if d0 <= d <= d1:
+            return lerp_clamped(d0, d1, q0, q1, d)
+    return float(table[-1][1])
+
+
+def compute_holemaking_feeds_and_speeds(
+    stock_material_id: str = "al_6061_t6",
+    tool_material_id: str = "carbide_coated",
+    diameter_mm: float = 5.0,
+    flutes: int = 2,
+    hole_depth_mm: float = 8.0,
+    operation_kind: str = "drill",
+    machine: Optional[MachineEnvelopeSpec] = None,
+    aggressiveness: float = 1.0,
+) -> HoleMakingFeedsSpeedsResult:
+    """Compute physics-grounded RPM, axial plunge feed, and peck depth for hole-making."""
+    stock = STOCK_MATERIALS.get(stock_material_id, STOCK_MATERIALS["al_6061_t6"])
+    tool_mat = TOOL_MATERIALS.get(tool_material_id, TOOL_MATERIALS["carbide_coated"])
+    machine_spec = machine or MachineEnvelopeSpec()
+    aggr = float(max(0.35, min(2.0, aggressiveness)))
+
+    d_mm = float(max(0.5, diameter_mm))
+    d_in = d_mm / INCH_MM
+    depth_mm = float(max(0.2, hole_depth_mm))
+    op = (operation_kind or "drill").lower()
+
+    # Drilling / spot-drilling / reaming surface speed derating relative to side milling
+    if "ream" in op:
+        sfm_op_mult = 0.45
+        ipt_op_mult = 1.35
+    elif "spot" in op or "center" in op:
+        sfm_op_mult = 0.65
+        ipt_op_mult = 0.80
+    elif "tap" in op:
+        sfm_op_mult = 0.22
+        ipt_op_mult = 1.0
+    else:
+        sfm_op_mult = 0.60
+        ipt_op_mult = 1.0
+
+    sfm_target = stock.sfm_carbide * tool_mat.sfm_mult * sfm_op_mult * (0.80 + 0.20 * aggr)
+    rpm_raw = (12.0 * sfm_target) / (math.pi * max(d_in, 1e-6))
+    active_limit = "Optimal Drill Chipload"
+    if rpm_raw > machine_spec.max_rpm:
+        rpm = float(machine_spec.max_rpm)
+        active_limit = "Spindle Max RPM"
+    elif rpm_raw < machine_spec.min_rpm:
+        rpm = float(machine_spec.min_rpm)
+        active_limit = "Spindle Min RPM"
+    else:
+        rpm = float(round(rpm_raw))
+    sfm = (rpm * math.pi * d_in) / 12.0
+
+    q_d = lookup_drill_reference_ipt_in(d_in)
+    q_ref = lookup_drill_reference_ipt_in(0.50)
+    diam_ratio = q_d / max(q_ref, 1e-12)
+    mat_chip = (
+        stock.ipt_carbide_in * tool_mat.coat_ipt_mult
+        if tool_mat.is_carbide
+        else stock.ipt_hss_in * reduce_ipt_factor(tool_mat.ipt_mult, stock.material_ipt_reduction)
+    )
+    # Deep-hole chip-evacuation derating above 3xD
+    aspect = depth_mm / d_mm
+    depth_derate = 1.0 if aspect <= 3.0 else max(0.65, 1.0 - 0.08 * (aspect - 3.0))
+    fz_in = diam_ratio * mat_chip * ipt_op_mult * depth_derate * aggr
+    fz_mm = fz_in * INCH_MM
+    f_rev_mm = fz_mm * max(1, int(flutes))
+    feed_mm_min = rpm * f_rev_mm
+    feed_mm_s = feed_mm_min / 60.0
+
+    # Axial MRR = (pi D^2 / 4) * feed, spindle power & drill thrust bounds
+    area_in2 = 0.25 * math.pi * (d_in ** 2)
+    mrr_in3_min = area_in2 * (feed_mm_min / INCH_MM)
+    power_kw = mrr_in3_min * stock.kp_hp_min_in3 * 1.15 * HP_TO_KW
+    # Empirical Shaw/Altintas axial thrust estimation proportional to hardness * D * f_rev
+    thrust_n = 1.35 * stock.hardness_hb * d_mm * f_rev_mm
+
+    u_scale = 1.0
+    if feed_mm_s > machine_spec.max_feed_mm_s * 0.999:
+        u_scale = min(u_scale, (machine_spec.max_feed_mm_s * 0.999) / feed_mm_s)
+        active_limit = "Machine Max Feed"
+    if power_kw > machine_spec.spindle_power_kw:
+        u_scale = min(u_scale, machine_spec.spindle_power_kw / power_kw)
+        active_limit = "Spindle Power"
+    if thrust_n > machine_spec.max_cutting_force_n * 0.99:
+        u_scale = min(u_scale, (machine_spec.max_cutting_force_n * 0.99) / thrust_n)
+        active_limit = "Drill Thrust Force"
+
+    u_scale = float(max(0.05, min(1.0, u_scale)))
+    fz_mm *= u_scale
+    f_rev_mm *= u_scale
+    feed_mm_s *= u_scale
+    feed_mm_min *= u_scale
+    power_kw *= u_scale
+    thrust_n *= u_scale
+
+    peck_required = ("drill" in op and "spot" not in op and "center" not in op) and (aspect > 2.2)
+    if peck_required:
+        peck_depth = max(0.8, min(depth_mm, (1.25 if stock.kp_hp_min_in3 < 0.5 else 0.75) * d_mm))
+        num_pecks = int(math.ceil(depth_mm / peck_depth))
+    else:
+        peck_depth = depth_mm
+        num_pecks = 1
+
+    return HoleMakingFeedsSpeedsResult(
+        stock_material_id=stock.id,
+        tool_material_id=tool_mat.id,
+        operation_kind=op,
+        diameter_mm=round(d_mm, 4),
+        flutes=int(flutes),
+        hole_depth_mm=round(depth_mm, 4),
+        spindle_rpm=round(rpm, 1),
+        surface_speed_sfm=round(sfm, 2),
+        fz_mm=round(fz_mm, 5),
+        feed_per_rev_mm=round(f_rev_mm, 5),
+        plunge_feed_mm_s=round(feed_mm_s, 4),
+        plunge_feed_mm_min=round(feed_mm_min, 2),
+        peck_required=bool(peck_required),
+        peck_depth_mm=round(peck_depth, 4),
+        num_pecks=int(num_pecks),
+        spindle_power_kw=round(power_kw, 4),
+        thrust_force_n=round(thrust_n, 2),
+        active_limit=active_limit,
+    )

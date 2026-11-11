@@ -436,6 +436,7 @@ def build_milling_task_bundle(
     voxel_mm: float = DEFAULT_VOXEL_MM,
     timing_rule: C.TimingRule = C.TimingRule.BLENDED_ACCEL_BOUNDED,
     seed_engine: str = "v2",
+    tool_override: Optional[C.ToolAssembly] = None,
 ) -> MillingTaskBundle:
     """Build one validated TaskSpec + clean-room MIT nominal MotionPlan (``v2`` default, ``v1`` legacy)."""
     shape = tuple(
@@ -466,7 +467,7 @@ def build_milling_task_bundle(
         },
         frame=C.Frame.WORK,
     )
-    tool = C.ToolAssembly(
+    tool = tool_override or C.ToolAssembly(
         cutter_kind=C.CutterKind.FLAT,
         cutter_radius_mm=2.5,
         flute_length_mm=12.0,

@@ -228,6 +228,9 @@ def analyze_plan_engagement(
     bundle: MillingTaskBundle,
     plan: C.MotionPlan,
     spec: Optional[ChiploadSpec] = None,
+    *,
+    initial_stock_z: Optional[np.ndarray] = None,
+    return_final_stock: bool = False,
 ) -> Dict[str, Any]:
     """Compute high-resolution per-segment & summary engaged/air/CWE/chipload telemetry.
 
@@ -238,7 +241,8 @@ def analyze_plan_engagement(
     cfg = spec or ChiploadSpec(cutter_diameter_mm=2.0 * float(bundle.task.tool.cutter_radius_mm))
     pitch = float(cfg.dexel_pitch_mm)
     cell_area = pitch * pitch
-    xs, ys, z_stock, z_target = build_target_heightfield_25d(bundle, pitch_mm=pitch)
+    xs, ys, z_stock_default, z_target = build_target_heightfield_25d(bundle, pitch_mm=pitch)
+    z_stock = z_stock_default if initial_stock_z is None else np.asarray(initial_stock_z, dtype=np.float64).copy()
     nx, ny = z_stock.shape
     x0_grid = float(bundle.case.stock_min_mm[0])
     y0_grid = float(bundle.case.stock_min_mm[1])
@@ -482,7 +486,10 @@ def analyze_plan_engagement(
         "spindle_rpm": cfg.spindle_rpm,
         "flutes": cfg.flutes,
     }
-    return {"summary": summary, "segments": seg_records}
+    out: Dict[str, Any] = {"summary": summary, "segments": seg_records}
+    if return_final_stock:
+        out["final_stock_z"] = z_stock.copy()
+    return out
 
 
 def subdivide_motion_plan(
@@ -689,8 +696,13 @@ class SubsegmentedCWEModel:
         self,
         bundle: MillingTaskBundle,
         spec: Optional[ChiploadSpec] = None,
+        *,
+        initial_stock_z: Optional[np.ndarray] = None,
     ) -> None:
         self.bundle = bundle
+        self._initial_stock_z_override = (
+            None if initial_stock_z is None else np.asarray(initial_stock_z, dtype=np.float64).copy()
+        )
         self.task = bundle.task
         self.spec = spec or ChiploadSpec.from_feeds_and_speeds(bundle)
         self.base_motion = subdivide_motion_plan(
@@ -794,8 +806,13 @@ class SubsegmentedCWEModel:
         # 2.5D dexel grid for differentiable CWE forward/backward
         self.pitch = float(self.spec.dexel_pitch_mm)
         self.cell_area = self.pitch * self.pitch
-        self.xs, self.ys, self.z_init, self.z_target = build_target_heightfield_25d(
+        self.xs, self.ys, z_init_default, self.z_target = build_target_heightfield_25d(
             bundle, pitch_mm=self.pitch
+        )
+        self.z_init = (
+            z_init_default
+            if self._initial_stock_z_override is None
+            else self._initial_stock_z_override.copy()
         )
         self.nx, self.ny = self.z_init.shape
         self.x0_grid = float(bundle.case.stock_min_mm[0])
@@ -1347,6 +1364,7 @@ def shortcut_verified_air_detours(
     spec: Optional[ChiploadSpec] = None,
     *,
     mode: str = "rapid_bridge",
+    initial_stock_z: Optional[np.ndarray] = None,
 ) -> C.MotionPlan:
     """Collapse stock-sim-verified empty-air ``G1`` detours into straight chords or safe ``G0`` bridges."""
     if mode == "none" or len(plan.segments) < 4:
@@ -1354,7 +1372,8 @@ def shortcut_verified_air_detours(
 
     cfg = spec or ChiploadSpec.from_feeds_and_speeds(bundle)
     pitch = float(cfg.dexel_pitch_mm)
-    xs, ys, z_stock, _ = build_target_heightfield_25d(bundle, pitch_mm=pitch)
+    xs, ys, z_stock_default, _ = build_target_heightfield_25d(bundle, pitch_mm=pitch)
+    z_stock = z_stock_default if initial_stock_z is None else np.asarray(initial_stock_z, dtype=np.float64).copy()
     nx, ny = z_stock.shape
     x0_grid = float(bundle.case.stock_min_mm[0])
     y0_grid = float(bundle.case.stock_min_mm[1])
@@ -1588,36 +1607,42 @@ def optimize_chipload_trajectory(
     lr_xy: float = 0.08,
     lr_feed: float = 0.14,
     verify_posted: bool = True,
+    initial_stock_z: Optional[np.ndarray] = None,
+    initial_theta: Optional[np.ndarray] = None,
 ) -> ChiploadOptResult:
     """Run ``DiffCAM-Chipload`` 1st-order STE-Adam joint CWE + Chipload trajectory optimization."""
     t0 = time.perf_counter()
     cfg = spec or ChiploadSpec.from_feeds_and_speeds(bundle)
-    model = SubsegmentedCWEModel(bundle, spec=cfg)
-    theta = model.zero_theta()
-
-    # Pre-initialize u_f toward feeds_and_speeds radial-chip-thinning + slotting target feed
-    nom_eng = analyze_plan_engagement(bundle, model.base_motion, model.spec)
-    tooth_freq = model.spec.tooth_freq_hz
-    for k, se in enumerate(nom_eng["segments"]):
-        if model.is_rapid[k]:
-            continue
-        if not se["engaged"]:
-            f_init = model.f_max * 0.99
-        else:
-            u_ae = max(0.02, float(se["ae_pct"]) / 100.0)
-            psi = float(radial_chip_thinning_factor(u_ae))
-            sf, _ = _slot_factor_and_grad(
-                np.asarray([u_ae]), model.spec.ideal_woc_frac, model.spec.slot_ipt_factor
-            )
-            h_eff = model.spec.target_hex_mm * float(sf[0])
-            f_chip = (tooth_freq * h_eff) / max(psi, 0.34)
-            if float(se["removed_mm3"]) > 1e-5:
-                seg_len = max(float(np.linalg.norm(model.ref_deltas[k])), 0.2)
-                f_mrr = (model.mrr_limit * 0.92 * seg_len) / float(se["removed_mm3"])
-                f_chip = min(f_chip, f_mrr)
-            f_init = float(np.clip(f_chip, model.f_min + 0.2, model.f_max - 0.05))
-        frac = np.clip((f_init - model.f_min) / (model.f_max - model.f_min), 1e-3, 1.0 - 1e-3)
-        theta[model.num_xy_params + k] = 0.5 * math.log(frac / (1.0 - frac)) - model.u_f0[k]
+    model = SubsegmentedCWEModel(bundle, spec=cfg, initial_stock_z=initial_stock_z)
+    if initial_theta is not None:
+        theta = np.asarray(initial_theta, dtype=np.float64).reshape(-1).copy()
+    else:
+        theta = model.zero_theta()
+        # Pre-initialize u_f toward feeds_and_speeds radial-chip-thinning + slotting target feed
+        nom_eng = analyze_plan_engagement(
+            bundle, model.base_motion, model.spec, initial_stock_z=initial_stock_z
+        )
+        tooth_freq = model.spec.tooth_freq_hz
+        for k, se in enumerate(nom_eng["segments"]):
+            if model.is_rapid[k]:
+                continue
+            if not se["engaged"]:
+                f_init = model.f_max * 0.99
+            else:
+                u_ae = max(0.02, float(se["ae_pct"]) / 100.0)
+                psi = float(radial_chip_thinning_factor(u_ae))
+                sf, _ = _slot_factor_and_grad(
+                    np.asarray([u_ae]), model.spec.ideal_woc_frac, model.spec.slot_ipt_factor
+                )
+                h_eff = model.spec.target_hex_mm * float(sf[0])
+                f_chip = (tooth_freq * h_eff) / max(psi, 0.34)
+                if float(se["removed_mm3"]) > 1e-5:
+                    seg_len = max(float(np.linalg.norm(model.ref_deltas[k])), 0.2)
+                    f_mrr = (model.mrr_limit * 0.92 * seg_len) / float(se["removed_mm3"])
+                    f_chip = min(f_chip, f_mrr)
+                f_init = float(np.clip(f_chip, model.f_min + 0.2, model.f_max - 0.05))
+            frac = np.clip((f_init - model.f_min) / (model.f_max - model.f_min), 1e-3, 1.0 - 1e-3)
+            theta[model.num_xy_params + k] = 0.5 * math.log(frac / (1.0 - frac)) - model.u_f0[k]
 
     m_adam = np.zeros_like(theta)
     v_adam = np.zeros_like(theta)
@@ -1671,13 +1696,13 @@ def optimize_chipload_trajectory(
         )
         if not verify_posted:
             chosen_plan = shortcut_verified_air_detours(
-                bundle, raw_plan, model.spec, mode="rapid_bridge"
+                bundle, raw_plan, model.spec, mode="rapid_bridge", initial_stock_z=initial_stock_z
             )
             chosen_shortcut = "rapid_bridge"
             break
         for sc_mode in ("rapid_bridge", "g1_chord", "none"):
             cand_plan = shortcut_verified_air_detours(
-                bundle, raw_plan, model.spec, mode=sc_mode
+                bundle, raw_plan, model.spec, mode=sc_mode, initial_stock_z=initial_stock_z
             )
             nc_str = post_motion_plan(cand_plan, bundle.task, dialect=C.Dialect.HAAS, config=m_cfg)
             rep = evaluate_posted_gcode(
@@ -1727,7 +1752,9 @@ def optimize_chipload_trajectory(
     xy_shifts = np.hypot(
         pts_opt[:, 0] - model.ref_pts[:, 0], pts_opt[:, 1] - model.ref_pts[:, 1]
     )
-    telemetry = analyze_plan_engagement(bundle, chosen_plan, model.spec)
+    telemetry = analyze_plan_engagement(
+        bundle, chosen_plan, model.spec, initial_stock_z=initial_stock_z
+    )
     wall_s = time.perf_counter() - t0
     return ChiploadOptResult(
         plan=chosen_plan,
@@ -1923,10 +1950,11 @@ def rollout_chipload_policy(
     *,
     provenance: str = "diffcam:shac_chipload",
     verify_posted: bool = False,
+    initial_stock_z: Optional[np.ndarray] = None,
 ) -> ChiploadOptResult:
     """Zero-shot rollout of a trained ``LocalCWEPolicy`` on ``bundle`` with optional posted safety check."""
     t0 = time.perf_counter()
-    model = SubsegmentedCWEModel(bundle, spec=spec)
+    model = SubsegmentedCWEModel(bundle, spec=spec, initial_stock_z=initial_stock_z)
     theta, _ = policy.map_to_model_theta(model)
     res_tol = float(bundle.task.tolerances.completion_residual_mm3)
 
@@ -1985,7 +2013,9 @@ def rollout_chipload_policy(
     xy_shifts = np.hypot(
         pts_opt[:, 0] - model.ref_pts[:, 0], pts_opt[:, 1] - model.ref_pts[:, 1]
     )
-    telemetry = analyze_plan_engagement(bundle, chosen_plan, model.spec)
+    telemetry = analyze_plan_engagement(
+        bundle, chosen_plan, model.spec, initial_stock_z=initial_stock_z
+    )
     return ChiploadOptResult(
         plan=chosen_plan,
         theta=chosen_theta,

@@ -483,7 +483,8 @@
 
     for (let i = 0; i < srcSegs.length; i++) {
       const src = srcSegs[i];
-      const dur = Math.max(1e-7, Number(durs[i]));
+      const isAtcDwell = src.kind === "rapid" && Number(src.length_mm || 0.0) <= 1e-6 && Number(src.duration_s || 0.0) >= 0.5;
+      const dur = isAtcDwell ? Number(src.duration_s) : Math.max(1e-7, Number(durs[i]));
       const spd = Number(speeds[i]);
       const isRapid = src.kind === "rapid";
 
@@ -548,6 +549,9 @@
         phi_eng_deg: Number(src.phi_eng_deg || 0.0),
         fz_mm: Number(fzMm.toFixed(5)),
         hex_mm: Number(hexMm.toFixed(5)),
+        tool_number: Number(src.tool_number || 1),
+        tool_radius_mm: Number(src.tool_radius_mm || (cutter.diameter_mm * 0.5)),
+        op_id: src.op_id || "",
       };
       tCursor += dur;
     }
@@ -892,7 +896,8 @@
             s.start[2],
             s.end[0],
             s.end[1],
-            s.end[2]
+            s.end[2],
+            s.tool_radius_mm
           );
         }
         if ((k + 1) % KEYFRAME_STRIDE === 0) {
@@ -903,11 +908,12 @@
       this.lastCarveKey = "";
     }
 
-    _sweepLinear(zGrid, cutSeg, segIdx, ax, ay, az, bx, by, bz) {
+    _sweepLinear(zGrid, cutSeg, segIdx, ax, ay, az, bx, by, bz, rOverride) {
       const zMinSeg = Math.min(az, bz);
       if (zMinSeg >= this.smax[2] - 1e-6) return;
 
-      const r = this.rCut;
+      const r = rOverride && Number(rOverride) > 0.1 ? Number(rOverride) : this.rCut;
+      const r2Local = r * r;
       const ix0 = Math.max(0, Math.floor((Math.min(ax, bx) - r - this.smin[0]) / this.dx));
       const ix1 = Math.min(this.nx - 1, Math.ceil((Math.max(ax, bx) + r - this.smin[0]) / this.dx));
       const iy0 = Math.max(0, Math.floor((Math.min(ay, by) - r - this.smin[1]) / this.dy));
@@ -928,7 +934,7 @@
           const rowOff = ix * this.ny;
           for (let iy = iy0; iy <= iy1; iy++) {
             const dpy = this.ys[iy] - ay;
-            if (dpx2 + dpy * dpy <= this.r2) {
+            if (dpx2 + dpy * dpy <= r2Local) {
               const idx = rowOff + iy;
               if (zCut < zGrid[idx] - 1e-6) {
                 zGrid[idx] = zCut;
@@ -950,9 +956,9 @@
           const perpX = px - uc * dx;
           const perpY = py - uc * dy;
           const dPerp2 = perpX * perpX + perpY * perpY;
-          if (dPerp2 > this.r2) continue;
+          if (dPerp2 > r2Local) continue;
 
-          const du = Math.sqrt(Math.max(0.0, this.r2 - dPerp2) * invLxy2);
+          const du = Math.sqrt(Math.max(0.0, r2Local - dPerp2) * invLxy2);
           const uLo = Math.max(0.0, uc - du);
           const uHi = Math.min(1.0, uc + du);
           if (uLo > uHi) continue;
@@ -998,7 +1004,8 @@
             s.start[2],
             s.end[0],
             s.end[1],
-            s.end[2]
+            s.end[2],
+            s.tool_radius_mm
           );
         }
       }
@@ -1018,7 +1025,8 @@
             cur.start[2],
             ex,
             ey,
-            ez
+            ez,
+            cur.tool_radius_mm
           );
         }
       }
@@ -1289,8 +1297,8 @@
   }
 
   function computeTightColorRange(plans, mode) {
-    if (mode === "engaged_air") {
-      return { min: 0.0, max: 1.0, span: 1.0, constant: false };
+    if (mode === "engaged_air" || mode === "tool_number") {
+      return { min: 1.0, max: 4.0, span: 3.0, constant: false };
     }
     let vMin = Infinity;
     let vMax = -Infinity;
@@ -1317,9 +1325,20 @@
     return { min: vMin, max: vMax, span: rawSpan, constant: false };
   }
 
+  const TOOL_PALETTE_RGB = [
+    [0.145, 0.520, 0.960], // T1: Cobalt Blue (Rough / Face Endmill)
+    [0.133, 0.800, 0.420], // T2: Emerald Green (Rest-Finish Endmill)
+    [0.980, 0.780, 0.120], // T3: Vivid Gold (Spot Drill)
+    [0.940, 0.340, 0.560], // T4: Crimson Rose (Peck Twist Drill)
+  ];
+
   function cutSegmentColorRgb(seg, mode, rangeObj) {
     if (mode === "engaged_air") {
       return seg.engaged ? [0.18, 0.85, 0.45] : [0.94, 0.39, 0.58];
+    }
+    if (mode === "tool_number") {
+      const tIdx = Math.max(0, (Number(seg.tool_number || 1) - 1) % TOOL_PALETTE_RGB.length);
+      return TOOL_PALETTE_RGB[tIdx];
     }
     const val = extractSegmentMetric(seg, mode);
     if (val === null) {
@@ -1782,6 +1801,15 @@
       midEl.textContent = "Air-Cut G1";
       maxEl.textContent = "Rapid G0";
       subEl.textContent = "Ribbon width: " + (state.pathWidthMm * 2.0).toFixed(2) + " mm · Drag: Orbit";
+      return;
+    }
+    if (mode === "tool_number") {
+      titleEl.textContent = "Multi-Tool TAMP Sequence (T1 → T4)";
+      barEl.className = "legend-gradient mode-tight";
+      minEl.textContent = "T1 Rough/Face";
+      midEl.textContent = "T2 Rest / T3 Spot";
+      maxEl.textContent = "T4 Peck Drill";
+      subEl.textContent = "Automated StandardToolLibrary + Persistent-IPW TAMP";
       return;
     }
 

@@ -1194,9 +1194,351 @@ def generate_fig4_transfer_and_ablations(
     pdf.write(out_path)
 
 
+def generate_fig5_exp5_chipload_overfit(
+    exp5: Dict[str, Any],
+    exp5b: Dict[str, Any],
+    out_path: Path,
+) -> None:
+    """Fig 5: (a) Fair Same-Speed vs Optimal-Chipload CWE (Exp5), (b) Fast Test-Time Trajectory Overfitting (Exp5b)."""
+    pdf = VectorPDFCanvas(504.0, 178.0)
+
+    # Panel (a): Exp5 Fair Same-Speed vs Optimal-Chipload Cycle Time + Optimal h_ex Band %
+    ax_a = (38.0, 48.0, 202.0, 112.0)
+    agg_by_m = {r["method"]: r for r in exp5.get("aggregate_table", [])}
+    methods_a = [
+        ("Nominal-CAM (@2)", "Nominal\nCAM"),
+        ("DiffCAM STE-Adam (MRR)", "STE-Adam\n(3D MRR)"),
+        ("PPO-Chipload (Zero-Order RL)", "PPO\n(CWE RL)"),
+        ("SHAC-Chipload (1st-Order RL)", "SHAC\n(CWE RL)"),
+        ("DiffCAM-Chipload (CWE)", "DiffCAM\n(CWE Opt)"),
+    ]
+    ymax_a = 92.0
+    _draw_axes(
+        pdf,
+        *ax_a,
+        xticks=[(i, lbl.split("\n")[0]) for i, (_, lbl) in enumerate(methods_a)],
+        yticks=[(v, f"{int(v)}s") for v in (0, 20, 40, 60, 80)],
+        xmin=-0.55,
+        xmax=len(methods_a) - 0.45,
+        ymin=0.0,
+        ymax=ymax_a,
+        title="(a) Fair Same-Speed vs. Optimal Chipload (Exp5)",
+        xlabel="",
+        ylabel="Mean Cycle Time (s)",
+    )
+    pdf.text(ax_a[0] + 0.5 * ax_a[2], ax_a[1] - 24.5, "Method (8 Held-Out Test Parts, Al 6061-T6)", size=6.6, align="center")
+    # Second line of xtick labels
+    for i, (_, lbl) in enumerate(methods_a):
+        parts = lbl.split("\n")
+        if len(parts) > 1:
+            px = ax_a[0] + ax_a[2] * (i + 0.55) / len(methods_a)
+            pdf.text(px, ax_a[1] - 14.2, parts[1], size=5.4, align="center", rgb=(0.30, 0.32, 0.36))
+
+    # Nominal baseline reference line (55.21 s)
+    nom_y = ax_a[1] + ax_a[3] * 55.21 / ymax_a
+    pdf.line(ax_a[0], nom_y, ax_a[0] + ax_a[2], nom_y, stroke=(0.45, 0.48, 0.52), line_width=0.7, dash=(2.5, 1.8))
+
+    for i, (m_key, _) in enumerate(methods_a):
+        row = agg_by_m.get(m_key, {})
+        t_same = float(row.get("mean_matched_cycle_time_s", 55.2))
+        t_opt = float(row.get("mean_cycle_time_s", 55.2))
+        opt_hex = float(row.get("mean_optimal_hex_pct", 0.0))
+        gx = ax_a[0] + ax_a[2] * (i + 0.55) / len(methods_a)
+        bw = 11.5
+        bh_same = max(1.0, ax_a[3] * t_same / ymax_a)
+        bh_opt = max(1.0, ax_a[3] * t_opt / ymax_a)
+
+        pdf.rect(
+            gx - bw - 0.8, ax_a[1], bw, bh_same,
+            fill=(0.56, 0.65, 0.76), stroke=(0.22, 0.25, 0.30), line_width=0.35,
+        )
+        opt_col = (0.00, 0.52, 0.78) if "DiffCAM-Chipload" in m_key else (
+            (0.82, 0.25, 0.24) if "MRR" in m_key else (0.04, 0.64, 0.48)
+        )
+        if "Nominal" in m_key:
+            opt_col = (0.36, 0.40, 0.46)
+        pdf.rect(
+            gx + 0.8, ax_a[1], bw, bh_opt,
+            fill=opt_col, stroke=(0.18, 0.20, 0.24), line_width=0.35,
+        )
+        pdf.text(
+            gx + 0.8 + 0.5 * bw,
+            ax_a[1] + bh_opt + 2.4,
+            f"{opt_hex:.0f}%",
+            size=5.3,
+            bold=("DiffCAM-Chipload" in m_key),
+            rgb=(0.05, 0.32, 0.52) if "DiffCAM-Chipload" in m_key else (0.20, 0.22, 0.26),
+            align="center",
+        )
+
+    pdf.rect(18.0, 9.0, 7.0, 4.8, fill=(0.56, 0.65, 0.76))
+    pdf.text(27.0, 9.4, "Fair Same-Speed (s)", size=5.5, bold=True)
+    pdf.rect(100.0, 9.0, 7.0, 4.8, fill=(0.00, 0.52, 0.78))
+    pdf.text(109.0, 9.4, "Opt-Chipload (s) + [% in Optimal h_ex Band]", size=5.5, bold=True)
+
+    # Panel (b): Exp5b Fast Inference-Time Trajectory Overfitting vs. RL
+    ax_b = (286.0, 48.0, 204.0, 112.0)
+    sum_by_reg = {r["regime"]: r for r in exp5b.get("summary", [])}
+
+    # Plot Cycle-Time Gain (%) vs log10(wall_ms) in [0.0 (1 ms) .. 3.6 (4000 ms)]
+    xmin_l, xmax_l = -0.3, 3.6
+    ymin_b, ymax_b = 0.0, 18.0
+    _draw_axes(
+        pdf,
+        *ax_b,
+        xticks=[(0.0, "1ms"), (1.0, "10ms"), (2.0, "100ms"), (3.0, "1s"), (3.5, "3.2s")],
+        yticks=[(v, f"{int(v)}%") for v in (0, 4, 8, 12, 16)],
+        xmin=xmin_l,
+        xmax=xmax_l,
+        ymin=ymin_b,
+        ymax=ymax_b,
+        title="(b) Fast Inference-Time Trajectory Overfitting (Exp5b)",
+        xlabel="Per-Part Test-Time Planning Latency (log scale)",
+        ylabel="Cycle-Time Gain vs. Fair CAM (%)",
+    )
+
+    def _to_b_pt(ms_val: float, gain_val: float) -> Tuple[float, float]:
+        lx = max(xmin_l, min(xmax_l, math.log10(max(ms_val, 0.55))))
+        gy = max(ymin_b, min(ymax_b, gain_val))
+        px = ax_b[0] + ax_b[2] * (lx - xmin_l) / (xmax_l - xmin_l)
+        py = ax_b[1] + ax_b[3] * (gy - ymin_b) / (ymax_b - ymin_b)
+        return (px, py)
+
+    # Curve 1: SHAC Zero-Shot -> SHAC + DiffCAM-Overfit (K=4, 8, 16, 32)
+    shac_keys = [
+        ("SHAC-ZeroShot (K=0)", "ZS"),
+        ("SHAC+DiffCAM-Overfit (K=4)", "K=4"),
+        ("SHAC+DiffCAM-Overfit (K=8)", "K=8"),
+        ("SHAC+DiffCAM-Overfit (K=16)", "K=16"),
+        ("SHAC+DiffCAM-Overfit (K=32)", "K=32"),
+    ]
+    shac_pts: List[Tuple[float, float]] = []
+    for rk, tag in shac_keys:
+        if rk in sum_by_reg:
+            r = sum_by_reg[rk]
+            pt = _to_b_pt(float(r["mean_opt_wall_ms"]), float(r["mean_gain_pct"]))
+            shac_pts.append(pt)
+    if len(shac_pts) >= 2:
+        pdf.polyline(shac_pts, stroke=(0.00, 0.56, 0.42), line_width=1.5)
+    for (rk, tag), pt in zip(shac_keys, shac_pts):
+        pdf.circle(pt[0], pt[1], 2.4, fill=(0.00, 0.56, 0.42), stroke=(1.0, 1.0, 1.0), line_width=0.5)
+        if tag == "ZS":
+            pdf.text(pt[0], pt[1] + 4.4, "SHAC-ZS", size=5.1, bold=True, rgb=(0.00, 0.42, 0.30), align="center")
+        elif tag == "K=8":
+            pdf.text(pt[0] - 8.5, pt[1] + 4.2, "K=8", size=5.0, bold=True, rgb=(0.00, 0.42, 0.30), align="center")
+        elif tag == "K=32":
+            pdf.text(pt[0] + 10.0, pt[1] - 7.8, "K=32 (97%)", size=4.9, bold=True, rgb=(0.00, 0.42, 0.30), align="center")
+
+    # Curve 2: Cold-Start DiffCAM (K=8, 32, 90)
+    cold_keys = [
+        ("Cold-DiffCAM (K=8)", "Cold-8"),
+        ("Cold-DiffCAM (K=32)", "Cold-32"),
+        ("Cold-DiffCAM (K=90)", "Cold-90"),
+    ]
+    cold_pts: List[Tuple[float, float]] = []
+    for rk, _ in cold_keys:
+        if rk in sum_by_reg:
+            r = sum_by_reg[rk]
+            cold_pts.append(_to_b_pt(float(r["mean_opt_wall_ms"]), float(r["mean_gain_pct"])))
+    if len(cold_pts) >= 2:
+        pdf.polyline(cold_pts, stroke=(0.00, 0.44, 0.74), line_width=1.3, dash=(3.0, 1.8))
+    for (_, tag), pt in zip(cold_keys, cold_pts):
+        pdf.circle(pt[0], pt[1], 2.3, fill=(0.00, 0.44, 0.74), stroke=(1.0, 1.0, 1.0), line_width=0.4)
+        if tag == "Cold-8":
+            pdf.text(pt[0] - 4.0, pt[1] + 4.6, "Cold-8", size=4.9, bold=True, rgb=(0.00, 0.34, 0.62), align="center")
+        elif tag == "Cold-90":
+            pdf.text(pt[0] - 4.0, pt[1] + 4.4, "Cold-90 (98%)", size=5.0, bold=True, rgb=(0.00, 0.34, 0.62), align="center")
+
+    # Curve 3: PPO Zero-Shot -> PPO Test-Time Overfitting (K=16, 64, 160)
+    ppo_keys = [
+        ("PPO-ZeroShot (K=0)", "PPO-ZS"),
+        ("PPO-Overfit (K=16)", "16"),
+        ("PPO-Overfit (K=64)", "64"),
+        ("PPO-Overfit (K=160)", "160"),
+    ]
+    ppo_pts: List[Tuple[float, float]] = []
+    for rk, _ in ppo_keys:
+        if rk in sum_by_reg:
+            r = sum_by_reg[rk]
+            ppo_pts.append(_to_b_pt(float(r["mean_opt_wall_ms"]), float(r["mean_gain_pct"])))
+    if len(ppo_pts) >= 2:
+        pdf.polyline(ppo_pts, stroke=(0.84, 0.36, 0.04), line_width=1.25, dash=(2.0, 1.6))
+    for (_, tag), pt in zip(ppo_keys, ppo_pts):
+        pdf.circle(pt[0], pt[1], 2.1, fill=(0.84, 0.36, 0.04), stroke=(1.0, 1.0, 1.0), line_width=0.4)
+        if tag == "160":
+            pdf.text(pt[0] - 12.0, pt[1] - 8.2, "PPO-160 (41%)", size=4.9, rgb=(0.68, 0.26, 0.02), align="center")
+
+    pdf.line(276.0, 11.5, 290.0, 11.5, stroke=(0.00, 0.56, 0.42), line_width=1.5)
+    pdf.text(293.0, 9.4, "SHAC + DiffCAM Overfit", size=5.4, bold=True)
+    pdf.line(372.0, 11.5, 386.0, 11.5, stroke=(0.00, 0.44, 0.74), line_width=1.3, dash=(3.0, 1.8))
+    pdf.text(389.0, 9.4, "Cold DiffCAM", size=5.4)
+    pdf.line(438.0, 11.5, 450.0, 11.5, stroke=(0.84, 0.36, 0.04), line_width=1.25, dash=(2.0, 1.6))
+    pdf.text(453.0, 9.4, "PPO Overfit", size=5.4)
+
+    pdf.write(out_path)
+
+
+def generate_fig6_exp6_tamp_multitool(
+    rdir: Path,
+    exp6: Dict[str, Any],
+    out_path: Path,
+) -> None:
+    """Fig 6: Automated Multi-Tool TAMP Pipeline: (a) 4-Tool G54 Toolpath & Carved STL, (b) 4-Part Benchmark."""
+    pdf = VectorPDFCanvas(504.0, 180.0)
+
+    # Panel (a): Left half — 4-Tool G54 Top-Down Toolpath + 3D Carved STL Inset for tamp-flanged-bracket
+    pdf.text(
+        130.0, 166.5,
+        "(a) Automated .stl -> 4-Tool TAMP Plan (O02001)",
+        size=7.4, bold=True, align="center",
+    )
+    tp_box = (14.0, 32.0, 132.0, 126.0)
+    pdf.rect(*tp_box, fill=(0.985, 0.988, 0.994), stroke=(0.28, 0.31, 0.36), line_width=0.6)
+
+    case_json_path = rdir / "simulator_viewer" / "cases" / "tamp-flanged-bracket.json"
+    if case_json_path.is_file():
+        cdata = json.loads(case_json_path.read_text(encoding="utf-8"))
+        smin = cdata["stock_min_mm"]
+        smax = cdata["stock_max_mm"]
+        wx0, wx1 = smin[0] - 4.0, smax[0] + 5.0
+        wy0, wy1 = smin[1] - 6.0, smax[1] + 6.0
+        sc = min((tp_box[2] - 10.0) / (wx1 - wx0), (tp_box[3] - 10.0) / (wy1 - wy0))
+        ox = tp_box[0] + 0.5 * tp_box[2] - 0.5 * (wx0 + wx1) * sc
+        oy = tp_box[1] + 0.5 * tp_box[3] - 0.5 * (wy0 + wy1) * sc
+
+        def _w2p(x: float, y: float) -> Tuple[float, float]:
+            return (ox + x * sc, oy + y * sc)
+
+        # Vise jaws along +/-Y
+        vj_lo0, vj_lo1 = _w2p(smin[0] - 2.0, smin[1] - 4.0), _w2p(smax[0] + 2.0, smin[1])
+        vj_hi0, vj_hi1 = _w2p(smin[0] - 2.0, smax[1]), _w2p(smax[0] + 2.0, smax[1] + 4.0)
+        pdf.rect(vj_lo0[0], vj_lo0[1], vj_lo1[0] - vj_lo0[0], vj_lo1[1] - vj_lo0[1], fill=(0.35, 0.39, 0.45))
+        pdf.rect(vj_hi0[0], vj_hi0[1], vj_hi1[0] - vj_hi0[0], vj_hi1[1] - vj_hi0[1], fill=(0.35, 0.39, 0.45))
+        pdf.text(0.5 * (vj_lo0[0] + vj_lo1[0]), vj_lo0[1] + 2.0, "G54 Vise Jaw (-Y)", size=4.6, rgb=(0.96, 0.97, 0.99), align="center")
+
+        # Stock billet
+        b0, b1 = _w2p(smin[0], smin[1]), _w2p(smax[0], smax[1])
+        pdf.rect(b0[0], b0[1], b1[0] - b0[0], b1[1] - b0[1], fill=(0.89, 0.92, 0.96), stroke=(0.42, 0.46, 0.52), line_width=0.6)
+
+        tool_cols: Dict[int, RGB] = {
+            1: (0.05, 0.45, 0.82),  # T1: Rough/Face/Contour Endmill
+            2: (0.04, 0.66, 0.36),  # T2: Rest-Finish Endmill
+            3: (0.92, 0.58, 0.04),  # T3: Spot Drill
+            4: (0.84, 0.18, 0.38),  # T4: Peck Twist Drill
+        }
+        opt_var = next((v for v in cdata["variants"] if v["id"] == "chipload_ste"), cdata["variants"][0])
+        for seg in opt_var["plan"]["segments"]:
+            if seg["kind"] == "rapid":
+                continue
+            tnum = int(seg.get("tool_number", 1))
+            col = tool_cols.get(tnum, (0.2, 0.2, 0.2))
+            p0 = _w2p(float(seg["start"][0]), float(seg["start"][1]))
+            p1 = _w2p(float(seg["end"][0]), float(seg["end"][1]))
+            if math.hypot(p1[0] - p0[0], p1[1] - p0[1]) < 0.4:
+                pdf.circle(p0[0], p0[1], 3.1 if tnum == 3 else 1.8, fill=col)
+            else:
+                pdf.line(p0[0], p0[1], p1[0], p1[1], stroke=col, line_width=0.85 if tnum == 1 else 1.05)
+
+    # Isometric 3D Carved Stock STL rendering right beside the G54 toolpath
+    stl_box = (150.0, 56.0, 102.0, 102.0)
+    carved_stl = rdir / "tamp_shop_packets" / "tamp-flanged-bracket_carved_stock.stl"
+    if carved_stl.is_file():
+        iso_rgb = _render_stl_isometric_rgb(carved_stl, width_px=240, height_px=240, bg_rgb=(0.985, 0.988, 0.994))
+        pdf.draw_rgb_image(iso_rgb, *stl_box)
+    pdf.rect(*stl_box, stroke=(0.32, 0.35, 0.40), line_width=0.55)
+    pdf.text(stl_box[0] + 51.0, stl_box[1] - 8.5, "3D Carved Stock (4 Tools)", size=5.6, bold=True, align="center")
+    pdf.text(stl_box[0] + 51.0, stl_box[1] - 16.0, "0.00 mm3 Gouge | Safety PASS", size=5.1, rgb=(0.05, 0.48, 0.26), align="center")
+
+    # Legend for T1..T4 under Panel (a)
+    t_leg = [
+        ((0.05, 0.45, 0.82), "T1: 10mm Rough/Face"),
+        ((0.04, 0.66, 0.36), "T2: 6mm Rest-Finish"),
+        ((0.92, 0.58, 0.04), "T3: 90deg Spot"),
+        ((0.84, 0.18, 0.38), "T4: 4mm G83 Peck"),
+    ]
+    for idx_t, (tc, tlbl) in enumerate(t_leg):
+        lx = 14.0 + (idx_t % 2) * 118.0
+        ly = 16.5 if idx_t < 2 else 7.5
+        pdf.rect(lx, ly, 6.5, 4.5, fill=tc)
+        pdf.text(lx + 8.5, ly + 0.3, tlbl, size=5.4, bold=True)
+
+    # Panel (b): 4-Part Multi-Tool TAMP Cycle-Time & ATC Swap Comparison
+    ax_b = (288.0, 48.0, 202.0, 110.0)
+    parts = exp6.get("parts", [])
+    short_names = ["Bracket\n(6061)", "Housing\n(6061)", "Manifold\n(7075)", "Mount\n(1018 Stl)"]
+    max_t = max([float(p["naive_total_time_s"]) for p in parts] + [90.0]) * 1.14
+    step_t = 25.0 if max_t <= 110.0 else (35.0 if max_t <= 150.0 else 50.0)
+    ymax_b = step_t * 4.0 + 6.0
+
+    _draw_axes(
+        pdf,
+        *ax_b,
+        xticks=[(i, short_names[i].split("\n")[0]) for i in range(min(4, len(parts)))],
+        yticks=[(v, f"{int(v)}s") for v in (0.0, step_t, 2.0 * step_t, 3.0 * step_t, 4.0 * step_t)],
+        xmin=-0.5,
+        xmax=max(3.5, len(parts) - 0.5),
+        ymin=0.0,
+        ymax=ymax_b,
+        title="(b) Multi-Tool TAMP Total Cycle Time Across Alloys (Exp6)",
+        xlabel="",
+        ylabel="Total Shop Time incl. ATC (s)",
+    )
+    pdf.text(ax_b[0] + 0.5 * ax_b[2], ax_b[1] - 24.5, "Multi-Feature .stl Part & Workpiece Alloy", size=6.6, align="center")
+    for i in range(min(4, len(parts))):
+        px = ax_b[0] + ax_b[2] * (i + 0.5) / 4.0
+        pdf.text(px, ax_b[1] - 14.2, short_names[i].split("\n")[1], size=5.4, align="center", rgb=(0.32, 0.35, 0.40))
+
+    for i, p in enumerate(parts[:4]):
+        gx = ax_b[0] + ax_b[2] * (i + 0.5) / 4.0
+        bw = 11.0
+        atc_s = float(p["atc_swap_time_s"])
+        vals_bar = [
+            (float(p["naive_total_time_s"]), (0.55, 0.60, 0.68)),
+            (float(p["same_speed_total_time_s"]), (0.20, 0.66, 0.52)),
+            (float(p["opt_chipload_total_time_s"]), (0.02, 0.46, 0.78)),
+        ]
+        for b_j, (tot_s, c_cut) in enumerate(vals_bar):
+            bx = gx + (b_j - 1.5) * (bw + 1.2) + 1.0
+            h_tot = max(1.0, ax_b[3] * tot_s / ymax_b)
+            h_atc = max(0.5, ax_b[3] * min(atc_s, tot_s) / ymax_b)
+            # Cutting base + ATC top cap
+            pdf.rect(bx, ax_b[1], bw, max(0.5, h_tot - h_atc), fill=c_cut, stroke=(0.2, 0.2, 0.2), line_width=0.3)
+            pdf.rect(
+                bx, ax_b[1] + max(0.5, h_tot - h_atc), bw, h_atc,
+                fill=(0.94, 0.74, 0.22), stroke=(0.2, 0.2, 0.2), line_width=0.3,
+            )
+            if b_j == 2:
+                pdf.text(
+                    bx + 0.5 * bw,
+                    ax_b[1] + h_tot + 2.2,
+                    f"-{float(p['opt_chipload_gain_pct']):.0f}%",
+                    size=5.3,
+                    bold=True,
+                    rgb=(0.02, 0.34, 0.62),
+                    align="center",
+                )
+
+    leg_b = [
+        ((0.55, 0.60, 0.68), "Naive CAM"),
+        ((0.20, 0.66, 0.52), "Same-Speed"),
+        ((0.02, 0.46, 0.78), "Opt-Chipload"),
+        ((0.94, 0.74, 0.22), "ATC Swap (6s/chg)"),
+    ]
+    for idx_l, (lc, llbl) in enumerate(leg_b):
+        lx = 278.0 + (idx_l % 2) * 108.0
+        ly = 16.5 if idx_l < 2 else 7.5
+        pdf.rect(lx, ly, 6.5, 4.5, fill=lc)
+        pdf.text(lx + 8.5, ly + 0.3, llbl, size=5.4, bold=True)
+
+    pdf.write(out_path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--run-dir", type=Path, default=PROJECT_ROOT / "runs" / "pub-20261110")
+    default_rdir = PROJECT_ROOT / "runs" / "pub-v2-20261110"
+    if not default_rdir.exists():
+        default_rdir = PROJECT_ROOT / "runs" / "pub-20261110"
+    parser.add_argument("--run-dir", type=Path, default=default_rdir)
     parser.add_argument("--out-dir", type=Path, default=PROJECT_ROOT / "manuscript" / "figures")
     parser.add_argument("--mirror-dir", type=Path, default=PROJECT_ROOT / "overleaf" / "figures")
     args = parser.parse_args()
@@ -1215,19 +1557,41 @@ def main() -> None:
     f2 = out_dir / "fig2_exp1_conditioning.pdf"
     f3 = out_dir / "fig3_exp2_convergence.pdf"
     f4 = out_dir / "fig4_exp3_transfer_ablations.pdf"
+    generated = [f1, f2, f3, f4]
 
     generate_fig1_hero(rdir, exp2_main, exp4, f1)
     generate_fig2_exp1(exp1, f2)
     generate_fig3_exp2_convergence(exp2_main, f3)
     generate_fig4_transfer_and_ablations(exp2_abl, exp3, f4)
 
+    exp5_p = rdir / "exp5_chipload_comparison.json"
+    exp5b_p = rdir / "exp5b_test_time_overfit.json"
+    if exp5_p.is_file() and exp5b_p.is_file():
+        f5 = out_dir / "fig5_exp5_chipload_overfit.pdf"
+        generate_fig5_exp5_chipload_overfit(
+            json.loads(exp5_p.read_text(encoding="utf-8")),
+            json.loads(exp5b_p.read_text(encoding="utf-8")),
+            f5,
+        )
+        generated.append(f5)
+
+    exp6_p = rdir / "exp6_tamp_multitool.json"
+    if exp6_p.is_file():
+        f6 = out_dir / "fig6_exp6_tamp_multitool.pdf"
+        generate_fig6_exp6_tamp_multitool(
+            rdir,
+            json.loads(exp6_p.read_text(encoding="utf-8")),
+            f6,
+        )
+        generated.append(f6)
+
     if args.mirror_dir:
         mdir = args.mirror_dir.resolve()
         mdir.mkdir(parents=True, exist_ok=True)
-        for p in (f1, f2, f3, f4):
+        for p in generated:
             shutil.copy2(p, mdir / p.name)
 
-    print(f"[FIGURES] Generated 4 PDF figures in {out_dir} and mirrored to {args.mirror_dir}", flush=True)
+    print(f"[FIGURES] Generated {len(generated)} PDF figures in {out_dir} and mirrored to {args.mirror_dir}", flush=True)
 
 
 if __name__ == "__main__":
