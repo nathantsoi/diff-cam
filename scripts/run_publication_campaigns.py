@@ -56,7 +56,8 @@ from benchmarks.milling_suite import (
     materialize_sampled_sources,
     multi_pocket_fields,
 )
-from cam import MachineConfig
+from cam import ControllerDialect, MachineConfig, get_dialect_spec, parse_shop_motion_plan, post_shop_program
+from cam.dialects.haas_linuxcnc import format_haas_ngc_shop_program
 from cam.posted_evaluator import evaluate_posted_gcode
 from cam.posts import post_motion_plan
 from simulator.csg_simulator import CSGSimulatorDelta
@@ -355,7 +356,10 @@ def _run_naive_or_annealed_adam(
             v = 0.999 * v + 0.001 * (g * g)
             mh = m / (1.0 - 0.9 ** step)
             vh = v / (1.0 - 0.999 ** step)
-            theta = spline.clip(theta - lr * mh / (np.sqrt(vh) + 1e-8))
+            step_vec = lr * mh / (np.sqrt(vh) + 1e-8)
+            if method_name == "Annealed-Adam" and n_pos > 0:
+                step_vec[:n_pos] *= 0.22
+            theta = spline.clip(theta - step_vec)
 
         history.append(
             {
@@ -506,7 +510,7 @@ def run_exp1_conditioning(
         base_spec = _make_objective_spec(bundle, k=40.0)
         ev_hard = _make_evaluator(bundle, sampled_task, sim, spline, base_spec)
         _ = ev_hard.evaluate_candidate(theta_probe, "exp1-hard-center", "hard")
-        hard_stock_d = sim.stock.to_numpy()[spline.num_steps].copy()
+        hard_stock_d = sim.stock_slice_numpy(spline.num_steps)
 
         fd_hard_proj = np.zeros(len(dirs), dtype=np.float64)
         for d_i, u_dir in enumerate(dirs):
@@ -523,7 +527,7 @@ def run_exp1_conditioning(
             denom = float(np.linalg.norm(soft_proj) * np.linalg.norm(fd_hard_proj))
             cos_sim = float(np.dot(soft_proj, fd_hard_proj) / denom) if denom > 1e-12 else 0.0
 
-            soft_occ = 1.0 / (1.0 + np.exp(-np.clip(-k_val * sim.stock.to_numpy()[spline.num_steps], -40.0, 40.0)))
+            soft_occ = 1.0 / (1.0 + np.exp(-np.clip(-k_val * sim.stock_slice_numpy(spline.num_steps), -40.0, 40.0)))
             hard_occ = (hard_stock_d < 0.0).astype(np.float64)
             occ_l1 = float(np.mean(np.abs(soft_occ - hard_occ)))
 
@@ -618,6 +622,7 @@ def run_exp2_family_worker(
     family_name: str,
     budget_evals: int = 64,
     seeds: Sequence[int] = (0, 1, 2),
+    case_out_name: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Worker for 1 CAM family (4 tasks <= 11 Taichi instance lifecycle cap)."""
     print(
@@ -840,8 +845,12 @@ def run_exp2_family_worker(
             }
         )
 
-    part_path = _safe_resolve_under(out_dir, f"_exp2_part_{family_name}.json")
-    _write_json(part_path, {"family": family_name, "tasks": task_records})
+    if case_out_name is not None:
+        part_path = _safe_resolve_under(out_dir, case_out_name)
+        _write_json(part_path, {"case_id": family_bundles[0].case.case_id, "tasks": task_records})
+    else:
+        part_path = _safe_resolve_under(out_dir, f"_exp2_part_{family_name}.json")
+        _write_json(part_path, {"family": family_name, "tasks": task_records})
     return task_records
 
 
@@ -1021,6 +1030,7 @@ def run_exp3_eval_worker(
                 zs_res = ev_base.evaluate_candidate(u_zs, f"zs-{label}-{b.case.case_id}", "hard")
                 dt_ms = 1000.0 * (time.perf_counter() - t_zs)
                 ct = float(zs_res.components["cycle_time_s"])
+                pk_mrr = float(zs_res.components["peak_mrr_mm3_s"])
                 transfer_rows.append(
                     {
                         "seed": seed,
@@ -1032,7 +1042,9 @@ def run_exp3_eval_worker(
                         "nominal_cycle_time_s": nom_t,
                         "cycle_time_s": ct,
                         "cycle_time_reduction_pct": 100.0 * (nom_t - ct) / max(nom_t, 1e-9),
-                        "peak_mrr_mm3_s": float(zs_res.components["peak_mrr_mm3_s"]),
+                        "peak_mrr_mm3_s": pk_mrr,
+                        "mrr_limit_mm3_s": b.mrr_limit_mm3_s,
+                        "mrr_overload_pct": max(0.0, 100.0 * (pk_mrr / b.mrr_limit_mm3_s - 1.0)),
                         "feasible": bool(zs_res.components["feasible"] == 1.0),
                     }
                 )
@@ -1056,6 +1068,7 @@ def run_exp3_eval_worker(
                 ("Scratch-STE-Adam-16", scr_ste),
             ):
                 ct = float(run_sum.best_result.components["cycle_time_s"])
+                pk_mrr = float(run_sum.best_result.components["peak_mrr_mm3_s"])
                 transfer_rows.append(
                     {
                         "seed": seed,
@@ -1066,7 +1079,9 @@ def run_exp3_eval_worker(
                         "nominal_cycle_time_s": nom_t,
                         "cycle_time_s": ct,
                         "cycle_time_reduction_pct": 100.0 * (nom_t - ct) / max(nom_t, 1e-9),
-                        "peak_mrr_mm3_s": float(run_sum.best_result.components["peak_mrr_mm3_s"]),
+                        "peak_mrr_mm3_s": pk_mrr,
+                        "mrr_limit_mm3_s": b.mrr_limit_mm3_s,
+                        "mrr_overload_pct": max(0.0, 100.0 * (pk_mrr / b.mrr_limit_mm3_s - 1.0)),
                         "feasible": bool(run_sum.best_result.components["feasible"] == 1.0),
                     }
                 )
@@ -1084,31 +1099,30 @@ def run_exp3_eval_worker(
     return payload
 
 
-def _format_haas_ngc_shop_program(
-    program_number: int,
-    case_id: str,
-    nc_body: str,
-) -> str:
-    """Wrap validated Haas NGC body with explicit O-number program header for Haas Mini Mill NGC."""
-    if not (1 <= program_number <= 99999):
-        raise ValueError("Haas NGC program number must be in 1..99999")
-    safe_label = re.sub(r"[^A-Za-z0-9_.-]", "_", case_id)
-    header = f"O{program_number:05d} (DIFFCAM MIT HAAS MINI MILL NGC - {safe_label})"
-    lines = nc_body.splitlines()
-    out: List[str] = []
-    inserted_onum = False
-    for line in lines:
-        stripped = line.strip()
-        if re.match(r"^O\d{4,5}\b", stripped):
-            if not inserted_onum:
-                out.append(header)
-                inserted_onum = True
-            continue
-        out.append(line)
-        if stripped == "%" and not inserted_onum:
-            out.append(header)
-            inserted_onum = True
-    return "\n".join(out) + "\n"
+def _make_haas_shop_eval_task(
+    fine_task: C.TaskSpec,
+    *,
+    z_home_above_datum_mm: float = 15.0,
+) -> C.TaskSpec:
+    """Anchor ``fine_task`` on a physical Haas Mini Mill table where ``G53 Z0.0`` is spindle home."""
+    lo = fine_task.limits.envelope_min_mm
+    hi = fine_task.limits.envelope_max_mm
+    shop_limits = dataclasses.replace(
+        fine_task.limits,
+        envelope_min_mm=(lo[0], lo[1], lo[2] - z_home_above_datum_mm),
+        envelope_max_mm=(hi[0], hi[1], max(0.0, hi[2] - z_home_above_datum_mm) + 10.0),
+    )
+    return dataclasses.replace(
+        fine_task,
+        work_to_machine=C.Transform.translation((0.0, 0.0, -z_home_above_datum_mm)),
+        initial_state=C.MachineState(
+            position_mm=(0.0, 0.0, 0.0),
+            frame=C.Frame.MACHINE,
+            length_offset_applied=fine_task.initial_state.length_offset_applied,
+            work_offset=fine_task.initial_state.work_offset,
+        ),
+        limits=shop_limits,
+    )
 
 
 def run_exp4_camotics_and_haas_packets(
@@ -1123,11 +1137,14 @@ def run_exp4_camotics_and_haas_packets(
     }
     stl_dir = _safe_resolve_under(out_dir, "camotics_stls")
     haas_dir = _safe_resolve_under(out_dir, "haas_ngc_packets")
+    multi_dir = _safe_resolve_under(out_dir, "multi_controller_packets")
     stl_dir.mkdir(parents=True, exist_ok=True)
     haas_dir.mkdir(parents=True, exist_ok=True)
+    multi_dir.mkdir(parents=True, exist_ok=True)
 
     camotics_rows: List[Dict[str, Any]] = []
     setup_rows: List[Dict[str, Any]] = []
+    multi_controller_rows: List[Dict[str, Any]] = []
 
     test_task_entries = [t for t in exp2_main["tasks"] if t["split"] == "test"]
     for idx, entry in enumerate(test_task_entries):
@@ -1227,17 +1244,37 @@ def run_exp4_camotics_and_haas_packets(
 
             if variant_label == "DiffCAM-STE":
                 prog_num = 1001 + idx
-                shop_nc = _format_haas_ngc_shop_program(prog_num, cid, haas_nc)
+                shop_nc = format_haas_ngc_shop_program(
+                    opt_motion,
+                    fine_task,
+                    cfg,
+                    program_number=prog_num,
+                    case_label=cid,
+                )
                 nc_path = _safe_resolve_under(haas_dir, f"O{prog_num:05d}_{cid}_diffcam_haas_ngc.nc")
                 nc_path.write_text(shop_nc, encoding="utf-8")
+                nom_shop_nc = format_haas_ngc_shop_program(
+                    fine_nom,
+                    fine_task,
+                    cfg,
+                    program_number=2001 + idx,
+                    case_label=f"{cid}_nominal",
+                )
                 nom_nc_path = _safe_resolve_under(haas_dir, f"O{2001+idx:05d}_{cid}_nominal_haas_ngc.nc")
-                nom_nc_path.write_text(
-                    _format_haas_ngc_shop_program(
-                        2001 + idx,
-                        f"{cid}_nominal",
-                        post_motion_plan(fine_nom, fine_task, dialect=C.Dialect.HAAS, config=cfg),
-                    ),
-                    encoding="utf-8",
+                nom_nc_path.write_text(nom_shop_nc, encoding="utf-8")
+
+                shop_eval_task = _make_haas_shop_eval_task(fine_task)
+                shop_ev = evaluate_posted_gcode(
+                    shop_eval_task,
+                    shop_nc.encode("utf-8"),
+                    dialect=C.Dialect.HAAS,
+                    settings={"max_step_mm": 0.125, "compute_bounds": False, "safety_screen": True},
+                )
+                nom_shop_ev = evaluate_posted_gcode(
+                    shop_eval_task,
+                    nom_shop_nc.encode("utf-8"),
+                    dialect=C.Dialect.HAAS,
+                    settings={"max_step_mm": 0.125, "compute_bounds": False, "safety_screen": True},
                 )
                 lo, hi = fine_task.stock.params["min_mm"], fine_task.stock.params["max_mm"]
                 setup_rows.append(
@@ -1248,19 +1285,72 @@ def run_exp4_camotics_and_haas_packets(
                         "case_id": cid,
                         "family": fine_task.family,
                         "stock_dimensions_mm": [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]],
-                        "g54_datum": "Stock top-surface XY center (X0 Y0 at billet center, Z0 at top face)",
+                        "g54_datum": "Stock top-surface XY center (X0.0 Y0.0 at billet center, Z0.0 at top face)",
                         "tool": "T1: 5.0 mm dia (R2.5 mm) flat carbide endmill, flute >= 12.0 mm, stickout >= 15.0 mm",
-                        "smoothing_code": "G64 + G187 P2 E0.05 (Haas NGC Medium Smoothing, 0.05 mm corner rounding)",
+                        "smoothing_code": "G54 + G187 P2 E0.05 (Haas NGC Medium Smoothing, 0.05 mm corner rounding; G187 reset)",
                         "nominal_cycle_time_s": round(sum(s.duration_s for s in fine_nom.segments), 3),
                         "diffcam_cycle_time_s": round(sum(s.duration_s for s in opt_motion.segments), 3),
-                        "posted_safety_pass": posted_ev.safety_pass,
-                        "posted_geometry_pass": posted_ev.geometry_pass,
+                        "posted_safety_pass": bool(posted_ev.safety_pass and shop_ev.safety_pass and nom_shop_ev.safety_pass),
+                        "posted_geometry_pass": bool(posted_ev.geometry_pass and shop_ev.geometry_pass and nom_shop_ev.geometry_pass),
+                        "shop_0p125mm_orig_gouge_mm3": shop_ev.metrics["original_part_gouge_volume_mm3"].value,
+                        "shop_0p125mm_residual_mm3": shop_ev.metrics["residual_volume_mm3"].value,
+                        "shop_nc_sha256": C.nc_hash(shop_nc.encode("utf-8")),
+                        "nominal_shop_nc_sha256": C.nc_hash(nom_shop_nc.encode("utf-8")),
                         "camotics_watertight": bool(
                             cam_ev.discretization.get("stl_topology", {}).get("watertight", False)
                         ),
                     }
                 )
-        print(f"  [Exp4] Verified {cid} in 0.125 mm posted_evaluator + CAMotics v1.2.0 STL.", flush=True)
+
+                # 3. 6-Controller Clean-Room Dialect Export & Round-Trip Verification
+                for ctrl in ControllerDialect:
+                    spec_d = get_dialect_spec(ctrl)
+                    sub_d = _safe_resolve_under(multi_dir, ctrl.value)
+                    sub_d.mkdir(parents=True, exist_ok=True)
+                    d_cfg = MachineConfig(
+                        units="mm",
+                        program_number=1001 + idx,
+                        tool_number=fine_task.tool.tool_number,
+                        length_offset=fine_task.tool.tool_number,
+                        spindle_rpm=8000,
+                        coolant=True,
+                    )
+                    d_shop_nc = post_shop_program(
+                        opt_motion,
+                        fine_task,
+                        dialect=ctrl,
+                        config=d_cfg,
+                        case_label=cid,
+                    )
+                    d_ext = spec_d.file_extension
+                    d_path = _safe_resolve_under(sub_d, f"{cid}_diffcam_{ctrl.value}{d_ext}")
+                    d_path.write_text(d_shop_nc, encoding="utf-8")
+                    parsed_shop = parse_shop_motion_plan(
+                        d_shop_nc, shop_eval_task, dialect=ctrl, g28_home_z_mm=0.0
+                    )
+                    d_typed_nc = post_motion_plan(opt_motion, fine_task, dialect=ctrl, config=d_cfg)
+                    d_ev = evaluate_posted_gcode(
+                        fine_task,
+                        d_typed_nc.encode("utf-8"),
+                        dialect=ctrl,
+                        settings={"max_step_mm": 0.25, "compute_bounds": False, "safety_screen": True},
+                    )
+                    multi_controller_rows.append(
+                        {
+                            "case_id": cid,
+                            "dialect": ctrl.value,
+                            "display_name": spec_d.display_name,
+                            "shop_file": f"multi_controller_packets/{ctrl.value}/{d_path.name}",
+                            "shop_segments": len(parsed_shop.segments),
+                            "geometry_pass": bool(d_ev.geometry_pass),
+                            "safety_pass": bool(d_ev.safety_pass),
+                            "orig_gouge_mm3": float(d_ev.metrics["original_part_gouge_volume_mm3"].value),
+                            "residual_mm3": float(d_ev.metrics["residual_volume_mm3"].value),
+                            "cycle_time_s": float(d_ev.metrics["cycle_time_s"].value),
+                            "shop_nc_sha256": C.nc_hash(d_shop_nc.encode("utf-8")),
+                        }
+                    )
+        print(f"  [Exp4] Verified {cid} across 6 controller dialects + 0.125 mm posted_evaluator + CAMotics v1.2.0 STL.", flush=True)
 
     # Write operator setup sheet Markdown in haas_ngc_packets/SETUP_SHEET.md
     md_lines = [
@@ -1268,9 +1358,9 @@ def run_exp4_camotics_and_haas_packets(
         "",
         "- **License:** MIT",
         "- **Controller Target:** Haas Mini Mill with Next-Gen Control (NGC)",
-        "- **Motion & Corner Blending:** `G54 G64` + `G187 P2 E0.05` (`0.05 mm` max corner rounding tolerance)",
+        "- **Motion & Corner Blending:** `G54` + `G187 P2 E0.05` (`0.05 mm` max corner rounding tolerance) + `G187` reset (`FORMAT_REAL` mandatory decimal points, `<= 3` XYZ / `<= 2` F metric decimals, `G90 G53 G0 Z0.0` home retract)",
         "- **Tooling (`T1` / `H1`):** `5.0 mm` diameter (`2.5 mm` radius) flat carbide endmill, flute length `12.0 mm`, holder clearance `>= 14.0 mm` above tip",
-        "- **Workholding & `G54` Datum:** Vise with parallels; `G54 X0 Y0` at billet XY center, `G54 Z0` at top stock face; minimum `5.0 mm` jaw clearance below deepest cut (`Z = -4.0 mm`)",
+        "- **Workholding & `G54` Datum:** Vise with parallels; `G54 X0.0 Y0.0` at billet XY center, `G54 Z0.0` at top stock face; minimum `5.0 mm` jaw clearance below deepest cut (`Z = -4.0 mm`)",
         "- **Pre-Cut Safety Checklist:**",
         "  1. Verify `T1` tool length offset `H1` against stock top `Z0`.",
         "  2. Run Haas NGC Graphics mode verification (`Setting 191 / G187` active).",
@@ -1299,9 +1389,46 @@ def run_exp4_camotics_and_haas_packets(
         "camotics_resolution_mm": 0.25,
         "verifications": camotics_rows,
         "haas_packets": setup_rows,
+        "multi_controller_audit": multi_controller_rows,
     }
     _write_json(_safe_resolve_under(out_dir, "exp4_camotics_and_haas.json"), payload)
     return payload
+
+
+def _build_worker_cmd(
+    out_dir: Path,
+    voxel_mm: float,
+    budget: int,
+    seeds: Sequence[int],
+    cpu: bool,
+    only: str,
+    family: Optional[str] = None,
+    case_id: Optional[str] = None,
+    jobs: int = 2,
+) -> List[str]:
+    cmd = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--output",
+        str(out_dir),
+        "--voxel-mm",
+        str(voxel_mm),
+        "--budget",
+        str(budget),
+        "--jobs",
+        str(jobs),
+        "--seeds",
+        *[str(s) for s in seeds],
+        "--only",
+        only,
+    ]
+    if cpu:
+        cmd.append("--cpu")
+    if family is not None:
+        cmd.extend(["--family", family])
+    if case_id is not None:
+        cmd.extend(["--case-id", case_id])
+    return cmd
 
 
 def _spawn_worker(
@@ -1312,26 +1439,36 @@ def _spawn_worker(
     cpu: bool,
     only: str,
     family: Optional[str] = None,
+    case_id: Optional[str] = None,
+    jobs: int = 2,
 ) -> None:
-    cmd = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "--output",
-        str(out_dir),
-        "--voxel-mm",
-        str(voxel_mm),
-        "--budget",
-        str(budget),
-        "--seeds",
-        *[str(s) for s in seeds],
-        "--only",
-        only,
-    ]
-    if cpu:
-        cmd.append("--cpu")
-    if family is not None:
-        cmd.extend(["--family", family])
-    subprocess.run(cmd, check=True)
+    subprocess.run(
+        _build_worker_cmd(
+            out_dir, voxel_mm, budget, seeds, cpu, only, family=family, case_id=case_id, jobs=jobs
+        ),
+        check=True,
+    )
+
+
+def _run_parallel_workers(cmds: Sequence[List[str]], max_parallel: int = 2) -> None:
+    active: List[subprocess.Popen[bytes]] = []
+    queue = list(cmds)
+    while queue or active:
+        while queue and len(active) < max_parallel:
+            cmd = queue.pop(0)
+            active.append(subprocess.Popen(cmd))
+        time.sleep(0.5)
+        still_running: List[subprocess.Popen[bytes]] = []
+        for proc in active:
+            rc = proc.poll()
+            if rc is None:
+                still_running.append(proc)
+            elif rc != 0:
+                for other in active:
+                    if other.poll() is None:
+                        other.terminate()
+                raise subprocess.CalledProcessError(rc, proc.args)
+        active = still_running
 
 
 def main() -> None:
@@ -1341,6 +1478,7 @@ def main() -> None:
     parser.add_argument("--budget", type=int, default=64)
     parser.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     parser.add_argument("--cpu", action="store_true")
+    parser.add_argument("--jobs", type=int, default=2)
     parser.add_argument(
         "--only",
         choices=[
@@ -1348,6 +1486,7 @@ def main() -> None:
             "exp1",
             "exp2",
             "exp2-family",
+            "exp2-case",
             "exp2-ablations",
             "exp3",
             "exp3-train",
@@ -1357,26 +1496,34 @@ def main() -> None:
         default="all",
     )
     parser.add_argument("--family", type=str, default=None)
+    parser.add_argument("--case-id", type=str, default=None)
     args = parser.parse_args()
 
     out_dir = args.output.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    # Orchestrator modes spawn isolated subprocesses so each Taichi process stays <= 8 instances.
+    # Orchestrator modes spawn isolated subprocesses so each Taichi process stays small & fast.
     if args.only == "all":
-        _spawn_worker(out_dir, args.voxel_mm, args.budget, args.seeds, args.cpu, "exp1")
-        _spawn_worker(out_dir, args.voxel_mm, args.budget, args.seeds, args.cpu, "exp2")
-        _spawn_worker(out_dir, args.voxel_mm, args.budget, args.seeds, args.cpu, "exp3")
-        _spawn_worker(out_dir, args.voxel_mm, args.budget, args.seeds, args.cpu, "exp4")
+        _spawn_worker(out_dir, args.voxel_mm, args.budget, args.seeds, args.cpu, "exp1", jobs=args.jobs)
+        _spawn_worker(out_dir, args.voxel_mm, args.budget, args.seeds, args.cpu, "exp2", jobs=args.jobs)
+        _spawn_worker(out_dir, args.voxel_mm, args.budget, args.seeds, args.cpu, "exp3", jobs=args.jobs)
+        _spawn_worker(out_dir, args.voxel_mm, args.budget, args.seeds, args.cpu, "exp4", jobs=args.jobs)
         print(f"[DONE] Publication campaign artifacts written to {out_dir}", flush=True)
         return
 
     if args.only == "exp2":
-        fams = ("facing_open_boss", "pocket_island", "adaptive_channel", "contour_profile")
+        from benchmarks.milling_suite import MILLING_CASES
+
+        case_cmds = [
+            _build_worker_cmd(
+                out_dir, args.voxel_mm, args.budget, args.seeds, args.cpu, "exp2-case", case_id=c.case_id
+            )
+            for c in MILLING_CASES
+        ]
+        _run_parallel_workers(case_cmds, max_parallel=max(1, args.jobs))
         merged_tasks: List[Dict[str, Any]] = []
-        for fam in fams:
-            _spawn_worker(out_dir, args.voxel_mm, args.budget, args.seeds, args.cpu, "exp2-family", family=fam)
-            part = json.loads((_safe_resolve_under(out_dir, f"_exp2_part_{fam}.json")).read_text(encoding="utf-8"))
+        for c in MILLING_CASES:
+            part = json.loads((_safe_resolve_under(out_dir, f"_exp2_case_{c.case_id}.json")).read_text(encoding="utf-8"))
             merged_tasks.extend(part["tasks"])
         main_payload = {
             "schema": "diffcam-pub-exp2-main/1",
@@ -1419,6 +1566,21 @@ def main() -> None:
         fam_bundles = [b for b in bundles if b.task.family == args.family]
         run_exp2_family_worker(
             pool, fam_bundles, out_dir, family_name=args.family, budget_evals=args.budget, seeds=args.seeds
+        )
+    elif args.only == "exp2-case":
+        if not args.case_id:
+            raise ValueError("--case-id is required for --only exp2-case")
+        sel_bundles = [b for b in bundles if b.case.case_id == args.case_id]
+        if not sel_bundles:
+            raise ValueError(f"Unknown case_id: {args.case_id!r}")
+        run_exp2_family_worker(
+            pool,
+            sel_bundles,
+            out_dir,
+            family_name=sel_bundles[0].task.family,
+            budget_evals=args.budget,
+            seeds=args.seeds,
+            case_out_name=f"_exp2_case_{args.case_id}.json",
         )
     elif args.only == "exp2-ablations":
         run_exp2_ablations_worker(pool, test_bundles, out_dir, budget_evals=args.budget)

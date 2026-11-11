@@ -2616,13 +2616,20 @@ class CSGSimulatorDelta:
             self.advance_position(t)
             self.apply_cut(t)
         self.compute_loss(num_active_steps - 1)
-        self.compute_holder_penalty(0, num_active_steps - 1)
-        self.compute_air_penalty(0, num_active_steps - 1)
-        self.compute_jerk_penalty(0, num_active_steps - 1)
-        self.compute_step_penalty(0, num_active_steps - 1)
-        self.compute_traj_prox_penalty(0, num_active_steps - 1)
-        self.compute_length_penalty(0, num_active_steps - 1)
-        self.compute_tool_gouge_penalty(0, num_active_steps - 1)
+        if self.holder_penalty_weight[None] > 0.0:
+            self.compute_holder_penalty(0, num_active_steps - 1)
+        if self.w_air[None] > 0.0 or self.w_prox[None] > 0.0:
+            self.compute_air_penalty(0, num_active_steps - 1)
+        if self.w_jerk[None] > 0.0:
+            self.compute_jerk_penalty(0, num_active_steps - 1)
+        if self.w_step[None] > 0.0:
+            self.compute_step_penalty(0, num_active_steps - 1)
+        if self.w_traj_prox[None] > 0.0:
+            self.compute_traj_prox_penalty(0, num_active_steps - 1)
+        if self.w_len[None] > 0.0:
+            self.compute_length_penalty(0, num_active_steps - 1)
+        if self.w_tool_gouge[None] > 0.0:
+            self.compute_tool_gouge_penalty(0, num_active_steps - 1)
         # Trajectory-quality measures (time / air-cut time / breakage). These
         # run inside the Tape so their soft loss terms receive gradient. When
         # all three soft weights are zero the kernels are skipped: they would
@@ -2644,7 +2651,8 @@ class CSGSimulatorDelta:
             self.compute_seg_time(0, num_active_steps - 1)
             self.compute_seg_volumes(0, num_active_steps - 1)
             self.compute_traj_metrics(0, num_active_steps - 1)
-            self.compute_break_loss()
+            if self.w_break[None] > 0.0:
+                self.compute_break_loss()
 
     def forward_hard(self, num_active_steps, clip_speeds=True):
         """Hard boolean forward pass for evaluation and rendering.
@@ -2711,6 +2719,18 @@ class CSGSimulatorDelta:
     # tool_delta[t0..T-2] (the prefix is fixed). Nondeterministic carve under
     # GPU atomics is irrelevant here -- we only ever READ stock[t]/tool_pos[t]
     # to snapshot, and WRITE them as fixed starts.
+
+    @ti.kernel
+    def _copy_stock_slice(self, t: ti.i32, out: ti.types.ndarray()):
+        for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
+            out[i, j, k] = self.stock[t, i, j, k]
+
+    def stock_slice_numpy(self, t: int) -> np.ndarray:
+        """Extract ``stock[t]`` into a ``(Nx, Ny, Nz)`` NumPy array without copying all ``max_steps``."""
+        dtype = np.float64 if self.precision == "f64" else np.float32
+        buf = np.empty((self.Nx, self.Ny, self.Nz), dtype=dtype)
+        self._copy_stock_slice(int(t), buf)
+        return buf
 
     def save_state(self, t):
         """Snapshot the stock SDF + tool position at step ``t`` (numpy copies)."""

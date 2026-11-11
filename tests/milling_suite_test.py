@@ -13,15 +13,18 @@ from benchmarks.milling_suite import (
     materialize_sampled_sources,
     multi_pocket_fields,
 )
-from cam import MachineConfig
+from cam import ControllerDialect, MachineConfig
 from cam.gcode_parser import parse_motion_plan
 from cam.posted_evaluator import _analytic_mask, _centres, evaluate_posted_gcode
-from cam.posts import post_motion_plan
+from cam.posts import post_motion_plan, post_shop_program
 from verification.camotics_adapter import _geometry_mask, unsupported_probe
 
 
-def test_all_16_milling_suite_tasks_qualify_in_posted_evaluator_and_masks_agree(tmp_path):
-    bundles = build_milling_suite(voxel_mm=0.5)
+@pytest.mark.parametrize("seed_engine,max_segs", [("v2", 450), ("v1", 60)])
+def test_all_16_milling_suite_tasks_qualify_in_posted_evaluator_and_masks_agree(
+    tmp_path, seed_engine: str, max_segs: int
+):
+    bundles = build_milling_suite(voxel_mm=0.5, seed_engine=seed_engine)
     assert len(bundles) == 16
     assert {b.task.family for b in bundles} == set(MILLING_FAMILIES)
     assert sum(b.task.split == C.Split.DEV for b in bundles) == 8
@@ -30,8 +33,8 @@ def test_all_16_milling_suite_tasks_qualify_in_posted_evaluator_and_masks_agree(
     for bundle in bundles:
         task = bundle.task
         motion = bundle.nominal_motion
-        assert 8 <= len(motion.segments) <= 60, (
-            f"{task.task_id}: unexpected segment count {len(motion.segments)}"
+        assert 8 <= len(motion.segments) <= max_segs, (
+            f"{task.task_id} ({seed_engine}): unexpected segment count {len(motion.segments)}"
         )
 
         # Verify exact 3-way mask parity: posted_evaluator == camotics_adapter == sampled SDF < 0

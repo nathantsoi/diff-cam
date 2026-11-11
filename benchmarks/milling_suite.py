@@ -25,6 +25,13 @@ from algorithms import parameterization as P
 from algorithms import run_artifacts as R
 from benchmarks import contracts as C
 from cam.canonical_strategies import canonical_seed_for_task
+from cam.strategies import (
+    AdaptiveConfig,
+    ContourConfig,
+    FacingConfig,
+    PocketConfig,
+    generate_cleanroom_toolpath,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_MULTI = "box_minus_multi_pocket"
@@ -404,13 +411,33 @@ def derive_multi_pocket_target(
     return C.GeometrySource(kind="analytic", params=candidate_params, frame=C.Frame.WORK)
 
 
+_CLEANROOM_V2_CONFIGS = {
+    "facing_open_boss": FacingConfig(),
+    "pocket_island": PocketConfig(
+        stepover_fraction=0.68,
+        nominal_feed_mm_s=4.6,
+        plunge_feed_mm_s=2.8,
+    ),
+    "adaptive_channel": AdaptiveConfig(
+        optimal_load_fraction=0.40,
+        trochoid_pitch_fraction=0.40,
+        nominal_feed_mm_s=4.5,
+        plunge_feed_mm_s=2.8,
+        chord_step_mm=1.35,
+        simplify_tol_mm=0.12,
+    ),
+    "contour_profile": ContourConfig(rough_stepover_fraction=0.68, corner_roll_arc_segments=3),
+}
+
+
 def build_milling_task_bundle(
     case: MillingCaseSpec,
     *,
     voxel_mm: float = DEFAULT_VOXEL_MM,
     timing_rule: C.TimingRule = C.TimingRule.BLENDED_ACCEL_BOUNDED,
+    seed_engine: str = "v2",
 ) -> MillingTaskBundle:
-    """Build one validated TaskSpec + canonical MIT nominal MotionPlan."""
+    """Build one validated TaskSpec + clean-room MIT nominal MotionPlan (``v2`` default, ``v1`` legacy)."""
     shape = tuple(
         int(round((hi - lo) / voxel_mm))
         for lo, hi in zip(case.stock_min_mm, case.stock_max_mm)
@@ -499,7 +526,14 @@ def build_milling_task_bundle(
         tolerances=tolerances,
         motion_semantics=semantics,
     )
-    nominal_motion = canonical_seed_for_task(task)
+    if seed_engine == "v2":
+        nominal_motion = generate_cleanroom_toolpath(
+            task, config=_CLEANROOM_V2_CONFIGS[case.family]
+        )
+    elif seed_engine == "v1":
+        nominal_motion = canonical_seed_for_task(task)
+    else:
+        raise ValueError(f"Unknown seed_engine {seed_engine!r}; expected 'v2' or 'v1'")
     return MillingTaskBundle(
         case=case,
         task=task,
@@ -514,8 +548,9 @@ def build_milling_suite(
     timing_rule: C.TimingRule = C.TimingRule.BLENDED_ACCEL_BOUNDED,
     split: Optional[str] = None,
     families: Optional[Sequence[str]] = None,
+    seed_engine: str = "v2",
 ) -> Tuple[MillingTaskBundle, ...]:
-    """Build the 16-task (or filtered) MIT canonical CNC milling suite."""
+    """Build the 16-task (or filtered) MIT clean-room CNC milling suite."""
     selected = MILLING_CASES
     if split is not None:
         selected = tuple(c for c in selected if c.split == split)
@@ -523,7 +558,9 @@ def build_milling_suite(
         fam_set = set(families)
         selected = tuple(c for c in selected if c.family in fam_set)
     return tuple(
-        build_milling_task_bundle(c, voxel_mm=voxel_mm, timing_rule=timing_rule)
+        build_milling_task_bundle(
+            c, voxel_mm=voxel_mm, timing_rule=timing_rule, seed_engine=seed_engine
+        )
         for c in selected
     )
 
@@ -592,24 +629,65 @@ def compute_waypoint_xy_weights(
         pmax = part.params["pocket_max_mm"]
         islands = part.params.get("islands_mm", ())
 
-    def _wall_clearance_mm(q: np.ndarray) -> float:
+    def _pt_to_seg_2d(px: float, py: float, ax: float, ay: float, bx: float, by: float) -> float:
+        dx, dy = bx - ax, by - ay
+        l2 = dx * dx + dy * dy
+        if l2 <= 1e-18:
+            return math.hypot(px - ax, py - ay)
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / l2))
+        return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
+    def _seg_intersects_box_2d(
+        ax: float, ay: float, bx: float, by: float, x0: float, y0: float, x1: float, y1: float
+    ) -> bool:
+        t0, t1 = 0.0, 1.0
+        dx, dy = bx - ax, by - ay
+        for p_val, q_val in ((-dx, ax - x0), (dx, x1 - ax), (-dy, ay - y0), (dy, y1 - ay)):
+            if abs(p_val) <= 1e-15:
+                if q_val < 0.0:
+                    return False
+            else:
+                r = q_val / p_val
+                if p_val < 0.0:
+                    if r > t1:
+                        return False
+                    if r > t0:
+                        t0 = r
+                else:
+                    if r < t0:
+                        return False
+                    if r < t1:
+                        t1 = r
+        return t0 <= t1
+
+    def _seg_wall_clearance_mm(pa: np.ndarray, pb: np.ndarray) -> float:
         if not has_multi_pocket:
             return scale_mm + 1.0
-        x, y, z = float(q[0]), float(q[1]), float(q[2])
+        ax, ay, az = float(pa[0]), float(pa[1]), float(pa[2])
+        bx, by, bz = float(pb[0]), float(pb[1]), float(pb[2])
+        z_low = min(az, bz)
         d_min = 1e6
         if pmin[0] > smin[0] + 1e-6:
-            d_min = min(d_min, max(0.0, x - float(pmin[0])))
+            d_min = min(d_min, max(0.0, min(ax, bx) - float(pmin[0])))
         if pmax[0] < smax[0] - 1e-6:
-            d_min = min(d_min, max(0.0, float(pmax[0]) - x))
+            d_min = min(d_min, max(0.0, float(pmax[0]) - max(ax, bx)))
         if pmin[1] > smin[1] + 1e-6:
-            d_min = min(d_min, max(0.0, y - float(pmin[1])))
+            d_min = min(d_min, max(0.0, min(ay, by) - float(pmin[1])))
         if pmax[1] < smax[1] - 1e-6:
-            d_min = min(d_min, max(0.0, float(pmax[1]) - y))
+            d_min = min(d_min, max(0.0, float(pmax[1]) - max(ay, by)))
         for imin, imax in islands:
-            if float(imax[2]) > z + 1e-6:
-                dx = max(0.0, float(imin[0]) - x, x - float(imax[0]))
-                dy = max(0.0, float(imin[1]) - y, y - float(imax[1]))
-                d_min = min(d_min, math.hypot(dx, dy))
+            if float(imax[2]) > z_low + 1e-6:
+                ix0, iy0 = float(imin[0]), float(imin[1])
+                ix1, iy1 = float(imax[0]), float(imax[1])
+                if _seg_intersects_box_2d(ax, ay, bx, by, ix0, iy0, ix1, iy1):
+                    d_min = 0.0
+                    break
+                for qx, qy in ((ax, ay), (bx, by)):
+                    dx = max(0.0, ix0 - qx, qx - ix1)
+                    dy = max(0.0, iy0 - qy, qy - iy1)
+                    d_min = min(d_min, math.hypot(dx, dy))
+                for cx, cy in ((ix0, iy0), (ix0, iy1), (ix1, iy0), (ix1, iy1)):
+                    d_min = min(d_min, _pt_to_seg_2d(cx, cy, ax, ay, bx, by))
         return d_min - r_tool
 
     for i in range(n_int):
@@ -624,11 +702,8 @@ def compute_waypoint_xy_weights(
             weights[i] = 0.0
             continue
         pk = pts[i + 1]
-        m_in = 0.5 * (pts[i] + pk)
-        m_out = 0.5 * (pk + pts[i + 2])
-        d_clear = min(_wall_clearance_mm(pk), _wall_clearance_mm(m_in), _wall_clearance_mm(m_out))
-        safe_disp = max(0.05, d_clear - 0.15)
-        weights[i] = float(np.clip(safe_disp / max(scale_mm, 1e-6), 0.04, 1.0))
+        d_clear = min(_seg_wall_clearance_mm(pts[i], pk), _seg_wall_clearance_mm(pk, pts[i + 2]))
+        weights[i] = float(np.clip((d_clear - 0.08) / max(scale_mm, 1e-6), 0.0, 1.0))
     return weights
 
 
@@ -650,7 +725,11 @@ def make_joint_parameterization(
     deltas_mm = np.diff(np.asarray(pts_work, dtype=np.float64), axis=0)
     steps = len(motion.segments)
     n_int = max(1, steps - 1)
-    pos_ctrl = min(n_int, max(8, (steps * 2) // 3)) if num_pos_controls is None else min(n_int, num_pos_controls)
+    pos_ctrl = (
+        min(n_int, 40, max(8, (steps * 2) // 3))
+        if num_pos_controls is None
+        else min(n_int, num_pos_controls)
+    )
     feed_ctrl = steps if num_feed_controls is None else min(steps, num_feed_controls)
 
     is_rapid = np.array([s.kind == C.SegmentKind.RAPID for s in motion.segments], dtype=bool)

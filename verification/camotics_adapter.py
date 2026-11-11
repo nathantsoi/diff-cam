@@ -49,6 +49,7 @@ import numpy as np
 
 from benchmarks import contracts as C
 from cam.config import MachineConfig
+from cam.dialects.base import ControllerDialect, coerce_controller_dialect
 from cam.posts import post_motion_plan
 from cam.gcode_parser import GCodeError, UnsupportedGCodeError, parse_motion_plan
 from simulator.csg_metrics import grid_material_metrics
@@ -567,14 +568,24 @@ def _prepare_camotics_nc(task: C.TaskSpec, nc_bytes: bytes,
         f"T{task.tool.tool_number} M06\n"
     ).encode("ascii")
     sim_body = bytes(nc_bytes)
-    if C.Dialect(dialect) == C.Dialect.HAAS:
-        # Preserve raw source_program.nc verbatim; neutralize Haas-proprietary G187
-        # smoothing words for LinuxCNC-based camsim after strict Haas parsing passed.
+    ctrl_dialect = coerce_controller_dialect(dialect)
+    if ctrl_dialect != ControllerDialect.RS274:
+        # Preserve raw source_program.nc verbatim; neutralize vendor-proprietary
+        # smoothing words for LinuxCNC-based camsim after strict parsing passed.
         cleaned_lines = []
         for raw_line in text.splitlines():
             stripped = raw_line.strip()
-            if stripped.upper().startswith("G187"):
+            upper = stripped.upper()
+            if ctrl_dialect == ControllerDialect.HAAS and upper.startswith("G187"):
                 cleaned_lines.append(f"(Haas NGC smoothing validated: {stripped})")
+            elif ctrl_dialect in (ControllerDialect.FANUC, ControllerDialect.ROBODRILL) and (
+                upper.startswith("G05.1") or upper.startswith("G5.1")
+            ):
+                cleaned_lines.append(f"(FANUC AICC smoothing validated: {stripped})")
+            elif ctrl_dialect == ControllerDialect.MAKINO and upper in ("M250", "M251", "M252", "M253"):
+                cleaned_lines.append(f"(Makino SGI smoothing validated: {stripped})")
+            elif ctrl_dialect == ControllerDialect.MAZAK and upper.startswith("G61.1"):
+                cleaned_lines.append(f"(Mazak SMC smoothing validated: {stripped})")
             else:
                 cleaned_lines.append(raw_line)
         sim_body = ("\n".join(cleaned_lines) + ("\n" if text.endswith("\n") else "")).encode("utf-8")
@@ -784,14 +795,19 @@ class CamoticsAdapter:
             raise AdapterError("camsim returned success but produced no STL output")
         return facts
 
-    def _evaluate(self, task: C.TaskSpec, nc_bytes: bytes, dialect: C.Dialect, settings: Mapping[str, Any]):
+    def _evaluate(self, task: C.TaskSpec, nc_bytes: bytes,
+                  dialect: C.Dialect | ControllerDialect | str, settings: Mapping[str, Any]):
         if not isinstance(nc_bytes, (bytes, bytearray)) or not nc_bytes:
             raise ValueError("nc_bytes must be nonempty bytes for NC evaluation")
         nc_bytes = bytes(nc_bytes)
+        ctrl_dialect = coerce_controller_dialect(dialect)
+        contract_dialect = (
+            C.Dialect.RS274 if ctrl_dialect == ControllerDialect.RS274 else C.Dialect.HAAS
+        )
         settings = dict(settings)
         reasons = unsupported_probe(task)
         if reasons:
-            return _empty_evaluation(task, reasons, nc=(nc_bytes, dialect), settings=settings)
+            return _empty_evaluation(task, reasons, nc=(nc_bytes, contract_dialect), settings=settings)
         resolution = _finite_positive("resolution_mm", settings.get("resolution_mm", self.default_resolution_mm))
         timeout = _finite_positive("timeout_s", settings.get("timeout_s", self.timeout_s))
         root = Path(settings.get("scratch_root", self.scratch_root or (Path(__file__).resolve().parents[1] / "external" / "camotics-evaluations")))
@@ -801,14 +817,14 @@ class CamoticsAdapter:
             exclusion_tolerance = _finite_nonnegative(
                 "exclusion_tolerance_mm3", settings.get("exclusion_tolerance_mm3", 0.0))
             try:
-                simulation_nc, parsed_motion = _prepare_camotics_nc(task, nc_bytes, dialect)
+                simulation_nc, parsed_motion = _prepare_camotics_nc(task, nc_bytes, ctrl_dialect)
             except (GCodeError, AdapterError, C.ContractError) as error:
                 return _empty_evaluation(task, [str(error)], coverage=C.Coverage.UNSUPPORTED,
-                                         nc=(nc_bytes, dialect), settings=settings)
+                                         nc=(nc_bytes, contract_dialect), settings=settings)
             rapid_reasons = _rapid_sweep_conflicts(task, parsed_motion)
             if rapid_reasons:
                 return _empty_evaluation(task, rapid_reasons, coverage=C.Coverage.UNSUPPORTED,
-                                         nc=(nc_bytes, dialect), motion=parsed_motion, settings=settings)
+                                         nc=(nc_bytes, contract_dialect), motion=parsed_motion, settings=settings)
             project = build_camotics_project(task, resolution)
             facts = self._run_camsim(task, simulation_nc, project, workdir, timeout,
                                      source_nc_bytes=nc_bytes)
@@ -916,32 +932,33 @@ class CamoticsAdapter:
                 safety_pass=None, geometry_pass=(C.geometry_pass_from_metrics(metrics, task.tolerances)
                                              if stl_facts["watertight"] and not unexpected_warnings
                                              and not constant_z_cuts else None),
-                nc_hash=C.nc_hash(nc_bytes), dialect=dialect,
+                nc_hash=C.nc_hash(nc_bytes), dialect=contract_dialect,
             )
         except (AdapterError, OSError, ValueError, subprocess.TimeoutExpired) as error:
             return _empty_evaluation(task, [f"evaluation blocked: {error}"], coverage=C.Coverage.UNKNOWN,
-                                     nc=(nc_bytes, dialect), settings={**settings, "workdir": str(workdir)})
+                                     nc=(nc_bytes, contract_dialect), settings={**settings, "workdir": str(workdir)})
 
     def evaluate_candidate(self, task: C.TaskSpec, motion: C.MotionPlan, settings: Mapping[str, Any]):
         reasons = unsupported_probe(task, motion)
         if reasons:
             return _empty_evaluation(task, reasons, motion=motion, settings=settings)
         settings = dict(settings)
-        dialect = C.Dialect(settings.get("dialect", C.Dialect.HAAS))
+        ctrl_dialect = coerce_controller_dialect(settings.get("dialect", C.Dialect.HAAS))
         config = settings.get(
             "machine_config",
             MachineConfig(tool_number=task.tool.tool_number),
         )
         try:
             machine_motion = _machine_motion(task, motion)
-            nc_bytes = post_motion_plan(machine_motion, task, dialect=dialect, config=config).encode("utf-8")
+            nc_bytes = post_motion_plan(machine_motion, task, dialect=ctrl_dialect, config=config).encode("utf-8")
         except (ValueError, TypeError) as error:
             return _empty_evaluation(task, [str(error)], motion=motion, settings=settings)
-        return self._evaluate(task, nc_bytes, dialect, settings)
+        return self._evaluate(task, nc_bytes, ctrl_dialect, settings)
 
-    def evaluate_posted_gcode(self, task: C.TaskSpec, nc_bytes: bytes, dialect: C.Dialect,
+    def evaluate_posted_gcode(self, task: C.TaskSpec, nc_bytes: bytes,
+                              dialect: C.Dialect | ControllerDialect | str,
                               settings: Mapping[str, Any]):
-        return self._evaluate(task, nc_bytes, C.Dialect(dialect), settings)
+        return self._evaluate(task, nc_bytes, coerce_controller_dialect(dialect), settings)
 
 
 __all__ = [

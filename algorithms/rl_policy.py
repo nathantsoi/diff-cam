@@ -39,7 +39,7 @@ def _precondition_policy_action_grad(grad_mu: np.ndarray) -> np.ndarray:
     n_xy = float(np.linalg.norm(g[:, :2]))
     n_f = float(np.linalg.norm(g[:, 2]))
     if n_xy > 1e-12:
-        g[:, :2] = g[:, :2] / max(n_xy, 1e-3)
+        g[:, :2] = 0.35 * g[:, :2] / max(n_xy, 1e-3)
     if n_f > 1e-12:
         g[:, 2] = g[:, 2] / max(n_f, 1e-3)
     return g
@@ -572,6 +572,7 @@ def train_diff_policy_shac(
     ]
 
     n_iters = max(1, max_evaluations - 1)
+    consec_infeasible = 0
     for step in range(n_iters):
         frac = step / max(1, n_iters - 1)
         k_cur = k_start + (k_end - k_start) * frac
@@ -581,11 +582,17 @@ def train_diff_policy_shac(
         u_vec = evaluator.parameterization.clip(mu.reshape(-1))
         ste_eval = evaluator.evaluate_ste_with_gradient(u_vec, f"{run_id}:step:{step:03d}")
         res = ste_eval.result
+        is_feas = res.valid and float(res.components.get("feasible", 0.0)) == 1.0
 
         if res.valid and _better_hard_candidate(res, best_res, resolved_sel):
             best_res = res
             best_theta = u_vec.copy()
             best_policy = policy.copy()
+            consec_infeasible = 0
+        elif not is_feas:
+            consec_infeasible += 1
+        else:
+            consec_infeasible = 0
 
         history.append(
             {
@@ -598,6 +605,13 @@ def train_diff_policy_shac(
                 "feasible": float(res.components.get("feasible", 0.0)),
             }
         )
+
+        if not is_feas and consec_infeasible >= 2:
+            best_flat = best_policy.get_flat_params()
+            params = 0.75 * best_flat + 0.25 * params
+            opt.m *= 0.4
+            policy.set_flat_params(params)
+            consec_infeasible = 0
 
         if ste_eval.gradient_theta is not None and np.all(np.isfinite(ste_eval.gradient_theta)):
             grad_mu = _precondition_policy_action_grad(
@@ -931,10 +945,12 @@ def solve_ste_continuation_adam(
 
         # Pull spatial parameters back toward best feasible incumbent if step crossed hard boundary
         n_pos = getattr(evaluator.parameterization, "num_pos_params", dim)
-        if not is_feas and consec_infeasible >= 2:
-            theta[:n_pos] = 0.75 * best_theta[:n_pos] + 0.25 * theta[:n_pos]
-            opt.m[:n_pos] *= 0.4
-            consec_infeasible = 0
+        has_feed = 0 < n_pos < dim and getattr(evaluator.parameterization, "log_feed_scale", 1.0) > 1e-4
+        pos_lr_mult = 0.22 if has_feed else 0.38
+        if not is_feas and consec_infeasible >= 1:
+            theta[:n_pos] = 0.82 * best_theta[:n_pos] + 0.18 * theta[:n_pos]
+            opt.m[:n_pos] *= 0.35
+            pos_lr_mult *= 0.5
 
         if ste_eval.gradient_theta is not None and np.all(np.isfinite(ste_eval.gradient_theta)):
             g = ste_eval.gradient_theta.copy()
@@ -946,9 +962,11 @@ def solve_ste_continuation_adam(
                 if gn_f > 1e-12:
                     g[n_pos:] = g[n_pos:] / max(gn_f, 1e-3)
             lr_scale = max(0.2, 0.5 * (1.0 + math.cos(math.pi * frac)))
-            theta = evaluator.parameterization.clip(
-                opt.step(theta, g, lr_scale=lr_scale, max_norm=5.0)
-            )
+            prev_theta = theta.copy()
+            cand_theta = opt.step(theta, g, lr_scale=lr_scale, max_norm=5.0)
+            if n_pos > 0:
+                cand_theta[:n_pos] = prev_theta[:n_pos] + pos_lr_mult * (cand_theta[:n_pos] - prev_theta[:n_pos])
+            theta = evaluator.parameterization.clip(cand_theta)
 
     evaluator.clear_evaluation_k()
     snap = evaluator.ledger.snapshot()

@@ -1,27 +1,22 @@
-"""Configurable G-code post-processors.
+# SPDX-License-Identifier: MIT
+"""Configurable clean-room G-code post-processors across six CNC controller dialects.
 
-A *post-processor* turns an ``(T, 3)`` unit-cube trajectory into a machine-
-specific G-code program. Two posts ship today:
+Supported post-processors (registered in :data:`POSTS`, :func:`post_motion_plan`,
+and :func:`post_shop_program`):
 
-* :class:`RS274Post` (``"rs274"``) -- the generic LinuxCNC-style program
-  (``G21``/``G90``/``G61`` + ``G0``/``G1`` + ``M2``). This is the faithful,
-  approach-free output used for round-trip fidelity checks.
-* :class:`HaasPost` (``"haas"``) -- a Fanuc-style program ready to load on a
-  Haas Mini Mill: program number, safety block, tool change with length offset,
-  spindle + coolant, an explicit clearance/plunge approach, and ``M30``.
-
-Register additional machines by adding a :class:`PostProcessor` subclass to
-:data:`POSTS`; everything else (``trajectory_to_gcode``, the export script, the
-CLI ``--post`` flag) picks them up automatically.
+* :class:`RS274Post` (``"rs274"``)         -- LinuxCNC / NIST RS274NGC (``.ngc``, ``G91.1``, ``G64 P0.05`` / ``G61``)
+* :class:`HaasPost` (``"haas"``)           -- Haas Next Generation Control (``.nc``, 5-digit ``O``, ``G187 P2 E0.05`` / ``G187``)
+* :class:`FanucPost` (``"fanuc"``)         -- FANUC 0i / 30i / 31i & Compact (``.nc``, 4-digit ``O``, AICC II ``G05.1 Q1 R5`` / ``Q0``, ``G28``)
+* :class:`RobodrillPost` (``"robodrill"``) -- FANUC Robodrill Alpha 31i-B5 (``.nc``, 4-digit ``O``, AICC II ``G05.1 Q1 R5`` / ``Q0``, ``G53``)
+* :class:`MakinoPost` (``"makino"``)       -- Makino Professional 5 / 6 Super GI (``.nc``, 4-digit ``O``, SGI ``M252`` / ``M250``, ``G28``)
+* :class:`MazakPost` (``"mazak"``)         -- Mazak Mazatrol Smooth / Matrix EIA/ISO (``.eia``, no leading ``%``, ``G61.1 P2`` / ``G64``, ``G53``)
 """
 
-import math
+from __future__ import annotations
+
 import numpy as np
 
 from benchmarks.contracts import (
-    ArcDirection,
-    ArcPlane,
-    ARC_RADIUS_TOL_MM,
     Dialect,
     Frame,
     MotionPlan,
@@ -30,37 +25,34 @@ from benchmarks.contracts import (
     TimingRule,
 )
 from .config import MachineConfig
-from .units import mm_to_inch, mm_per_min_to_ipm
+from .dialects import (
+    FANUC_SPEC,
+    HAAS_NGC_SPEC,
+    LINUXCNC_RS274_SPEC,
+    MAKINO_SPEC,
+    MAZAK_SPEC,
+    ROBODRILL_SPEC,
+    ControllerDialect,
+    coerce_controller_dialect,
+    get_dialect_spec,
+    is_dialect_allowed_by_task,
+)
+from .dialects.base import (
+    arc_offset_words,
+    build_motion_lines,
+    feed_out as _feed_out,
+    fmt_real,
+    len_out as _len_out,
+    posted_work_vector as _posted_work_vector_real,
+)
 
 
 # ---------------------------------------------------------------------------
-# Output-unit helpers
-# ---------------------------------------------------------------------------
-# Internally everything is millimetres. The post declares G21 (mm) or G20
-# (inch); when inch is requested the coordinate and feed VALUES must be
-# converted too -- otherwise the program declares inches but emits mm numbers.
-# These convert just prior to G-code emission (cf. cam.units).
-def _len_out(value_mm, config: MachineConfig):
-    """Length in mm -> the configured output units (scalar or array)."""
-    return mm_to_inch(value_mm) if config.units == "inch" else value_mm
-
-
-def _feed_out(feed_mm_per_min: float, config: MachineConfig) -> float:
-    """Feed in mm/min -> the configured output units (mm/min or in/min)."""
-    return mm_per_min_to_ipm(feed_mm_per_min) if config.units == "inch" else feed_mm_per_min
-
-
-# ---------------------------------------------------------------------------
-# Formatting helpers (shared by all posts)
+# Legacy formatting helpers (preserved for backward-compatible callers)
 # ---------------------------------------------------------------------------
 def _fmt(value: float, precision: int) -> str:
-    """Format one finite coordinate value, trimming zeros without losing its meaning."""
-    if not np.isfinite(value):
-        raise ValueError(f"numeric G-code words must be finite; got {value!r}")
-    s = f"{value:.{precision}f}"
-    if "." in s:
-        s = s.rstrip("0").rstrip(".")
-    return s if s not in ("", "-0") else "0"
+    """Format one finite coordinate value in legacy RS274 compact form."""
+    return fmt_real(value, precision, force_decimal=False)
 
 
 def _axis_words(point_mm, precision: int) -> str:
@@ -74,19 +66,18 @@ def _axis_words(point_mm, precision: int) -> str:
 
 def _posted_work_vector(point_work, config: MachineConfig, precision: int):
     """Coordinates exactly as a parser receives them for this post precision."""
-    converted = _len_out(np.asarray(point_work, dtype=np.float64), config)
-    return np.asarray([float(_fmt(float(value), precision)) for value in converted], dtype=np.float64)
+    return _posted_work_vector_real(point_work, config, precision)
 
 
 # ---------------------------------------------------------------------------
-# Post-processor base + implementations
+# Post-processor base + 6 controller implementations
 # ---------------------------------------------------------------------------
 class PostProcessor:
     """Base class. Subclasses implement :meth:`program`."""
 
     name = "base"
 
-    def program(self, positions, config: MachineConfig) -> str:
+    def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
         raise NotImplementedError
 
     @staticmethod
@@ -102,215 +93,107 @@ class PostProcessor:
 
 
 class RS274Post(PostProcessor):
-    """Generic RS274/NGC output (the original diff-cam exporter).
-
-    The first point is reached with a rapid (G0); every subsequent point is a
-    cutting feed move (G1). Exact-stop mode (G61) means a planner re-reading
-    this program passes through every waypoint, so the round trip
-    ``trajectory -> G-code -> trajectory`` reproduces the original path.
-    """
+    """LinuxCNC / NIST RS274NGC post-processor."""
 
     name = "rs274"
 
     def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
-        positions = self._validate(positions)
-        # Normalized stock coords [0,1] -> work-coordinate-system mm (top-centre
-        # G54), then mm -> output units.
-        pts_out = _len_out(config.to_wcs(positions), config)
-        feed_out = _feed_out(config.feed, config)
-        p = config.precision
-
-        lines = [
-            "(Generated by diff-cam cam.posts.RS274Post)",
-            config.units_code,        # G21 / G20
-            "G90",                    # absolute distance mode
-            "G61",                    # exact-stop path control
-        ]
-
-        # Rapid to the first waypoint.
-        lines.append(f"G0 {_axis_words(pts_out[0], p)}")
-
-        if len(pts_out) > 1:
-            lines.append(f"F{_fmt(feed_out, p)}")
-            for pt in pts_out[1:]:
-                lines.append(f"G1 {_axis_words(pt, p)}")
-
-        lines.append("M2")
-        return "\n".join(lines) + "\n"
+        return LINUXCNC_RS274_SPEC.format_legacy_positions_program(
+            self._validate(positions), config
+        )
 
 
 class HaasPost(PostProcessor):
-    """Fanuc-style program for a Haas Mini Mill.
-
-    Structure::
-
-        %
-        O00001 (DIFFCAM)
-        G17 G40 G49 G80 G90      ; safety block
-        G21                      ; units
-        G54                      ; work offset
-        T1 M06                   ; tool change
-        G43 H1 Z<safe>           ; tool length offset, rapid to clearance
-        S5000 M03                ; spindle on (CW)
-        M08                      ; flood coolant on
-        G00 X.. Y..              ; rapid above the first point
-        G01 Z.. F<plunge>        ; plunge to the first depth
-        F<feed>
-        G01 X.. Y.. Z..          ; cutting moves through the trajectory
-        ...
-        G00 Z<safe>              ; retract
-        M09                      ; coolant off
-        M05                      ; spindle off
-        G53 G00 Z0.              ; home Z in machine coordinates
-        M30                      ; program end + rewind
-        %
-    """
+    """Haas Next Generation Control (NGC) post-processor."""
 
     name = "haas"
 
     def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
-        positions = self._validate(positions)
-        # Normalized stock coords [0,1] -> work-coordinate-system mm (top-centre
-        # G54), then mm -> output units.
-        pts_out = _len_out(config.to_wcs(positions), config)
-        feed_out = _feed_out(config.feed, config)
-        plunge_out = _feed_out(config.plunge_feed, config)
-        p = config.precision
-        safe = _fmt(_len_out(config.safe_z_mm, config), p)
+        return HAAS_NGC_SPEC.format_legacy_positions_program(
+            self._validate(positions), config
+        )
 
-        lines = [
-            "%",
-            f"O{config.program_number:05d} ({config.program_name})",
-            "(Post: Haas Mini Mill -- generated by diff-cam cam.posts.HaasPost)",
-            "G17 G40 G49 G80 G90",                 # safety block
-            config.units_code,                     # G21 / G20
-            config.work_offset,                    # G54
-            f"T{config.tool_number} M06",          # tool change
-            f"G43 H{config.h_register} Z{safe}",   # length offset, rapid to clearance
-            f"S{_fmt(config.spindle_rpm, 0)} M03", # spindle CW
-        ]
 
-        # Program the work offset (G54..G59) to the stock origin in machine
-        # coords, so the program is self-contained: coords below are relative to
-        # the stock's top-centre and the controller knows where that sits. The
-        # operator need only confirm the machine zero. Pxx selects the fixture
-        # offset register: G54->P1, G55->P2, ...
-        if config.stock_origin_in is not None:
-            ox, oy, oz = _len_out(config.stock_origin_vec, config)
-            p_reg = int(config.work_offset[1:]) - 53  # "G54" -> 1
-            idx = lines.index(config.work_offset) + 1
-            lines.insert(
-                idx,
-                f"G10 L2 P{p_reg} X{_fmt(ox, p)} Y{_fmt(oy, p)} Z{_fmt(oz, p)}",
-            )
+class FanucPost(PostProcessor):
+    """FANUC 0i / 30i / 31i & Compact post-processor."""
 
-        if config.coolant:
-            lines.append("M08")
+    name = "fanuc"
 
-        # Approach: rapid above the first XY, then plunge to the first depth.
-        x0, y0, z0 = pts_out[0]
-        lines.append(f"G00 X{_fmt(x0, p)} Y{_fmt(y0, p)}")
-        lines.append(f"G01 Z{_fmt(z0, p)} F{_fmt(plunge_out, p)}")
+    def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
+        return FANUC_SPEC.format_legacy_positions_program(
+            self._validate(positions), config
+        )
 
-        # Cutting moves through the rest of the trajectory.
-        if len(pts_out) > 1:
-            lines.append(f"F{_fmt(feed_out, p)}")
-            for pt in pts_out[1:]:
-                lines.append(f"G01 {_axis_words(pt, p)}")
 
-        # Retract / shutdown.
-        lines.append(f"G00 Z{safe}")
-        if config.coolant:
-            lines.append("M09")
-        lines.append("M05")
-        lines.append("G53 G00 Z0.")                # home Z (machine coords)
-        lines.append("M30")
-        lines.append("%")
-        return "\n".join(lines) + "\n"
+class RobodrillPost(PostProcessor):
+    """FANUC Robodrill Alpha (31i-B5) post-processor."""
+
+    name = "robodrill"
+
+    def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
+        return ROBODRILL_SPEC.format_legacy_positions_program(
+            self._validate(positions), config
+        )
+
+
+class MakinoPost(PostProcessor):
+    """Makino Professional 5 / 6 (Super GI) post-processor."""
+
+    name = "makino"
+
+    def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
+        return MAKINO_SPEC.format_legacy_positions_program(
+            self._validate(positions), config
+        )
+
+
+class MazakPost(PostProcessor):
+    """Mazak Mazatrol Smooth / Matrix (EIA/ISO) post-processor."""
+
+    name = "mazak"
+
+    def program(self, positions, config: MachineConfig = MachineConfig()) -> str:
+        return MAZAK_SPEC.format_legacy_positions_program(
+            self._validate(positions), config
+        )
 
 
 # ---------------------------------------------------------------------------
-# Typed MotionPlan posting
+# Typed & shop-floor MotionPlan posting
 # ---------------------------------------------------------------------------
-
-
 class UnsupportedPostError(ValueError):
     """A motion/task feature that the requested NC dialect cannot preserve."""
 
 
 def _arc_offset_words(start_work, end_work, centre_work, plane, config, precision, segment_id):
-    """Quantize arc offsets, allowing a bounded center correction.
-
-    The emitted centre-remapping is reconstructed from the POSTED start. Only
-    the nearest I/J/K offset grid points plus/minus one code step are considered.
-    Endpoints, direction, turn count and the 1e-3 mm typed-arc radius tolerance
-    are never changed. If nearest-neighbor correction cannot preserve these
-    constraints, the arc is refused with UnsupportedPostError instead of being
-    silently turned into a different-radius/invalid path.
-    """
-    from .gcode_parser import _typed_plane_axes
-
-    start_out = _posted_work_vector(start_work, config, precision)
-    end_out = _posted_work_vector(end_work, config, precision)
-    if math.dist(start_work, end_work) > 0 and np.array_equal(start_out, end_out):
-        raise UnsupportedPostError(
-            f"segment {segment_id}: distinct arc endpoints collapse to the same posted point at "
-            f"{config.units} precision {precision}; rejecting a partial arc that would become a full turn"
-        )
-    centre_out = _len_out(np.asarray(centre_work, dtype=np.float64), config)
-    a, b, _ = _typed_plane_axes(plane)
-    axis_names = {0: "I", 1: "J", 2: "K"}
-    unit_to_mm = 25.4 if config.units == "inch" else 1.0
-    step = 10.0 ** (-precision)
-    native_mean_radius = 0.5 * (
-        np.linalg.norm(np.asarray(start_work)[[a, b]] - np.asarray(centre_work)[[a, b]])
-        + np.linalg.norm(np.asarray(end_work)[[a, b]] - np.asarray(centre_work)[[a, b]])
+    return arc_offset_words(
+        start_work,
+        end_work,
+        centre_work,
+        plane,
+        config,
+        precision,
+        segment_id,
+        force_decimal=False,
     )
-    best = (math.inf, math.inf, math.inf, [])
-    for dx in (-1, 0, 1):
-        for dy in (-1, 0, 1):
-            centre = start_out.copy()
-            candidate = []
-            for axis_index, shift in zip((a, b), (dx, dy)):
-                offset = centre_out[axis_index] - start_out[axis_index] + shift * step
-                word = _fmt(offset, precision)
-                centre[axis_index] += float(word)
-                candidate.append(f"{axis_names[axis_index]}{word}")
-            r_start = np.linalg.norm((start_out[[a, b]] - centre[[a, b]]) * unit_to_mm)
-            r_end = np.linalg.norm((end_out[[a, b]] - centre[[a, b]]) * unit_to_mm)
-            if min(r_start, r_end) <= ARC_RADIUS_TOL_MM:
-                continue  # a degenerate radius-zero post is not a valid arc
-            radius_error = abs(r_start - r_end)
-            mean_error = abs(0.5 * (r_start + r_end) - native_mean_radius)
-            score = (radius_error, mean_error, dx * dx + dy * dy)
-            if score < best[:3]:
-                best = (*score, candidate)
-    error, _, _, words = best
-    if not words:
-        raise UnsupportedPostError(
-            f"segment {segment_id}: post quantization collapses the arc to zero/near-zero radius at "
-            f"{config.units} precision {precision}; increase post precision or reject this incompatible arc"
-        )
-    if error > ARC_RADIUS_TOL_MM + 1e-12:
-        raise UnsupportedPostError(
-            f"segment {segment_id}: no nearest-grid arc offset preserves radii at {config.units} "
-            f"precision {precision} (best error {error:g} mm > {ARC_RADIUS_TOL_MM:g} mm). "
-            "Increase post precision or reject this incompatible arc; it was not emitted"
-        )
-    return words
 
 
-def _validate_typed_post(plan: MotionPlan, task: TaskSpec, dialect: Dialect, config: MachineConfig) -> None:
+def _validate_typed_post(
+    plan: MotionPlan,
+    task: TaskSpec,
+    ctrl_dialect: ControllerDialect,
+    config: MachineConfig,
+) -> None:
     if config.h_register != task.tool.tool_number:
         raise UnsupportedPostError(
             f"G43 H{config.h_register} does not match TaskSpec.tool.tool_number={task.tool.tool_number}"
         )
-    if dialect == Dialect.HAAS and config.tool_number != task.tool.tool_number:
+    if ctrl_dialect != ControllerDialect.RS274 and config.tool_number != task.tool.tool_number:
         raise UnsupportedPostError(
             f"T{config.tool_number} does not match TaskSpec.tool.tool_number={task.tool.tool_number}"
         )
-    if dialect not in task.motion_semantics.dialects:
-        raise UnsupportedPostError(f"dialect {dialect.value!r} is disabled by this TaskSpec")
+    if not is_dialect_allowed_by_task(task, ctrl_dialect):
+        raise UnsupportedPostError(f"dialect {ctrl_dialect.value!r} is disabled by this TaskSpec")
     if plan.frame != Frame.MACHINE:
         raise UnsupportedPostError("typed posting requires a machine-frame MotionPlan")
     if not plan.initial_state.known:
@@ -330,114 +213,72 @@ def _validate_typed_post(plan: MotionPlan, task: TaskSpec, dialect: Dialect, con
     plan.validate_for_task(task)
 
 
-def _typed_motion_lines(plan: MotionPlan, task: TaskSpec, config: MachineConfig) -> list[str]:
-    # Imported lazily so the legacy post-only import path stays lightweight.
-    from .gcode_parser import _mapped_arc_orientation, _typed_plane_axes
-
-    inverse = task.work_to_machine.inverse()
-    output_plane = ArcPlane.XY
-    lines: list[str] = []
-    plane_codes = {ArcPlane.XY: "G17", ArcPlane.XZ: "G18", ArcPlane.YZ: "G19"}
-    precision = config.precision
-
-    for segment in plan.segments:
-        home = segment.tag == "home"
-        if segment.kind == SegmentKind.ARC:
-            if home:
-                raise UnsupportedPostError("G53 does not support arc motion")
-            arc = segment.arc
-            try:
-                work_plane, work_direction = _mapped_arc_orientation(
-                    inverse, arc.plane, arc.direction
-                )
-            except ValueError as error:
-                raise UnsupportedPostError(str(error)) from error
-            if work_plane != output_plane:
-                lines.append(plane_codes[work_plane])
-                output_plane = work_plane
-            end_work = inverse.apply(segment.end_mm)
-            centre_work = inverse.apply(arc.centre_mm)
-            start_work = inverse.apply(segment.start_mm)
-            end_out = _posted_work_vector(end_work, config, precision)
-            words = [_axis_words(end_out, precision)]
-            words.extend(_arc_offset_words(start_work, end_work, centre_work,
-                                           work_plane, config, precision, segment.id))
-            if arc.turns:
-                words.append(f"P{arc.turns + 1}")
-            words.append(f"F{_fmt(_feed_out(segment.feed_mm_s * 60.0, config), precision)}")
-            code = "G2" if work_direction == ArcDirection.CW else "G3"
-            lines.append(f"{code} {' '.join(words)}")
-            continue
-
-        code = "G0" if segment.kind == SegmentKind.RAPID else "G1"
-        target = segment.end_mm if home else inverse.apply(segment.end_mm)
-        words = [
-            f"G53 {code}" if home else code,
-            _axis_words(_len_out(np.asarray(target, dtype=np.float64), config), precision),
-        ]
-        if segment.kind == SegmentKind.FEED:
-            words.append(f"F{_fmt(_feed_out(segment.feed_mm_s * 60.0, config), precision)}")
-        lines.append(" ".join(words))
-    return lines
+def _typed_motion_lines(
+    plan: MotionPlan,
+    task: TaskSpec,
+    config: MachineConfig,
+    *,
+    force_decimal: bool = False,
+) -> list[str]:
+    return build_motion_lines(
+        plan,
+        task,
+        config,
+        xyz_precision=config.precision,
+        feed_precision=config.precision,
+        force_decimal=force_decimal,
+    )
 
 
 def post_motion_plan(
     plan: MotionPlan,
     task: TaskSpec,
-    dialect: Dialect | str = Dialect.RS274,
+    dialect: Dialect | ControllerDialect | str = Dialect.RS274,
     config: MachineConfig | None = None,
 ) -> str:
-    """Post machine-frame typed motion without adding approach/retract moves.
-
-    Arcs are emitted in I/J/K centre-offset form (never chord approximations).
-    A segment tagged ``home`` is emitted as an absolute G53 G0/G1 block.  Any
-    other tag, including ``plunge``, remains a G1 feed with its own retained F
-    word.  Haas and RS274 differ only in non-motion prologue/epilogue words;
-    both use G61 exact-stop semantics and the same geometric motion sequence.
-    """
-    dialect = Dialect(dialect)
+    """Post machine-frame typed motion without adding synthetic approach/retract moves."""
+    ctrl_dialect = coerce_controller_dialect(dialect)
+    spec = get_dialect_spec(ctrl_dialect)
     config = config or MachineConfig(units="mm")
-    _validate_typed_post(plan, task, dialect, config)
-    unit_code = config.units_code
-    motion_lines = _typed_motion_lines(plan, task, config)
-    offset_line = (
-        f"G43 H{config.h_register}"
-        if plan.initial_state.length_offset_applied
-        else "G49"
+    _validate_typed_post(plan, task, ctrl_dialect, config)
+    motion_lines = _typed_motion_lines(plan, task, config, force_decimal=spec.force_decimal)
+    nc_text = spec.format_typed_program(
+        motion_lines,
+        plan=plan,
+        task=task,
+        config=config,
     )
+    spec.verify_hardware_syntax(nc_text, units=config.units, shop_mode=False)
+    return nc_text
 
-    blended = plan.timing_rule == TimingRule.BLENDED_ACCEL_BOUNDED
-    if dialect == Dialect.RS274:
-        path_ctrl = "G54 G64 P0.05" if blended else "G54 G61"
-        lines = [
-            "(Generated by diff-cam typed MotionPlan RS274 post)",
-            unit_code,
-            "G17 G40 G49 G80 G90 G94",
-            path_ctrl,
-            offset_line,
-        ]
-        lines.extend(motion_lines)
-        lines.append("M2")
-    else:
-        path_ctrl_lines = ["G54 G64", "G187 P2 E0.05"] if blended else ["G54 G61"]
-        lines = [
-            "%",
-            f"O{config.program_number:05d} ({config.program_name})",
-            "(Generated by diff-cam typed MotionPlan Haas NGC post)",
-            "G17 G40 G49 G80 G90 G94",
-            unit_code,
-            *path_ctrl_lines,
-            f"T{config.tool_number} M06",
-            offset_line,
-            f"S{_fmt(config.spindle_rpm, 0)} M03",
-        ]
-        if config.coolant:
-            lines.append("M08")
-        lines.extend(motion_lines)
-        if config.coolant:
-            lines.append("M09")
-        lines.extend(("M05", "M30", "%"))
-    return "\n".join(lines) + "\n"
+
+def post_shop_program(
+    plan: MotionPlan,
+    task: TaskSpec,
+    dialect: Dialect | ControllerDialect | str = ControllerDialect.HAAS,
+    config: MachineConfig | None = None,
+    *,
+    case_label: str | None = None,
+    blend_tolerance_mm: float = 0.05,
+) -> str:
+    """Post a standalone physical shop-floor program with safe home retracts and decimal caps."""
+    ctrl_dialect = coerce_controller_dialect(dialect)
+    spec = get_dialect_spec(ctrl_dialect)
+    config = config or MachineConfig(
+        units="mm",
+        tool_number=task.tool.tool_number,
+        length_offset=task.tool.tool_number,
+    )
+    _validate_typed_post(plan, task, ctrl_dialect, config)
+    nc_text = spec.format_shop_program(
+        plan,
+        task,
+        config,
+        case_label=case_label,
+        blend_tolerance_mm=blend_tolerance_mm,
+    )
+    spec.verify_hardware_syntax(nc_text, units=config.units, shop_mode=True)
+    return nc_text
 
 
 # ---------------------------------------------------------------------------
@@ -446,6 +287,10 @@ def post_motion_plan(
 POSTS = {
     RS274Post.name: RS274Post,
     HaasPost.name: HaasPost,
+    FanucPost.name: FanucPost,
+    RobodrillPost.name: RobodrillPost,
+    MakinoPost.name: MakinoPost,
+    MazakPost.name: MazakPost,
 }
 
 

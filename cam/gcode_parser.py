@@ -40,9 +40,14 @@ from benchmarks.contracts import (
     sha256_text,
 )
 from .config import MachineConfig
+from .dialects.base import (
+    ControllerDialect,
+    coerce_controller_dialect,
+    is_dialect_allowed_by_task,
+)
 
-# A word is a letter followed by a (signed, optional-decimal) number.
-_WORD_RE = re.compile(r"([A-Za-z])\s*([-+]?[0-9]*\.?[0-9]+)")
+# A word is a letter followed by a (signed, optional-decimal, including trailing-dot) number.
+_WORD_RE = re.compile(r"([A-Za-z])\s*([-+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))")
 
 # Plane constants.
 PLANE_XY, PLANE_XZ, PLANE_YZ = 17, 18, 19
@@ -482,34 +487,23 @@ def _strict_arc(
 def parse_motion_plan(
     text: str,
     task: TaskSpec,
-    dialect: Dialect | str = Dialect.RS274,
+    dialect: Dialect | ControllerDialect | str = Dialect.RS274,
 ) -> MotionPlan:
-    """Parse a declared RS274/Haas subset into a machine-frame MotionPlan.
+    """Parse a declared controller G-code subset into a machine-frame MotionPlan.
 
+    Supports ``rs274``, ``haas``, ``fanuc``, ``robodrill``, ``makino``, and ``mazak``.
     G54 positions are transformed by ``task.work_to_machine``.  G53 is a
     single-block absolute machine move (G91+G53 and G53 arcs are rejected).
     I/J/K are always start-relative offsets, including in G91.  All three
     principal arc planes and helical/multi-turn arcs use ``arc_geometry`` from
     the shared contract.
-
-    Tool-length register tables are not modeled.  G43 Hn declares that the H
-    register is calibrated so coordinates refer to the cutter tip; G49 declares
-    the equivalent zero-length/gauge-tip convention.  The caller must provision
-    those registers for physical execution.  If T appears, it must equal
-    task.tool.tool_number; every H must equal that number too.  Once the first H
-    register is recorded, a later different register is unsupported.  Tool changes
-    are limited to one repeated tool number because TaskSpec describes one fixed
-    tool assembly.
-
-    The plan uses the task's declared timing rule; G61/G61.1 are accepted and
-    G64/other blended path-control modes are unsupported.  Initial units,
-    distance mode, motion mode, and feed must be explicit.  Most importantly,
-    an unknown initial position is an error at the first motion: the approach
-    is never silently omitted.
     """
-    dialect = Dialect(dialect)
-    if dialect not in task.motion_semantics.dialects:
-        raise UnsupportedGCodeError(f"dialect {dialect.value!r} is disabled by this TaskSpec")
+    try:
+        ctrl_dialect = coerce_controller_dialect(dialect)
+    except ValueError as error:
+        raise GCodeError(str(error)) from error
+    if not is_dialect_allowed_by_task(task, ctrl_dialect):
+        raise UnsupportedGCodeError(f"dialect {ctrl_dialect.value!r} is disabled by this TaskSpec")
     if task.initial_state.work_offset != "G54":
         raise UnsupportedGCodeError("only the G54 work offset is represented by TaskSpec")
     if task.initial_state.known and task.initial_state.frame != Frame.MACHINE:
@@ -534,14 +528,30 @@ def parse_motion_plan(
     blended_mode = task.motion_semantics.timing_rule == TimingRule.BLENDED_ACCEL_BOUNDED
     supported_g = {
         0.0, 1.0, 2.0, 3.0, 17.0, 18.0, 19.0, 20.0, 21.0,
-        40.0, 43.0, 49.0, 53.0, 54.0, 61.0, 61.1, 80.0, 90.0, 91.0, 94.0,
+        40.0, 43.0, 49.0, 53.0, 54.0, 61.0, 80.0, 90.0, 91.0, 94.0,
     }
-    if blended_mode:
-        supported_g.add(64.0)
-        if dialect == Dialect.HAAS:
-            supported_g.add(187.0)
     supported_m = {0, 1, 2, 3, 4, 5, 6, 8, 9, 30}
-    allowed_words = set("GMXYZIJKRFPSTHNOL") | ({"E"} if blended_mode and dialect == Dialect.HAAS else set())
+    allowed_words = set("GMXYZIJKRFPSTHNOL")
+
+    if ctrl_dialect == ControllerDialect.RS274:
+        supported_g.update({61.1, 91.1})
+        if blended_mode:
+            supported_g.add(64.0)
+    elif ctrl_dialect == ControllerDialect.HAAS:
+        supported_g.add(61.1)
+        if blended_mode:
+            supported_g.add(187.0)
+            allowed_words.add("E")
+    elif ctrl_dialect in (ControllerDialect.FANUC, ControllerDialect.ROBODRILL):
+        if blended_mode:
+            supported_g.add(5.1)
+            allowed_words.add("Q")
+    elif ctrl_dialect == ControllerDialect.MAKINO:
+        if blended_mode:
+            supported_m.update({250, 251, 252, 253})
+    elif ctrl_dialect == ControllerDialect.MAZAK:
+        if blended_mode:
+            supported_g.update({61.1, 64.0})
 
     for line, raw in enumerate(text.splitlines(), start=1):
         try:
@@ -580,10 +590,14 @@ def parse_motion_plan(
                     )
                 if code in (93.0, 95.0) or (code == 64.0 and not blended_mode):
                     raise _nc_error(line, f"G{code:g} changes timing/blending semantics", True)
+                if code == 64.0 and ctrl_dialect == ControllerDialect.HAAS:
+                    raise _nc_error(line, "G64 is unsupported on Haas NGC (use G187 smoothing)", True)
                 if code not in supported_g:
                     raise _nc_error(line, f"unsupported G{code:g}", True)
             if "E" in block and 187.0 not in gcodes:
                 raise _nc_error(line, "E word is only accepted on a Haas NGC G187 smoothing block", True)
+            if "Q" in block and 5.1 not in gcodes:
+                raise _nc_error(line, "Q word is only accepted on a FANUC G05.1 AICC block", True)
             if 187.0 in gcodes:
                 if any(axis in block for axis in ("X", "Y", "Z", "I", "J", "K", "R")):
                     raise _nc_error(line, "G187 must appear on a standalone setup block without motion")
@@ -596,8 +610,40 @@ def parse_motion_plan(
                     if block["E"] <= 0:
                         raise _nc_error(line, "Haas NGC G187 E tolerance must be positive")
                     block.pop("E")
-            if 64.0 in gcodes and not any(m in gcodes for m in (2.0, 3.0)):
+            if 5.1 in gcodes:
+                if any(axis in block for axis in ("X", "Y", "Z", "I", "J", "K")):
+                    raise _nc_error(line, "G05.1 must appear on a standalone AICC setup block without motion")
+                if "Q" not in block:
+                    raise _nc_error(line, "FANUC G05.1 requires Q1 (enable) or Q0 (cancel)")
+                q_mode = _integer_word(block, "Q", line, minimum=0)
+                if q_mode not in (0, 1):
+                    raise _nc_error(line, "FANUC G05.1 Q mode must be 0 or 1")
+                block.pop("Q")
+                if "R" in block:
+                    if q_mode == 0:
+                        raise _nc_error(line, "FANUC G05.1 Q0 cancel block cannot include R")
+                    r_level = _integer_word(block, "R", line, minimum=1)
+                    if r_level > 10:
+                        raise _nc_error(line, "FANUC G05.1 R precision level must be in 1..10")
+                    block.pop("R")
+            if any(m in (250, 251, 252, 253) for m in mcodes):
+                if any(axis in block for axis in ("X", "Y", "Z", "I", "J", "K", "R")):
+                    raise _nc_error(line, "Makino SGI M250..M253 must appear on a standalone block without motion")
+                if sum(m in (250, 251, 252, 253) for m in mcodes) > 1:
+                    raise _nc_error(line, f"conflicting Makino SGI M codes: {mcodes}")
+            if 61.1 in gcodes and ctrl_dialect == ControllerDialect.MAZAK:
+                if any(axis in block for axis in ("X", "Y", "Z", "I", "J", "K", "R")):
+                    raise _nc_error(line, "Mazak G61.1 must appear on a standalone setup block without motion")
                 if "P" in block:
+                    p_level = _integer_word(block, "P", line, minimum=0)
+                    if p_level > 7:
+                        raise _nc_error(line, "Mazak G61.1 P level must be in 0..7")
+                    block.pop("P")
+            if 64.0 in gcodes and not any(m in gcodes for m in (2.0, 3.0)):
+                if ctrl_dialect == ControllerDialect.MAZAK:
+                    if any(axis in block for axis in ("X", "Y", "Z", "I", "J", "K", "R")) or "P" in block:
+                        raise _nc_error(line, "Mazak G64 cancel must appear on a standalone block without P or motion")
+                elif "P" in block:
                     if block["P"] < 0:
                         raise _nc_error(line, "G64 P blend tolerance must be nonnegative")
                     block.pop("P")
@@ -809,13 +855,62 @@ def parse_motion_plan(
         initial_state=task.initial_state,
         segments=tuple(segments),
         timing_rule=task.motion_semantics.timing_rule,
-        provenance=f"parsed:{dialect.value}:{sha256_text(text)}",
+        provenance=f"parsed:{ctrl_dialect.value}:{sha256_text(text)}",
     )
     try:
         plan.validate_for_task(task)
     except ValueError as error:
         raise GCodeError(f"typed NC does not satisfy TaskSpec: {error}") from error
     return plan
+
+
+def parse_shop_motion_plan(
+    text: str,
+    task: TaskSpec,
+    dialect: Dialect | ControllerDialect | str = ControllerDialect.HAAS,
+    *,
+    g28_home_z_mm: float = 0.0,
+) -> MotionPlan:
+    """Parse a standalone physical shop-floor program into a machine-frame MotionPlan.
+
+    On ``fanuc`` and ``makino`` shop programs, zero-intermediate Z reference
+    returns (``G28 G91 Z0.0``) are mapped to explicit machine-frame ``G90 G53 G0 Z<home>``
+    moves (respecting active ``G20``/``G21`` units) before strict ``parse_motion_plan``
+    validation. All other dialects (``haas``, ``robodrill``, ``mazak``, ``rs274``)
+    already emit ``G53`` directly and are parsed verbatim.
+    """
+    ctrl_dialect = coerce_controller_dialect(dialect)
+    if ctrl_dialect not in (ControllerDialect.FANUC, ControllerDialect.ROBODRILL, ControllerDialect.MAKINO):
+        return parse_motion_plan(text, task, dialect=ctrl_dialect)
+
+    units_scale = 1.0
+    rewritten: list[str] = []
+    for line_no, raw in enumerate(text.splitlines(), start=1):
+        words = _strict_line_words(raw, line_no)
+        if not words:
+            rewritten.append(raw)
+            continue
+        gcodes = [val for ltr, val in words if ltr == "G"]
+        if 20.0 in gcodes:
+            units_scale = 25.4
+        elif 21.0 in gcodes:
+            units_scale = 1.0
+        if 28.0 in gcodes:
+            if ctrl_dialect == ControllerDialect.ROBODRILL:
+                raise _nc_error(line_no, "FANUC Robodrill shop packets must use G53, not G28", True)
+            other = {ltr: val for ltr, val in words if ltr != "G"}
+            if 91.0 not in gcodes or set(other.keys()) != {"Z"} or abs(other["Z"]) > 1e-12:
+                raise _nc_error(
+                    line_no,
+                    "shop G28 parser supports only zero-intermediate Z reference return (G28 G91 Z0.0)",
+                    True,
+                )
+            z_out = g28_home_z_mm / units_scale
+            rewritten.append(f"G90 G53 G0 Z{z_out:.6f}")
+        else:
+            rewritten.append(raw)
+    body = "\n".join(rewritten) + ("\n" if text.endswith("\n") else "")
+    return parse_motion_plan(body, task, dialect=ctrl_dialect)
 
 
 def segment_waypoints(segments):

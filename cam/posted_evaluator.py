@@ -28,6 +28,7 @@ from typing import Any, Dict, Mapping, Optional, Tuple
 import numpy as np
 
 from benchmarks import contracts as C
+from cam.dialects.base import ControllerDialect, coerce_controller_dialect
 from cam.gcode_parser import GCodeError, parse_motion_plan
 from simulator import csg_metrics
 from simulator.csg_metrics import compute_grid_metrics
@@ -505,6 +506,87 @@ def _unsupported(task, motion, settings, reasons, *, nc_bytes=None, dialect=None
     )
 
 
+def _axes_1d(grid: C.GridSpec) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    return tuple(
+        grid.origin_mm[a] + (np.arange(grid.shape[a], dtype=np.float64) + 0.5) * grid.voxel_mm
+        for a in range(3)
+    )
+
+
+def _slice_bounds_1d(axis: np.ndarray, lo_val: float, hi_val: float) -> Tuple[int, int]:
+    i0 = int(np.searchsorted(axis, lo_val - 1e-12, side="left"))
+    i1 = int(np.searchsorted(axis, hi_val + 1e-12, side="right"))
+    return max(0, i0), min(int(axis.shape[0]), i1)
+
+
+def _cyl_dist_grid(
+    ax: np.ndarray,
+    ay: np.ndarray,
+    az: np.ndarray,
+    base: Tuple[float, float, float],
+    radius: float,
+    height: float,
+) -> np.ndarray:
+    """Separable 2D-XY + 1D-Z exact capped-cylinder SDF on a rectilinear subgrid."""
+    radial = np.hypot(ax[:, None] - base[0], ay[None, :] - base[1]) - radius
+    vertical = np.maximum(base[2] - az, az - (base[2] + height))
+    return np.hypot(
+        np.maximum(radial, 0.0)[:, :, None],
+        np.maximum(vertical, 0.0)[None, None, :],
+    ) + np.minimum(np.maximum(radial[:, :, None], vertical[None, None, :]), 0.0)
+
+
+def _cyl_dist_2d_ztop(
+    ax: np.ndarray,
+    ay: np.ndarray,
+    z_top_vals: np.ndarray,
+    active_xy: np.ndarray,
+    base: Tuple[float, float, float],
+    radius: float,
+    height: float,
+) -> np.ndarray:
+    """Exact columnwise min cylinder SDF when all active Z satisfy z <= base[2]."""
+    radial_full = np.hypot(ax[:, None] - base[0], ay[None, :] - base[1]) - radius
+    radial = radial_full[active_xy]
+    z_vals = z_top_vals[active_xy]
+    vertical = np.maximum(base[2] - z_vals, z_vals - (base[2] + height))
+    return np.hypot(np.maximum(radial, 0.0), np.maximum(vertical, 0.0)) + np.minimum(
+        np.maximum(radial, vertical), 0.0
+    )
+
+
+def _cyl_scalar(px: float, py: float, pz: float, base: Tuple[float, float, float], radius: float, height: float) -> float:
+    radial = math.hypot(px - base[0], py - base[1]) - radius
+    vertical = max(base[2] - pz, pz - (base[2] + height))
+    return math.hypot(max(radial, 0.0), max(vertical, 0.0)) + min(max(radial, vertical), 0.0)
+
+
+def _recompute_col_zmax(mask_3d: np.ndarray) -> Tuple[np.ndarray, int]:
+    """For each (ix, iy) column, return highest active iz index (-1 if empty) and global max iz."""
+    any_xy = mask_3d.any(axis=2)
+    if not any_xy.any():
+        return np.full(mask_3d.shape[:2], -1, dtype=np.int32), -1
+    nz = mask_3d.shape[2]
+    rev_first = np.argmax(mask_3d[:, :, ::-1], axis=2)
+    zmax = np.where(any_xy, (nz - 1) - rev_first, -1).astype(np.int32)
+    return zmax, int(zmax.max())
+
+
+def _body_specs(base: Tuple[float, float, float], tool: C.ToolSpec) -> Dict[str, Optional[Tuple[Tuple[float, float, float], float, float]]]:
+    shank_height = tool.holder_bottom_mm - tool.flute_length_mm
+    return {
+        "cutter": (base, tool.cutter_radius_mm, tool.flute_length_mm),
+        "shank": None
+        if shank_height <= 0
+        else ((base[0], base[1], base[2] + tool.flute_length_mm), tool.shank_radius_mm, shank_height),
+        "holder": (
+            (base[0], base[1], base[2] + tool.holder_bottom_mm),
+            tool.holder_radius_mm,
+            tool.holder_height_mm,
+        ),
+    }
+
+
 def _execute(task, motion, cfg):
     lo, hi = task.stock.params["min_mm"], task.stock.params["max_mm"]
     grid_lo, grid_hi = task.grid.bounds_mm
@@ -513,19 +595,123 @@ def _execute(task, motion, cfg):
     if any(lo[a] < grid_lo[a] - 1e-9 or hi[a] > grid_hi[a] + 1e-9 for a in range(3)):
         raise ValueError("stock extends beyond represented grid; whole-cell safety is unavailable")
 
-    points = _centres(task.grid)
-    stock_d = _box_distance(points, lo, hi)
-    initial = stock_d <= 0
-    stock_interior = stock_d < 0
-    remaining = initial.copy()
     rho = math.sqrt(3) * task.grid.voxel_mm / 2
     voxel_volume = task.grid.voxel_mm ** 3
-    guaranteed = np.zeros(task.grid.shape, dtype=bool)
-    definite = np.zeros(task.grid.shape, dtype=bool)
-    station_upper = np.zeros(task.grid.shape, dtype=bool)
-    continuous_upper = np.zeros(task.grid.shape, dtype=bool)
-    unique_by_component = {name: np.zeros(task.grid.shape, dtype=bool)
-                           for name in ("rapid_cutter", "cutter", "shank", "holder")}
+    ax_full, ay_full, az_full = _axes_1d(task.grid)
+
+    # Tight subgrid covering all stock-bearing whole cells (stock_d <= rho).
+    # Outside this subgrid, stock_d > rho > 0, so initial, stock_interior,
+    # remaining, material, safety_material, and all volume bounds are identically False.
+    bx0, bx1 = _slice_bounds_1d(ax_full, lo[0] - rho, hi[0] + rho)
+    by0, by1 = _slice_bounds_1d(ay_full, lo[1] - rho, hi[1] + rho)
+    bz0, bz1 = _slice_bounds_1d(az_full, lo[2] - rho, hi[2] + rho)
+
+    ax = ax_full[bx0:bx1]
+    ay = ay_full[by0:by1]
+    az = az_full[bz0:bz1]
+    sub_shape = (ax.shape[0], ay.shape[0], az.shape[0])
+    sub_pts = tuple(np.meshgrid(ax, ay, az, indexing="ij"))
+    stock_d = _box_distance(sub_pts, lo, hi) if all(s > 0 for s in sub_shape) else np.empty(sub_shape, dtype=np.float64)
+    initial_sub = stock_d <= 0
+    stock_interior = stock_d < 0
+    stock_whole = stock_d <= rho
+    remaining = initial_sub.copy()
+    guaranteed = np.zeros(sub_shape, dtype=bool)
+    definite = np.zeros(sub_shape, dtype=bool)
+    station_upper = np.zeros(sub_shape, dtype=bool)
+    continuous_upper = np.zeros(sub_shape, dtype=bool)
+    unique_by_component = {
+        name: np.zeros(sub_shape, dtype=bool)
+        for name in ("rapid_cutter", "cutter", "shank", "holder")
+    }
+
+    material = remaining & stock_interior
+    safety_material = stock_whole.copy()
+    mat_zmax, mat_global_zmax = _recompute_col_zmax(material)
+    safe_zmax, safe_global_zmax = _recompute_col_zmax(safety_material)
+
+    def _ref_voxel_coords(zmax_2d: np.ndarray, qx: float, qy: float) -> Optional[Tuple[float, float, float]]:
+        active = zmax_2d >= 0
+        if not active.any():
+            return None
+        ix_near = min(max(int(np.searchsorted(ax, qx)), 0), max(0, ax.shape[0] - 1))
+        iy_near = min(max(int(np.searchsorted(ay, qy)), 0), max(0, ay.shape[0] - 1))
+        if ax.shape[0] > 0 and ay.shape[0] > 0 and zmax_2d[ix_near, iy_near] >= 0:
+            return float(ax[ix_near]), float(ay[iy_near]), float(az[zmax_2d[ix_near, iy_near]])
+        idxs = np.argwhere(active)
+        r0, c0 = int(idxs[0, 0]), int(idxs[0, 1])
+        return float(ax[r0]), float(ay[c0]), float(az[zmax_2d[r0, c0]])
+
+    def _min_dist_over_mask(
+        mask_3d: np.ndarray,
+        zmax_2d: np.ndarray,
+        global_zmax: int,
+        spec: Tuple[Tuple[float, float, float], float, float],
+        running_min: float,
+    ) -> float:
+        if global_zmax < 0:
+            return running_min
+        base, rad, hgt = spec
+        if base[2] >= float(az[global_zmax]):
+            # Monotonic in Z for all z <= base[2]: exact columnwise min at zmax_2d.
+            active_xy = zmax_2d >= 0
+            z_top = az[np.maximum(zmax_2d, 0)]
+            d2 = _cyl_dist_2d_ztop(ax, ay, z_top, active_xy, base, rad, hgt)
+            return min(running_min, float(d2.min()))
+        ref = _ref_voxel_coords(zmax_2d, base[0], base[1])
+        if ref is None:
+            return running_min
+        ub = min(running_min, _cyl_scalar(ref[0], ref[1], ref[2], base, rad, hgt))
+        pad = max(0.0, ub) + 1e-9
+        ix0, ix1 = _slice_bounds_1d(ax, base[0] - rad - pad, base[0] + rad + pad)
+        iy0, iy1 = _slice_bounds_1d(ay, base[1] - rad - pad, base[1] + rad + pad)
+        iz0, iz1 = _slice_bounds_1d(az, base[2] - pad, base[2] + hgt + pad)
+        if ix0 >= ix1 or iy0 >= iy1 or iz0 >= iz1:
+            return ub
+        m_sub = mask_3d[ix0:ix1, iy0:iy1, iz0:iz1]
+        if not m_sub.any():
+            return ub
+        d_sub = _cyl_dist_grid(ax[ix0:ix1], ay[iy0:iy1], az[iz0:iz1], base, rad, hgt)
+        return min(ub, float(d_sub[m_sub].min()))
+
+    def _min_pair_over_safety(
+        spec_now: Tuple[Tuple[float, float, float], float, float],
+        spec_nxt: Tuple[Tuple[float, float, float], float, float],
+        min_needed_upper: float,
+    ) -> Optional[float]:
+        if safe_global_zmax < 0:
+            return None
+        b0, r0, h0 = spec_now
+        b1, r1, h1 = spec_nxt
+        z_top_max = float(az[safe_global_zmax])
+        if b0[2] >= z_top_max and b1[2] >= z_top_max:
+            active_xy = safe_zmax >= 0
+            z_top = az[np.maximum(safe_zmax, 0)]
+            d0 = _cyl_dist_2d_ztop(ax, ay, z_top, active_xy, b0, r0, h0)
+            d1 = _cyl_dist_2d_ztop(ax, ay, z_top, active_xy, b1, r1, h1)
+            return float(np.minimum(d0, d1).min())
+        ref = _ref_voxel_coords(safe_zmax, 0.5 * (b0[0] + b1[0]), 0.5 * (b0[1] + b1[1]))
+        if ref is None:
+            return None
+        ub = min(
+            _cyl_scalar(ref[0], ref[1], ref[2], b0, r0, h0),
+            _cyl_scalar(ref[0], ref[1], ref[2], b1, r1, h1),
+        )
+        eff_ub = min(ub, min_needed_upper)
+        pad = max(0.0, eff_ub) + 1e-9
+        rmax = max(r0, r1)
+        ix0, ix1 = _slice_bounds_1d(ax, min(b0[0], b1[0]) - rmax - pad, max(b0[0], b1[0]) + rmax + pad)
+        iy0, iy1 = _slice_bounds_1d(ay, min(b0[1], b1[1]) - rmax - pad, max(b0[1], b1[1]) + rmax + pad)
+        iz0, iz1 = _slice_bounds_1d(az, min(b0[2], b1[2]) - pad, max(b0[2] + h0, b1[2] + h1) + pad)
+        if ix0 >= ix1 or iy0 >= iy1 or iz0 >= iz1:
+            return ub
+        m_sub = safety_material[ix0:ix1, iy0:iy1, iz0:iz1]
+        if not m_sub.any():
+            return ub
+        d0 = _cyl_dist_grid(ax[ix0:ix1], ay[iy0:iy1], az[iz0:iz1], b0, r0, h0)
+        d1 = _cyl_dist_grid(ax[ix0:ix1], ay[iy0:iy1], az[iz0:iz1], b1, r1, h1)
+        return min(ub, float(np.minimum(d0, d1)[m_sub].min()))
+
     seen_events = set()
     events = []
     segment_records = []
@@ -562,80 +748,155 @@ def _execute(task, motion, cfg):
             "temporal_station_cover_bound_mm": delta_t,
             "motion_model": "contracts.arc_geometry" if segment.kind == C.SegmentKind.ARC else "linear",
         })
-        current = None
+        current_specs = None
         for j in range(1 if zero_length else m + 1):
             s = 0.0 if zero_length else j / m
-            if current is None:
-                current = _body_distances(points, _base_at(segment, s, task, motion.frame), task.tool)
+            if current_specs is None:
+                current_specs = _body_specs(_base_at(segment, s, task, motion.frame), task.tool)
             if segment.kind != C.SegmentKind.RAPID:
-                cutter = current["cutter"]
-                # The shared endpoint of a contiguous cutting join inherits the
-                # preceding station's engagement instead of being re-tested against
-                # stock already removed at that pose. Other stations retain the
-                # exact-grid removal test before subtraction. Rapids reset the state.
-                engaged = (last_station_engaged if j == 0 and contiguous_cut_join
-                           else bool(np.any(remaining & (cutter <= 0))))
+                c_base, c_rad, c_hgt = current_specs["cutter"]
+                cut_pad = (rho + delta_t) if cfg.compute_bounds else 0.0
+                cix0, cix1 = _slice_bounds_1d(ax, c_base[0] - c_rad - cut_pad, c_base[0] + c_rad + cut_pad)
+                ciy0, ciy1 = _slice_bounds_1d(ay, c_base[1] - c_rad - cut_pad, c_base[1] + c_rad + cut_pad)
+                ciz0, ciz1 = _slice_bounds_1d(az, c_base[2] - cut_pad, c_base[2] + c_hgt + cut_pad)
+                if cix0 < cix1 and ciy0 < ciy1 and ciz0 < ciz1:
+                    cutter_sub = _cyl_dist_grid(
+                        ax[cix0:cix1], ay[ciy0:ciy1], az[ciz0:ciz1], c_base, c_rad, c_hgt
+                    )
+                    cut_le0 = cutter_sub <= 0.0
+                    rem_sub = remaining[cix0:cix1, ciy0:ciy1, ciz0:ciz1]
+                    engaged = (
+                        last_station_engaged
+                        if j == 0 and contiguous_cut_join
+                        else bool(np.any(rem_sub & cut_le0))
+                    )
+                    wholly_sub = cutter_sub < -rho
+                    if wholly_sub.any():
+                        g_sub = guaranteed[cix0:cix1, ciy0:ciy1, ciz0:ciz1]
+                        prev_g_count = int(g_sub.sum())
+                        g_sub |= wholly_sub
+                        if int(g_sub.sum()) != prev_g_count:
+                            safety_material[cix0:cix1, ciy0:ciy1, ciz0:ciz1] &= ~wholly_sub
+                            safe_zmax[cix0:cix1, ciy0:ciy1], _ = _recompute_col_zmax(
+                                safety_material[cix0:cix1, ciy0:ciy1, :]
+                            )
+                            safe_global_zmax = int(safe_zmax.max()) if safe_zmax.size else -1
+                    if cfg.compute_bounds:
+                        sd_sub = stock_d[cix0:cix1, ciy0:ciy1, ciz0:ciz1]
+                        sw_sub = stock_whole[cix0:cix1, ciy0:ciy1, ciz0:ciz1]
+                        definite[cix0:cix1, ciy0:ciy1, ciz0:ciz1] |= (sd_sub < -rho) & wholly_sub
+                        station_upper[cix0:cix1, ciy0:ciy1, ciz0:ciz1] |= sw_sub & (cutter_sub <= rho)
+                        continuous_upper[cix0:cix1, ciy0:ciy1, ciz0:ciz1] |= sw_sub & (cutter_sub <= rho + delta_t)
+                    if np.any(rem_sub & cut_le0):
+                        rem_sub[cut_le0] = False
+                        material[cix0:cix1, ciy0:ciy1, ciz0:ciz1] &= ~cut_le0
+                        mat_zmax[cix0:cix1, ciy0:ciy1], _ = _recompute_col_zmax(
+                            material[cix0:cix1, ciy0:ciy1, :]
+                        )
+                        mat_global_zmax = int(mat_zmax.max()) if mat_zmax.size else -1
+                else:
+                    engaged = last_station_engaged if j == 0 and contiguous_cut_join else False
                 last_station_engaged = engaged
                 if not engaged:
-                    air_cut_time_s += _station_time_weight(segment=segment,
-                        subdivisions=m, index=j, zero_length=zero_length)
-                wholly_covered = cutter < -rho
-                guaranteed |= wholly_covered
-                if cfg.compute_bounds:
-                    definite |= (stock_d < -rho) & wholly_covered
-                    station_upper |= (stock_d <= rho) & (cutter <= rho)
-                    continuous_upper |= (stock_d <= rho) & (cutter <= rho + delta_t)
-                remaining[cutter <= 0] = False
+                    air_cut_time_s += _station_time_weight(
+                        segment=segment, subdivisions=m, index=j, zero_length=zero_length
+                    )
                 checked = ("shank", "holder")
             else:
                 last_station_engaged = None
                 checked = ("cutter", "shank", "holder")
 
-            material = remaining & stock_interior
-            contact_union = np.zeros(task.grid.shape, dtype=bool)
-            min_noncutting = None
+            has_material = mat_global_zmax >= 0
+            contact_boxes = []
             for name in checked:
-                distance = current[name]
-                if distance is None:
+                spec = current_specs[name]
+                if spec is None:
                     continue
                 rapid_cutter = segment.kind == C.SegmentKind.RAPID and name == "cutter"
                 if rapid_cutter:
                     rapid_seen = True
-                    if material.any():
-                        min_rapid_clearance = min(min_rapid_clearance, float(distance[material].min()))
+                    if has_material:
+                        min_rapid_clearance = _min_dist_over_mask(
+                            material, mat_zmax, mat_global_zmax, spec, min_rapid_clearance
+                        )
                 else:
-                    min_noncutting = distance.copy() if min_noncutting is None else np.minimum(min_noncutting, distance)
-                contact = material & (distance < (-tolerance if rapid_cutter else 0.0))
-                if not contact.any():
+                    if has_material:
+                        min_clearance = _min_dist_over_mask(
+                            material, mat_zmax, mat_global_zmax, spec, min_clearance
+                        )
+                if not has_material:
                     continue
-                contact_union |= contact
+                b_base, b_rad, b_hgt = spec
+                thresh = -tolerance if rapid_cutter else 0.0
+                # thresh <= 0.0 (since rapid_penetration_mm >= 0), so contact requires voxel inside cylinder AABB.
+                ix0, ix1 = _slice_bounds_1d(ax, b_base[0] - b_rad, b_base[0] + b_rad)
+                iy0, iy1 = _slice_bounds_1d(ay, b_base[1] - b_rad, b_base[1] + b_rad)
+                iz0, iz1 = _slice_bounds_1d(az, b_base[2], b_base[2] + b_hgt)
+                if ix0 >= ix1 or iy0 >= iy1 or iz0 >= iz1:
+                    continue
+                m_sub = material[ix0:ix1, iy0:iy1, iz0:iz1]
+                if not m_sub.any():
+                    continue
+                d_sub = _cyl_dist_grid(ax[ix0:ix1], ay[iy0:iy1], az[iz0:iz1], b_base, b_rad, b_hgt)
+                c_sub = m_sub & (d_sub < thresh)
+                if not c_sub.any():
+                    continue
+                contact_boxes.append((ix0, ix1, iy0, iy1, iz0, iz1, c_sub))
                 component = "rapid_cutter" if rapid_cutter else name
-                unique_by_component[component] |= contact
+                unique_by_component[component][ix0:ix1, iy0:iy1, iz0:iz1] |= c_sub
                 kind = "rapid_collision" if rapid_cutter else f"{name}_collision"
                 if kind not in seen_events:
                     seen_events.add(kind)
                     events.append(C.SegmentEvent(segment.id, kind, s,
                         "first sampled contact beyond the applicable tolerance; not an exact continuous first-contact time"))
-            if contact_union.any():
+            if contact_boxes:
                 collision_count += 1
+                if len(contact_boxes) == 1:
+                    union_count = int(contact_boxes[0][6].sum())
+                else:
+                    ux0 = min(b[0] for b in contact_boxes)
+                    ux1 = max(b[1] for b in contact_boxes)
+                    uy0 = min(b[2] for b in contact_boxes)
+                    uy1 = max(b[3] for b in contact_boxes)
+                    uz0 = min(b[4] for b in contact_boxes)
+                    uz1 = max(b[5] for b in contact_boxes)
+                    u_mask = np.zeros((ux1 - ux0, uy1 - uy0, uz1 - uz0), dtype=bool)
+                    for bx_0, bx_1, by_0, by_1, bz_0, bz_1, c_sub in contact_boxes:
+                        u_mask[bx_0 - ux0:bx_1 - ux0, by_0 - uy0:by_1 - uy0, bz_0 - uz0:bz_1 - uz0] |= c_sub
+                    union_count = int(u_mask.sum())
                 weight = segment.duration_s if zero_length else segment.duration_s * (0.5 if j in (0, m) else 1.0) / m
-                integrated += weight * float(contact_union.sum()) * voxel_volume
-            if min_noncutting is not None and material.any():
-                min_clearance = min(min_clearance, float(min_noncutting[material].min()))
+                integrated += weight * float(union_count) * voxel_volume
 
             possible_here = False
-            following = None
+            following_specs = None
             if cfg.safety_screen and (zero_length or j < m):
                 if not zero_length:
-                    following = _body_distances(points, _base_at(segment, (j + 1) / m, task, motion.frame), task.tool)
-                safety_material = (stock_d <= rho) & ~guaranteed
+                    following_specs = _body_specs(
+                        _base_at(segment, (j + 1) / m, task, motion.frame), task.tool
+                    )
                 for name in checked:
-                    now = current[name]
-                    if now is None or not safety_material.any():
+                    spec_now = current_specs[name]
+                    if spec_now is None or safe_global_zmax < 0:
                         continue
-                    near = now if zero_length else np.minimum(now, following[name])
                     interval = 0.0 if zero_length else delta_t
-                    lower = float(near[safety_material].min()) - rho - interval
+                    if zero_length:
+                        cur_bound = min_rapid_lower if (segment.kind == C.SegmentKind.RAPID and name == "cutter") else min_clearance_lower
+                        req_ub = max(rho + interval, cur_bound + rho + interval) if math.isfinite(cur_bound) else math.inf
+                        near_min = _min_dist_over_mask(
+                            safety_material, safe_zmax, safe_global_zmax, spec_now, req_ub
+                        )
+                        if not math.isfinite(near_min):
+                            near_min = _min_dist_over_mask(
+                                safety_material, safe_zmax, safe_global_zmax, spec_now, math.inf
+                            )
+                    else:
+                        spec_nxt = following_specs[name]
+                        cur_bound = min_rapid_lower if (segment.kind == C.SegmentKind.RAPID and name == "cutter") else min_clearance_lower
+                        req_ub = max(rho + interval, cur_bound + rho + interval) if math.isfinite(cur_bound) else math.inf
+                        near_min = _min_pair_over_safety(spec_now, spec_nxt, req_ub)
+                    if near_min is None:
+                        continue
+                    lower = near_min - rho - interval
                     if segment.kind == C.SegmentKind.RAPID and name == "cutter":
                         min_rapid_lower = min(min_rapid_lower, lower)
                         upper = max(0.0, -lower)
@@ -650,8 +911,13 @@ def _execute(task, motion, cfg):
                     safety_uncertain = True
                     if segment.id not in uncertain_segments:
                         uncertain_segments.append(segment.id)
-            current = following
+            current_specs = following_specs
         previous_segment = segment
+
+    remaining_full = np.zeros(task.grid.shape, dtype=bool)
+    initial_full = np.zeros(task.grid.shape, dtype=bool)
+    remaining_full[bx0:bx1, by0:by1, bz0:bz1] = remaining
+    initial_full[bx0:bx1, by0:by1, bz0:bz1] = initial_sub
 
     cycle_time_s = sum(segment.duration_s for segment in motion.segments)
     # At configured exact-grid sampling, trapezoidal station weights partition
@@ -692,7 +958,7 @@ def _execute(task, motion, cfg):
             null_reason=None if air_fraction is not None else "cycle_time_s is not positive; no finite air-fraction denominator"),
         "force_proxy": C.Metric(None, "proxy", null_reason="geometry-only evaluator: no calibrated force model"),
     }
-    unique = np.zeros(task.grid.shape, dtype=bool)
+    unique = np.zeros(sub_shape, dtype=bool)
     for mask in unique_by_component.values():
         unique |= mask
     metrics["unique_contacted_volume_mm3"] = C.Metric(float(unique.sum()) * voxel_volume, "mm^3", denominator="spatial union of collided cells, not component sum")
@@ -729,7 +995,7 @@ def _execute(task, motion, cfg):
             "authoritative_verdict_max_step_mm": 0.125,
         },
     }
-    return _Execution(remaining, initial, metrics, discretization, safety, reasons, tuple(events))
+    return _Execution(remaining_full, initial_full, metrics, discretization, safety, reasons, tuple(events))
 
 
 def _result(task, motion, cfg, execution):
@@ -783,35 +1049,40 @@ class PostedEvaluator:
         except ValueError as error:
             return _unsupported(task, motion, cfg, [str(error)])
 
-    def evaluate_posted_gcode(self, task: C.TaskSpec, nc_bytes: bytes, dialect: C.Dialect,
+    def evaluate_posted_gcode(self, task: C.TaskSpec, nc_bytes: bytes,
+                              dialect: C.Dialect | ControllerDialect | str,
                               settings: Mapping[str, Any]) -> C.EvaluationResult:
         if not isinstance(nc_bytes, bytes):
             raise C.ContractError("nc_bytes must be immutable bytes for exact source hashing")
         try:
-            dialect = C.Dialect(dialect)
+            ctrl_dialect = coerce_controller_dialect(dialect)
         except ValueError as error:
             raise C.ContractError(f"unknown NC dialect {dialect!r}") from error
+        contract_dialect = (
+            C.Dialect.RS274 if ctrl_dialect == ControllerDialect.RS274 else C.Dialect.HAAS
+        )
         try:
             cfg = RefinementSettings.from_mapping(settings)
         except ValueError as error:
             return _unsupported(task, _error_plan(task), settings,
-                                [str(error)], nc_bytes=nc_bytes, dialect=dialect)
+                                [str(error)], nc_bytes=nc_bytes, dialect=contract_dialect)
         if cfg.expected_nc_hash is not None and cfg.expected_nc_hash != C.nc_hash(nc_bytes):
             raise C.ContractError("raw NC hash differs from settings.expected_nc_hash")
         try:
-            motion = parse_motion_plan(nc_bytes.decode("utf-8"), task, dialect)
+            motion = parse_motion_plan(nc_bytes.decode("utf-8"), task, ctrl_dialect)
             motion.validate_for_task(task)
             reasons = _unsupported_reasons(task, motion, _centres(task.grid))
             if reasons:
-                return _unsupported(task, motion, cfg, reasons, nc_bytes=nc_bytes, dialect=dialect)
+                return _unsupported(task, motion, cfg, reasons, nc_bytes=nc_bytes, dialect=contract_dialect)
             base = _result(task, motion, cfg, _execute(task, motion, cfg))
             discretization = dict(base.discretization)
             discretization["parsed_motion_hash"] = motion.motion_hash
+            discretization["controller_dialect"] = ctrl_dialect.value
             return dataclasses.replace(base, discretization=discretization, nc_hash=C.nc_hash(nc_bytes),
-                                       motion_hash=None, dialect=dialect)
+                                       motion_hash=None, dialect=contract_dialect)
         except (GCodeError, ValueError) as error:
             plan = _error_plan(task)
-            return _unsupported(task, plan, cfg, [str(error)], nc_bytes=nc_bytes, dialect=dialect)
+            return _unsupported(task, plan, cfg, [str(error)], nc_bytes=nc_bytes, dialect=contract_dialect)
 
 
 def evaluate_candidate(task, motion, settings=None):

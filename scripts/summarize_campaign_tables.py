@@ -118,18 +118,43 @@ def summarize(run_dir: Path) -> Dict[str, Any]:
         "Scratch-STE-Adam-16",
     ):
         sub = [r for r in exp3["test_transfer"] if r["regime"] == reg]
+        ovl_vals = [float(r.get("mrr_overload_pct", 0.0)) for r in sub]
+        fam_g3 = {
+            fam: round(float(np.mean([r["cycle_time_reduction_pct"] for r in sub if r["family"] == fam])), 1)
+            for fam in FAMILIES
+        }
         exp3_table[reg] = {
             "gain_mean": round(float(np.mean([r["cycle_time_reduction_pct"] for r in sub])), 1),
             "gain_std": round(float(np.std([r["cycle_time_reduction_pct"] for r in sub])), 1),
             "feasible_pct": round(100.0 * float(np.mean([1.0 if r["feasible"] else 0.0 for r in sub])), 1),
             "peak_mrr_mean": round(float(np.mean([r["peak_mrr_mm3_s"] for r in sub])), 1),
+            "mrr_overload_pct_mean": round(float(np.mean(ovl_vals)), 1),
+            "by_family_gain_pct": fam_g3,
         }
     out["exp3_transfer"] = exp3_table
 
-    # 5. Exp4 CAMotics + Haas NGC
+    # 5. Exp4 CAMotics + Haas NGC + 6-Controller Audit
     ver = exp4["verifications"]
     diff_v = [v for v in ver if v["variant"] == "DiffCAM-STE"]
     nom_v = [v for v in ver if v["variant"] == "Nominal-CAM"]
+    mc_rows = exp4.get("multi_controller_audit", [])
+    mc_summary: Dict[str, Any] = {}
+    if mc_rows:
+        dialects = sorted({str(r["dialect"]) for r in mc_rows})
+        mc_summary = {
+            "total_programs": len(mc_rows),
+            "geometry_pass_count": sum(1 for r in mc_rows if r["geometry_pass"]),
+            "safety_pass_count": sum(1 for r in mc_rows if r["safety_pass"]),
+            "max_orig_gouge_mm3": round(max(float(r["orig_gouge_mm3"]) for r in mc_rows), 4),
+            "by_dialect": {
+                d: {
+                    "count": sum(1 for r in mc_rows if r["dialect"] == d),
+                    "pass_count": sum(1 for r in mc_rows if r["dialect"] == d and r["geometry_pass"] and r["safety_pass"]),
+                    "mean_cycle_time_s": round(float(np.mean([r["cycle_time_s"] for r in mc_rows if r["dialect"] == d])), 2),
+                }
+                for d in dialects
+            },
+        }
     out["exp4_verification"] = {
         "num_test_cases": len(diff_v),
         "posted_0p125mm_geom_pass_count": sum(1 for v in diff_v if v["posted_0p125mm_geometry_pass"]),
@@ -139,6 +164,7 @@ def summarize(run_dir: Path) -> Dict[str, Any]:
         "camotics_watertight_count": sum(1 for v in diff_v if v["camotics_watertight"]),
         "mean_nominal_time_s": round(float(np.mean([v["cycle_time_s"] for v in nom_v])), 2),
         "mean_diffcam_time_s": round(float(np.mean([v["cycle_time_s"] for v in diff_v])), 2),
+        "multi_controller_summary": mc_summary,
         "per_case": exp4["haas_packets"],
     }
     return out

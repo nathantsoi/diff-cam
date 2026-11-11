@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DiffCAM Manufacture Simulator — 3D Toolpath &amp; Resulting Stock</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-badge">MIT</span>
+      <div>
+        <h1 class="brand-title">DiffCAM Manufacture Simulator</h1>
+        <p class="brand-subtitle">3D Toolpath, Resulting Stock Mesh &amp; Publication Benchmark Explorer</p>
+      </div>
+    </div>
+
+    <div class="toolbar-controls">
+      <label class="field-group" for="case-select">
+        <span class="field-label">Benchmark Part</span>
+        <select id="case-select" class="select-input" aria-label="Select benchmark part"></select>
+      </label>
+
+      <div class="field-group" role="group" aria-label="Optimization method">
+        <span class="field-label">Simulated Toolpath &amp; Stock</span>
+        <div id="variant-buttons" class="segmented-group"></div>
+      </div>
+
+      <div class="field-group" role="group" aria-label="Artifact downloads">
+        <span class="field-label">Open in External Simulator / CNC</span>
+        <div class="download-group">
+          <a id="dl-rustcnc" class="btn btn-accent" href="#" download>RustCNC (.rustcnc)</a>
+          <a id="dl-camotics" class="btn btn-secondary" href="#" download>CAMotics (.camotics)</a>
+          <a id="dl-nc" class="btn btn-secondary" href="#" download>G-Code (.nc)</a>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <div id="error-banner" class="error-banner hidden" role="alert"></div>
+
+  <main class="workspace">
+    <section class="viewport-pane" aria-label="3D Milling Simulation Viewport">
+      <div class="viewport-Header">
+        <div class="layer-toggles" role="group" aria-label="3D visibility layers">
+          <label class="toggle-pill"><input type="checkbox" id="chk-stock" checked> <span>Resulting Stock</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-target"> <span>Target CAD Overlay</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-billet" checked> <span>Billet Bounds</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-cuts" checked> <span>Cut Path (G1)</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-rapids" checked> <span>Rapids (G0)</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-tool" checked> <span>3D Endmill + Holder</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-clip"> <span>Clip Path to Playhead</span></label>
+        </div>
+        <div class="camera-buttons" role="group" aria-label="Camera views">
+          <button type="button" id="cam-iso" class="btn btn-tiny">Iso</button>
+          <button type="button" id="cam-top" class="btn btn-tiny">Top (XY)</button>
+          <button type="button" id="cam-front" class="btn btn-tiny">Front (XZ)</button>
+          <button type="button" id="cam-fit" class="btn btn-tiny">Reset View</button>
+        </div>
+      </div>
+
+      <div class="canvas-stage">
+        <canvas id="gl-canvas"></canvas>
+
+        <div class="hud-dro" aria-live="polite">
+          <div class="dro-title">G54 Live Spindle DRO</div>
+          <div class="dro-grid">
+            <span class="dro-axis axis-x">X</span><span id="dro-x" class="dro-val">0.000 mm</span>
+            <span class="dro-axis axis-y">Y</span><span id="dro-y" class="dro-val">0.000 mm</span>
+            <span class="dro-axis axis-z">Z</span><span id="dro-z" class="dro-val">6.000 mm</span>
+          </div>
+          <div class="dro-meta">
+            <div><span class="meta-k">Motion:</span> <span id="dro-class" class="meta-v">Rapid</span></div>
+            <div><span class="meta-k">Feed:</span> <span id="dro-feed" class="meta-v">0.0 mm/s (0 mm/min)</span></div>
+            <div><span class="meta-k">Segment:</span> <span id="dro-seg" class="meta-v">0 / 0</span></div>
+            <div><span class="meta-k">Stock Mesh:</span> <span id="dro-mesh-src" class="meta-v">—</span></div>
+          </div>
+        </div>
+
+        <div class="hud-legend">
+          <div class="legend-title">Feedrate Color Scale (G1)</div>
+          <div class="legend-gradient"></div>
+          <div class="legend-labels">
+            <span id="legend-min">3.0 mm/s</span>
+            <span id="legend-mid">11.5 mm/s</span>
+            <span id="legend-max">20.0 mm/s</span>
+          </div>
+          <div class="legend-hint">Drag: Orbit &middot; Shift+Drag / Right-Drag: Pan &middot; Wheel: Zoom</div>
+        </div>
+      </div>
+
+      <div class="scrubber-bar">
+        <button type="button" id="btn-play" class="btn btn-primary">Play</button>
+        <button type="button" id="btn-reset" class="btn btn-secondary">Start</button>
+        <label class="speed-label" for="speed-select">
+          <span>Speed</span>
+          <select id="speed-select" class="select-compact">
+            <option value="0.25">0.25x</option>
+            <option value="0.5">0.5x</option>
+            <option value="1" selected>1.0x</option>
+            <option value="2">2.0x</option>
+            <option value="4">4.0x</option>
+          </select>
+        </label>
+        <input type="range" id="time-slider" class="time-slider" min="0" max="1000" value="1000" step="1" aria-label="Simulation timeline">
+        <div id="time-readout" class="time-readout">0.00 / 0.00 s</div>
+      </div>
+    </section>
+
+    <aside class="inspector-pane" aria-label="Benchmark Metrics and Paper Tables">
+      <div id="kpi-strip" class="kpi-strip"></div>
+
+      <nav class="tab-nav" role="tablist" aria-label="Tabular results tabs">
+        <button type="button" class="tab-btn active" data-tab="case" role="tab" aria-selected="true">Selected Part (8 Methods)</button>
+        <button type="button" class="tab-btn" data-tab="exp2" role="tab" aria-selected="false">Paper Table I (Exp2)</button>
+        <button type="button" class="tab-btn" data-tab="audit" role="tab" aria-selected="false">Transfer &amp; 6-Post Audit</button>
+      </nav>
+
+      <div id="tab-content" class="tab-content"></div>
+
+      <footer class="howto-box">
+        <div class="howto-title">RustCNC Manufacture Page Instructions</div>
+        <p class="howto-text">
+          Click <strong>RustCNC (.rustcnc)</strong> above to download the self-contained Manufacture container with embedded parametric CAD target, billet FixedBox stock, T1 5.0 mm flat endmill, and pre-hashed toolpaths for DiffCAM STE-Adam, Nominal-CAM (@2), and DiffPolicy-SHAC. Open the file in RustCNC, switch to <strong>Manufacture</strong>, select a Setup, and click <strong>Simulate</strong>.
+        </p>
+      </footer>
+    </aside>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

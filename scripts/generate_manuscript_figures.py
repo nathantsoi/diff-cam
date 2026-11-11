@@ -373,7 +373,7 @@ class VectorPDFCanvas:
         path.write_bytes(bytes(buf))
 
 
-def _feed_colormap(feed_mm_s: float, vmin: float = 4.0, vmax: float = 20.0) -> RGB:
+def _feed_colormap(feed_mm_s: float, vmin: float = 3.0, vmax: float = 20.0) -> RGB:
     """Smooth plasma/viridis-like ramp from deep navy (slow) -> teal -> amber-gold (fast)."""
     t = max(0.0, min(1.0, (feed_mm_s - vmin) / max(vmax - vmin, 1e-6)))
     stops = [
@@ -814,13 +814,13 @@ def generate_fig1_hero(
     cb_x, cb_y, cb_w, cb_h = 148.0, 6.5, 150.0, 6.5
     n_steps = 48
     for i in range(n_steps):
-        f_val = 4.0 + (20.0 - 4.0) * (i + 0.5) / n_steps
+        f_val = 3.0 + (20.0 - 3.0) * (i + 0.5) / n_steps
         x0 = cb_x + cb_w * i / n_steps
         pdf.rect(x0, cb_y, cb_w / n_steps + 0.3, cb_h, fill=_feed_colormap(f_val))
     pdf.rect(cb_x, cb_y, cb_w, cb_h, stroke=(0.3, 0.3, 0.3), line_width=0.4)
     pdf.text(cb_x - 4.0, cb_y + 1.2, "Feed f_t:", size=6.7, bold=True, align="right")
-    for f_tick in (4, 8, 12, 16, 20):
-        tx = cb_x + cb_w * (f_tick - 4.0) / 16.0
+    for f_tick in (3, 7, 11, 15, 20):
+        tx = cb_x + cb_w * (f_tick - 3.0) / 17.0
         pdf.text(tx, cb_y + cb_h + 2.2, f"{f_tick}", size=5.9, align="center")
     pdf.text(cb_x + cb_w + 4.0, cb_y + 1.2, "mm/s (Haas NGC G187 P2 E0.05)", size=6.5, align="left")
     pdf.line(20.0, cb_y + 3.2, 36.0, cb_y + 3.2, stroke=(0.68, 0.70, 0.74), line_width=0.9, dash=(1.8, 1.4))
@@ -875,25 +875,31 @@ def generate_fig2_exp1(exp1: Dict[str, Any], out_path: Path) -> None:
     x0_l, x1_l = min(log_ks), max(log_ks)
 
     # Panel (a): Gradient SNR & Soft-Hard Cosine vs k
-    ax_a = (33.0, 32.0, 130.0, 110.0)
+    ax_a = (31.0, 32.0, 120.0, 110.0)
     snr_means = [float(np.mean([r["local_grad_snr"] for r in rows if float(r["k"]) == k])) for k in ks]
     cos_means = [float(np.mean([r["cosine_vs_hard_fd"] for r in rows if float(r["k"]) == k])) for k in ks]
-    snr_max = 80.0
+    snr_step = 20.0 if max(snr_means) <= 80.0 else (25.0 if max(snr_means) <= 100.0 else 40.0)
+    snr_max = max(80.0, math.ceil(max(snr_means) / snr_step) * snr_step)
     _draw_axes(
         pdf, *ax_a,
         xticks=[(math.log2(k), f"{int(k)}") for k in ks],
-        yticks=[(v, f"{int(v)}") for v in (0, 20, 40, 60, 80)],
+        yticks=[(v, f"{int(v)}") for v in np.linspace(0.0, snr_max, 5)],
         xmin=x0_l, xmax=x1_l, ymin=0.0, ymax=snr_max,
         title="(a) Gradient SNR & Alignment vs. k",
         xlabel="Surrogate Stiffness k",
         ylabel="Local Gradient SNR",
     )
+    # Secondary right y-axis ticks for Cosine in [0, 1]
+    for cv in (0.0, 0.25, 0.50, 0.75, 1.00):
+        ry = ax_a[1] + ax_a[3] * cv
+        pdf.line(ax_a[0] + ax_a[2], ry, ax_a[0] + ax_a[2] + 2.0, ry, stroke=(0.84, 0.37, 0.00), line_width=0.6)
+        pdf.text(ax_a[0] + ax_a[2] + 3.2, ry - 2.0, f"{cv:.2f}", size=5.3, rgb=(0.84, 0.37, 0.00), align="left")
     pts_snr = [
         (ax_a[0] + ax_a[2] * (lk - x0_l) / (x1_l - x0_l), ax_a[1] + ax_a[3] * v / snr_max)
         for lk, v in zip(log_ks, snr_means)
     ]
     pts_cos = [
-        (ax_a[0] + ax_a[2] * (lk - x0_l) / (x1_l - x0_l), ax_a[1] + ax_a[3] * max(0.0, c) * 0.45)
+        (ax_a[0] + ax_a[2] * (lk - x0_l) / (x1_l - x0_l), ax_a[1] + ax_a[3] * max(0.0, min(1.0, c)))
         for lk, c in zip(log_ks, cos_means)
     ]
     pdf.polyline(pts_snr, stroke=(0.00, 0.45, 0.70), line_width=1.5)
@@ -902,12 +908,14 @@ def generate_fig2_exp1(exp1: Dict[str, Any], out_path: Path) -> None:
     pdf.polyline(pts_cos, stroke=(0.84, 0.37, 0.00), line_width=1.4, dash=(3.0, 1.8))
     for px, py in pts_cos:
         pdf.circle(px, py, 2.0, fill=(0.84, 0.37, 0.00))
-    # Legend cleanly in open lower region (y in [6, 24] pt above bottom axis)
-    pdf.rect(ax_a[0] + 4.5, ax_a[1] + 5.0, ax_a[2] - 9.0, 21.5, fill=(0.99, 0.99, 1.0), stroke=(0.82, 0.84, 0.88), line_width=0.35)
-    pdf.line(ax_a[0] + 8.0, ax_a[1] + 19.5, ax_a[0] + 19.0, ax_a[1] + 19.5, stroke=(0.00, 0.45, 0.70), line_width=1.5)
-    pdf.text(ax_a[0] + 22.0, ax_a[1] + 17.5, "Grad SNR (peak 65.7 at k=40)", size=5.5, rgb=(0.00, 0.45, 0.70), bold=True)
-    pdf.line(ax_a[0] + 8.0, ax_a[1] + 10.0, ax_a[0] + 19.0, ax_a[1] + 10.0, stroke=(0.84, 0.37, 0.00), line_width=1.4, dash=(2.5, 1.5))
-    pdf.text(ax_a[0] + 22.0, ax_a[1] + 8.0, "Hard-FD Cosine (0.98-0.99)", size=5.5, rgb=(0.84, 0.37, 0.00), bold=True)
+    peak_idx = int(np.argmax(snr_means))
+    peak_k = int(ks[peak_idx])
+    # Legend cleanly in open lower region (y in [4, 23] pt above bottom axis)
+    pdf.rect(ax_a[0] + 4.5, ax_a[1] + 4.0, ax_a[2] - 9.0, 19.5, fill=(0.99, 0.99, 1.0), stroke=(0.82, 0.84, 0.88), line_width=0.35)
+    pdf.line(ax_a[0] + 8.0, ax_a[1] + 17.5, ax_a[0] + 19.0, ax_a[1] + 17.5, stroke=(0.00, 0.45, 0.70), line_width=1.5)
+    pdf.text(ax_a[0] + 22.0, ax_a[1] + 15.5, f"Grad SNR (peak {snr_means[peak_idx]:.1f} at k={peak_k})", size=5.4, rgb=(0.00, 0.45, 0.70), bold=True)
+    pdf.line(ax_a[0] + 8.0, ax_a[1] + 8.8, ax_a[0] + 19.0, ax_a[1] + 8.8, stroke=(0.84, 0.37, 0.00), line_width=1.4, dash=(2.5, 1.5))
+    pdf.text(ax_a[0] + 22.0, ax_a[1] + 6.8, f"Hard-FD Cosine ({min(cos_means):.2f}-{max(cos_means):.2f})", size=5.4, rgb=(0.84, 0.37, 0.00), bold=True)
 
     # Panel (b): Soft-to-Hard Volumetric Occupancy L1 Bias vs k (per family)
     ax_b = (200.0, 32.0, 130.0, 110.0)
@@ -953,11 +961,11 @@ def generate_fig2_exp1(exp1: Dict[str, Any], out_path: Path) -> None:
     ax_c = (367.0, 32.0, 127.0, 110.0)
     reach = exp1["reachability_sweep"]
     r_vals = sorted({float(r["perturbation_R"]) for r in reach})
-    ymax_c = 80.0
+    ymax_c = 60.0
     _draw_axes(
         pdf, *ax_c,
         xticks=[(i, f"R={rv:.2f}") for i, rv in enumerate(r_vals)],
-        yticks=[(v, f"{int(v)}%") for v in (0, 20, 40, 60, 80)],
+        yticks=[(v, f"{int(v)}%") for v in (0, 15, 30, 45, 60)],
         xmin=-0.5, xmax=len(r_vals) - 0.5, ymin=0.0, ymax=ymax_c,
         title="(c) Perturbed Init Recovery",
         xlabel="Perturbation Radius R",
@@ -1007,14 +1015,28 @@ def generate_fig3_exp2_convergence(exp2_main: Dict[str, Any], out_path: Path) ->
         "Hard-CMA-ES",
     ]
 
+    all_min_norm = 1.0
+    for t_rec in exp2_main["tasks"]:
+        nom_t = float(t_rec["methods"]["Nominal-CAM"][0]["cycle_time_s"])
+        for m_name in methods_order:
+            for r in t_rec["methods"].get(m_name, []):
+                if r["curve_best_cycle_time_s"]:
+                    all_min_norm = min(all_min_norm, float(min(r["curve_best_cycle_time_s"])) / max(nom_t, 1e-9))
+    ymin = 0.20 if all_min_norm < 0.29 else 0.30
+    ymax = 1.04
+    yticks_conv = (
+        [(0.20, "0.20"), (0.40, "0.40"), (0.60, "0.60"), (0.80, "0.80"), (1.00, "1.00")]
+        if ymin <= 0.20
+        else [(0.30, "0.30"), (0.45, "0.45"), (0.60, "0.60"), (0.75, "0.75"), (0.90, "0.90"), (1.00, "1.00")]
+    )
+
     for f_idx, fam in enumerate(FAMILY_ORDER):
         px = left + f_idx * (panel_w + gap)
         fam_tasks = [t for t in exp2_main["tasks"] if t["family"] == fam]
-        ymin, ymax = 0.30, 1.04
         _draw_axes(
             pdf, px, bot, panel_w, panel_h,
             xticks=[(1, "1"), (16, "16"), (32, "32"), (48, "48"), (budget, str(budget))],
-            yticks=[(0.30, "0.30"), (0.45, "0.45"), (0.60, "0.60"), (0.75, "0.75"), (0.90, "0.90"), (1.00, "1.00")],
+            yticks=yticks_conv,
             xmin=1.0, xmax=float(budget), ymin=ymin, ymax=ymax,
             title=FAMILY_LABELS[fam],
             xlabel="Simulator Evals",
@@ -1080,11 +1102,11 @@ def generate_fig4_transfer_and_ablations(
         ("Scratch-STE-Adam-16", (0.55, 0.55, 0.58), "Scratch STE (16 evals)"),
     ]
     rows3 = exp3["test_transfer"]
-    ymax_a = 80.0
+    ymax_a = 60.0
     _draw_axes(
         pdf, *ax_a,
         xticks=[(i, short) for i, short in enumerate(("Facing", "Pocket", "Adaptive", "Contour"))],
-        yticks=[(v, f"{int(v)}%") for v in (0, 20, 40, 60, 80)],
+        yticks=[(v, f"{int(v)}%") for v in (0, 15, 30, 45, 60)],
         xmin=-0.5, xmax=3.5, ymin=0.0, ymax=ymax_a,
         title="(a) Held-Out Test Policy Generalization (Exp3)",
         xlabel="Held-Out Test Family",
@@ -1120,11 +1142,19 @@ def generate_fig4_transfer_and_ablations(
         ("No-MRR-Barrier", "No-MRR"),
     ]
     abl_rows = exp2_abl["rows"]
-    max_val_b = 145.0
+    arm_peaks = []
+    for arm_key, _ in arms:
+        sub = [r for r in abl_rows if r["arm"] == arm_key]
+        if sub:
+            arm_peaks.append(float(np.mean([r["cycle_time_reduction_pct"] for r in sub])))
+            arm_peaks.append(float(np.mean([r["mrr_overload_pct"] for r in sub])))
+    raw_peak_b = max(arm_peaks + [120.0])
+    step_b = 35.0 if raw_peak_b <= 132.0 else (50.0 if raw_peak_b <= 185.0 else 70.0)
+    max_val_b = step_b * 4.0 + 8.0
     _draw_axes(
         pdf, *ax_b,
         xticks=[(i, lbl) for i, (_, lbl) in enumerate(arms)],
-        yticks=[(v, f"{int(v)}%") for v in (0, 35, 70, 105, 140)],
+        yticks=[(v, f"{int(v)}%") for v in (0.0, step_b, 2.0 * step_b, 3.0 * step_b, 4.0 * step_b)],
         xmin=-0.5, xmax=len(arms) - 0.5, ymin=0.0, ymax=max_val_b,
         title="(b) Physical & Kinematic Ablation Study",
         xlabel="Ablation Configuration (8 Test Tasks)",

@@ -536,7 +536,11 @@ class CandidateEvaluator:
                     "gouge_soft": float(self.sim.diag_gouge[None]),
                     "residual_soft": float(self.sim.diag_residual[None]),
                     "holder_soft": float(self.sim.diag_holder[None]),
-                    "final_stock": self.sim.stock.to_numpy()[steps].copy(),
+                    "final_stock": (
+                        self.sim.stock_slice_numpy(steps)
+                        if hasattr(self.sim, "stock_slice_numpy")
+                        else self.sim.stock.to_numpy()[steps].copy()
+                    ),
                     "time_source_is_simulator_surrogate": 1.0,
                 }
                 if grad_deltas_mm is not None:
@@ -571,9 +575,13 @@ class CandidateEvaluator:
                 forward_calls += 1
                 self.sim.forward_hard(steps + 1, clip_speeds=False)
                 target = self.sim.target.to_numpy() < 0
-                history = self.sim.stock.to_numpy()
-                initial = history[0] < 0
-                stock = history[steps] < 0
+                if hasattr(self.sim, "stock_slice_numpy"):
+                    initial = self.sim.stock_slice_numpy(0) < 0
+                    stock = self.sim.stock_slice_numpy(steps) < 0
+                else:
+                    history = self.sim.stock.to_numpy()
+                    initial = history[0] < 0
+                    stock = history[steps] < 0
                 # Same definitions/denominators as simulator.csg_metrics (contracts 1.1, coordinator decision):
                 # gouge = removed ∧ T over |initial ∧ T|; residual = remaining ∧ ¬T over |initial ∧ ¬T|.
                 in_target = np.count_nonzero(initial & target)
