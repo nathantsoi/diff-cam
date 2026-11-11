@@ -31,7 +31,12 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from algorithms.chipload_opt import SubsegmentedCWEModel, analyze_plan_engagement
+from algorithms.chipload_opt import (
+    SubsegmentedCWEModel,
+    analyze_plan_engagement,
+    shortcut_verified_air_detours,
+    subdivide_motion_plan,
+)
 from algorithms.rl_policy import DirectSegmentActionMap
 from benchmarks import contracts as C
 from benchmarks.milling_suite import (
@@ -110,16 +115,22 @@ def reconstruct_motion_plan(
     bundle: MillingTaskBundle,
     method_name: str,
     best_theta: Optional[Sequence[float]],
+    *,
+    shortcut_mode: str = "none",
 ) -> C.MotionPlan:
     """Reconstruct a validated ``MotionPlan`` on ``bundle.task`` from ``best_theta``."""
     if method_name in ("Nominal-CAM", "Nominal") or best_theta is None:
         return bundle.nominal_motion
 
     theta_arr = np.asarray(best_theta, dtype=np.float64).reshape(-1)
-    if method_name in ("DiffCAM-Chipload", "Chipload-STE"):
-        return SubsegmentedCWEModel(bundle).to_motion_plan(
-            theta_arr, provenance="diffcam:chipload_ste"
+    if method_name in ("DiffCAM-Chipload", "Chipload-STE", "SHAC-Chipload", "PPO-Chipload"):
+        slug = method_name.lower().replace("-", "_")
+        raw_plan = SubsegmentedCWEModel(bundle).to_motion_plan(
+            theta_arr, provenance=f"diffcam:{slug}"
         )
+        if shortcut_mode and shortcut_mode != "none":
+            return shortcut_verified_air_detours(bundle, raw_plan, mode=shortcut_mode)
+        return raw_plan
     task = bundle.task
     nom = bundle.nominal_motion
 
@@ -1085,13 +1096,35 @@ def _compute_xy_shift_vs_nominal(bundle: MillingTaskBundle, plan: C.MotionPlan) 
     return round(float(np.mean(dists)), 4), round(float(np.max(dists)), 4)
 
 
-def serialize_plan_for_viewer(bundle: MillingTaskBundle, plan: C.MotionPlan) -> Dict[str, Any]:
+def serialize_plan_for_viewer(
+    bundle: MillingTaskBundle,
+    plan: C.MotionPlan,
+    *,
+    subdivide_for_cwe: bool = False,
+) -> Dict[str, Any]:
     """Serialize ``plan`` segments, cumulative timing, CWE, and chipload telemetry for WebGL playback."""
     inv = bundle.task.work_to_machine.inverse().apply
-    eng_report = analyze_plan_engagement(bundle, plan)
+    mean_xy_shift, max_xy_shift = _compute_xy_shift_vs_nominal(bundle, plan)
+
+    cwe_plan = plan
+    if subdivide_for_cwe:
+        max_xy = max(
+            (
+                math.hypot(
+                    float(inv(s.end_mm)[0] - inv(s.start_mm)[0]),
+                    float(inv(s.end_mm)[1] - inv(s.start_mm)[1]),
+                )
+                for s in plan.segments
+                if s.kind != C.SegmentKind.RAPID
+            ),
+            default=0.0,
+        )
+        if max_xy > 3.2:
+            cwe_plan = subdivide_motion_plan(bundle.task, plan, max_cut_seg_mm=2.5)
+
+    eng_report = analyze_plan_engagement(bundle, cwe_plan)
     eng_segs = eng_report["segments"]
     eng_summary = eng_report["summary"]
-    mean_xy_shift, max_xy_shift = _compute_xy_shift_vs_nominal(bundle, plan)
 
     t_cursor = 0.0
     cum_removed = 0.0
@@ -1100,7 +1133,7 @@ def serialize_plan_for_viewer(bundle: MillingTaskBundle, plan: C.MotionPlan) -> 
     cut_len = 0.0
     rapid_len = 0.0
 
-    for seg, se in zip(plan.segments, eng_segs):
+    for seg, se in zip(cwe_plan.segments, eng_segs):
         sw = inv(seg.start_mm)
         ew = inv(seg.end_mm)
         length = math.dist(sw, ew)
@@ -1134,6 +1167,7 @@ def serialize_plan_for_viewer(bundle: MillingTaskBundle, plan: C.MotionPlan) -> 
                 "removed_mm3": round(rem_k, 4),
                 "cum_removed_mm3": round(cum_removed, 3),
                 "mrr_mm3_s": float(se["mrr_mm3_s"]),
+                "ap_mm": float(se["ap_mm"]),
                 "ae_mm": float(se["ae_mm"]),
                 "ae_pct": float(se["ae_pct"]),
                 "phi_eng_deg": float(se["phi_eng_deg"]),

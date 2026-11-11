@@ -38,29 +38,43 @@ import numpy as np
 
 from benchmarks import contracts as C
 from benchmarks.milling_suite import MillingTaskBundle, multi_pocket_fields
+from cam.feeds_and_speeds import (
+    STOCK_MATERIALS,
+    CutterGeometrySpec,
+    MachineEnvelopeSpec,
+    compute_feeds_and_speeds,
+    infer_case_nominal_doc_woc_mm,
+)
 
 
 @dataclass(frozen=True)
 class ChiploadSpec:
-    """Physical spindle, endmill, and target chipload specification (Aluminum 6061, 5 mm 3FL)."""
+    """Physical spindle, endmill, and target chipload specification."""
 
     spindle_rpm: float = 8000.0
     flutes: int = 3
     cutter_diameter_mm: float = 5.0
-    target_hex_mm: float = 0.035
+    target_hex_mm: float = 0.036
     min_hex_mm: float = 0.020
-    max_hex_mm: float = 0.045
+    max_hex_mm: float = 0.048
+    ideal_woc_frac: float = 0.35
+    slot_ipt_factor: float = 0.80
+    base_feed_mm_s: float = 16.0
+    stock_material_id: str = "al_6061_t6"
+    tool_material_id: str = "carbide_coated"
+    aggressiveness: float = 1.0
     subdivide_max_mm: float = 2.5
     dexel_pitch_mm: float = 0.25
     station_step_mm: float = 0.20
-    max_xy_shift_mm: float = 2.8
+    max_xy_shift_mm: float = 3.5
     wall_safety_margin_mm: float = 0.16
     smooth_footprint_mm: float = 0.28
-    u_spike_cap: float = 0.62
+    u_spike_cap: float = 0.58
     w_time: float = 1.0
+    w_matched_time: float = 0.85
     w_chipload: float = 2.20
     w_hex_overload: float = 4.00
-    w_spike: float = 0.45
+    w_spike: float = 0.65
     w_mrr: float = 0.80
     w_smooth_xy: float = 0.04
     w_residual: float = 2.50
@@ -68,6 +82,80 @@ class ChiploadSpec:
     @property
     def tooth_freq_hz(self) -> float:
         return (self.spindle_rpm * float(self.flutes)) / 60.0
+
+    @classmethod
+    def from_feeds_and_speeds(
+        cls,
+        bundle: MillingTaskBundle,
+        stock_material_id: str = "al_6061_t6",
+        tool_material_id: str = "carbide_coated",
+        aggressiveness: float = 1.0,
+        flutes: int = 3,
+    ) -> "ChiploadSpec":
+        """Construct physics-grounded ``ChiploadSpec`` from tool, stock, DOC, and WOC."""
+        tool = bundle.task.tool
+        d_mm = 2.0 * float(tool.cutter_radius_mm)
+        cutter = CutterGeometrySpec(
+            diameter_mm=d_mm,
+            flutes=flutes,
+            flute_length_mm=float(tool.flute_length_mm),
+            stickout_mm=float(tool.holder_bottom_mm),
+            shank_diameter_mm=2.0 * float(tool.shank_radius_mm),
+            corner_radius_mm=float(getattr(bundle.case, "tool_corner_radius_mm", 0.0)),
+            helix_deg=35.0,
+            slot_ipt_factor=0.80,
+        )
+        machine = MachineEnvelopeSpec(
+            max_rpm=8000.0,
+            max_feed_mm_s=float(bundle.task.limits.max_feed_mm_s),
+            rapid_xy_mm_s=float(bundle.task.limits.rapid_mm_s),
+        )
+        doc_mm, woc_mm = infer_case_nominal_doc_woc_mm(
+            float(bundle.case.stock_max_mm[2]),
+            float(bundle.case.pocket_min_mm[2]),
+            d_mm,
+            bundle.case.family,
+        )
+        fs = compute_feeds_and_speeds(
+            stock_material_id=stock_material_id,
+            tool_material_id=tool_material_id,
+            cutter=cutter,
+            machine=machine,
+            doc_mm=doc_mm,
+            woc_mm=woc_mm,
+            aggressiveness=aggressiveness,
+        )
+        stock_spec = STOCK_MATERIALS.get(stock_material_id, STOCK_MATERIALS["al_6061_t6"])
+        h_target = max(0.004, float(fs.chip_thickness_mm))
+        return cls(
+            spindle_rpm=float(fs.spindle_rpm),
+            flutes=int(flutes),
+            cutter_diameter_mm=d_mm,
+            target_hex_mm=h_target,
+            min_hex_mm=round(0.56 * h_target, 6),
+            max_hex_mm=round(1.26 * h_target, 6),
+            ideal_woc_frac=float(stock_spec.ideal_woc_frac),
+            slot_ipt_factor=float(cutter.slot_ipt_factor),
+            base_feed_mm_s=float(min(fs.feed_mm_s, bundle.task.limits.max_feed_mm_s * 0.99)),
+            stock_material_id=stock_spec.id,
+            tool_material_id=fs.tool_material_id,
+            aggressiveness=float(fs.aggressiveness),
+        )
+
+
+def _slot_factor_and_grad(
+    u_ae_over_d: np.ndarray,
+    ideal_woc_frac: float = 0.35,
+    slot_ipt_factor: float = 0.80,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Differentiable slotting IPT reduction ``slot_factor(u_ae)`` and ``d_slot / d_u``."""
+    u = np.clip(np.asarray(u_ae_over_d, dtype=np.float64), 0.0, 1.0)
+    u0 = float(min(max(ideal_woc_frac, 0.02), 0.95))
+    span = max(1.0 - u0, 1e-6)
+    t = np.clip((u - u0) / span, 0.0, 1.0)
+    sf = 1.0 + t * (float(slot_ipt_factor) - 1.0)
+    dsf = np.where((u > u0) & (u < 1.0), (float(slot_ipt_factor) - 1.0) / span, 0.0)
+    return sf, dsf
 
 
 def radial_chip_thinning_factor(
@@ -177,7 +265,9 @@ def analyze_plan_engagement(
     weighted_hex_sum = 0.0
     weighted_hex_sq_err = 0.0
     weighted_ae_sum = 0.0
+    weighted_ap_sum = 0.0
     peak_ae_mm = 0.0
+    peak_ap_mm = 0.0
     peak_hex_mm = 0.0
     peak_inst_mrr = 0.0
 
@@ -212,6 +302,7 @@ def analyze_plan_engagement(
                     "rapid_time_s": round(dur, 6) if is_rapid else 0.0,
                     "removed_mm3": 0.0,
                     "mrr_mm3_s": 0.0,
+                    "ap_mm": 0.0,
                     "ae_mm": 0.0,
                     "ae_pct": 0.0,
                     "phi_eng_deg": 0.0,
@@ -230,6 +321,7 @@ def analyze_plan_engagement(
         seg_removed = 0.0
         seg_eng_subs = 0
         seg_ae_vals: List[float] = []
+        seg_ap_vals: List[float] = []
         fz = feed_s / max(tooth_freq, 1e-6)
 
         for m in range(n_sub):
@@ -285,7 +377,9 @@ def analyze_plan_engagement(
                     # Plunge / pure axial entry: full diameter engagement
                     ae_sub = diam
                 seg_ae_vals.append(ae_sub)
+                seg_ap_vals.append(max_ap)
                 peak_ae_mm = max(peak_ae_mm, ae_sub)
+                peak_ap_mm = max(peak_ap_mm, max_ap)
                 inst_mrr = dv / max(sub_dur, 1e-7)
                 peak_inst_mrr = max(peak_inst_mrr, inst_mrr)
 
@@ -303,6 +397,7 @@ def analyze_plan_engagement(
 
         if seg_ae_vals:
             ae_mean = float(np.mean(seg_ae_vals))
+            ap_mean = float(np.mean(seg_ap_vals))
             u_ae = min(1.0, max(0.0, ae_mean / diam))
             phi_deg = math.degrees(math.acos(max(-1.0, min(1.0, 1.0 - 2.0 * u_ae))))
             psi = float(radial_chip_thinning_factor(u_ae))
@@ -310,6 +405,7 @@ def analyze_plan_engagement(
             peak_hex_mm = max(peak_hex_mm, hex_val)
 
             weighted_ae_sum += ae_mean * eng_t
+            weighted_ap_sum += ap_mean * eng_t
             weighted_hex_sum += hex_val * eng_t
             weighted_hex_sq_err += ((hex_val - cfg.target_hex_mm) ** 2) * eng_t
             if hex_val < cfg.min_hex_mm:
@@ -320,6 +416,7 @@ def analyze_plan_engagement(
                 optimal_hex_time += eng_t
         else:
             ae_mean = 0.0
+            ap_mean = 0.0
             u_ae = 0.0
             phi_deg = 0.0
             hex_val = 0.0
@@ -334,6 +431,7 @@ def analyze_plan_engagement(
                 "rapid_time_s": 0.0,
                 "removed_mm3": round(seg_removed, 4),
                 "mrr_mm3_s": round(seg_mrr, 3),
+                "ap_mm": round(ap_mean, 4),
                 "ae_mm": round(ae_mean, 4),
                 "ae_pct": round(100.0 * u_ae, 2),
                 "phi_eng_deg": round(phi_deg, 2),
@@ -346,6 +444,7 @@ def analyze_plan_engagement(
     denom_t = max(total_time, 1e-9)
     denom_eng = max(total_engaged_time, 1e-9)
     mean_ae_mm = weighted_ae_sum / denom_eng if total_engaged_time > 1e-6 else 0.0
+    mean_ap_mm = weighted_ap_sum / denom_eng if total_engaged_time > 1e-6 else 0.0
     mean_hex_mm = weighted_hex_sum / denom_eng if total_engaged_time > 1e-6 else 0.0
     hex_rmse_mm = math.sqrt(weighted_hex_sq_err / denom_eng) if total_engaged_time > 1e-6 else 0.0
     dexel_residual_mm3 = float(np.sum(np.maximum(0.0, z_stock - z_target))) * cell_area
@@ -364,6 +463,8 @@ def analyze_plan_engagement(
         "air_cut_dist_mm": round(total_air_cut_dist, 3),
         "rapid_dist_mm": round(total_rapid_dist, 3),
         "removed_volume_mm3": round(total_removed_mm3, 3),
+        "mean_ap_mm": round(mean_ap_mm, 4),
+        "peak_ap_mm": round(peak_ap_mm, 4),
         "mean_ae_mm": round(mean_ae_mm, 4),
         "mean_ae_pct": round(100.0 * mean_ae_mm / diam, 2),
         "peak_ae_mm": round(peak_ae_mm, 4),
@@ -591,9 +692,7 @@ class SubsegmentedCWEModel:
     ) -> None:
         self.bundle = bundle
         self.task = bundle.task
-        self.spec = spec or ChiploadSpec(
-            cutter_diameter_mm=2.0 * float(bundle.task.tool.cutter_radius_mm)
-        )
+        self.spec = spec or ChiploadSpec.from_feeds_and_speeds(bundle)
         self.base_motion = subdivide_motion_plan(
             self.task, bundle.nominal_motion, max_cut_seg_mm=self.spec.subdivide_max_mm
         )
@@ -870,6 +969,9 @@ class SubsegmentedCWEModel:
         u_ae = ae_mm / self.diam  # (M,) in [0, 1]
 
         psi, dpsi_du = _radial_chip_thinning_and_grad(u_ae)
+        slot_fac, dslot_du = _slot_factor_and_grad(
+            u_ae, self.spec.ideal_woc_frac, self.spec.slot_ipt_factor
+        )
         tooth_freq = self.spec.tooth_freq_hz
         fz = speeds / tooth_freq
         hex_mm = fz * psi
@@ -882,13 +984,22 @@ class SubsegmentedCWEModel:
 
         inv_tnom = 1.0 / max(self.nom_duration_s, 1e-6)
         h_star = float(self.spec.target_hex_mm)
+        h_star_vec = h_star * slot_fac
 
-        # 1. Cycle time term
+        # 1a. Adaptive cycle time term
         loss_time = float(self.spec.w_time) * float(np.sum(tau)) * inv_tnom
 
-        # 2. Optimal chipload tracking + carbide tooth-overload barrier (active where engaged)
+        # 1b. Fair matched-speed geometric path-time term (prevents path lengthening)
+        base_cut = float(np.clip(self.spec.base_feed_mm_s, self.f_min, self.f_max))
+        matched_speeds = np.where(self.is_rapid, self.rapid_speed, base_cut)
+        tau_matched, _, _ = blended_durations_with_pullback(
+            deltas, matched_speeds, self.max_accel, g_tau=None
+        )
+        loss_matched = float(self.spec.w_matched_time) * float(np.sum(tau_matched)) * inv_tnom
+
+        # 2. Optimal chipload tracking (with slotting derating) + tooth-overload barrier
         h_max = float(self.spec.max_hex_mm)
-        hex_rel_err = (hex_mm - h_star) / h_star
+        hex_rel_err = (hex_mm - h_star_vec) / h_star
         hex_over = np.maximum(0.0, (hex_mm - h_max) / h_star)
         chip_pen_per_seg = (
             float(self.spec.w_chipload) * (hex_rel_err ** 2)
@@ -919,7 +1030,15 @@ class SubsegmentedCWEModel:
             else 0.0
         )
 
-        total_loss = loss_time + loss_chip + loss_spike + loss_mrr + loss_res + loss_smooth
+        total_loss = (
+            loss_time
+            + loss_matched
+            + loss_chip
+            + loss_spike
+            + loss_mrr
+            + loss_res
+            + loss_smooth
+        )
 
         # ---------------- Reverse-Mode Analytical Adjoint Pass ----------------
         g_tau = np.full(self.m_segs, float(self.spec.w_time) * inv_tnom, dtype=np.float64)
@@ -936,6 +1055,12 @@ class SubsegmentedCWEModel:
 
         # Gradient wrt u_ae -> ae_mm -> (dv_arr, lxy_arr)
         g_u_ae = g_hex * fz * dpsi_du
+        g_u_ae -= (
+            eta
+            * tau
+            * inv_tnom
+            * (2.0 * float(self.spec.w_chipload) * hex_rel_err * dslot_du)
+        )
         g_u_ae += (
             float(self.spec.w_spike)
             * (2.0 * spike_excess / max(self.m_segs, 1))
@@ -963,14 +1088,24 @@ class SubsegmentedCWEModel:
         _, g_deltas_time, g_speeds_time = blended_durations_with_pullback(
             deltas, speeds, self.max_accel, g_tau=g_tau
         )
-        assert g_deltas_time is not None and g_speeds_time is not None
+        g_tau_matched = np.full(
+            self.m_segs, float(self.spec.w_matched_time) * inv_tnom, dtype=np.float64
+        )
+        _, g_deltas_matched, _ = blended_durations_with_pullback(
+            deltas, matched_speeds, self.max_accel, g_tau=g_tau_matched
+        )
+        assert (
+            g_deltas_time is not None
+            and g_speeds_time is not None
+            and g_deltas_matched is not None
+        )
         g_speeds_total = (g_speeds_direct + g_speeds_time) * self.cut_mask
 
         # raw_ae dependence on lxy_arr (where lxy_arr > 0.35 * r_cut)
         lxy_active = (lxy_arr > 0.35 * self.r_cut).astype(np.float64)
         g_lxy = -g_raw_ae * (raw_ae / eff_span) * lxy_active
         inv_lxy = np.where(lxy_arr > 1e-8, 1.0 / np.maximum(lxy_arr, 1e-8), 0.0)
-        g_deltas = g_deltas_time.copy()
+        g_deltas = g_deltas_time + g_deltas_matched
         g_deltas[:, 0] += g_lxy * deltas[:, 0] * inv_lxy
         g_deltas[:, 1] += g_lxy * deltas[:, 1] * inv_lxy
 
@@ -1102,8 +1237,347 @@ class ChiploadOptResult:
     mean_xy_shift_mm: float
     max_xy_shift_mm: float
     wall_time_s: float
+    shortcut_mode: str = "none"
     posted_eval: Optional[Dict[str, Any]] = None
     history: List[float] = field(default_factory=list)
+
+
+def retime_motion_plan_constant_speed(
+    task: C.TaskSpec,
+    plan: C.MotionPlan,
+    cut_feed_mm_s: float,
+    *,
+    provenance_suffix: str = "matched_speed",
+) -> C.MotionPlan:
+    """Return a copy of ``plan`` with every ``G1`` cutting segment set to ``cut_feed_mm_s``."""
+    f_cut = float(np.clip(cut_feed_mm_s, 0.2, float(task.limits.max_feed_mm_s) * 0.999))
+    rapid_s = float(task.limits.rapid_mm_s)
+    new_segs: List[C.Segment] = []
+    for s in plan.segments:
+        ln = s.path_length_mm
+        if s.kind == C.SegmentKind.RAPID:
+            new_segs.append(dataclasses.replace(s, duration_s=max(ln / rapid_s, 1e-9), feed_mm_s=None))
+        else:
+            new_segs.append(dataclasses.replace(s, duration_s=max(ln / f_cut, 1e-9), feed_mm_s=f_cut))
+    if plan.timing_rule == C.TimingRule.BLENDED_ACCEL_BOUNDED:
+        durs = C.blended_segment_durations(new_segs, rapid_s, float(task.limits.max_accel_mm_s2))
+        new_segs = [dataclasses.replace(s, duration_s=float(d)) for s, d in zip(new_segs, durs)]
+    out = C.MotionPlan(
+        frame=plan.frame,
+        initial_state=plan.initial_state,
+        segments=tuple(new_segs),
+        timing_rule=plan.timing_rule,
+        provenance=f"{plan.provenance}:{provenance_suffix}",
+    )
+    out.validate_for_task(task)
+    return out
+
+
+def _sweep_removes_or_updates_dexels(
+    xs: np.ndarray,
+    ys: np.ndarray,
+    z_stock: np.ndarray,
+    x0_grid: float,
+    y0_grid: float,
+    pitch: float,
+    r_eff: float,
+    z_min_stock: float,
+    z_max_stock: float,
+    pa: Tuple[float, float, float],
+    pb: Tuple[float, float, float],
+    *,
+    mutate: bool,
+) -> float:
+    """Return volume ``mm^3`` below ``z_stock`` swept by flat endmill of radius ``r_eff``."""
+    ax, ay, az = pa
+    bx, by, bz = pb
+    if min(az, bz) >= z_max_stock - 1e-7:
+        return 0.0
+    nx, ny = z_stock.shape
+    r2 = r_eff * r_eff
+    len_3d = math.dist(pa, pb)
+    n_sub = max(1, int(math.ceil(len_3d / 0.20)))
+    dx, dy, dz = bx - ax, by - ay, bz - az
+    removed = 0.0
+    cell_area = pitch * pitch
+    for m in range(n_sub):
+        u0 = m / n_sub
+        u1 = (m + 1) / n_sub
+        sx0, sy0, sz0 = ax + u0 * dx, ay + u0 * dy, az + u0 * dz
+        sx1, sy1, sz1 = ax + u1 * dx, ay + u1 * dy, az + u1 * dz
+        ix0 = max(0, int(math.floor((min(sx0, sx1) - r_eff - x0_grid) / pitch)))
+        ix1 = min(nx, int(math.ceil((max(sx0, sx1) + r_eff - x0_grid) / pitch)) + 1)
+        iy0 = max(0, int(math.floor((min(sy0, sy1) - r_eff - y0_grid) / pitch)))
+        iy1 = min(ny, int(math.ceil((max(sy0, sy1) + r_eff - y0_grid) / pitch)) + 1)
+        if ix0 >= ix1 or iy0 >= iy1:
+            continue
+        px = xs[ix0:ix1, None]
+        py = ys[None, iy0:iy1]
+        sdx, sdy, sdz = sx1 - sx0, sy1 - sy0, sz1 - sz0
+        lxy2 = sdx * sdx + sdy * sdy
+        if lxy2 <= 1e-12:
+            dist2 = (px - sx0) ** 2 + (py - sy0) ** 2
+            inside = dist2 <= r2
+            z_swept = np.full(dist2.shape, max(min(sz0, sz1), z_min_stock), dtype=np.float64)
+        else:
+            uc = ((px - sx0) * sdx + (py - sy0) * sdy) / lxy2
+            d_perp2 = (px - sx0 - uc * sdx) ** 2 + (py - sy0 - uc * sdy) ** 2
+            valid_perp = d_perp2 <= r2
+            du = np.sqrt(np.maximum(r2 - d_perp2, 0.0) / lxy2)
+            u_lo = np.maximum(0.0, uc - du)
+            u_hi = np.minimum(1.0, uc + du)
+            inside = valid_perp & (u_lo <= u_hi)
+            u_best = u_hi if sdz < 0.0 else u_lo
+            z_swept = np.maximum(sz0 + u_best * sdz, z_min_stock)
+        cur_patch = z_stock[ix0:ix1, iy0:iy1]
+        dz_cut = np.where(inside & (z_swept < cur_patch), cur_patch - z_swept, 0.0)
+        dv = float(np.sum(dz_cut)) * cell_area
+        if dv > 0.0:
+            removed += dv
+            if mutate:
+                z_stock[ix0:ix1, iy0:iy1] = cur_patch - dz_cut
+            elif dv > 1e-7:
+                return removed
+    return removed
+
+
+def shortcut_verified_air_detours(
+    bundle: MillingTaskBundle,
+    plan: C.MotionPlan,
+    spec: Optional[ChiploadSpec] = None,
+    *,
+    mode: str = "rapid_bridge",
+) -> C.MotionPlan:
+    """Collapse stock-sim-verified empty-air ``G1`` detours into straight chords or safe ``G0`` bridges."""
+    if mode == "none" or len(plan.segments) < 4:
+        return plan
+
+    cfg = spec or ChiploadSpec.from_feeds_and_speeds(bundle)
+    pitch = float(cfg.dexel_pitch_mm)
+    xs, ys, z_stock, _ = build_target_heightfield_25d(bundle, pitch_mm=pitch)
+    nx, ny = z_stock.shape
+    x0_grid = float(bundle.case.stock_min_mm[0])
+    y0_grid = float(bundle.case.stock_min_mm[1])
+    z_min_stock = float(bundle.case.stock_min_mm[2])
+    z_max_stock = float(bundle.case.stock_max_mm[2])
+    z_safe = min(
+        z_max_stock + 2.0,
+        float(bundle.task.limits.envelope_max_mm[2]) - 0.5,
+    )
+    r_cut = float(bundle.task.tool.cutter_radius_mm)
+    rapid_s = float(bundle.task.limits.rapid_mm_s)
+    base_f = max(4.0, float(cfg.base_feed_mm_s))
+
+    inv = bundle.task.work_to_machine.inverse().apply
+    to_mach = bundle.task.work_to_machine.apply
+    segs = list(plan.segments)
+    n_segs = len(segs)
+
+    def _vertical_rapid_safe(pt_w: Tuple[float, float, float]) -> bool:
+        arr_p = np.asarray(pt_w, dtype=np.float64)
+        margin_mm = max(0.85, math.sqrt(3.0) * 0.5 * float(bundle.task.grid.voxel_mm) + 0.35)
+        if _segment_wall_clearance_mm(bundle.task, arr_p, arr_p) < margin_mm:
+            return False
+        r_chk = r_cut + margin_mm
+        ix0 = max(0, int(math.floor((pt_w[0] - r_chk - x0_grid) / pitch)))
+        ix1 = min(nx, int(math.ceil((pt_w[0] + r_chk - x0_grid) / pitch)) + 1)
+        iy0 = max(0, int(math.floor((pt_w[1] - r_chk - y0_grid) / pitch)))
+        iy1 = min(ny, int(math.ceil((pt_w[1] + r_chk - y0_grid) / pitch)) + 1)
+        if ix0 >= ix1 or iy0 >= iy1:
+            return True
+        px = xs[ix0:ix1, None]
+        py = ys[None, iy0:iy1]
+        disk = ((px - pt_w[0]) ** 2 + (py - pt_w[1]) ** 2) <= (r_chk * r_chk)
+        if not np.any(disk):
+            return True
+        return bool(np.all(z_stock[ix0:ix1, iy0:iy1][disk] <= pt_w[2] + 1e-5))
+
+    out_segs: List[C.Segment] = []
+    sid = 0
+    i = 0
+    while i < n_segs:
+        s_i = segs[i]
+        pa_i = tuple(float(v) for v in inv(s_i.start_mm))
+        pb_i = tuple(float(v) for v in inv(s_i.end_mm))
+        if s_i.kind == C.SegmentKind.RAPID:
+            out_segs.append(dataclasses.replace(s_i, id=f"s{sid:04d}"))
+            sid += 1
+            i += 1
+            continue
+
+        # Probe whether s_i is a zero-removal horizontal G1 segment
+        is_horiz = abs(pb_i[2] - pa_i[2]) <= 1e-5 and math.hypot(pb_i[0] - pa_i[0], pb_i[1] - pa_i[1]) > 1e-5
+        if not is_horiz:
+            _sweep_removes_or_updates_dexels(
+                xs, ys, z_stock, x0_grid, y0_grid, pitch, r_cut, z_min_stock, z_max_stock, pa_i, pb_i, mutate=True
+            )
+            out_segs.append(dataclasses.replace(s_i, id=f"s{sid:04d}"))
+            sid += 1
+            i += 1
+            continue
+
+        dv_i = _sweep_removes_or_updates_dexels(
+            xs, ys, z_stock, x0_grid, y0_grid, pitch, r_cut, z_min_stock, z_max_stock, pa_i, pb_i, mutate=False
+        )
+        if dv_i > 1e-6:
+            _sweep_removes_or_updates_dexels(
+                xs, ys, z_stock, x0_grid, y0_grid, pitch, r_cut, z_min_stock, z_max_stock, pa_i, pb_i, mutate=True
+            )
+            out_segs.append(dataclasses.replace(s_i, id=f"s{sid:04d}"))
+            sid += 1
+            i += 1
+            continue
+
+        # Extend contiguous zero-removal horizontal G1 run [i .. j-1]
+        z_level = pa_i[2]
+        j = i + 1
+        while j < n_segs and segs[j].kind != C.SegmentKind.RAPID:
+            pa_j = tuple(float(v) for v in inv(segs[j].start_mm))
+            pb_j = tuple(float(v) for v in inv(segs[j].end_mm))
+            if abs(pa_j[2] - z_level) > 1e-5 or abs(pb_j[2] - z_level) > 1e-5:
+                break
+            if math.hypot(pb_j[0] - pa_j[0], pb_j[1] - pa_j[1]) <= 1e-5:
+                break
+            dv_j = _sweep_removes_or_updates_dexels(
+                xs, ys, z_stock, x0_grid, y0_grid, pitch, r_cut, z_min_stock, z_max_stock, pa_j, pb_j, mutate=False
+            )
+            if dv_j > 1e-6:
+                break
+            j += 1
+
+        run_len = j - i
+        replaced = False
+        if run_len >= 2:
+            # Candidate sub-spans: full [i, j-1] first, then 1-station buffered [i+1, j-2]
+            cand_bounds: List[Tuple[int, int]] = [(i, j - 1)]
+            if run_len >= 4:
+                cand_bounds.append((i + 1, j - 2))
+
+            for a_idx, b_idx in cand_bounds:
+                pa_w = tuple(float(v) for v in inv(segs[a_idx].start_mm))
+                pb_w = tuple(float(v) for v in inv(segs[b_idx].end_mm))
+                orig_len = sum(segs[k].path_length_mm for k in range(a_idx, b_idx + 1))
+                chord_xy = math.hypot(pb_w[0] - pa_w[0], pb_w[1] - pa_w[1])
+
+                # Option 1: Safe G0 rapid bridge above z_safe
+                if (
+                    mode == "rapid_bridge"
+                    and orig_len >= 5.0
+                    and z_safe > z_level + 0.2
+                    and _vertical_rapid_safe(pa_w)
+                    and _vertical_rapid_safe(pb_w)
+                ):
+                    lift_d = max(0.0, z_safe - pa_w[2])
+                    plunge_d = max(0.0, z_safe - pb_w[2])
+                    bridge_time = (lift_d + chord_xy + plunge_d) / rapid_s + 0.04
+                    if bridge_time < 0.80 * (orig_len / base_f):
+                        for pre_k in range(i, a_idx):
+                            out_segs.append(dataclasses.replace(segs[pre_k], id=f"s{sid:04d}"))
+                            sid += 1
+                        p_top_a = (pa_w[0], pa_w[1], z_safe)
+                        p_top_b = (pb_w[0], pb_w[1], z_safe)
+                        for w0, w1 in ((pa_w, p_top_a), (p_top_a, p_top_b), (p_top_b, pb_w)):
+                            m0, m1 = to_mach(w0), to_mach(w1)
+                            d_m = math.dist(m0, m1)
+                            if d_m > 1e-6:
+                                out_segs.append(
+                                    C.Segment(
+                                        id=f"s{sid:04d}",
+                                        kind=C.SegmentKind.RAPID,
+                                        start_mm=m0,
+                                        end_mm=m1,
+                                        duration_s=max(d_m / rapid_s, 1e-9),
+                                        feed_mm_s=None,
+                                        tag="air_bridge_rapid",
+                                    )
+                                )
+                                sid += 1
+                        for post_k in range(b_idx + 1, j):
+                            out_segs.append(dataclasses.replace(segs[post_k], id=f"s{sid:04d}"))
+                            sid += 1
+                        replaced = True
+                        break
+
+                # Option 2: Direct straight G1 chord across verified empty cavity
+                if chord_xy > 1e-4 and (orig_len - chord_xy) >= 0.08:
+                    pa_np = np.asarray(pa_w, dtype=np.float64)
+                    pb_np = np.asarray(pb_w, dtype=np.float64)
+                    if _segment_wall_clearance_mm(bundle.task, pa_np, pb_np) >= 0.24:
+                        dv_chord = _sweep_removes_or_updates_dexels(
+                            xs,
+                            ys,
+                            z_stock,
+                            x0_grid,
+                            y0_grid,
+                            pitch,
+                            r_cut + 0.10,
+                            z_min_stock,
+                            z_max_stock,
+                            pa_w,
+                            pb_w,
+                            mutate=False,
+                        )
+                        if dv_chord <= 1e-7:
+                            for pre_k in range(i, a_idx):
+                                out_segs.append(dataclasses.replace(segs[pre_k], id=f"s{sid:04d}"))
+                                sid += 1
+                            max_f_span = max(
+                                float(segs[k].feed_mm_s or base_f) for k in range(a_idx, b_idx + 1)
+                            )
+                            n_ch = max(1, int(math.ceil(chord_xy / max(cfg.subdivide_max_mm, 1.0))))
+                            for m in range(n_ch):
+                                u0, u1 = m / n_ch, (m + 1) / n_ch
+                                w0 = (
+                                    pa_w[0] + u0 * (pb_w[0] - pa_w[0]),
+                                    pa_w[1] + u0 * (pb_w[1] - pa_w[1]),
+                                    z_level,
+                                )
+                                w1 = (
+                                    pa_w[0] + u1 * (pb_w[0] - pa_w[0]),
+                                    pa_w[1] + u1 * (pb_w[1] - pa_w[1]),
+                                    z_level,
+                                )
+                                m0, m1 = to_mach(w0), to_mach(w1)
+                                d_m = math.dist(m0, m1)
+                                out_segs.append(
+                                    C.Segment(
+                                        id=f"s{sid:04d}",
+                                        kind=segs[a_idx].kind,
+                                        start_mm=m0,
+                                        end_mm=m1,
+                                        duration_s=max(d_m / max_f_span, 1e-9),
+                                        feed_mm_s=max_f_span,
+                                        tag="air_chord_cut",
+                                    )
+                                )
+                                sid += 1
+                            for post_k in range(b_idx + 1, j):
+                                out_segs.append(dataclasses.replace(segs[post_k], id=f"s{sid:04d}"))
+                                sid += 1
+                            replaced = True
+                            break
+
+        if not replaced:
+            for k in range(i, j):
+                out_segs.append(dataclasses.replace(segs[k], id=f"s{sid:04d}"))
+                sid += 1
+        i = j
+
+    if plan.timing_rule == C.TimingRule.BLENDED_ACCEL_BOUNDED:
+        durs = C.blended_segment_durations(
+            out_segs, rapid_s, float(bundle.task.limits.max_accel_mm_s2)
+        )
+        out_segs = [dataclasses.replace(s, duration_s=float(d)) for s, d in zip(out_segs, durs)]
+
+    out_plan = C.MotionPlan(
+        frame=plan.frame,
+        initial_state=plan.initial_state,
+        segments=tuple(out_segs),
+        timing_rule=plan.timing_rule,
+        provenance=f"{plan.provenance}:{mode}",
+    )
+    out_plan.validate_for_task(bundle.task)
+    return out_plan
 
 
 def optimize_chipload_trajectory(
@@ -1117,10 +1591,11 @@ def optimize_chipload_trajectory(
 ) -> ChiploadOptResult:
     """Run ``DiffCAM-Chipload`` 1st-order STE-Adam joint CWE + Chipload trajectory optimization."""
     t0 = time.perf_counter()
-    model = SubsegmentedCWEModel(bundle, spec=spec)
+    cfg = spec or ChiploadSpec.from_feeds_and_speeds(bundle)
+    model = SubsegmentedCWEModel(bundle, spec=cfg)
     theta = model.zero_theta()
 
-    # Pre-initialize u_f toward analytic radial-chip-thinning target feed for fast convergence
+    # Pre-initialize u_f toward feeds_and_speeds radial-chip-thinning + slotting target feed
     nom_eng = analyze_plan_engagement(bundle, model.base_motion, model.spec)
     tooth_freq = model.spec.tooth_freq_hz
     for k, se in enumerate(nom_eng["segments"]):
@@ -1131,7 +1606,11 @@ def optimize_chipload_trajectory(
         else:
             u_ae = max(0.02, float(se["ae_pct"]) / 100.0)
             psi = float(radial_chip_thinning_factor(u_ae))
-            f_chip = (tooth_freq * model.spec.target_hex_mm) / max(psi, 0.25)
+            sf, _ = _slot_factor_and_grad(
+                np.asarray([u_ae]), model.spec.ideal_woc_frac, model.spec.slot_ipt_factor
+            )
+            h_eff = model.spec.target_hex_mm * float(sf[0])
+            f_chip = (tooth_freq * h_eff) / max(psi, 0.34)
             if float(se["removed_mm3"]) > 1e-5:
                 seg_len = max(float(np.linalg.norm(model.ref_deltas[k])), 0.2)
                 f_mrr = (model.mrr_limit * 0.92 * seg_len) / float(se["removed_mm3"])
@@ -1168,9 +1647,10 @@ def optimize_chipload_trajectory(
         step_lr = lr_vec * (0.25 + 0.75 * decay)
         theta = np.clip(theta - step_lr * m_hat / (np.sqrt(v_hat) + eps_a), -4.5, 4.5)
 
-    # Certified feasibility guard on exact 0.125 mm posted G-code evaluator (backtracks XY scale if needed)
+    # Certified feasibility guard on exact 0.125 mm posted G-code evaluator
     chosen_plan: Optional[C.MotionPlan] = None
     chosen_theta = best_theta.copy()
+    chosen_shortcut = "none"
     posted_dict: Optional[Dict[str, Any]] = None
 
     from cam.config import MachineConfig
@@ -1186,40 +1666,56 @@ def optimize_chipload_trajectory(
     )
 
     for xy_scale in (1.0, 0.75, 0.50, 0.25, 0.0):
-        cand_plan = model.to_motion_plan(
+        raw_plan = model.to_motion_plan(
             best_theta, xy_scale_override=xy_scale, provenance="diffcam:chipload_ste"
         )
         if not verify_posted:
-            chosen_plan = cand_plan
+            chosen_plan = shortcut_verified_air_detours(
+                bundle, raw_plan, model.spec, mode="rapid_bridge"
+            )
+            chosen_shortcut = "rapid_bridge"
             break
-        nc_str = post_motion_plan(cand_plan, bundle.task, dialect=C.Dialect.HAAS, config=m_cfg)
-        rep = evaluate_posted_gcode(
-            bundle.task,
-            nc_str.encode("utf-8"),
-            dialect=C.Dialect.HAAS,
-            settings={"max_step_mm": 0.125, "compute_bounds": False, "safety_screen": True},
-        )
-        orig_m = rep.metrics.get("original_part_gouge_volume_mm3")
-        orig_gouge = float(orig_m.value) if orig_m is not None and orig_m.value is not None else 0.0
-        res_vol = float(rep.metrics["residual_volume_mm3"].value)
-        if rep.geometry_pass and rep.safety_pass and orig_gouge <= 1e-6 and res_vol <= res_tol:
-            chosen_plan = cand_plan
-            if xy_scale < 1.0:
-                # Fold scaled XY shifts back into chosen_theta for exact reproducibility
-                u_xy = best_theta[: model.num_xy_params]
-                scaled_tanh = np.clip(xy_scale * np.tanh(u_xy), -0.999, 0.999)
-                chosen_theta[: model.num_xy_params] = np.arctanh(scaled_tanh)
-            posted_air = rep.metrics.get("air_cut_time_s")
-            posted_rapid = rep.metrics.get("rapid_time_s")
-            posted_dict = {
-                "geometry_pass": bool(rep.geometry_pass),
-                "safety_pass": bool(rep.safety_pass),
-                "original_part_gouge_mm3": round(orig_gouge, 5),
-                "residual_mm3": round(res_vol, 4),
-                "posted_air_cut_time_s": round(float(posted_air.value), 4) if posted_air and posted_air.value is not None else None,
-                "posted_rapid_time_s": round(float(posted_rapid.value), 4) if posted_rapid and posted_rapid.value is not None else None,
-                "xy_scale_applied": xy_scale,
-            }
+        for sc_mode in ("rapid_bridge", "g1_chord", "none"):
+            cand_plan = shortcut_verified_air_detours(
+                bundle, raw_plan, model.spec, mode=sc_mode
+            )
+            nc_str = post_motion_plan(cand_plan, bundle.task, dialect=C.Dialect.HAAS, config=m_cfg)
+            rep = evaluate_posted_gcode(
+                bundle.task,
+                nc_str.encode("utf-8"),
+                dialect=C.Dialect.HAAS,
+                settings={"max_step_mm": 0.125, "compute_bounds": False, "safety_screen": True},
+            )
+            orig_m = rep.metrics.get("original_part_gouge_volume_mm3")
+            orig_gouge = (
+                float(orig_m.value) if orig_m is not None and orig_m.value is not None else 0.0
+            )
+            res_vol = float(rep.metrics["residual_volume_mm3"].value)
+            if rep.geometry_pass and rep.safety_pass and orig_gouge <= 1e-6 and res_vol <= res_tol:
+                chosen_plan = cand_plan
+                chosen_shortcut = sc_mode
+                if xy_scale < 1.0:
+                    u_xy = best_theta[: model.num_xy_params]
+                    scaled_tanh = np.clip(xy_scale * np.tanh(u_xy), -0.999, 0.999)
+                    chosen_theta[: model.num_xy_params] = np.arctanh(scaled_tanh)
+                posted_air = rep.metrics.get("air_cut_time_s")
+                posted_rapid = rep.metrics.get("rapid_time_s")
+                posted_dict = {
+                    "geometry_pass": bool(rep.geometry_pass),
+                    "safety_pass": bool(rep.safety_pass),
+                    "original_part_gouge_mm3": round(orig_gouge, 5),
+                    "residual_mm3": round(res_vol, 4),
+                    "posted_air_cut_time_s": round(float(posted_air.value), 4)
+                    if posted_air and posted_air.value is not None
+                    else None,
+                    "posted_rapid_time_s": round(float(posted_rapid.value), 4)
+                    if posted_rapid and posted_rapid.value is not None
+                    else None,
+                    "xy_scale_applied": xy_scale,
+                    "shortcut_mode": sc_mode,
+                }
+                break
+        if chosen_plan is not None:
             break
 
     if chosen_plan is None:
@@ -1240,6 +1736,7 @@ def optimize_chipload_trajectory(
         mean_xy_shift_mm=float(np.mean(xy_shifts)),
         max_xy_shift_mm=float(np.max(xy_shifts)),
         wall_time_s=wall_s,
+        shortcut_mode=chosen_shortcut,
         posted_eval=posted_dict,
         history=history,
     )
@@ -1510,6 +2007,8 @@ __all__ = [
     "analyze_plan_engagement",
     "subdivide_motion_plan",
     "blended_durations_with_pullback",
+    "retime_motion_plan_constant_speed",
+    "shortcut_verified_air_detours",
     "optimize_chipload_trajectory",
     "train_chipload_shac",
     "train_chipload_ppo",

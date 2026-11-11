@@ -20,6 +20,7 @@ from algorithms.chipload_opt import (
     ChiploadSpec,
     analyze_plan_engagement,
     optimize_chipload_trajectory,
+    retime_motion_plan_constant_speed,
     rollout_chipload_policy,
     train_chipload_ppo,
     train_chipload_shac,
@@ -27,6 +28,7 @@ from algorithms.chipload_opt import (
 from benchmarks import contracts as C
 from benchmarks.milling_suite import CORNER_RADIUS_KEY, MillingTaskBundle, build_milling_suite
 from cam.config import MachineConfig
+from cam.feeds_and_speeds import export_feeds_speeds_catalog_json, infer_case_nominal_doc_woc_mm
 from cam.posts import post_motion_plan
 from scripts.summarize_campaign_tables import METHODS, summarize
 from verification.simulator_export import (
@@ -111,24 +113,40 @@ def compute_or_load_chipload_benchmark(
     if not test_bundles:
         return {}
 
-    spec = ChiploadSpec()
-    # Equal simulator-evaluation budget (240 evaluations total on 8 dev tasks):
-    # - SHAC-Chipload: 30 epochs * 8 tasks = 240 differentiable rollouts
-    # - PPO-Chipload : 30 epochs * 8 score-function rollouts = 240 zero-order rollouts
-    shac_policy = train_chipload_shac(dev_bundles, spec=spec, epochs=30, lr=0.038, seed=0) if dev_bundles else None
+    # Equal simulator-evaluation budget (280 evaluations total on 8 dev tasks):
+    # - SHAC-Chipload: 35 epochs * 8 tasks = 280 differentiable rollouts
+    # - PPO-Chipload : 35 epochs * 8 score-function rollouts = 280 zero-order rollouts
+    shac_policy = train_chipload_shac(dev_bundles, spec=None, epochs=35, lr=0.038, seed=0) if dev_bundles else None
     ppo_policy = (
-        train_chipload_ppo(dev_bundles, spec=spec, epochs=30, pop_per_epoch=8, lr=0.02, seed=0)
+        train_chipload_ppo(dev_bundles, spec=None, epochs=35, pop_per_epoch=8, lr=0.02, seed=0)
         if dev_bundles
         else None
     )
 
     cases_out: Dict[str, Any] = {}
     agg_methods: Dict[str, List[Dict[str, float]]] = {}
+    ref_spec = ChiploadSpec.from_feeds_and_speeds(test_bundles[0])
 
     for b in test_bundles:
         cid = b.case.case_id
         t_entry = task_by_id[cid]
-        nom_eng = analyze_plan_engagement(b, b.nominal_motion, spec)["summary"]
+        case_spec = ChiploadSpec.from_feeds_and_speeds(
+            b,
+            stock_material_id="al_6061_t6",
+            tool_material_id="carbide_coated",
+            aggressiveness=1.0,
+        )
+        doc_mm, woc_mm = infer_case_nominal_doc_woc_mm(
+            float(b.case.stock_max_mm[2]),
+            float(b.task.operation_target.geometry.params["pocket_min_mm"][2]),
+            2.0 * float(b.task.tool.cutter_radius_mm),
+            b.case.family,
+        )
+        base_f = float(case_spec.base_feed_mm_s)
+
+        # Fair baseline: Naive CAM (@2) running at feeds_and_speeds programmed constant feedrate
+        nom_fair_plan = retime_motion_plan_constant_speed(b.task, b.nominal_motion, base_f)
+        nom_eng = analyze_plan_engagement(b, nom_fair_plan, case_spec)["summary"]
         nom_t = float(nom_eng["total_time_s"])
 
         # Old coarse-segment STE-MRR plan
@@ -137,16 +155,22 @@ def compute_or_load_chipload_benchmark(
         ste_mrr_plan = reconstruct_motion_plan(
             b, "STE-Continuation-Adam", best_mrr_rec.get("best_theta")
         )
-        mrr_viewer = serialize_plan_for_viewer(b, ste_mrr_plan)
-        mrr_eng = mrr_viewer["engagement_summary"]
+        ste_mrr_matched = retime_motion_plan_constant_speed(b.task, ste_mrr_plan, base_f)
+        mrr_matched_t = float(sum(s.duration_s for s in ste_mrr_matched.segments))
+        mrr_viewer = serialize_plan_for_viewer(b, ste_mrr_plan, subdivide_for_cwe=True)
+        mrr_eng = analyze_plan_engagement(b, ste_mrr_plan, case_spec)["summary"]
 
-        # New sub-segmented CWE + Chipload STE-Adam co-optimization
-        chip_res = optimize_chipload_trajectory(b, spec=spec, num_iters=85, verify_posted=True)
+        # Sub-segmented CWE + Feeds&Speeds STE-Adam co-optimization + verified air shortcuts
+        chip_res = optimize_chipload_trajectory(b, spec=case_spec, num_iters=90, verify_posted=True)
         chip_eng = chip_res.telemetry["summary"]
+        chip_matched = retime_motion_plan_constant_speed(b.task, chip_res.plan, base_f)
+        chip_matched_t = float(sum(s.duration_s for s in chip_matched.segments))
 
         method_rows: List[Dict[str, Any]] = [
             {
                 "method": "Nominal-CAM (@2)",
+                "matched_cycle_time_s": round(nom_t, 4),
+                "matched_gain_pct": 0.0,
                 "cycle_time_s": nom_eng["total_time_s"],
                 "gain_vs_nom_pct": 0.0,
                 "engaged_time_s": nom_eng["engaged_time_s"],
@@ -165,6 +189,8 @@ def compute_or_load_chipload_benchmark(
             },
             {
                 "method": "DiffCAM STE-Adam (MRR)",
+                "matched_cycle_time_s": round(mrr_matched_t, 4),
+                "matched_gain_pct": round(100.0 * (nom_t - mrr_matched_t) / max(nom_t, 1e-6), 2),
                 "cycle_time_s": mrr_eng["total_time_s"],
                 "gain_vs_nom_pct": round(100.0 * (nom_t - mrr_eng["total_time_s"]) / max(nom_t, 1e-6), 2),
                 "engaged_time_s": mrr_eng["engaged_time_s"],
@@ -183,6 +209,8 @@ def compute_or_load_chipload_benchmark(
             },
             {
                 "method": "DiffCAM-Chipload (CWE)",
+                "matched_cycle_time_s": round(chip_matched_t, 4),
+                "matched_gain_pct": round(100.0 * (nom_t - chip_matched_t) / max(nom_t, 1e-6), 2),
                 "cycle_time_s": chip_eng["total_time_s"],
                 "gain_vs_nom_pct": round(100.0 * (nom_t - chip_eng["total_time_s"]) / max(nom_t, 1e-6), 2),
                 "engaged_time_s": chip_eng["engaged_time_s"],
@@ -205,22 +233,29 @@ def compute_or_load_chipload_benchmark(
             },
         ]
 
+        shac_res = None
         if shac_policy is not None and ppo_policy is not None:
             shac_res = rollout_chipload_policy(
-                b, shac_policy, spec=spec, provenance="diffcam:shac_chipload", verify_posted=True
+                b, shac_policy, spec=case_spec, provenance="diffcam:shac_chipload", verify_posted=True
             )
             shac_eng = shac_res.telemetry["summary"]
             ppo_res = rollout_chipload_policy(
-                b, ppo_policy, spec=spec, provenance="diffcam:ppo_chipload", verify_posted=True
+                b, ppo_policy, spec=case_spec, provenance="diffcam:ppo_chipload", verify_posted=True
             )
             ppo_eng = ppo_res.telemetry["summary"]
             for label, r_obj, r_eng in (
                 ("SHAC-Chipload (1st-Order RL)", shac_res, shac_eng),
                 ("PPO-Chipload (Zero-Order RL)", ppo_res, ppo_eng),
             ):
+                r_matched = retime_motion_plan_constant_speed(b.task, r_obj.plan, base_f)
+                r_matched_t = float(sum(s.duration_s for s in r_matched.segments))
                 method_rows.append(
                     {
                         "method": label,
+                        "matched_cycle_time_s": round(r_matched_t, 4),
+                        "matched_gain_pct": round(
+                            100.0 * (nom_t - r_matched_t) / max(nom_t, 1e-6), 2
+                        ),
                         "cycle_time_s": r_eng["total_time_s"],
                         "gain_vs_nom_pct": round(
                             100.0 * (nom_t - r_eng["total_time_s"]) / max(nom_t, 1e-6), 2
@@ -251,19 +286,36 @@ def compute_or_load_chipload_benchmark(
         cases_out[cid] = {
             "case_id": cid,
             "family": b.case.family,
+            "nominal_doc_mm": round(doc_mm, 4),
+            "nominal_woc_mm": round(woc_mm, 4),
+            "base_feed_mm_s": round(base_f, 4),
             "chipload_theta": [round(float(x), 6) for x in chip_res.theta.tolist()],
+            "chipload_shortcut_mode": chip_res.shortcut_mode,
             "chipload_wall_time_s": round(chip_res.wall_time_s, 3),
             "chipload_mean_xy_shift_mm": round(chip_res.mean_xy_shift_mm, 4),
             "chipload_max_xy_shift_mm": round(chip_res.max_xy_shift_mm, 4),
             "chipload_peak_mrr_mm3_s": chip_eng["peak_inst_mrr_mm3_s"],
             "chipload_posted": chip_res.posted_eval,
+            "shac_chipload_theta": (
+                [round(float(x), 6) for x in shac_res.theta.tolist()]
+                if shac_res is not None
+                else None
+            ),
+            "shac_chipload_peak_mrr_mm3_s": (
+                shac_res.telemetry["summary"]["peak_inst_mrr_mm3_s"]
+                if shac_res is not None
+                else 0.0
+            ),
+            "shac_chipload_posted": shac_res.posted_eval if shac_res is not None else None,
             "table": method_rows,
         }
         print(
-            f"[ChiploadOpt] {cid}: T={chip_eng['total_time_s']:.2f}s "
+            f"[ChiploadOpt] {cid}: Matched {nom_t:.2f}s -> {chip_matched_t:.2f}s "
+            f"(-{100.0 * (nom_t - chip_matched_t) / max(nom_t, 1e-6):.1f}%) | "
+            f"OptChipload T={chip_eng['total_time_s']:.2f}s "
             f"(eng={chip_eng['engaged_time_s']:.2f}s, air={chip_eng['air_cut_time_s']:.2f}s), "
             f"hex={chip_eng['mean_hex_mm']:.4f}mm (opt={chip_eng['optimal_hex_pct']:.1f}%), "
-            f"maxXY={chip_res.max_xy_shift_mm:.2f}mm",
+            f"maxXY={chip_res.max_xy_shift_mm:.2f}mm, sc={chip_res.shortcut_mode}",
             flush=True,
         )
 
@@ -272,6 +324,12 @@ def compute_or_load_chipload_benchmark(
         aggregate_table.append(
             {
                 "method": m_name,
+                "mean_matched_cycle_time_s": round(
+                    float(np.mean([r["matched_cycle_time_s"] for r in rows])), 2
+                ),
+                "mean_matched_gain_pct": round(
+                    float(np.mean([r["matched_gain_pct"] for r in rows])), 1
+                ),
                 "mean_cycle_time_s": round(float(np.mean([r["cycle_time_s"] for r in rows])), 2),
                 "mean_gain_pct": round(float(np.mean([r["gain_vs_nom_pct"] for r in rows])), 1),
                 "mean_engaged_time_s": round(float(np.mean([r["engaged_time_s"] for r in rows])), 2),
@@ -288,12 +346,12 @@ def compute_or_load_chipload_benchmark(
         )
 
     payload = {
-        "schema": "diffcam-exp5-chipload-cwe/1",
-        "target_hex_mm": spec.target_hex_mm,
-        "optimal_hex_band_mm": [spec.min_hex_mm, spec.max_hex_mm],
-        "spindle_rpm": spec.spindle_rpm,
-        "flutes": spec.flutes,
-        "rl_equal_sim_budget": 240,
+        "schema": "diffcam-exp5-chipload-cwe/2",
+        "target_hex_mm": ref_spec.target_hex_mm,
+        "optimal_hex_band_mm": [ref_spec.min_hex_mm, ref_spec.max_hex_mm],
+        "spindle_rpm": ref_spec.spindle_rpm,
+        "flutes": ref_spec.flutes,
+        "rl_equal_sim_budget": 280,
         "aggregate_table": aggregate_table,
         "cases": cases_out,
     }
@@ -392,71 +450,95 @@ def export_all_simulator_bundles(
         haas_pkt = haas_pkt_by_id.get(cid, {})
         nom_total_s = float(sum(s.duration_s for s in bundle.nominal_motion.segments))
 
-        # 2a. Featured DiffCAM-Chipload (CWE) variant when present
+        # 2a. Featured DiffCAM-Chipload (CWE) + SHAC-Chipload (RL) variants when present
         chip_case = exp5_cases.get(cid)
         if chip_case and chip_case.get("chipload_theta"):
-            var_id = "chipload_ste"
-            display_label = "DiffCAM-Chipload (CWE)"
-            plan = reconstruct_motion_plan(bundle, "DiffCAM-Chipload", chip_case["chipload_theta"])
-            rustcnc_variants.append((var_id, display_label, plan))
+            cwe_exports = [
+                (
+                    "chipload_ste",
+                    "DiffCAM-Chipload",
+                    "Direct DiffCAM (CWE)",
+                    chip_case["chipload_theta"],
+                    str(chip_case.get("chipload_shortcut_mode", "none")),
+                    chip_case.get("chipload_posted") or {},
+                    float(chip_case.get("chipload_peak_mrr_mm3_s", 0.0)),
+                ),
+            ]
+            if chip_case.get("shac_chipload_theta"):
+                cwe_exports.append(
+                    (
+                        "shac_chipload",
+                        "SHAC-Chipload",
+                        "RL Policy — SHAC (CWE)",
+                        chip_case["shac_chipload_theta"],
+                        "none",
+                        chip_case.get("shac_chipload_posted") or {},
+                        float(chip_case.get("shac_chipload_peak_mrr_mm3_s", 0.0)),
+                    )
+                )
 
-            cam_info = export_camotics_project(
-                camotics_dir, bundle, var_id, plan, resolution_mm=0.25
-            )
-            stock_stl_bytes, mesh_source = carve_resulting_stock_stl_bytes(
-                bundle, plan, use_camotics_docker=False
-            )
-            stock_stl_name = f"{cid}_{var_id}_stock.stl"
-            safe_resolve_under(meshes_dir, stock_stl_name).write_bytes(stock_stl_bytes)
+            for var_id, m_name, display_label, th_vec, sc_mode, p_meta, pk_mrr in cwe_exports:
+                plan = reconstruct_motion_plan(
+                    bundle, m_name, th_vec, shortcut_mode=sc_mode
+                )
+                rustcnc_variants.append((var_id, display_label, plan))
 
-            haas_nc_name = f"{cid}_{var_id}.nc"
-            m_cfg = MachineConfig(
-                units="mm",
-                tool_number=bundle.task.tool.tool_number,
-                length_offset=bundle.task.tool.tool_number,
-                spindle_rpm=8000,
-                coolant=True,
-            )
-            safe_resolve_under(haas_dir, haas_nc_name).write_text(
-                post_motion_plan(plan, bundle.task, dialect=C.Dialect.HAAS, config=m_cfg),
-                encoding="utf-8",
-            )
-            p_meta = chip_case.get("chipload_posted") or {}
-            plan_json = serialize_plan_for_viewer(bundle, plan)
-            dur_s = float(sum(s.duration_s for s in plan.segments))
-            viewer_variants.append(
-                {
-                    "id": var_id,
-                    "method": "DiffCAM-Chipload",
-                    "label": display_label,
-                    "seed": 0,
-                    "stock_stl_url": f"/data/meshes/{stock_stl_name}",
-                    "stock_mesh_source": mesh_source,
-                    "camotics_project_url": f"/downloads/camotics/{cam_info['project_file']}",
-                    "camotics_nc_url": f"/downloads/camotics/{cam_info['nc_file']}",
-                    "haas_nc_url": f"/downloads/haas/{haas_nc_name}",
-                    "metrics": {
-                        "cycle_time_s": round(dur_s, 3),
-                        "nominal_cycle_time_s": round(nom_total_s, 3),
-                        "cycle_time_reduction_pct": round(
-                            100.0 * (nom_total_s - dur_s) / max(nom_total_s, 1e-6), 2
-                        ),
-                        "peak_mrr_mm3_s": round(
-                            float(chip_case.get("chipload_peak_mrr_mm3_s", 0.0)), 2
-                        ),
-                        "air_fraction": round(
-                            float(plan_json["engagement_summary"]["air_cut_pct"]) / 100.0, 4
-                        ),
-                        "feasible": True,
-                        "posted_geometry_pass": bool(p_meta.get("geometry_pass", True)),
-                        "posted_safety_pass": bool(p_meta.get("safety_pass", True)),
-                        "orig_gouge_mm3": round(float(p_meta.get("original_part_gouge_mm3", 0.0)), 4),
-                        "residual_mm3": round(float(p_meta.get("residual_mm3", 0.0)), 4),
-                        "camotics_watertight": True,
-                    },
-                    "plan": plan_json,
-                }
-            )
+                cam_info = export_camotics_project(
+                    camotics_dir, bundle, var_id, plan, resolution_mm=0.25
+                )
+                stock_stl_bytes, mesh_source = carve_resulting_stock_stl_bytes(
+                    bundle, plan, use_camotics_docker=False
+                )
+                stock_stl_name = f"{cid}_{var_id}_stock.stl"
+                safe_resolve_under(meshes_dir, stock_stl_name).write_bytes(stock_stl_bytes)
+
+                haas_nc_name = f"{cid}_{var_id}.nc"
+                m_cfg = MachineConfig(
+                    units="mm",
+                    tool_number=bundle.task.tool.tool_number,
+                    length_offset=bundle.task.tool.tool_number,
+                    spindle_rpm=8000,
+                    coolant=True,
+                )
+                safe_resolve_under(haas_dir, haas_nc_name).write_text(
+                    post_motion_plan(plan, bundle.task, dialect=C.Dialect.HAAS, config=m_cfg),
+                    encoding="utf-8",
+                )
+                plan_json = serialize_plan_for_viewer(bundle, plan, subdivide_for_cwe=True)
+                dur_s = float(sum(s.duration_s for s in plan.segments))
+                viewer_variants.append(
+                    {
+                        "id": var_id,
+                        "method": m_name,
+                        "label": display_label,
+                        "seed": 0,
+                        "stock_stl_url": f"/data/meshes/{stock_stl_name}",
+                        "stock_mesh_source": mesh_source,
+                        "camotics_project_url": f"/downloads/camotics/{cam_info['project_file']}",
+                        "camotics_nc_url": f"/downloads/camotics/{cam_info['nc_file']}",
+                        "haas_nc_url": f"/downloads/haas/{haas_nc_name}",
+                        "metrics": {
+                            "cycle_time_s": round(dur_s, 3),
+                            "nominal_cycle_time_s": round(nom_total_s, 3),
+                            "cycle_time_reduction_pct": round(
+                                100.0 * (nom_total_s - dur_s) / max(nom_total_s, 1e-6), 2
+                            ),
+                            "peak_mrr_mm3_s": round(pk_mrr, 2),
+                            "air_fraction": round(
+                                float(plan_json["engagement_summary"]["air_cut_pct"]) / 100.0, 4
+                            ),
+                            "feasible": True,
+                            "posted_geometry_pass": bool(p_meta.get("geometry_pass", True)),
+                            "posted_safety_pass": bool(p_meta.get("safety_pass", True)),
+                            "orig_gouge_mm3": round(
+                                float(p_meta.get("original_part_gouge_mm3", 0.0)), 4
+                            ),
+                            "residual_mm3": round(float(p_meta.get("residual_mm3", 0.0)), 4),
+                            "camotics_watertight": True,
+                        },
+                        "plan": plan_json,
+                    }
+                )
 
         for var_id, method_key, display_label, exp4_variant_label in PLAYABLE_VARIANTS:
             method_recs = task_entry.get("methods", {}).get(method_key, [])
@@ -520,7 +602,7 @@ def export_all_simulator_bundles(
                 else {}
             )
             posted_meta = best_rec.get("posted") or {}
-            plan_json = serialize_plan_for_viewer(bundle, plan)
+            plan_json = serialize_plan_for_viewer(bundle, plan, subdivide_for_cwe=True)
 
             viewer_variants.append(
                 {
@@ -585,11 +667,21 @@ def export_all_simulator_bundles(
 
         geom_params = bundle.task.operation_target.geometry.params
         tool = bundle.task.tool
+        doc_mm, woc_mm = infer_case_nominal_doc_woc_mm(
+            float(bundle.case.stock_max_mm[2]),
+            float(geom_params["pocket_min_mm"][2]),
+            2.0 * float(tool.cutter_radius_mm),
+            bundle.case.family,
+        )
         case_payload = {
-            "schema": "diffcam-viewer-case/2",
+            "schema": "diffcam-viewer-case/3",
             "case_id": cid,
             "family": bundle.case.family,
             "split": bundle.task.split.value,
+            "nominal_doc_mm": round(doc_mm, 4),
+            "nominal_woc_mm": round(woc_mm, 4),
+            "max_accel_mm_s2": float(bundle.task.limits.max_accel_mm_s2),
+            "rapid_mm_s": float(bundle.task.limits.rapid_mm_s),
             "stock_min_mm": list(bundle.case.stock_min_mm),
             "stock_max_mm": list(bundle.case.stock_max_mm),
             "pocket_min_mm": [float(v) for v in geom_params["pocket_min_mm"]],
@@ -654,11 +746,12 @@ def export_all_simulator_bundles(
         )
 
     manifest_payload = {
-        "schema": "diffcam-simulator-viewer/2",
+        "schema": "diffcam-simulator-viewer/3",
         "run_id": run_dir.name,
         "cases": manifest_cases,
         "paper_summary": summary_metrics,
         "chipload_summary": exp5_data.get("aggregate_table", []),
+        "feeds_and_speeds_catalog": export_feeds_speeds_catalog_json(),
     }
     safe_resolve_under(viewer_dir, "manifest.json").write_text(
         json.dumps(manifest_payload, indent=2) + "\n",

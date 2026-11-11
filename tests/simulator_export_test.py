@@ -242,11 +242,22 @@ def test_viewer_frontend_has_zero_unsafe_dom_or_storage_sinks() -> None:
         r"\balert\s*\(",
         r"\bconfirm\s*\(",
         r"\bprompt\s*\(",
+        r"\.style\.",
     )
     for pat in forbidden_patterns:
         assert re.search(pat, js_code_only) is None, f"Forbidden sink matched in app.js: {pat}"
     assert "onclick=" not in html_src.lower()
     assert "style=" not in html_src.lower()
+    for required_id in (
+        'id="speed-policy-select"',
+        'value="matched" selected="selected"',
+        'id="aggressiveness-slider"',
+        'id="stock-mat-select"',
+        'id="tool-mat-select"',
+        'id="path-width-slider"',
+        'id="layout-sbs"',
+    ):
+        assert required_id in html_src
 
 
 def test_loopback_server_security_headers_method_allowlist_and_traversal(

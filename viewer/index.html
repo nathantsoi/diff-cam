@@ -4,7 +4,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DiffCAM Manufacture Simulator — Live Cutting Stock, CWE &amp; Chipload</title>
+  <title>DiffCAM Manufacture Simulator — Fair Speed, Feeds &amp; Speeds Chipload &amp; Side-by-Side</title>
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -13,7 +13,7 @@
       <span class="brand-badge">MIT</span>
       <div>
         <h1 class="brand-title">DiffCAM Manufacture Simulator</h1>
-        <p class="brand-subtitle">Live 2.5D Dexel Stock Carving, Cutter Engagement (CWE) &amp; Chipload Explorer</p>
+        <p class="brand-subtitle">Fair Matched-Speed &amp; Clean-Room Feeds/Speeds Optimal Chipload Explorer</p>
       </div>
     </div>
 
@@ -23,42 +23,79 @@
         <select id="case-select" class="select-input" aria-label="Select benchmark part"></select>
       </label>
 
-      <div class="field-group" role="group" aria-label="Optimization method">
-        <span class="field-label">Simulated Toolpath &amp; Stock</span>
+      <div class="field-group" role="group" aria-label="Viewport layout mode">
+        <span class="field-label">Comparison View</span>
+        <div class="segmented-group">
+          <button type="button" id="layout-single" class="btn btn-active">Single Viewport</button>
+          <button type="button" id="layout-sbs" class="btn">Side-by-Side (Naive | RL | DiffCAM)</button>
+        </div>
+      </div>
+
+      <div id="single-variant-group" class="field-group" role="group" aria-label="Optimization method">
+        <span class="field-label">Simulated Method</span>
         <div id="variant-buttons" class="segmented-group"></div>
       </div>
 
       <div class="field-group" role="group" aria-label="Artifact downloads">
-        <span class="field-label">Open in External Simulator / CNC</span>
+        <span class="field-label">Export to External Simulator / CNC</span>
         <div class="download-group">
-          <a id="dl-rustcnc" class="btn btn-accent" href="#" download>RustCNC (.rustcnc)</a>
-          <a id="dl-camotics" class="btn btn-secondary" href="#" download>CAMotics (.camotics)</a>
-          <a id="dl-nc" class="btn btn-secondary" href="#" download>G-Code (.nc)</a>
+          <a id="dl-rustcnc" class="btn btn-accent" href="#" download="part.rustcnc">RustCNC (.rustcnc)</a>
+          <a id="dl-camotics" class="btn btn-secondary" href="#" download="part.camotics">CAMotics (.camotics)</a>
+          <a id="dl-nc" class="btn btn-secondary" href="#" download="part.nc">G-Code (.nc)</a>
         </div>
       </div>
     </div>
   </header>
+
+  <section class="physics-bar" aria-label="Fair Speed Policy, Aggressiveness, and Feeds and Speeds Parameters">
+    <div class="physics-controls">
+      <label class="field-group" for="speed-policy-select">
+        <span class="field-label">Speed Comparison Policy</span>
+        <select id="speed-policy-select" class="select-input select-highlight" aria-label="Speed comparison policy">
+          <option value="matched" selected="selected">Same Speed Across Methods (Fair Default)</option>
+          <option value="optimal_chipload">Optimization Mode (Optimal Chipload — Feeds &amp; Speeds)</option>
+        </select>
+      </label>
+
+      <label class="field-group slider-field" for="aggressiveness-slider">
+        <span class="field-label">Cut Aggressiveness: <strong id="aggressiveness-val" class="accent-mono">100%</strong></span>
+        <input type="range" id="aggressiveness-slider" class="aggr-slider" min="40" max="180" value="100" step="5" aria-label="Cutting aggressiveness percentage">
+      </label>
+
+      <label class="field-group" for="stock-mat-select">
+        <span class="field-label">Stock Material</span>
+        <select id="stock-mat-select" class="select-input" aria-label="Select workpiece stock material"></select>
+      </label>
+
+      <label class="field-group" for="tool-mat-select">
+        <span class="field-label">Tool Material</span>
+        <select id="tool-mat-select" class="select-input" aria-label="Select cutting tool substrate and coating"></select>
+      </label>
+    </div>
+
+    <div id="physics-readout-strip" class="physics-readout-strip" aria-live="polite"></div>
+  </section>
 
   <div id="error-banner" class="error-banner hidden" role="alert"></div>
 
   <main class="workspace">
     <section class="viewport-pane" aria-label="3D Milling Simulation Viewport">
       <div class="viewport-header">
-        <div class="layer-toggles" role="group" aria-label="3D visibility and appearance">
-          <label class="toggle-pill"><input type="checkbox" id="chk-stock" checked> <span>Stock</span></label>
+        <div class="layer-toggles" role="group" aria-label="3D stock and toolpath appearance">
+          <label class="toggle-pill"><input type="checkbox" id="chk-stock" checked="checked"> <span>Stock</span></label>
           <label class="inline-select-group" for="stock-mode-select">
             <span class="inline-label">Mode</span>
             <select id="stock-mode-select" class="select-compact" aria-label="Stock display mode">
-              <option value="live_alloy" selected>Live Cutting (Skin + Alloy)</option>
+              <option value="live_alloy" selected="selected">Live Cutting (Skin + Alloy)</option>
               <option value="live_glass">Translucent Stock + CAD</option>
               <option value="live_deviation">Stock-to-Model Deviation</option>
-              <option value="static_stl">Final STL (CAMotics/0.25mm)</option>
+              <option value="static_stl">Final STL (0.25mm)</option>
             </select>
           </label>
           <label class="inline-select-group" for="stock-color-select">
             <span class="inline-label">Tint</span>
             <select id="stock-color-select" class="select-compact" aria-label="Raw billet color">
-              <option value="green" selected>RustCNC Green</option>
+              <option value="green" selected="selected">RustCNC Green</option>
               <option value="silver">6061 Alloy</option>
               <option value="blue">Layout Blue</option>
               <option value="amber">Setup Gold</option>
@@ -71,20 +108,25 @@
           <label class="inline-select-group" for="path-color-select">
             <span class="inline-label">Path Color</span>
             <select id="path-color-select" class="select-compact" aria-label="Toolpath color mode">
-              <option value="engaged_air" selected>Engaged vs. Air-Cut</option>
-              <option value="chipload">Chip Load h_ex</option>
-              <option value="engagement">Engagement a_e (%D)</option>
-              <option value="feedrate">Feedrate (mm/s)</option>
+              <option value="chipload" selected="selected">Chip Load h_ex (Tight Fit)</option>
+              <option value="engagement">Engagement a_e %D (Tight Fit)</option>
+              <option value="feedrate">Feedrate mm/s (Tight Fit)</option>
+              <option value="mrr">Inst. MRR mm³/s (Tight Fit)</option>
+              <option value="engaged_air">Engaged vs. Air-Cut</option>
             </select>
+          </label>
+          <label class="inline-select-group" for="path-width-slider">
+            <span class="inline-label">Path Width</span>
+            <input type="range" id="path-width-slider" class="mini-slider" min="10" max="50" value="28" step="2" aria-label="3D toolpath ribbon width">
           </label>
         </div>
 
         <div class="layer-toggles" role="group" aria-label="Visibility and camera">
           <label class="toggle-pill"><input type="checkbox" id="chk-target"> <span>Target CAD</span></label>
-          <label class="toggle-pill"><input type="checkbox" id="chk-billet" checked> <span>Billet Box</span></label>
-          <label class="toggle-pill"><input type="checkbox" id="chk-cuts" checked> <span>G1 Path</span></label>
-          <label class="toggle-pill"><input type="checkbox" id="chk-rapids" checked> <span>G0 Rapids</span></label>
-          <label class="toggle-pill"><input type="checkbox" id="chk-tool" checked> <span>3D Endmill</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-billet" checked="checked"> <span>Billet Box</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-cuts" checked="checked"> <span>G1 Path</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-rapids" checked="checked"> <span>G0 Rapids</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-tool" checked="checked"> <span>3D Endmill</span></label>
           <label class="toggle-pill"><input type="checkbox" id="chk-clip"> <span>Clip Path</span></label>
           <button type="button" id="cam-iso" class="btn btn-tiny">Iso</button>
           <button type="button" id="cam-top" class="btn btn-tiny">Top</button>
@@ -96,7 +138,9 @@
       <div class="canvas-stage">
         <canvas id="gl-canvas"></canvas>
 
-        <div class="hud-dro" aria-live="polite">
+        <div id="sbs-overlay" class="sbs-overlay hidden" aria-live="polite"></div>
+
+        <div id="hud-dro" class="hud-dro" aria-live="polite">
           <div class="dro-header-row">
             <span class="dro-title">G54 Live Spindle &amp; CWE</span>
             <span id="dro-state-badge" class="state-badge state-engaged">ENGAGED</span>
@@ -109,22 +153,22 @@
           <div class="dro-meta">
             <div><span class="meta-k">Move:</span> <span id="dro-class" class="meta-v">Cutting</span></div>
             <div><span class="meta-k">Feed:</span> <span id="dro-feed" class="meta-v">0.0 mm/s (0 mm/min)</span></div>
-            <div><span class="meta-k">Radial a_e:</span> <span id="dro-ae" class="meta-v">0.00 mm (0%D · 0°)</span></div>
+            <div><span class="meta-k">Engagement:</span> <span id="dro-ae" class="meta-v">0.00 mm (0%D)</span></div>
             <div><span class="meta-k">Chip h_ex:</span> <span id="dro-hex" class="meta-v">0.000 mm/tooth</span></div>
-            <div><span class="meta-k">Removed:</span> <span id="dro-vol" class="meta-v">0.0 / 0.0 mm³</span></div>
+            <div><span class="meta-k">Removed:</span> <span id="dro-vol" class="meta-v">0 / 0 mm³</span></div>
             <div><span class="meta-k">Segment:</span> <span id="dro-seg" class="meta-v">0 / 0</span></div>
           </div>
         </div>
 
         <div class="hud-legend">
-          <div id="legend-title" class="legend-title">Toolpath: Engaged Cut vs. Air-Cutting (G1)</div>
-          <div id="legend-bar" class="legend-gradient mode-engaged"></div>
+          <div id="legend-title" class="legend-title">Chip Load h_ex (Tight Trajectory Range)</div>
+          <div id="legend-bar" class="legend-gradient mode-tight"></div>
           <div class="legend-labels">
-            <span id="legend-min">Engaged G1</span>
-            <span id="legend-mid">Air-Cut G1</span>
-            <span id="legend-max">Rapid G0</span>
+            <span id="legend-min">0.000</span>
+            <span id="legend-mid">0.000</span>
+            <span id="legend-max">0.000</span>
           </div>
-          <div class="legend-hint">Drag: Orbit &middot; Shift/Right-Drag: Pan &middot; Wheel: Zoom</div>
+          <div id="legend-sub" class="legend-hint">Air G1: Slate &middot; Rapid G0: Amber &middot; Drag: Orbit</div>
         </div>
       </div>
 
@@ -137,12 +181,12 @@
           <button type="button" id="btn-end" class="btn btn-tiny" title="Jump to machined end">&#9197; End</button>
         </div>
         <label class="speed-label" for="speed-select">
-          <span>Speed</span>
+          <span>Playback</span>
           <select id="speed-select" class="select-compact">
             <option value="0.25">0.25x</option>
             <option value="0.5">0.5x</option>
             <option value="1">1.0x</option>
-            <option value="2" selected>2.0x</option>
+            <option value="2" selected="selected">2.0x</option>
             <option value="4">4.0x</option>
             <option value="8">8.0x</option>
           </select>
@@ -157,7 +201,7 @@
 
       <div id="engagement-card" class="engagement-card">
         <div class="eng-card-header">
-          <span class="eng-card-title">Time Engaged vs. Air-Cutting Breakdown</span>
+          <span id="eng-card-title" class="eng-card-title">Time Engaged vs. Air-Cutting Breakdown</span>
           <span id="eng-vol-summary" class="eng-card-sub">0 mm³ removed</span>
         </div>
         <div id="eng-svg-mount" class="eng-svg-mount"></div>
@@ -165,7 +209,7 @@
       </div>
 
       <nav class="tab-nav" role="tablist" aria-label="Tabular results tabs">
-        <button type="button" class="tab-btn active" data-tab="chipload" role="tab" aria-selected="true">CWE &amp; Chipload</button>
+        <button type="button" class="tab-btn active" data-tab="chipload" role="tab" aria-selected="true">Live 3-Way &amp; Chipload</button>
         <button type="button" class="tab-btn" data-tab="case" role="tab" aria-selected="false">Part (8 Methods)</button>
         <button type="button" class="tab-btn" data-tab="exp2" role="tab" aria-selected="false">Table I (Exp2)</button>
         <button type="button" class="tab-btn" data-tab="audit" role="tab" aria-selected="false">Transfer &amp; Posts</button>
@@ -174,14 +218,14 @@
       <div id="tab-content" class="tab-content"></div>
 
       <footer class="howto-box">
-        <div class="howto-title">Live Cutting Stock &amp; RustCNC Container</div>
+        <div class="howto-title">Fair Speed vs. Feeds &amp; Speeds Optimal Chipload</div>
         <p class="howto-text">
-          Press <strong>Play</strong>, drag the timeline, or click <strong>Prev / Next</strong> to watch the 5.0 mm 3FL endmill progressively carve the 2.5D dexel billet. Switch between <strong>DiffCAM-Chipload (CWE)</strong>, <strong>DiffCAM STE-Adam (MRR)</strong>, and <strong>Nominal-CAM</strong> to compare reshaped corner/air trajectories, or download <strong>RustCNC (.rustcnc)</strong> to open all setups in RustCNC Manufacture.
+          Defaults to <strong>Same Speed Across Methods</strong> so geometry &amp; air-cut shortcuts are compared at identical feedrate. Switch to <strong>Optimization Mode (Optimal Chipload)</strong>, adjust <strong>Aggressiveness</strong>, or pick <strong>Stock / Tool Material</strong> and click <strong>Side-by-Side</strong> to compare Naive CAM, RL (SHAC), and Direct DiffCAM live.
         </p>
       </footer>
     </aside>
   </main>
 
-  <script src="/app.js" defer></script>
+  <script src="/app.js" defer="defer"></script>
 </body>
 </html>
