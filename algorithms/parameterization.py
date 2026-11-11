@@ -425,5 +425,313 @@ class AbsolutePositionResidual(_LinearDeltaParameterization):
         return self._differencing_matrix
 
 
+class PositionSpline(_LinearDeltaParameterization):
+    """Cubic B-spline residuals directly on interior waypoint positions ``P1..P_(T-1)``.
+
+    Unlike ``DeltaSpline`` (which Perturbs segment deltas and accumulates ``O(T)`` drift via
+    ``cumsum``), ``PositionSpline`` places a clamped cubic B-spline basis ``B`` on interior
+    waypoint positions ``delta_P[1..T-1] = scale_mm * diag(w) @ B @ theta`` with ``delta_P[0] = 0``
+    and ``delta_P[T] = 0`` (when ``anchor_end=True``), and maps to segment delta residuals via
+    the exact first-difference operator ``D``. Every waypoint displacement is strictly bounded
+    by ``scale_mm`` regardless of horizon length ``T``.
+    """
+
+    def __init__(
+        self,
+        cam_deltas_mm,
+        scale_mm: float,
+        num_control_points: Optional[int] = None,
+        bounds: _Bounds = None,
+        anchor_end: bool = True,
+        waypoint_weights=None,
+        initial_position_mm=None,
+    ):
+        deltas = _finite_array("cam_deltas_mm", cam_deltas_mm, (3,))
+        steps = deltas.shape[0]
+        if anchor_end and steps < 2:
+            raise ValueError("PositionSpline anchor_end=True requires T >= 2")
+        n_active = steps - 1 if anchor_end else steps
+        controls = n_active if num_control_points is None else min(int(num_control_points), n_active)
+        if n_active < 4 or controls == n_active:
+            active_basis = np.eye(n_active, dtype=np.float64)
+            controls = n_active
+        else:
+            controls = max(4, controls)
+            active_basis = cubic_open_uniform_basis(n_active, controls)
+
+        if waypoint_weights is not None:
+            w = np.asarray(waypoint_weights, dtype=np.float64).reshape(-1)
+            if w.shape != (n_active,) or not np.all(np.isfinite(w)) or np.any(w < 0):
+                raise ValueError(f"waypoint_weights must be non-negative finite shape ({n_active},)")
+            active_basis = w[:, None] * active_basis
+
+        position_map = np.zeros((steps, controls), dtype=np.float64)
+        position_map[:n_active, :] = active_basis
+
+        difference = np.zeros((steps, steps), dtype=np.float64)
+        difference[0, 0] = 1.0
+        for row in range(1, steps):
+            difference[row, row - 1] = -1.0
+            difference[row, row] = 1.0
+        mapping = difference @ position_map
+        self.anchor_end = bool(anchor_end)
+        self.num_control_points = int(controls)
+        self._position_residual_map = _readonly(position_map)
+        self._differencing_matrix = _readonly(difference)
+        base_init = np.zeros(3, dtype=np.float64) if initial_position_mm is None else np.asarray(initial_position_mm, dtype=np.float64)
+        ref_positions = np.vstack([base_init[None, :], base_init[None, :] + np.cumsum(deltas, axis=0)])
+        super().__init__(
+            deltas,
+            mapping,
+            scale_mm,
+            base_init,
+            bounds,
+            "position_spline",
+            ref_positions,
+        )
+
+    @property
+    def basis(self) -> Array:
+        return self.linear_map
+
+
+class JointPathFeedSpline:
+    """Co-parameterization of spatial B-spline residuals and per-segment log-feed splines.
+
+    ``theta`` has length ``num_pos_params + num_feed_params``.
+    * ``forward(theta) -> (T, 3)`` commanded segment displacements in mm.
+    * ``forward_feed_multipliers(theta) -> (T,)`` positive feed multipliers ``exp(log_scale * B_f @ theta_f)``
+      on cutting segments, and exact ``1.0`` on rapid segments (where ``is_rapid[t] == True``).
+    * ``pullback(grad_deltas)`` preserves the spatial-only interface (zero feed gradient).
+    * ``pullback_joint(grad_deltas, grad_feed_mult, theta)`` returns the exact full gradient
+      ``(num_params,)`` combining spatial transpose-Jacobian and ``d exp(u)/d theta_f``.
+    """
+
+    mode = "joint_path_feed_spline"
+
+    def __init__(
+        self,
+        cam_deltas_mm,
+        scale_mm: float,
+        *,
+        num_pos_controls: Optional[int] = None,
+        num_feed_controls: Optional[int] = None,
+        log_feed_scale: float = 0.35,
+        pos_bounds: _Bounds = (-1.0, 1.0),
+        feed_bounds: Optional[Tuple[float, float]] = (-1.0, 1.5),
+        is_rapid=None,
+        max_feed_mult_per_seg=None,
+        anchor_end: bool = False,
+        xy_only: bool = False,
+        spatial_mode: str = "delta_spline",
+        waypoint_weights=None,
+        initial_position_mm=None,
+    ):
+        if spatial_mode == "position_spline":
+            self.spatial = PositionSpline(
+                cam_deltas_mm,
+                scale_mm=scale_mm,
+                num_control_points=num_pos_controls,
+                bounds=pos_bounds,
+                anchor_end=anchor_end,
+                waypoint_weights=waypoint_weights,
+                initial_position_mm=initial_position_mm,
+            )
+        elif spatial_mode == "delta_spline":
+            self.spatial = DeltaSpline(
+                cam_deltas_mm,
+                scale_mm=scale_mm,
+                num_control_points=num_pos_controls,
+                bounds=pos_bounds,
+                anchor_end=anchor_end,
+                initial_position_mm=initial_position_mm,
+            )
+        else:
+            raise ValueError(f"unknown JointPathFeedSpline spatial_mode {spatial_mode!r}")
+        self.xy_only = bool(xy_only)
+        self._num_free_pos_pts = self.spatial.num_params // 3
+        steps = self.spatial.num_steps
+        f_controls = steps if num_feed_controls is None else int(num_feed_controls)
+        if f_controls == steps:
+            feed_basis = np.eye(steps, dtype=np.float64)
+        else:
+            feed_basis = cubic_open_uniform_basis(steps, max(4, min(f_controls, steps)))
+            f_controls = feed_basis.shape[1]
+        self._feed_basis = _readonly(feed_basis)
+        self.num_feed_controls = int(f_controls)
+        self.log_feed_scale = _scale(log_feed_scale)
+        if is_rapid is None:
+            rapid_mask = np.zeros(steps, dtype=bool)
+        else:
+            rapid_mask = np.asarray(is_rapid, dtype=bool)
+            if rapid_mask.shape != (steps,):
+                raise ValueError(f"is_rapid: expected shape ({steps},), got {rapid_mask.shape}")
+        self._is_rapid = rapid_mask.copy()
+        self._is_rapid.flags.writeable = False
+        self._cut_mask = (~self._is_rapid).astype(np.float64)
+        self._cut_mask.flags.writeable = False
+
+        if max_feed_mult_per_seg is None:
+            self._max_mult = None
+        else:
+            mm = np.asarray(max_feed_mult_per_seg, dtype=np.float64)
+            if mm.shape != (steps,) or np.any(mm <= 0) or not np.all(np.isfinite(mm)):
+                raise ValueError("max_feed_mult_per_seg must be positive finite shape (T,)")
+            self._max_mult = _readonly(mm)
+
+        self.anchor_end = self.spatial.anchor_end
+        self.num_control_points = self.spatial.num_control_points
+
+        if pos_bounds is None and feed_bounds is None:
+            self._lower_bounds = None
+            self._upper_bounds = None
+        else:
+            if self.spatial.bounds is None:
+                p_lo = -np.inf * np.ones(self.num_pos_params, dtype=np.float64)
+                p_hi = np.inf * np.ones(self.num_pos_params, dtype=np.float64)
+            elif self.xy_only:
+                sp_lo, sp_hi = self.spatial.bounds
+                p_lo = sp_lo.reshape(self._num_free_pos_pts, 3)[:, :2].reshape(-1)
+                p_hi = sp_hi.reshape(self._num_free_pos_pts, 3)[:, :2].reshape(-1)
+            else:
+                p_lo, p_hi = self.spatial.bounds
+            if feed_bounds is None:
+                f_lo = np.full(self.num_feed_controls, -2.0, dtype=np.float64)
+                f_hi = np.full(self.num_feed_controls, 2.0, dtype=np.float64)
+            else:
+                f_lo = np.full(self.num_feed_controls, float(feed_bounds[0]), dtype=np.float64)
+                f_hi = np.full(self.num_feed_controls, float(feed_bounds[1]), dtype=np.float64)
+            lower = np.concatenate([p_lo, f_lo])
+            upper = np.concatenate([p_hi, f_hi])
+            if np.any(lower >= upper) or np.any(lower > 0) or np.any(upper < 0):
+                raise ValueError("JointPathFeedSpline bounds must be ordered and contain theta=0")
+            self._lower_bounds = _readonly(lower)
+            self._upper_bounds = _readonly(upper)
+
+    @property
+    def num_pos_params(self) -> int:
+        return 2 * self._num_free_pos_pts if self.xy_only else self.spatial.num_params
+
+    @property
+    def num_feed_params(self) -> int:
+        return self.num_feed_controls
+
+    @property
+    def num_params(self) -> int:
+        return self.num_pos_params + self.num_feed_params
+
+    @property
+    def num_steps(self) -> int:
+        return self.spatial.num_steps
+
+    @property
+    def parameter_shape(self) -> Tuple[int, ...]:
+        return (self.num_params,)
+
+    @property
+    def scale_mm(self) -> float:
+        return self.spatial.scale_mm
+
+    @property
+    def initial_position_mm(self) -> Array:
+        return self.spatial.initial_position_mm
+
+    @property
+    def reference_deltas_mm(self) -> Array:
+        return self.spatial.reference_deltas_mm
+
+    @property
+    def reference_positions_mm(self) -> Array:
+        return self.spatial.reference_positions_mm
+
+    @property
+    def basis(self) -> Array:
+        return self.spatial.basis
+
+    @property
+    def feed_basis(self) -> Array:
+        return self._feed_basis
+
+    @property
+    def bounds(self):
+        if self._lower_bounds is None:
+            return None
+        return self._lower_bounds, self._upper_bounds
+
+    def _split(self, theta, check_bounds: bool = True) -> Tuple[Array, Array]:
+        arr = np.asarray(theta, dtype=np.float64).reshape(-1)
+        if arr.shape != (self.num_params,) or not np.isfinite(arr).all():
+            raise ValueError(f"theta: expected finite ({self.num_params},), got {arr.shape}")
+        if check_bounds and self._lower_bounds is not None:
+            if np.any(arr < self._lower_bounds - 1e-12) or np.any(arr > self._upper_bounds + 1e-12):
+                raise ValueError("theta outside declared normalized bounds")
+        return arr[: self.num_pos_params], arr[self.num_pos_params :]
+
+    def in_bounds(self, theta, tolerance: float = 0.0) -> bool:
+        arr = np.asarray(theta, dtype=np.float64).reshape(-1)
+        if arr.shape != (self.num_params,) or not np.isfinite(arr).all():
+            raise ValueError("theta must be finite with shape (num_params,)")
+        if self._lower_bounds is None:
+            return True
+        return bool(np.all(arr >= self._lower_bounds - tolerance)
+                    and np.all(arr <= self._upper_bounds + tolerance))
+
+    def clip(self, theta) -> Array:
+        arr = np.asarray(theta, dtype=np.float64).reshape(-1)
+        if self._lower_bounds is None:
+            return arr.copy()
+        return np.clip(arr, self._lower_bounds, self._upper_bounds)
+
+    def _expand_pos(self, theta_pos: Array) -> Array:
+        if not self.xy_only:
+            return theta_pos
+        pts2 = theta_pos.reshape(self._num_free_pos_pts, 2)
+        return np.column_stack([pts2, np.zeros(self._num_free_pos_pts, dtype=np.float64)]).reshape(-1)
+
+    def _reduce_pos_grad(self, grad_pos_3d: Array) -> Array:
+        if not self.xy_only:
+            return grad_pos_3d
+        return grad_pos_3d.reshape(self._num_free_pos_pts, 3)[:, :2].reshape(-1)
+
+    def forward(self, theta) -> Array:
+        theta_pos, _ = self._split(theta)
+        return self.spatial.forward(self._expand_pos(theta_pos))
+
+    def positions(self, theta) -> Array:
+        theta_pos, _ = self._split(theta)
+        return self.spatial.positions(self._expand_pos(theta_pos))
+
+    def _smooth_feed_cap(self, raw_mult: Array) -> Tuple[Array, Array]:
+        """Smoothly cap feed multiplier below max_feed_mult_per_seg if configured."""
+        if self._max_mult is None:
+            return raw_mult, np.ones_like(raw_mult)
+        capped = np.minimum(raw_mult, self._max_mult)
+        d_cap = (raw_mult < self._max_mult).astype(np.float64)
+        return capped, d_cap
+
+    def forward_feed_multipliers(self, theta) -> Array:
+        _, theta_feed = self._split(theta)
+        log_u = self.log_feed_scale * (self._feed_basis @ theta_feed)
+        raw_mult = np.exp(log_u)
+        capped, _ = self._smooth_feed_cap(raw_mult)
+        return 1.0 + self._cut_mask * (capped - 1.0)
+
+    def pullback(self, grad_deltas) -> Array:
+        grad_pos = self._reduce_pos_grad(self.spatial.pullback(grad_deltas))
+        return np.concatenate([grad_pos, np.zeros(self.num_feed_params, dtype=np.float64)])
+
+    def pullback_joint(self, grad_deltas, grad_feed_mult, theta) -> Array:
+        _, theta_feed = self._split(theta)
+        grad_pos = self._reduce_pos_grad(self.spatial.pullback(grad_deltas))
+        g_mult = np.asarray(grad_feed_mult, dtype=np.float64).reshape(-1)
+        if g_mult.shape != (self.num_steps,) or not np.isfinite(g_mult).all():
+            raise ValueError(f"grad_feed_mult: expected finite ({self.num_steps},)")
+        log_u = self.log_feed_scale * (self._feed_basis @ theta_feed)
+        raw_mult = np.exp(log_u)
+        _, d_cap = self._smooth_feed_cap(raw_mult)
+        d_theta_f = self.log_feed_scale * (self._feed_basis.T @ (g_mult * self._cut_mask * d_cap * raw_mult))
+        return np.concatenate([grad_pos, d_theta_f])
+
+
 __all__ = ["AbsolutePositionResidual", "DeltaResidual", "DeltaSpline",
-           "cubic_open_uniform_basis"]
+           "PositionSpline", "JointPathFeedSpline", "cubic_open_uniform_basis"]

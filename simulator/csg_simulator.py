@@ -519,6 +519,22 @@ class CSGSimulatorDelta:
         self.w_air_ramp_frac[None] = 0.0
         self.w_break = ti.field(dtype=self._precision, shape=())
         self.w_break[None] = 0.0
+        # Differentiable per-segment feedrate + blended kinematics + volumetric MRR barrier.
+        self.use_per_seg_speeds = ti.field(dtype=ti.i32, shape=())
+        self.use_per_seg_speeds[None] = 0
+        self.use_blended_timing = ti.field(dtype=ti.i32, shape=())
+        self.use_blended_timing[None] = 0
+        self.max_accel_mm_s2 = ti.field(dtype=self._precision, shape=())
+        self.max_accel_mm_s2[None] = 500.0
+        self.w_mrr = ti.field(dtype=self._precision, shape=())
+        self.w_mrr[None] = 0.0
+        self.mrr_limit_mm3_s = ti.field(dtype=self._precision, shape=())
+        self.mrr_limit_mm3_s[None] = 100.0
+        self.w_rapid_stock = ti.field(dtype=self._precision, shape=())
+        self.w_rapid_stock[None] = 0.0
+        self.seg_nom_speed = ti.field(dtype=self._precision, shape=max_steps)
+        self.seg_is_rapid = ti.field(dtype=ti.i32, shape=max_steps)
+        self.seg_feed_mult = ti.field(dtype=self._precision, shape=max_steps, needs_grad=True)
         # Breakage-model constants (see docs/algorithms.md). kc = specific
         # cutting force (Al ~700 N/mm^2); f_ref = nominal force at which
         # P_break=0.5 (effective S_bar/alpha_mean -- calibrate); sigma_risk =
@@ -621,6 +637,7 @@ class CSGSimulatorDelta:
         self.diag_air_time_early = ti.field(dtype=self._precision, shape=())
         self.diag_air_time_mid = ti.field(dtype=self._precision, shape=())
         self.diag_air_time_late = ti.field(dtype=self._precision, shape=())
+        self.diag_mrr_max = ti.field(dtype=self._precision, shape=())
 
         # Per-segment differentiable intermediates for the three new measures.
         # Written by compute_seg_time / compute_seg_volumes (inside the Tape)
@@ -696,8 +713,16 @@ class CSGSimulatorDelta:
             target_geometry, stock_geometry, stock_box_origin_mm
         )
         ti.root.lazy_grad()
+        self._init_per_seg_speed_defaults()
         _record_taichi_instance_success()
         self._initialization_complete = True
+
+    @ti.kernel
+    def _init_per_seg_speed_defaults(self):
+        for t in range(self.max_steps):
+            self.seg_nom_speed[t] = self.feed_speed[None]
+            self.seg_is_rapid[t] = 0
+            self.seg_feed_mult[t] = 1.0
 
     def precision_metadata(self):
         """JSON-safe objective/run-setup identity, not an optimizer cost claim.
@@ -1588,7 +1613,7 @@ class CSGSimulatorDelta:
 
     @ti.kernel
     def apply_cut(self, t: ti.i32):
-        """stock[t+1] = smooth_max(stock[t], -tool_sdf at segment t)."""
+        """stock[t+1] = smooth_max(stock[t], -tool_sdf at segment t) for cutting segments."""
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             # k is scaled by k_ref because SDFs are now in voxels (the carve
             # smooth_max would otherwise overflow exp() and NaN the gradient).
@@ -1597,17 +1622,22 @@ class CSGSimulatorDelta:
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
             tool_d = self.tool_sdf(p, t)
-            self.stock[t + 1, i, j, k] = smooth_max(self.stock[t, i, j, k], -tool_d, kv)
+            is_cut = ti.cast(1 - self.use_per_seg_speeds[None] * self.seg_is_rapid[t], self._precision)
+            carved = smooth_max(self.stock[t, i, j, k], -tool_d, kv)
+            self.stock[t + 1, i, j, k] = self.stock[t, i, j, k] * (1.0 - is_cut) + carved * is_cut
 
     @ti.kernel
     def apply_cut_hard(self, t: ti.i32):
-        """stock[t+1] = max(stock[t], -tool_sdf_sharp at segment t)."""
+        """stock[t+1] = max(stock[t], -tool_sdf_sharp at segment t) for cutting segments."""
         for i, j, k in ti.ndrange(self.Nx, self.Ny, self.Nz):
             p = ti.Vector(
                 [(i + 0.5) / self.Nx, (j + 0.5) / self.Ny, (k + 0.5) / self.Nz]
             )
-            tool_d = self.tool_sdf_sharp(p, t)
-            self.stock[t + 1, i, j, k] = ti.max(self.stock[t, i, j, k], -tool_d)
+            if self.use_per_seg_speeds[None] == 1 and self.seg_is_rapid[t] == 1:
+                self.stock[t + 1, i, j, k] = self.stock[t, i, j, k]
+            else:
+                tool_d = self.tool_sdf_sharp(p, t)
+                self.stock[t + 1, i, j, k] = ti.max(self.stock[t, i, j, k], -tool_d)
 
     @ti.kernel
     def loss_at(self, t: ti.i32) -> float:
@@ -1939,23 +1969,7 @@ class CSGSimulatorDelta:
 
     @ti.kernel
     def compute_seg_time(self, t_start: ti.i32, T: ti.i32):
-        """Per-segment motion time (seconds), differentiable.
-
-        Mirrors ``advance_position``'s feed/rapid regime selection: the move is
-        cutting (feed_speed) when the cutter would come within safe_distance of
-        the remaining stock at the commanded destination, else traverse
-        (rapid_speed). The segment time is the executed length over the regime
-        speed:
-
-            seg_time = min(|delta|.L_mm, cap_mm) / speed
-
-        where cap_mm = speed*dt (the speed clip). Below the cap the time scales
-        linearly with the commanded length (gradient 1/speed w.r.t. delta); at
-        the cap it saturates to dt (zero gradient, the same subgradient pattern
-        as advance_position). is_feed is a hard gate (zero gradient), so grad
-        flows only through the magnitude -- exactly the existing speed-clip
-        behavior. Reads tool_delta/tool_pos/stock[t]; safe under ti.ad.Tape.
-        """
+        """Per-segment motion time (seconds), differentiable in tool_delta and seg_feed_mult."""
         for t in range(t_start, T):
             a = self.tool_pos[t]
             delta = self.tool_delta[t]
@@ -1974,12 +1988,44 @@ class CSGSimulatorDelta:
             rapid_step = self.rapid_speed[None] * self.dt[None]
             feed_step = self.feed_speed[None] * self.dt[None]
             cap_mm = rapid_step + (feed_step - rapid_step) * is_feed
-            speed = self.rapid_speed[None] + (
+            legacy_speed = self.rapid_speed[None] + (
                 self.feed_speed[None] - self.rapid_speed[None]
             ) * is_feed
-            # min(mag, cap)/speed -- length-limited motion time.
-            seg_t = ti.min(mag_mm, cap_mm) / (speed + 1e-12)
-            self.seg_time[t] = seg_t
+            enforced = ti.cast(self.enforce_speed_limits[None], self._precision)
+            eff_legacy_mm = ti.min(mag_mm, cap_mm) * enforced + mag_mm * (1.0 - enforced)
+            legacy_t = eff_legacy_mm / (legacy_speed + 1e-12)
+
+            # Explicit per-segment speeds + optional acceleration-bounded corner blending
+            eps_L = 1e-6
+            eps_v = 1e-3
+            norm_eps = ti.sqrt(dmm.dot(dmm) + eps_L * eps_L)
+            eff_len = norm_eps - eps_L
+            is_r = ti.cast(self.seg_is_rapid[t], self._precision)
+            mult = 1.0 * is_r + self.seg_feed_mult[t] * (1.0 - is_r)
+            seg_spd = ti.max(self.seg_nom_speed[t] * mult, 1e-6)
+            cruise_t = eff_len / seg_spd
+
+            t_prev = ti.max(0, t - 1)
+            has_prev = ti.cast(t > 0, self._precision)
+            d_prev = self.tool_delta[t_prev]
+            dmm_p = ti.Vector([d_prev.x * self.Lx, d_prev.y * self.Ly, d_prev.z * self.Lz])
+            norm_p = ti.sqrt(dmm_p.dot(dmm_p) + eps_L * eps_L)
+            is_rp = ti.cast(self.seg_is_rapid[t_prev], self._precision)
+            mult_p = 1.0 * is_rp + self.seg_feed_mult[t_prev] * (1.0 - is_rp)
+            spd_p = ti.max(self.seg_nom_speed[t_prev] * mult_p, 1e-6)
+
+            v_cur = dmm * (seg_spd / norm_eps)
+            v_prev = dmm_p * (spd_p * has_prev / norm_p)
+            dv = v_cur - v_prev
+            inv_2a = 0.5 / ti.max(self.max_accel_mm_s2[None], 1e-6)
+            junc_entry = (ti.sqrt(dv.dot(dv) + eps_v * eps_v) - eps_v) * inv_2a
+            is_last = ti.cast(t == T - 1, self._precision)
+            junc_exit = (ti.sqrt(v_cur.dot(v_cur) + eps_v * eps_v) - eps_v) * inv_2a * is_last
+            blended_on = ti.cast(self.use_blended_timing[None], self._precision)
+            typed_t = cruise_t + blended_on * (junc_entry + junc_exit)
+
+            per_seg_on = ti.cast(self.use_per_seg_speeds[None], self._precision)
+            self.seg_time[t] = typed_t * per_seg_on + legacy_t * (1.0 - per_seg_on)
 
     @ti.kernel
     def zero_seg_volumes(self, t_start: ti.i32, T: ti.i32):
@@ -2113,6 +2159,20 @@ class CSGSimulatorDelta:
                 ramp = ti.cast(ti.max(0, t - t_start - warm), self._precision) / ti.cast(ti.max(1, span - warm), self._precision)
                 ramp = ti.max(0.0, ti.min(1.0, ramp))
                 ti.atomic_add(self.loss[None], w_al * st * is_air * ramp * inv_n)
+            # Volumetric Material Removal Rate (MRR) barrier + rapid-stock collision barrier.
+            w_m = self.w_mrr[None]
+            mrr_lim = ti.max(self.mrr_limit_mm3_s[None], 1e-6)
+            stock_box_mm3 = self.Lx * self.Ly * self.Lz
+            is_r = ti.cast(self.use_per_seg_speeds[None] * self.seg_is_rapid[t], self._precision)
+            is_cut = 1.0 - is_r
+            vol_eng_mm3 = eng * stock_box_mm3 * is_cut
+            mrr_t = vol_eng_mm3 / (st + 1e-6)
+            mrr_excess = ti.max(0.0, mrr_t / mrr_lim - 1.0)
+            ti.atomic_add(self.loss[None], w_m * mrr_excess * mrr_excess * inv_n)
+            w_rs = self.w_rapid_stock[None]
+            rapid_eng = eng * is_r
+            ti.atomic_add(self.loss[None], w_rs * rapid_eng * rapid_eng)
+
             # Per-step breakage probability; accumulated for the traj-level term.
             eng = self.seg_engage[t]
             mu_F = kc * (eng * v_mm3) / (dt * D + 1e-12)
@@ -2201,7 +2261,36 @@ class CSGSimulatorDelta:
             speed = self.rapid_speed[None] + (
                 self.feed_speed[None] - self.rapid_speed[None]
             ) * is_feed
-            self.seg_time[t] = ti.min(mag_mm, cap_mm) / (speed + 1e-12)
+            enforced = ti.cast(self.enforce_speed_limits[None], self._precision)
+            eff_legacy_mm = ti.min(mag_mm, cap_mm) * enforced + mag_mm * (1.0 - enforced)
+            legacy_t = eff_legacy_mm / (speed + 1e-12)
+            eps_L = 1e-6
+            eps_v = 1e-3
+            norm_eps = ti.sqrt(dmm.dot(dmm) + eps_L * eps_L)
+            eff_len = norm_eps - eps_L
+            is_r = ti.cast(self.seg_is_rapid[t], self._precision)
+            mult = 1.0 * is_r + self.seg_feed_mult[t] * (1.0 - is_r)
+            seg_spd = ti.max(self.seg_nom_speed[t] * mult, 1e-6)
+            cruise_t = eff_len / seg_spd
+            t_prev = ti.max(0, t - 1)
+            has_prev = ti.cast(t > 0, self._precision)
+            d_prev = self.tool_delta[t_prev]
+            dmm_p = ti.Vector([d_prev.x * self.Lx, d_prev.y * self.Ly, d_prev.z * self.Lz])
+            norm_p = ti.sqrt(dmm_p.dot(dmm_p) + eps_L * eps_L)
+            is_rp = ti.cast(self.seg_is_rapid[t_prev], self._precision)
+            mult_p = 1.0 * is_rp + self.seg_feed_mult[t_prev] * (1.0 - is_rp)
+            spd_p = ti.max(self.seg_nom_speed[t_prev] * mult_p, 1e-6)
+            v_cur = dmm * (seg_spd / norm_eps)
+            v_prev = dmm_p * (spd_p * has_prev / norm_p)
+            dv = v_cur - v_prev
+            inv_2a = 0.5 / ti.max(self.max_accel_mm_s2[None], 1e-6)
+            junc_entry = (ti.sqrt(dv.dot(dv) + eps_v * eps_v) - eps_v) * inv_2a
+            is_last = ti.cast(t == T - 1, self._precision)
+            junc_exit = (ti.sqrt(v_cur.dot(v_cur) + eps_v * eps_v) - eps_v) * inv_2a * is_last
+            blended_on = ti.cast(self.use_blended_timing[None], self._precision)
+            typed_t = cruise_t + blended_on * (junc_entry + junc_exit)
+            per_seg_on = ti.cast(self.use_per_seg_speeds[None], self._precision)
+            self.seg_time[t] = typed_t * per_seg_on + legacy_t * (1.0 - per_seg_on)
         # Combine into diag fields.
         total_time = 0.0
         air_time = 0.0
@@ -2215,6 +2304,8 @@ class CSGSimulatorDelta:
         emax = 0.0
         esum = 0.0
         fmax = 0.0
+        mrr_max = 0.0
+        stock_box_mm3 = self.Lx * self.Ly * self.Lz
         kc = self.kc[None]
         f_ref = self.f_ref[None]
         sigma_risk = ti.max(self.sigma_risk[None], 1e-6)
@@ -2244,6 +2335,9 @@ class CSGSimulatorDelta:
                 air_mid += st * is_air
             else:
                 air_late += st * is_air
+            is_r = ti.cast(self.use_per_seg_speeds[None] * self.seg_is_rapid[t], self._precision)
+            if is_r < 0.5:
+                mrr_max = ti.max(mrr_max, (eng * stock_box_mm3) / (st + 1e-9))
             mu_F = kc * (eng * v_mm3) / (dt * D + 1e-12)
             fmax = ti.max(fmax, mu_F)
             emax = ti.max(emax, eng)
@@ -2262,6 +2356,7 @@ class CSGSimulatorDelta:
         self.diag_break_prob_max[None] = pmax
         self.diag_fcut_max[None] = fmax
         self.diag_engage_max[None] = emax
+        self.diag_mrr_max[None] = mrr_max
         # segment-mean engagement:
         self.diag_engage_mean[None] = esum / ti.max(1, T)
         # docs/design.md hard threshold rule.
@@ -2540,7 +2635,9 @@ class CSGSimulatorDelta:
         w_any = (self.w_time[None] > 0.0
                  or self.w_air_time[None] > 0.0
                  or self.w_air_late[None] > 0.0
-                 or self.w_break[None] > 0.0)
+                 or self.w_break[None] > 0.0
+                 or self.w_mrr[None] > 0.0
+                 or self.w_rapid_stock[None] > 0.0)
         if w_any:
             self.zero_seg_volumes(0, num_active_steps - 1)
             self.zero_acc_psum()
@@ -2701,6 +2798,8 @@ class CSGSimulatorDelta:
             self.seg_air.grad[t] = 0.0
             self.seg_swept.grad[t] = 0.0
             self.seg_engage.grad[t] = 0.0
+            self.seg_feed_mult[t] = 1.0
+            self.seg_feed_mult.grad[t] = 0.0
         for t in range(self.max_steps + 1):
             self.tool_pos[t] = ti.Vector([0.0, 0.0, 0.0])
             self.tool_pos.grad[t] = ti.Vector([0.0, 0.0, 0.0])
@@ -2735,6 +2834,7 @@ class CSGSimulatorDelta:
         self.diag_air_time_early[None] = 0.0
         self.diag_air_time_mid[None] = 0.0
         self.diag_air_time_late[None] = 0.0
+        self.diag_mrr_max[None] = 0.0
 
     # ========================================================================
     # Rendering

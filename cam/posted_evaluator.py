@@ -295,6 +295,64 @@ def _analytic_mask(geometry, points):
         # Only concave pocket corners change. The original outer stock and
         # convex island are retained exactly as they are in the sharp source.
         return sharp | unreachable
+    if p.get("primitive") == "box_minus_multi_pocket":
+        box_min, box_max = p["box_min_mm"], p["box_max_mm"]
+        pocket_min, pocket_max = p["pocket_min_mm"], p["pocket_max_mm"]
+        outside = _box_distance(points, box_min, box_max) <= 0
+        pocket = _box_distance(points, pocket_min, pocket_max) <= 0
+        if any(pocket_min[a] < box_min[a] - 1e-9 or pocket_max[a] > box_max[a] + 1e-9 for a in range(3)):
+            raise ValueError("box_minus_multi_pocket: pocket must lie within box bounds")
+        sharp = outside & ~pocket
+        for isl in p.get("islands_mm", ()):
+            if not isinstance(isl, (list, tuple)) or len(isl) != 2:
+                raise ValueError("box_minus_multi_pocket: each island in islands_mm must be [min_mm, max_mm]")
+            ilo, ihi = isl[0], isl[1]
+            if any(ilo[a] < pocket_min[a] - 1e-9 or ihi[a] > pocket_max[a] + 1e-9 for a in range(3)):
+                raise ValueError("box_minus_multi_pocket: island must lie within pocket bounds")
+            sharp |= outside & (_box_distance(points, ilo, ihi) <= 0)
+        try:
+            radius = float(p.get("pocket_unreached_corner_radius_mm", 0.0))
+        except (TypeError, ValueError) as error:
+            raise ValueError("pocket_unreached_corner_radius_mm must be finite and nonnegative") from error
+        if not math.isfinite(radius) or radius < 0:
+            raise ValueError("pocket_unreached_corner_radius_mm must be finite and nonnegative")
+        if radius == 0.0:
+            return sharp
+        if any(pocket_max[axis] - pocket_min[axis] < 2 * radius for axis in (0, 1)):
+            raise ValueError("unreached-corner radius is too large for this pocket")
+        unreachable = np.zeros(sharp.shape, dtype=bool)
+        for x_side in (0, 1):
+            x_walled = (
+                (pocket_min[0] > box_min[0] + 1e-9)
+                if x_side == 0
+                else (pocket_max[0] < box_max[0] - 1e-9)
+            )
+            if not x_walled:
+                continue
+            for y_side in (0, 1):
+                y_walled = (
+                    (pocket_min[1] > box_min[1] + 1e-9)
+                    if y_side == 0
+                    else (pocket_max[1] < box_max[1] - 1e-9)
+                )
+                if not y_walled:
+                    continue
+                cx = pocket_min[0] + radius if x_side == 0 else pocket_max[0] - radius
+                cy = pocket_min[1] + radius if y_side == 0 else pocket_max[1] - radius
+                xlo = pocket_min[0] if x_side == 0 else pocket_max[0] - radius
+                xhi = pocket_min[0] + radius if x_side == 0 else pocket_max[0]
+                ylo = pocket_min[1] if y_side == 0 else pocket_max[1] - radius
+                yhi = pocket_min[1] + radius if y_side == 0 else pocket_max[1]
+                in_corner = (
+                    outside
+                    & (points[0] >= xlo) & (points[0] <= xhi)
+                    & (points[1] >= ylo) & (points[1] <= yhi)
+                    & (points[2] >= pocket_min[2]) & (points[2] <= pocket_max[2])
+                )
+                unreachable |= in_corner & (
+                    (points[0] - cx) ** 2 + (points[1] - cy) ** 2 >= radius ** 2
+                )
+        return sharp | unreachable
     raise ValueError(f"unsupported analytic geometry primitive {p.get('primitive')!r}")
 
 

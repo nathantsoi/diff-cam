@@ -355,6 +355,70 @@ def _geometry_mask(source: C.GeometrySource, points_mm: np.ndarray) -> np.ndarra
         if set(params) - {"primitive", "min_mm", "max_mm"}:
             raise AdapterError("box: only primitive/min_mm/max_mm parameters are supported")
         return _box_mask(points_mm, *bounds)
+    if primitive == "box_minus_multi_pocket":
+        required_mp = {"box_min_mm", "box_max_mm", "pocket_min_mm", "pocket_max_mm"}
+        if not required_mp.issubset(params):
+            raise AdapterError(
+                f"box_minus_multi_pocket: missing parameters {sorted(required_mp - set(params))}"
+            )
+        box_min, box_max = params["box_min_mm"], params["box_max_mm"]
+        pocket_min, pocket_max = params["pocket_min_mm"], params["pocket_max_mm"]
+        outside = _box_mask(points_mm, box_min, box_max)
+        pocket = _box_mask(points_mm, pocket_min, pocket_max)
+        if any(pocket_min[a] < box_min[a] - 1e-9 or pocket_max[a] > box_max[a] + 1e-9 for a in range(3)):
+            raise AdapterError("box_minus_multi_pocket: pocket must be contained in declared stock box")
+        remaining = outside & ~pocket
+        for isl in params.get("islands_mm", ()):
+            if not isinstance(isl, (list, tuple)) or len(isl) != 2:
+                raise AdapterError("box_minus_multi_pocket: each island must be [min_mm, max_mm]")
+            ilo, ihi = isl[0], isl[1]
+            if any(ilo[a] < pocket_min[a] - 1e-9 or ihi[a] > pocket_max[a] + 1e-9 for a in range(3)):
+                raise AdapterError("box_minus_multi_pocket: preserved island must lie within pocket region")
+            remaining |= outside & _box_mask(points_mm, ilo, ihi)
+        try:
+            radius = float(params.get("pocket_unreached_corner_radius_mm", 0.0))
+        except (TypeError, ValueError) as error:
+            raise AdapterError("pocket_unreached_corner_radius_mm must be finite and nonnegative") from error
+        if not math.isfinite(radius) or radius < 0:
+            raise AdapterError("pocket_unreached_corner_radius_mm must be finite and nonnegative")
+        if radius == 0.0:
+            return remaining
+        if any(pocket_max[axis] - pocket_min[axis] < 2 * radius for axis in (0, 1)):
+            raise AdapterError("unreached-corner radius is too large for this pocket")
+        pts = np.asarray(points_mm, dtype=float)
+        unreachable = np.zeros(remaining.shape, dtype=bool)
+        for x_side in (0, 1):
+            x_walled = (
+                (pocket_min[0] > box_min[0] + 1e-9)
+                if x_side == 0
+                else (pocket_max[0] < box_max[0] - 1e-9)
+            )
+            if not x_walled:
+                continue
+            for y_side in (0, 1):
+                y_walled = (
+                    (pocket_min[1] > box_min[1] + 1e-9)
+                    if y_side == 0
+                    else (pocket_max[1] < box_max[1] - 1e-9)
+                )
+                if not y_walled:
+                    continue
+                cx = pocket_min[0] + radius if x_side == 0 else pocket_max[0] - radius
+                cy = pocket_min[1] + radius if y_side == 0 else pocket_max[1] - radius
+                xlo = pocket_min[0] if x_side == 0 else pocket_max[0] - radius
+                xhi = pocket_min[0] + radius if x_side == 0 else pocket_max[0]
+                ylo = pocket_min[1] if y_side == 0 else pocket_max[1] - radius
+                yhi = pocket_min[1] + radius if y_side == 0 else pocket_max[1]
+                in_corner = (
+                    outside
+                    & (pts[..., 0] >= xlo) & (pts[..., 0] <= xhi)
+                    & (pts[..., 1] >= ylo) & (pts[..., 1] <= yhi)
+                    & (pts[..., 2] >= pocket_min[2]) & (pts[..., 2] <= pocket_max[2])
+                )
+                unreachable |= in_corner & (
+                    (pts[..., 0] - cx) ** 2 + (pts[..., 1] - cy) ** 2 >= radius ** 2
+                )
+        return remaining | unreachable
     if primitive != "box_minus_pocket":
         raise AdapterError(f"unsupported analytic primitive {primitive!r}")
     required = {
@@ -502,7 +566,19 @@ def _prepare_camotics_nc(task: C.TaskSpec, nc_bytes: bytes,
         f"G10 L2 P1 {offset_words}\n"
         f"T{task.tool.tool_number} M06\n"
     ).encode("ascii")
-    return prefix + bytes(nc_bytes), motion
+    sim_body = bytes(nc_bytes)
+    if C.Dialect(dialect) == C.Dialect.HAAS:
+        # Preserve raw source_program.nc verbatim; neutralize Haas-proprietary G187
+        # smoothing words for LinuxCNC-based camsim after strict Haas parsing passed.
+        cleaned_lines = []
+        for raw_line in text.splitlines():
+            stripped = raw_line.strip()
+            if stripped.upper().startswith("G187"):
+                cleaned_lines.append(f"(Haas NGC smoothing validated: {stripped})")
+            else:
+                cleaned_lines.append(raw_line)
+        sim_body = ("\n".join(cleaned_lines) + ("\n" if text.endswith("\n") else "")).encode("utf-8")
+    return prefix + sim_body, motion
 
 
 def unsupported_probe(task: C.TaskSpec, motion: Optional[C.MotionPlan] = None) -> Tuple[str, ...]:

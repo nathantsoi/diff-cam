@@ -36,6 +36,7 @@ from benchmarks.contracts import (
     TaskSpec,
     TimingRule,
     arc_geometry,
+    blended_segment_durations,
     sha256_text,
 )
 from .config import MachineConfig
@@ -530,12 +531,17 @@ def parse_motion_plan(
     h_register: Optional[int] = None
     program_ended = False
 
+    blended_mode = task.motion_semantics.timing_rule == TimingRule.BLENDED_ACCEL_BOUNDED
     supported_g = {
         0.0, 1.0, 2.0, 3.0, 17.0, 18.0, 19.0, 20.0, 21.0,
         40.0, 43.0, 49.0, 53.0, 54.0, 61.0, 61.1, 80.0, 90.0, 91.0, 94.0,
     }
+    if blended_mode:
+        supported_g.add(64.0)
+        if dialect == Dialect.HAAS:
+            supported_g.add(187.0)
     supported_m = {0, 1, 2, 3, 4, 5, 6, 8, 9, 30}
-    allowed_words = set("GMXYZIJKRFPSTHNOL")
+    allowed_words = set("GMXYZIJKRFPSTHNOL") | ({"E"} if blended_mode and dialect == Dialect.HAAS else set())
 
     for line, raw in enumerate(text.splitlines(), start=1):
         try:
@@ -572,10 +578,29 @@ def parse_motion_plan(
                         "use task.work_to_machine or an explicit absolute G53 move",
                         True,
                     )
-                if code in (64.0, 93.0, 95.0):
+                if code in (93.0, 95.0) or (code == 64.0 and not blended_mode):
                     raise _nc_error(line, f"G{code:g} changes timing/blending semantics", True)
                 if code not in supported_g:
                     raise _nc_error(line, f"unsupported G{code:g}", True)
+            if "E" in block and 187.0 not in gcodes:
+                raise _nc_error(line, "E word is only accepted on a Haas NGC G187 smoothing block", True)
+            if 187.0 in gcodes:
+                if any(axis in block for axis in ("X", "Y", "Z", "I", "J", "K", "R")):
+                    raise _nc_error(line, "G187 must appear on a standalone setup block without motion")
+                if "P" in block:
+                    p_mode = _integer_word(block, "P", line, minimum=1)
+                    if p_mode > 3:
+                        raise _nc_error(line, "Haas NGC G187 P mode must be 1, 2, or 3")
+                    block.pop("P")
+                if "E" in block:
+                    if block["E"] <= 0:
+                        raise _nc_error(line, "Haas NGC G187 E tolerance must be positive")
+                    block.pop("E")
+            if 64.0 in gcodes and not any(m in gcodes for m in (2.0, 3.0)):
+                if "P" in block:
+                    if block["P"] < 0:
+                        raise _nc_error(line, "G64 P blend tolerance must be nonnegative")
+                    block.pop("P")
             if 53.0 in gcodes and 54.0 in gcodes:
                 raise _nc_error(line, "G53 and G54 cannot share a block")
             if any(code not in supported_m for code in mcodes):
@@ -759,6 +784,25 @@ def parse_motion_plan(
             if isinstance(error, GCodeError):
                 raise
             raise _nc_error(line, str(error)) from error
+
+    if blended_mode and segments:
+        blended_durs = blended_segment_durations(
+            segments, task.limits.rapid_mm_s, task.limits.max_accel_mm_s2
+        )
+        segments = [
+            Segment(
+                id=s.id,
+                kind=s.kind,
+                start_mm=s.start_mm,
+                end_mm=s.end_mm,
+                duration_s=dur,
+                feed_mm_s=s.feed_mm_s,
+                arc=s.arc,
+                tag=s.tag,
+                source_line=s.source_line,
+            )
+            for s, dur in zip(segments, blended_durs)
+        ]
 
     plan = MotionPlan(
         frame=Frame.MACHINE,

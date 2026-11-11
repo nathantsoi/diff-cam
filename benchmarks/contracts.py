@@ -83,6 +83,9 @@ class TimingRule(str, Enum):
     # Segments are sampled at a fixed controller period ``dt_s``; duration_s is
     # stated per segment and must be a positive multiple of dt_s.
     FIXED_DT = "fixed_dt"
+    # Acceleration-bounded corner velocity blending (RS274 G64 / Haas NGC G187):
+    # cruise duration + smooth junction velocity-change transition time.
+    BLENDED_ACCEL_BOUNDED = "blended_accel_bounded"
 
 
 class CutterKind(str, Enum):
@@ -623,6 +626,59 @@ def arc_geometry(start, end, arc: ArcData, segment_id: str = "?") -> Dict[str, f
     return {"radius_mm": r, "sweep_rad": sweep, "length_mm": math.hypot(r * sweep, dn)}
 
 
+BLENDED_EPS_LEN_MM = 1e-6
+BLENDED_EPS_VEL_MM_S = 1e-3
+
+
+def blended_segment_durations(
+    segments: Sequence["Segment"],
+    rapid_mm_s: float,
+    max_accel_mm_s2: float,
+    *,
+    eps_len_mm: float = BLENDED_EPS_LEN_MM,
+    eps_vel_mm_s: float = BLENDED_EPS_VEL_MM_S,
+) -> Tuple[float, ...]:
+    """Smooth, closed-form acceleration-bounded segment durations (seconds).
+
+    Matches CSGSimulatorDelta.compute_seg_time when use_per_seg_speeds=1 and
+    use_blended_timing=1:
+      cruise_t   = (sqrt(||d_t||^2 + eps_L^2) - eps_L) / speed_t
+      junction_t = (sqrt(||v_t - v_{t-1}||^2 + eps_v^2) - eps_v) / (2 * a_max)
+                   + [t == T-1] * (sqrt(||v_{T-1}||^2 + eps_v^2) - eps_v) / (2 * a_max)
+    where v_t = speed_t * d_t / sqrt(||d_t||^2 + eps_L^2) for linear segments
+    (and tangent-endpoint velocity for arcs).
+    """
+    n = len(segments)
+    if n == 0:
+        return ()
+    inv_2a = 0.5 / float(max_accel_mm_s2)
+    v_prev = (0.0, 0.0, 0.0)
+    out: List[float] = []
+    for idx, seg in enumerate(segments):
+        speed = float(rapid_mm_s) if seg.kind == SegmentKind.RAPID else float(seg.feed_mm_s)  # type: ignore[arg-type]
+        dx = seg.end_mm[0] - seg.start_mm[0]
+        dy = seg.end_mm[1] - seg.start_mm[1]
+        dz = seg.end_mm[2] - seg.start_mm[2]
+        if seg.arc is None:
+            norm_eps = math.sqrt(dx * dx + dy * dy + dz * dz + eps_len_mm * eps_len_mm)
+            eff_len = norm_eps - eps_len_mm
+            scale = speed / norm_eps
+            vx, vy, vz = dx * scale, dy * scale, dz * scale
+        else:
+            eff_len = seg.path_length_mm
+            chord_eps = math.sqrt(dx * dx + dy * dy + dz * dz + eps_len_mm * eps_len_mm)
+            scale = speed / chord_eps
+            vx, vy, vz = dx * scale, dy * scale, dz * scale
+        cruise = eff_len / speed
+        dvx, dvy, dvz = vx - v_prev[0], vy - v_prev[1], vz - v_prev[2]
+        junction = (math.sqrt(dvx * dvx + dvy * dvy + dvz * dvz + eps_vel_mm_s * eps_vel_mm_s) - eps_vel_mm_s) * inv_2a
+        if idx == n - 1:
+            junction += (math.sqrt(vx * vx + vy * vy + vz * vz + eps_vel_mm_s * eps_vel_mm_s) - eps_vel_mm_s) * inv_2a
+        out.append(cruise + junction)
+        v_prev = (vx, vy, vz)
+    return tuple(out)
+
+
 def _check_duration(s: "Segment", expect: float, what: str) -> None:
     if abs(expect - s.duration_s) > 1e-6 * max(1.0, expect):
         raise ContractError(f"segment[{s.id}].duration_s: {s.duration_s} != {what} = {expect}")
@@ -695,6 +751,12 @@ class MotionPlan:
                                     f"{task.limits.max_feed_mm_s}")
             if self.timing_rule == TimingRule.EXACT_STOP_CONSTANT_SPEED and s.kind == SegmentKind.RAPID:
                 _check_duration(s, s.path_length_mm / task.limits.rapid_mm_s, "length/limits.rapid_mm_s")
+        if self.timing_rule == TimingRule.BLENDED_ACCEL_BOUNDED:
+            expected = blended_segment_durations(
+                self.segments, task.limits.rapid_mm_s, task.limits.max_accel_mm_s2
+            )
+            for s, exp_dur in zip(self.segments, expected):
+                _check_duration(s, exp_dur, "blended_accel_bounded_duration")
 
     def to_dict(self) -> Dict[str, Any]:
         return _to_jsonable(self)
@@ -735,6 +797,7 @@ METRIC_UNITS: Dict[str, str] = {
     "collision_sample_count": "count",        # depends on sampling; never compare across settings
     "time_integrated_overlap_mm3_s": "mm^3*s",
     "cycle_time_s": "s", "air_fraction": "1", "air_cut_time_s": "s", "rapid_time_s": "s",
+    "peak_mrr_mm3_s": "mm^3/s", "mean_mrr_mm3_s": "mm^3/s",
     "spatial_uncertainty_mm3": "mm^3", "temporal_uncertainty_mm3": "mm^3",
     "force_proxy": "proxy",                   # uncalibrated; never ranks or qualifies a program
 }

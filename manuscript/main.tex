@@ -1,0 +1,342 @@
+\documentclass[conference]{IEEEtran}
+\usepackage{times}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage[numbers,sort&compress]{natbib}
+\usepackage{url}
+\usepackage[bookmarks=true,hidelinks]{hyperref}
+
+\hypersetup{
+  pdftitle={Differentiable 3-Axis CNC Machining: Co-Optimizing Toolpaths and Feedrates via Smooth-to-Hard Surrogate Gradients and Residual Reinforcement Learning},
+  pdfauthor={Anonymous Authors},
+  pdfsubject={Robotics; Computer-Aided Manufacturing; Differentiable Simulation; Reinforcement Learning},
+  pdfkeywords={CNC Machining, Differentiable Simulation, Trajectory Optimization, Reinforcement Learning, Toolpath Planning}
+}
+
+\begin{document}
+
+\title{Differentiable 3-Axis CNC Machining: Co-Optimizing Toolpaths and Feedrates via Smooth-to-Hard Surrogate Gradients and Residual Reinforcement Learning}
+
+\author{Author Names Omitted for Anonymous Review}
+
+\maketitle
+
+\begin{abstract}
+Generating physically optimal toolpaths for 3-axis Computer Numerical Control (CNC) milling requires reasoning over long-horizon trajectories in which every cutting pass permanently mutates the in-process workpiece (IPW) geometry and governs subsequent cutter-workpiece engagement (CWE) loads. Classical computer-aided manufacturing (CAM) relies on conservative geometric offset heuristics and constant feedrates because Boolean solid-modeling kernels are discontinuous—yielding zero gradients during air-cutting and undefined derivatives at stock boundaries—while naive geometry-only optimization under exact-stop kinematics fails to exploit real CNC corner blending or respect volumetric chip-load limits. We present \textbf{DiffCAM}, an MIT-licensed, GPU-accelerated dual-mode differentiable 3-axis milling framework that couples exact Boolean swept-cylinder signed distance field (SDF) carving with a log-sum-exp smooth relaxation, Straight-Through Estimator (STE) stiffness continuation, acceleration-bounded junction corner blending aligned with NIST RS274 (\texttt{G64 P0.05}) and Haas Next-Gen Control (\texttt{G187 P2 E0.05}), and an analytical Peak Material Removal Rate (MRR) barrier. Using a drift-free, wall-clearance-weighted \texttt{PositionSpline} co-parameterization of 2.5D XY waypoints and per-segment feedrates, we conduct a controlled study comparing first-order differentiable trajectory and policy optimization (\texttt{STE-Continuation-Adam}, \texttt{DiffPolicy-SHAC}) against zero-order reinforcement learning and black-box search (\texttt{Hard-PPO}, \texttt{Hard-CEM}, \texttt{Hard-CMA-ES}) across 16 canonical Facing, Pocket, Adaptive, and Contour tasks under a strict 64-evaluation budget. First-order \texttt{STE-Continuation-Adam} reduces mean cycle time by $\mathbf{58.5 \pm 6.8\%}$ at $\mathbf{100\%}$ hard geometric and safety feasibility, while first-order \texttt{DiffPolicy-SHAC} achieves nearly $2\times$ the cycle-time reduction of zero-order \texttt{Hard-PPO} ($\mathbf{42.0\%}$ vs.\ $\mathbf{21.5\%}$) and transfers zero-shot to unseen test parts with a $\mathbf{40.4\%}$ speedup in $<\!1.5\text{ ms}$. Ablations show that removing our volumetric MRR barrier induces $+128.3\%$ cutter overload, and independent verification on a $0.125\text{ mm}$ posted G-code evaluator and containerized \texttt{CAMotics v1.2.0} certifies $8/8$ watertight STL solids with $0.00\text{ mm}^3$ target gouge alongside shop-ready Haas Mini Mill NGC programs.
+\end{abstract}
+
+\IEEEpeerreviewmaketitle
+
+\section{Introduction}
+\label{sec:intro}
+
+Subtractive CNC machining remains the backbone of precision mechanical manufacturing, yet toolpath generation is still dominated by purely geometric rules devised decades ago~\cite{held1991pocket,altintas2012manufacturing}. Unlike collision-free robot motion planning in static environments, 3-axis milling is a history-dependent, irreversible manipulation process over a continuous volumetric field: every millimeter traveled by the rotating endmill permanently carves the in-process workpiece (IPW), determining the radial and axial cutter-workpiece engagement (CWE) encountered by future passes~\cite{rauch2009trochoidal,suh2008cnc}. Consequently, standard industrial CAM packages decouple toolpath topology (e.g., zig-zag facing, offset pocketing, trochoidal clearing, exterior contouring) from conservative, worst-case constant feedrates chosen to survive full-width slotting corners—leaving substantial machine productivity unrealized during partial-engagement cuts and air-repositioning transitions.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/fig1_hero_camotics.pdf}
+  \vspace{-1.6em}
+  \caption{\textbf{DiffCAM joint 2.5D toolpath and feedrate co-optimization certified in CAMotics v1.2.0.} \emph{Top row:} Representative held-out test parts across four canonical MIT clean-room CAM families showing stock billets, retained islands/bosses, dashed gray nominal CAM seeds, and optimized \texttt{STE-Continuation-Adam} trajectories colored by per-segment feedrate $f_t \in [4, 20]\text{ mm/s}$ under Haas Next-Gen Control corner blending (\texttt{G64} + \texttt{G187 P2 E0.05}). \emph{Bottom row:} 4$\times$-MSAA isometric renderings of the closed, watertight binary STL meshes reconstructed directly by containerized \texttt{CAMotics v1.2.0} ($0.25\text{ mm}$ grid) from posted Haas NGC G-code, achieving $54.7\%$--$68.7\%$ cycle-time reductions with $0.00\text{ mm}^3$ target gouge.}
+  \label{fig:hero}
+  \vspace{-0.8em}
+\end{figure*}
+
+Bridging modern gradient-based trajectory optimization and reinforcement learning (RL) with CNC milling faces three coupled obstacles:
+\begin{enumerate}
+  \item \textbf{Discontinuous Boolean Material Removal:} In solid modeling and dexel/voxel kernels~\cite{vanhook1986dexel,coffland2021camotics}, subtracting a swept tool volume $\psi_{\text{tool}}$ from stock SDF $\phi_t$ via $\phi_{t+1}(\mathbf{x}) = \max(\phi_t(\mathbf{x}), -\psi_{\text{tool}}(\mathbf{x}))$ yields identically zero spatial gradients when a segment cuts air and non-differentiable kinks at cutter engagement boundaries~\cite{shapiro2007rfunctions}.
+  \item \textbf{Surrogate Bias and Cumulative Drift:} Naive smooth relaxations of $\max(\cdot,\cdot)$ introduce volumetric occupancy inflation at low stiffness $k$, causing optimizers to hallucinate phantom material removal that fails exact Boolean evaluation~\cite{suh2022differentiable,metz2021gradients}. Simultaneously, parameterizing multi-pass toolpaths via relative segment deltas $\Delta \mathbf{p}_t$ induces $O(T)$ cumulative position variance across $T \sim 50\text{--}150$ segments, slamming interior passes into blueprint walls.
+  \item \textbf{Controller-Blind Kinematics:} Optimizing path length under constant feedrates and exact-stop (\texttt{G61}) assumptions stalls when part tolerances fix the required pass count, whereas naively maximizing feedrates without volumetric engagement feedback causes catastrophic cutter overload ($\text{MRR}_t \gg \text{MRR}_{\max}$) or mismatches physical CNC corner-rounding deceleration~\cite{erkorkmaz2001highspeed,kramer2000rs274ngc}.
+\end{enumerate}
+
+These challenges motivate a central question in differentiable physical AI: \emph{when initialized from valid topological CAM seeds under a tight simulation budget, how do first-order analytical gradients through a smoothed-to-hard cutting simulator compare against zero-order RL and evolutionary strategies operating directly on exact Boolean cutting?}
+
+To answer this question rigorously, we introduce \textbf{DiffCAM} (Fig.~\ref{fig:hero}), an end-to-end differentiable 3-axis milling simulator, trajectory optimizer, and residual RL benchmark built in Taichi~\cite{hu2020difftaichi}. Our primary contributions are fourfold:
+\begin{itemize}
+  \item \textbf{Dual-Mode Swept-CSG Simulation with STE Continuation:} We formulate a GPU-accelerated 3D SDF simulator supporting both exact Boolean material removal and a log-sum-exp smooth surrogate, paired with a Straight-Through Estimator (STE)~\cite{bengio2013estimating} stiffness schedule ($k: 25 \to 90$) and exact hard-feasibility checkpointing that eliminates soft-to-hard occupancy drift.
+  \item \textbf{Blended CNC Kinematics and Volumetric MRR Barrier:} We co-optimize continuous 2.5D XY toolpaths and per-segment feedrates under a differentiable acceleration-bounded junction blending model aligned with \texttt{RS274} \texttt{G64 P0.05} and Haas Next-Gen Control \texttt{G187 P2 E0.05}, constrained by differentiable pre-cut chip-volume Peak MRR, analytical wall-gouge, holder-collision, and rapid-clearance barriers.
+  \item \textbf{Drift-Free Co-Parameterization and Controlled RL Study:} We introduce an analytical wall-clearance-weighted \texttt{PositionSpline} that eliminates $O(T)$ cumulative delta drift while pinning plunge/retract and finishing boundaries, and compare first-order \texttt{STE-Continuation-Adam} and \texttt{DiffPolicy-SHAC}~\cite{xu2022accelerated} against zero-order \texttt{Hard-PPO}~\cite{schulman2017proximal}, \texttt{Hard-CEM}~\cite{rubinstein2004cem}, and \texttt{Hard-CMA-ES}~\cite{hansen2001cmaes} across a 16-task MIT-licensed benchmark spanning Facing, Pocket, Adaptive, and Contour operations.
+  \item \textbf{Multi-Fidelity G-Code, CAMotics STL, and Haas NGC Certification:} Every held-out test solution is post-processed into standard \texttt{RS274} and Haas Mini Mill NGC G-code (\texttt{O01001}--\texttt{O01008}) and verified by both a $0.125\text{ mm}$-step swept-SDF evaluator and containerized \texttt{CAMotics v1.2.0}~\cite{coffland2021camotics} ($0.25\text{ mm}$ octree), achieving $8/8$ watertight STL meshes, $0.00\text{ mm}^3$ target gouge, and a $59.9\%$ aggregate test cycle-time reduction.
+\end{itemize}
+
+\section{Related Work}
+\label{sec:related}
+
+\textbf{Geometric CAM and Engagement-Aware Toolpaths.}
+Classical pocket and contour milling rely on 2D Voronoi medial-axis offsets~\cite{held1991pocket} and direction-parallel rastering, which suffer from sharp radial engagement spikes in concave corners. Trochoidal and adaptive clearing strategies~\cite{rauch2009trochoidal,altintas2012manufacturing} bound radial immersion via circular or cycloidal loops, while solid verification engines use Z-buffer dexels~\cite{vanhook1986dexel}, R-functions~\cite{shapiro2007rfunctions}, or octree marching-cubes isosurfaces as in \texttt{CAMotics}~\cite{coffland2021camotics}. However, these forward geometric kernels are non-differentiable, preventing direct gradient-based co-adaptation of waypoint geometry and feed schedules to part-specific stock state.
+
+\textbf{CNC Corner Blending and Feedrate Scheduling.}
+Physical CNC interpolators avoid coming to a complete stop at every linear \texttt{G1} block junction (\texttt{G61}) by blending adjacent velocity vectors within a user-specified path-deviation tolerance—standardized as \texttt{G64 P}$e$ in NIST \texttt{RS274NGC}~\cite{kramer2000rs274ngc} and \texttt{G187 P2 E}$e$ on Haas Next-Gen Control~\cite{suh2008cnc,erkorkmaz2001highspeed}. Classical feedrate scheduling optimizes speed along a \emph{frozen} reference path under axis acceleration or cutting-force bounds~\cite{altintas2012manufacturing,erkorkmaz2001highspeed}. Conversely, optimizing path geometry under frozen feeds yields negligible speedup when feature walls lock pass topology. DiffCAM unifies both regimes by backpropagating simultaneously through blended junction kinematics, swept chip-volume engagement, and waypoint positions.
+
+\textbf{Differentiable Physics vs.\ Zero-Order RL.}
+Differentiable simulators such as \texttt{DiffTaichi}~\cite{hu2020difftaichi} and \texttt{Brax}~\cite{freeman2021brax} enable low-variance first-order trajectory optimization and short-horizon analytic actor-critic training (\texttt{SHAC})~\cite{xu2022accelerated}. Yet Suh et al.~\cite{suh2022differentiable} and Metz et al.~\cite{metz2021gradients} showed that stiff contact discontinuities can induce high gradient variance or surrogate bias, allowing randomized zero-order estimators such as \texttt{PPO}~\cite{schulman2017proximal,schulman2016gae}, \texttt{CEM}~\cite{rubinstein2004cem}, and \texttt{CMA-ES}~\cite{hansen2001cmaes} to remain competitive. By combining log-sum-exp CSG smoothing with Straight-Through Estimator (STE) evaluation~\cite{bengio2013estimating} and stiffness continuation, DiffCAM preserves high directional gradient alignment ($\cos\theta \ge 0.98$) while guaranteeing zero surrogate gap at deployment.
+
+\section{Differentiable 3-Axis Milling Formulation}
+\label{sec:formulation}
+
+\subsection{Dual-Mode Swept-Cylinder SDF Material Removal}
+We represent the 3D stock billet on a uniform Eulerian grid $\Omega \subset \mathbb{R}^3$ of voxel pitch $\Delta x$ with signed distance values $\phi_t : \Omega \to \mathbb{R}$ after segment $t \in \{0,\dots,T\}$, following the convention $\phi_t(\mathbf{x}) < 0$ inside solid material and $\phi_t(\mathbf{x}) > 0$ in empty space. Given a flat-end cylindrical cutter of radius $R$, flute length $L_{\text{flute}}$, holder clearance height $L_{\text{clear}}$, and holder shank radius $R_{\text{holder}} > R$ moving linearly from $\mathbf{p}_{t-1} \in \mathbb{R}^3$ to $\mathbf{p}_t \in \mathbb{R}^3$, let $\tau^\star(\mathbf{x}) = \operatorname{clip}\!\big(\frac{(\mathbf{x} - \mathbf{p}_{t-1})\cdot \Delta\mathbf{p}_t}{\|\Delta\mathbf{p}_t\|_2^2 + \varepsilon}, 0, 1\big)$ denote the closest-point parameter along $\Delta\mathbf{p}_t = \mathbf{p}_t - \mathbf{p}_{t-1}$, with interpolated tool-tip reference $\mathbf{c}_t(\mathbf{x}) = \mathbf{p}_{t-1} + \tau^\star(\mathbf{x})\Delta\mathbf{p}_t$. The local swept cutting-flute SDF is
+\begin{equation}
+  \begin{aligned}
+    \psi_{\text{tool}}(\mathbf{x}; \mathbf{p}_{t-1}, \mathbf{p}_t) =\;& \max\Big(
+      \|\mathbf{x}^{xy} - \mathbf{c}_t^{xy}(\mathbf{x})\|_2 - R, \\
+      &c_t^z(\mathbf{x}) - x^z,\; x^z - \big(c_t^z(\mathbf{x}) + L_{\text{flute}}\big)\Big).
+  \end{aligned}
+  \label{eq:swept_tool}
+\end{equation}
+
+In \textbf{exact hard Boolean mode}, material subtraction updates the IPW via the exact CSG difference:
+\begin{equation}
+  \phi_t^{\text{hard}}(\mathbf{x}) = \max\!\big(\phi_{t-1}^{\text{hard}}(\mathbf{x}),\; -\psi_{\text{tool}}(\mathbf{x}; \mathbf{p}_{t-1}, \mathbf{p}_t)\big).
+  \label{eq:hard_csg}
+\end{equation}
+Because $\max(a,b)$ has zero derivative with respect to inactive arguments and a discontinuous subgradient along $a = b$, we pair Eq.~\eqref{eq:hard_csg} with a numerically stabilized \textbf{smooth log-sum-exp relaxation} controlled by inverse-temperature stiffness $k > 0$:
+\begin{equation}
+  \begin{aligned}
+    \phi_t^{(k)}(\mathbf{x}) &= \max_k\!\big(\phi_{t-1}^{(k)}(\mathbf{x}), -\psi_{\text{tool}}(\mathbf{x})\big) \\
+    &= m + \frac{1}{k}\log\!\Big(e^{k(\phi_{t-1}^{(k)}(\mathbf{x}) - m)} + e^{k(-\psi_{\text{tool}}(\mathbf{x}) - m)}\Big),
+  \end{aligned}
+  \label{eq:soft_csg}
+\end{equation}
+where $m = \max(\phi_{t-1}^{(k)}(\mathbf{x}), -\psi_{\text{tool}}(\mathbf{x}))$. Smooth voxel occupancy is mapped via the logistic sigmoid $\sigma_k(\phi) = (1 + e^{k\phi})^{-1} \in (0,1)$, which converges pointwise to the hard indicator $\mathbb{I}[\phi < 0]$ as $k \to \infty$ while providing dense, analytically differentiable reverse-mode sensitivities $\partial \mathcal{L}_k / \partial \mathbf{p}_t$ across the $\mathcal{O}(1/k)$ boundary layer.
+
+\subsection{Straight-Through Estimator and Stiffness Continuation}
+Optimizing $\mathcal{L}_k$ at a fixed low stiffness (e.g., $k \le 20$) suffers from severe \emph{surrogate occupancy drift}: the $\frac{\log 2}{k}$ additive shift in Eq.~\eqref{eq:soft_csg} accumulates over overlapping passes, inflating soft stock erosion relative to $\phi_T^{\text{hard}}$. Conversely, initializing directly at $k \ge 100$ concentrates gradients onto a razor-thin shell. We resolve this bias-variance trade-off via a \textbf{Straight-Through Estimator (STE) with linear stiffness continuation}. At optimization step $n \in \{0,\dots,N-1\}$, we schedule $k(n) = k_{\min} + \frac{n}{N-1}(k_{\max} - k_{\min})$ ($25 \to 90$) and define the forward-hard / backward-smooth objective:
+\begin{equation}
+  \mathcal{L}_{\text{STE}}(\boldsymbol{\theta}; k(n)) = \mathcal{L}_{\text{hard}}(\boldsymbol{\theta}) + \Big(\mathcal{L}_{k(n)}(\boldsymbol{\theta}) - \operatorname{sg}\!\big[\mathcal{L}_{k(n)}(\boldsymbol{\theta})\big]\Big),
+  \label{eq:ste}
+\end{equation}
+where $\operatorname{sg}[\cdot]$ is the stop-gradient operator. Every candidate $\boldsymbol{\theta}_n$ is scored and checkpointed strictly on exact Boolean $\mathcal{L}_{\text{hard}}(\boldsymbol{\theta}_n)$ and hard geometric/safety feasibility, while reverse-mode Taichi kernels supply $\nabla_{\boldsymbol{\theta}} \mathcal{L}_{k(n)}(\boldsymbol{\theta}_n)$ at the cost of one additional hard forward pass ($<8\text{ ms}$ on GPU).
+
+\subsection{Blended Acceleration-Bounded CNC Kinematics}
+To eliminate the mismatch between idealized constant-speed models and modern CNC lookahead controllers, we formulate a differentiable acceleration-bounded corner-blending timing law (\texttt{BLENDED\_ACCEL\_BOUNDED}) aligned with \texttt{RS274} \texttt{G64 P0.05} and Haas NGC \texttt{G187 P2 E0.05}. Let segment $t$ have length $\ell_t = \|\mathbf{p}_t - \mathbf{p}_{t-1}\|_2$, unit tangent $\hat{\mathbf{d}}_t = (\mathbf{p}_t - \mathbf{p}_{t-1}) / (\ell_t + \varepsilon)$, and commanded speed $v_t = f_t$ for cutting moves (\texttt{G1}) or $v_t = v_{\text{rapid}}$ for non-cutting rapids (\texttt{G0}). At interior junction $t$ between consecutive cutting moves, the turning angle $\alpha_t$ satisfies $\cos\alpha_t = \hat{\mathbf{d}}_t \cdot \hat{\mathbf{d}}_{t+1}$, yielding the smooth half-angle sine $s_t = \sqrt{\tfrac{1}{2}(1 - \cos\alpha_t) + \varepsilon}$ and blended junction speed
+\begin{equation}
+  v_{\text{junc},t} = \begin{cases}
+    \min(v_t, v_{t+1})(1 - \kappa_c s_t), & \text{\texttt{G1}--\texttt{G1} junction}, \\
+    0, & \text{otherwise},
+  \end{cases}
+  \label{eq:junc_speed}
+\end{equation}
+with blending factor $\kappa_c = 0.85$ calibrated to a $0.05\text{ mm}$ corner-rounding tolerance under machine acceleration limit $a_{\max}$. With entry speed $v_{\text{in},t} = \min(v_t, v_{\text{junc},t-1})$ and exit speed $v_{\text{out},t} = \min(v_t, v_{\text{junc},t})$ bounded by reachability over $\ell_t$, the segment duration and total cycle time are
+\begin{equation}
+  \begin{aligned}
+    \tau_t(\mathbf{p}, \mathbf{f}) &= \frac{\ell_t}{v_t} + \frac{(v_t - v_{\text{in},t})^2 + (v_t - v_{\text{out},t})^2}{2\,a_{\max}\,v_t}, \\
+    T_{\text{cycle}} &= \sum_{t=1}^T \tau_t(\mathbf{p}, \mathbf{f}).
+  \end{aligned}
+  \label{eq:cycle_time}
+\end{equation}
+Crucially, $\tau_t$ is jointly differentiable with respect to both waypoint positions $\mathbf{p}$ (via $\ell_t$ and junction deflection $\cos\alpha_t$) and per-segment feedrates $f_t$.
+
+\subsection{Volumetric Peak MRR and Machining Safety Barriers}
+Increasing feedrate $f_t$ reduces $\tau_t$ in Eq.~\eqref{eq:cycle_time}, but unchecked acceleration in full-width slotting or corner plunges exceeds cutter flute evacuation and spindle torque limits~\cite{altintas2012manufacturing}. At each cutting step $t$, our simulator integrates the \emph{pre-cut} swept chip volume directly from the evolving IPW field $\phi_{t-1}$:
+\begin{equation}
+  \begin{aligned}
+    \Delta V_t &= \Delta x^3 \sum_{\mathbf{x} \in \Omega} \sigma_k\!\big(\!-\phi_{t-1}(\mathbf{x})\big)\,\sigma_k\!\big(\!-\psi_{\text{tool}}(\mathbf{x}; \mathbf{p}_{t-1}, \mathbf{p}_t)\big), \\
+    \text{MRR}_t &= \frac{\Delta V_t}{\tau_t}.
+  \end{aligned}
+  \label{eq:mrr}
+\end{equation}
+We enforce a rated volumetric removal limit $\text{MRR}_{\max}$ via a horizon-normalized quadratic overload barrier $\mathcal{B}_{\text{MRR}} = w_{\text{MRR}} \sum_{t=1}^T \max\!\big(0, \frac{\text{MRR}_t}{\text{MRR}_{\max}} - 1\big)^2$. Under this coupling, air-cutting and light radial-skimming passes ($\Delta V_t \approx 0$) receive pure cycle-time gradients that push $f_t \to f_{\max}$, whereas heavy roughing passes automatically throttle $f_t$ or shift waypoints laterally to shave $\Delta V_t$.
+
+Given target blueprint SDF $\phi_{\text{target}}(\mathbf{x})$, final geometric accuracy combines overcut gouge $V_{\text{gouge}} = \Delta x^3 \sum_{\mathbf{x}} \mathbb{I}[\phi_{\text{target}}(\mathbf{x}) < 0]\,\sigma_k(\phi_T(\mathbf{x}))$ and uncut residual $V_{\text{res}} = \Delta x^3 \sum_{\mathbf{x}} \mathbb{I}[\phi_{\text{target}}(\mathbf{x}) > 0]\,\sigma_k(-\phi_T(\mathbf{x}))$, augmented by three analytical machine-protection barriers: (1) an exact continuous 2D point-to-segment wall-clearance barrier $\mathcal{B}_{\text{wall}}$ preventing sub-voxel finishing-wall nicks, (2) a cylindrical tool-holder collision barrier $\mathcal{B}_{\text{holder}}$ over $z \in [c_t^z + L_{\text{clear}}, c_t^z + L_{\text{clear}} + L_{\text{holder}}]$ of radius $R_{\text{holder}}$ against $\phi_{t-1}$, and (3) a \texttt{G0} rapid-stock intersection barrier $\mathcal{B}_{\text{rapid}}$ guaranteeing zero rapid contact with unmachined stock. The composite loss is
+\begin{equation}
+  \begin{aligned}
+    \mathcal{L} =\;& w_T \frac{T_{\text{cycle}}}{T_{\text{nom}}} + w_g \bar{V}_{\text{gouge}}^2 + w_r \bar{V}_{\text{res}}^2 \\
+    &+ \mathcal{B}_{\text{MRR}} + \mathcal{B}_{\text{wall}} + \mathcal{B}_{\text{holder}} + \mathcal{B}_{\text{rapid}},
+  \end{aligned}
+  \label{eq:total_loss}
+\end{equation}
+with candidate hard feasibility requiring simultaneously zero holder collision, zero rapid stock contact, and target gouge/residual below strict volumetric tolerances.
+
+\section{Trajectory and Policy Co-Optimization}
+\label{sec:methods}
+
+\subsection{Drift-Free Waypoint-Position and Feed Co-Parameterization}
+A critical failure mode in long-horizon machining optimization is \emph{cumulative delta drift}: if an optimizer perturbs segment displacements $\Delta\mathbf{p}_t = \Delta\bar{\mathbf{p}}_t + \delta\mathbf{p}_t$, waypoint $\mathbf{p}_t = \mathbf{p}_0 + \sum_{j=1}^t \Delta\mathbf{p}_j$ accumulates $O(T)$ random-walk variance across $T \in [35, 130]$ segments, causing downstream finishing passes or vertical retracts to collide with pocket walls even under tiny step sizes.
+
+We eliminate cumulative drift via a bounded \textbf{Waypoint-Position and Log-Feed Co-Parameterization} (\texttt{JointPathFeedSpline}). Given nominal CAM waypoints $\{\bar{\mathbf{p}}_i\}_{i=0}^T$ and nominal cutting feeds $\{\bar{f}_t\}_{t=1}^T$, we hold axial heights $\bar{p}_i^z$ fixed to preserve constant-layer floor flatness and safe \texttt{G0} clearance planes, and parameterize horizontal waypoints and segment feeds as
+\begin{equation}
+  \begin{aligned}
+    \mathbf{p}_i^{xy}(\boldsymbol{\theta}) &= \bar{\mathbf{p}}_i^{xy} + r_{xy}\,w_i\tanh\!\big((\mathbf{B}\boldsymbol{\theta}_{\text{pos}})_i\big), \\
+    f_t(\boldsymbol{\theta}) &= \bar{f}_t \exp\!\big(\rho_f \tanh(\theta_{\text{feed},t})\big),
+  \end{aligned}
+  \label{eq:joint_spline}
+\end{equation}
+where $\mathbf{B} \in \mathbb{R}^{(T+1)\times K_p}$ is a clamped cubic B-spline basis ($K_p \le 40$), $r_{xy} = 1.8\text{ mm}$ bounds maximum lateral excursion, and $\rho_f = 0.80$ spans feed multipliers $f_t / \bar{f}_t \in [0.45, 2.22]$. Crucially, $w_i \in [0, 1]$ is an \emph{analytical blueprint wall-clearance weight}:
+\begin{equation}
+  w_i = \begin{cases}
+    0, & \text{if } i \text{ is a plunge/retract}, \\
+    \operatorname{clip}\!\big(\frac{d_{\text{wall}}(\bar{\mathbf{p}}_i) - \delta_{\text{pin}}}{r_{xy}},\, 0,\, 1\big), & \text{otherwise},
+  \end{cases}
+  \label{eq:wall_weight}
+\end{equation}
+where $d_{\text{wall}}(\bar{\mathbf{p}}_i)$ is the exact Euclidean clearance from the cutter periphery at $\bar{\mathbf{p}}_i$ to any retained pocket wall or island boss ($\delta_{\text{pin}} = 0.08\text{ mm}$). Equation~\eqref{eq:wall_weight} automatically pins vertical plunge/retract axes and tangent wall-finishing passes ($w_i = 0$) while granting full $O(1)$-bounded lateral mobility to interior roughing passes.
+
+\subsection{Invariant Segment State and Residual RL Policies}
+To test whether machining heuristics can generalize across part dimensions without re-solving from scratch, we cast segment-level refinement as a finite-horizon Markov Decision Process with an invariant \textbf{18-D per-segment state} $\mathbf{s}_t \in \mathbb{R}^{18}$ extracted from a single nominal pass: normalized start/end coordinates in stock-box coordinates ($6$), unit motion direction and normalized length ($4$), normalized nominal feed and adjacent junction cosines $(\cos\alpha_{t-1}, \cos\alpha_t)$ ($3$), binary cutting/plunge/retract flags ($2$), normalized pre-cut chip volume $\Delta V_t$, nominal $\text{MRR}_t / \text{MRR}_{\max}$, local target SDF clearance, and endpoint mobility $(w_{t-1} + w_t)/2$ ($3$).
+
+A shared two-layer $\tanh$ MLP policy $\boldsymbol{\pi}_\psi(\mathbf{a}_t \mid \mathbf{s}_t) = \mathcal{N}(\boldsymbol{\mu}_\psi(\mathbf{s}_t), \operatorname{diag}(\boldsymbol{\sigma}^2))$ ($64$--$64$ hidden units, zero-initialized output layer so $\boldsymbol{\mu}_{\psi_0}(\mathbf{s}_t) \equiv \mathbf{0}$ starts exactly at the feasible nominal CAM seed) outputs residual waypoint and log-feed actions $\mathbf{a}_t \in [-1, 1]^3$ mapped through Eq.~\eqref{eq:joint_spline} via \texttt{DirectSegmentActionMap}. We compare two controlled policy-learning paradigms sharing identical network architectures and simulator budgets:
+\begin{enumerate}
+  \item \textbf{\texttt{DiffPolicy-SHAC} (First-Order Differentiable RL):} Following Short-Horizon Actor-Critic~\cite{xu2022accelerated}, we roll out deterministic/exploratory policy actions $\mathbf{u} = \boldsymbol{\mu}_\psi(\mathbf{S})$ through our STE continuation evaluator (Eq.~\eqref{eq:ste}) and backpropagate analytical simulator gradients $\nabla_{\mathbf{u}}\mathcal{L}_{k(n)}$ directly into $\psi$ via the chain rule $\nabla_\psi \mathcal{L} = (\partial \boldsymbol{\mu}_\psi / \partial \psi)^\top \mathbf{P}\nabla_{\mathbf{u}}\mathcal{L}_{k(n)}$. Here $\mathbf{P}$ applies decoupled RMS preconditioning across spatial XY and log-feed coordinates so stiff wall-barrier gradients never drown out smooth feedrate sensitivities during Adam~\cite{kingma2015adam} updates.
+  \item \textbf{\texttt{Hard-PPO} (Zero-Order Clipped Policy Gradient):} Operating purely on exact hard Boolean rollouts ($\nabla_{\mathbf{u}}\mathcal{L}$ unavailable), we train $\boldsymbol{\pi}_\psi$ alongside a $64$--$64$ \texttt{ValueCritic} $V_\omega(\mathbf{s}_t)$ using Clipped Proximal Policy Optimization ($\epsilon = 0.2$)~\cite{schulman2017proximal} and Generalized Advantage Estimation ($\gamma = 0.99, \lambda = 0.95$)~\cite{schulman2016gae}, driven by dense per-segment hard rewards $r_t = -\big(\frac{\tau_t}{T_{\text{nom}}} + w_{\text{MRR}}\max(0, \frac{\text{MRR}_t}{\text{MRR}_{\max}} - 1)^2\big) - \frac{1}{T}\mathcal{C}_{\text{terminal}}^{\text{hard}}$.
+\end{enumerate}
+
+\section{Experimental Setup}
+\label{sec:setup}
+
+\textbf{MIT Clean-Room 16-Task Milling Suite.}
+We construct a 100\% MIT-licensed benchmark suite spanning four canonical 2.5D CAM strategy families—\texttt{facing\_open\_boss}, \texttt{pocket\_island}, \texttt{adaptive\_channel} (dual-island trochoidal/channel clearing), and \texttt{contour\_profile} (exterior stepped boss)—with 2 development (\texttt{dev}) and 2 held-out test (\texttt{test}) geometric instances per family ($16$ tasks total, $35$--$125$ motion segments per program). All tasks model Al 6061-T6 billets ($30\text{--}38 \times 24\text{--}32 \times 8\text{ mm}$) machined by a $5.0\text{ mm}$ diameter ($R = 2.5\text{ mm}$) flat carbide endmill ($12\text{ mm}$ flute, $14\text{ mm}$ holder diameter, $8000\text{ RPM}$, $v_{\text{rapid}} = 60\text{ mm/s}$, $a_{\max} = 1200\text{ mm/s}^2$, and family-rated $\text{MRR}_{\max} \in [95, 130]\text{ mm}^3/\text{s}$).
+
+\textbf{Methods and Compute Parity.}
+Every optimizer is audited by a deterministic \texttt{ComputeLedger} capped at $B = 64$ simulator candidate evaluations across 3 random seeds ($0, 1, 2$) on an NVIDIA RTX 5070 Ti GPU ($0.50\text{ mm}$ optimization grid): (0) \texttt{Nominal-CAM}, (1) \texttt{Naive-Smooth-Adam} (fixed $k=25$, no STE), (2) \texttt{Annealed-Adam} ($k: 20 \to 85$, final hard check only), (3) \texttt{STE-Continuation-Adam} ($k: 25 \to 90$ with per-step hard STE selection), (4) \texttt{DiffPolicy-SHAC} (1st-order RL), (5) \texttt{Hard-PPO} (0th-order RL, $8$ episodes/batch), (6) \texttt{Hard-CEM} (population $12$, elite $25\%$), and (7) \texttt{Hard-CMA-ES}~\cite{hansen2001cmaes} ($\sigma_0 = 0.22$, population $12$).
+
+\textbf{Independent Posted G-Code and CAMotics v1.2.0 Audit.}
+All held-out test trajectories are post-processed into both NIST \texttt{RS274} (\texttt{G64 P0.05}) and Haas Mini Mill Next-Gen Control (\texttt{G54 G64} + \texttt{G187 P2 E0.05}, programs \texttt{O01001}--\texttt{O01008}) and verified by two independent external evaluators at $2\times$ finer spatial resolution ($0.25\text{ mm}$ grid): (1) a standalone NC parser and swept-SDF \texttt{posted\_evaluator} stepping at $0.125\text{ mm}$ stations ($0.00\text{ mm}^3$ target gouge tolerance, $\le 2.0\text{ mm}^3$ residual tolerance, full holder and rapid-move safety screen), and (2) containerized \texttt{CAMotics v1.2.0} (\texttt{camsim} at $0.25\text{ mm}$ octree resolution), auditing closed manifold watertightness and volume consistency on exported binary STL meshes.
+
+\section{Results and Analysis}
+\label{sec:results}
+
+\subsection{Exp1: Surrogate Conditioning and Perturbed Reachability}
+Figure~\ref{fig:exp1} characterizes the numerical mechanics of our smooth CSG relaxation across stiffness $k \in \{10, 20, 40, 80, 160\}$ on the four development families. In Fig.~\ref{fig:exp1}(a), directional cosine similarity between analytical smooth gradients $\nabla_{\boldsymbol{\theta}}\mathcal{L}_k$ and central finite differences of exact $\mathcal{L}_{\text{hard}}$ remains remarkably high across all stiffnesses ($\mathbf{0.980\text{--}0.993}$), while local gradient signal-to-noise ratio (SNR) peaks at $\mathbf{65.72}$ near $k = 40$ before declining to $46.13$--$53.46$ at $k \in \{80, 160\}$ as active boundary voxels thin out. Simultaneously, Fig.~\ref{fig:exp1}(b) reveals why naive smooth optimization fails without continuation: the $L_1$ volumetric occupancy gap between soft and hard IPW states is $\mathbf{72.6\%}$ at $k = 10$ and $\mathbf{52.2\%}$ at $k = 20$, but drops exponentially to $\mathbf{12.6\%}$ at $k = 40$, $\mathbf{4.5\%}$ at $k = 80$, and $\mathbf{1.4\%}$ at $k = 160$. Sweeping $k: 25 \to 90$ under STE captures wide-basin SNR early and sharp geometric fidelity late.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig2_exp1_conditioning.pdf}
+  \vspace{-1.6em}
+  \caption{\textbf{Exp1: Surrogate gradient conditioning and perturbed recovery.} (a) Analytical gradient SNR peaks at $k=40$ ($65.7$) while hard finite-difference cosine stays $0.98$--$0.99$. (b) Soft-to-hard occupancy $L_1$ bias collapses from $72.6\%$ ($k=10$) to $<\!4.5\%$ inside our STE continuation window $k \in [25, 90]$. (c) From perturbed initializations $R \in \{0.00, 0.20, 0.40\}$, \texttt{STE-Continuation-Adam} recovers $100\%$ feasibility and $52\%$--$56\%$ speedups vs.\ $16\%$--$17\%$ for \texttt{Hard-CMA-ES}.}
+  \label{fig:exp1}
+  \vspace{-0.8em}
+\end{figure}
+
+In Fig.~\ref{fig:exp1}(c), we perturb initial parameters uniformly within $\|\boldsymbol{\theta}_0\|_\infty \le R$ for $R \in \{0.00, 0.20, 0.40\}$ ($48$-evaluation budget). \texttt{STE-Continuation-Adam} recovers $100\%$ hard feasibility across all $R$ and achieves $\mathbf{52.3\%}$, $\mathbf{52.4\%}$, and $\mathbf{55.7\%}$ cycle-time reductions—more than $3.3\times$ the gain of zero-order \texttt{Hard-CMA-ES} ($15.5\%$, $16.6\%$, $15.7\%$).
+
+\subsection{Exp2: Single-Task Trajectory and RL Benchmark}
+Table~\ref{tab:exp2_main} and Fig.~\ref{fig:exp2_conv} report our main 16-task $\times$ 8-method benchmark ($64$ simulator evaluations, 3 seeds). \texttt{STE-Continuation-Adam} achieves the strongest performance across every CAM family, cutting mean cycle time from $68.44\text{ s}$ to $\mathbf{27.96\text{ s}}$ ($\mathbf{-58.5 \pm 6.8\%}$ reduction) at $\mathbf{100\%}$ hard feasibility in $3.40\text{ s}$ of wall-clock GPU time. Comparing smooth gradient baselines isolates the exact contribution of STE: \texttt{Naive-Smooth-Adam} (fixed $k=25$) stalls at $-32.3\%$ because uncalibrated occupancy bias misleads interior roughing passes on Pocket ($-22.1\%$) and Adaptive ($-23.2\%$) tasks, while \texttt{Annealed-Adam} (smooth $k$-schedule without per-step hard STE checkpointing) reaches $-52.8\%$ overall but suffers high variance on Adaptive clearing ($-41.1 \pm 15.9\%$ vs.\ $\mathbf{-59.1 \pm 1.1\%}$ with STE).
+
+\begin{table*}[t]
+  \centering
+  \caption{\textbf{Exp2 Main Benchmark across 16 Milling Tasks (4 Families $\times$ 4 Geometries $\times$ 3 Seeds, Budget $B = 64$ Simulator Evaluations).} Cycle-time reductions ($\Delta T_{\text{cycle}}$, $\%$) are mean $\pm$ std relative to \texttt{Nominal-CAM}; all methods are evaluated strictly on exact Boolean hard cutting under blended acceleration kinematics.}
+  \label{tab:exp2_main}
+  \vspace{-0.4em}
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{llccccccc}
+    \toprule
+    \textbf{Method} & \textbf{Optimization Class} & \textbf{Facing} ($\%$) & \textbf{Pocket} ($\%$) & \textbf{Adaptive} ($\%$) & \textbf{Contour} ($\%$) & \textbf{Overall $-\Delta T$} ($\%$) & \textbf{Mean $T$} (s) & \textbf{Peak MRR} ($\text{mm}^3$/s) \\
+    \midrule
+    \texttt{Nominal-CAM} & Canonical CAM Seed & $0.0 \pm 0.0$ & $0.0 \pm 0.0$ & $0.0 \pm 0.0$ & $0.0 \pm 0.0$ & $0.0 \pm 0.0$ & $68.44$ & $66.2$ \\
+    \midrule
+    \texttt{Hard-CEM}~\cite{rubinstein2004cem} & 0th-Order Elite Search & $15.8 \pm 2.4$ & $11.8 \pm 2.9$ & $9.2 \pm 3.7$ & $15.7 \pm 2.0$ & $13.1 \pm 4.0$ & $59.48$ & $85.9$ \\
+    \texttt{Hard-PPO}~\cite{schulman2017proximal} & 0th-Order Clipped RL & $17.8 \pm 6.0$ & $18.1 \pm 5.9$ & $18.8 \pm 4.2$ & $31.2 \pm 6.9$ & $21.5 \pm 8.1$ & $53.67$ & $92.7$ \\
+    \texttt{Hard-CMA-ES}~\cite{hansen2001cmaes} & 0th-Order Covariance ES & $22.1 \pm 3.0$ & $18.9 \pm 6.9$ & $14.8 \pm 3.4$ & $31.2 \pm 2.6$ & $21.8 \pm 7.4$ & $53.62$ & $93.7$ \\
+    \midrule
+    \texttt{Naive-Smooth-Adam} & 1st-Order Fixed $k=25$ & $34.6 \pm 6.8$ & $22.1 \pm 5.7$ & $23.2 \pm 6.6$ & $49.5 \pm 4.2$ & $32.3 \pm 12.5$ & $45.94$ & $103.8$ \\
+    \texttt{DiffPolicy-SHAC}~\cite{xu2022accelerated} & 1st-Order Analytic RL & $51.3 \pm 3.6$ & $18.4 \pm 14.3$ & $36.5 \pm 13.5$ & $61.7 \pm 3.0$ & $\mathbf{42.0 \pm 19.2}$ & $38.18$ & $107.2$ \\
+    \texttt{Annealed-Adam} & 1st-Order Smooth $k$-Sched & $\mathbf{55.5 \pm 2.6}$ & $49.6 \pm 4.6$ & $41.1 \pm 15.9$ & $64.8 \pm 2.4$ & $52.8 \pm 12.1$ & $32.38$ & $105.3$ \\
+    \texttt{STE-Continuation-Adam} & \textbf{1st-Order STE Traj (Ours)} & $55.4 \pm 7.5$ & $\mathbf{52.9 \pm 4.2}$ & $\mathbf{59.1 \pm 1.1}$ & $\mathbf{66.5 \pm 2.5}$ & $\mathbf{58.5 \pm 6.8}$ & $\mathbf{27.96}$ & $109.6$ \\
+    \bottomrule
+  \end{tabular}%
+  }
+  \vspace{-0.6em}
+\end{table*}
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=\textwidth]{figures/fig3_exp2_convergence.pdf}
+  \vspace{-1.6em}
+  \caption{\textbf{Exp2 sample-efficiency convergence across canonical CAM families ($B = 64$ simulator evaluations, mean $\pm$ 1 SD shaded).} First-order methods (\texttt{STE-Continuation-Adam}, \texttt{DiffPolicy-SHAC}) achieve steep cycle-time reductions within the first $16$--$24$ evaluations by exploiting exact per-segment $\partial T_{\text{cycle}} / \partial f_t$ and $\partial \Delta V_t / \partial \mathbf{p}_t$ sensitivities, whereas zero-order RL (\texttt{Hard-PPO}) and evolutionary search (\texttt{Hard-CMA-ES}, \texttt{Hard-CEM}) converge slowly in $100+$ parameter dimensions.}
+  \label{fig:exp2_conv}
+  \vspace{-0.8em}
+\end{figure*}
+
+Comparing our controlled RL arms directly addresses the first- vs.\ zero-order policy learning question: under identical $64$--$64$ MLP architectures and a 64-episode simulator budget, first-order \texttt{DiffPolicy-SHAC} achieves $\mathbf{-42.0 \pm 19.2\%}$ mean cycle-time reduction ($38.18\text{ s}$), nearly doubling the speedup of zero-order \texttt{Hard-PPO} ($\mathbf{-21.5 \pm 8.1\%}$, $53.67\text{ s}$) and \texttt{Hard-CMA-ES} ($-21.8\%$). Because \texttt{Hard-PPO} must estimate credit assignment across $40$--$120$ sequential segments from noisy Gaussian action perturbations, 64 rollouts provide only 8 policy updates. By contrast, \texttt{DiffPolicy-SHAC} receives exact per-segment analytical sensitivities on every rollout, converging within $16$ evaluations on exterior Contour ($-61.7\%$) and Open Boss Facing ($-51.3\%$). Interestingly, on enclosed \texttt{pocket\_island} tasks ($-18.4\%$ single-task SHAC vs.\ $-52.9\%$ \texttt{STE-Continuation-Adam}), shared state-conditioned MLP weights couple inner roughing rings with outer wall rings, whereas per-trajectory B-spline parameters adjust individual passes independently.
+
+\subsection{Exp3: Multi-Task Policy Transfer and Physical Ablations}
+While per-part trajectory optimization excels given 64 evaluations, neural policies amortize optimization across geometries. In \textbf{Exp3} (Table~\ref{tab:exp3_abl} top, Fig.~\ref{fig:exp3_abl}a), we train multi-task \texttt{DiffPolicy-SHAC} and \texttt{Hard-PPO} policies for 20 epochs across the 8 \texttt{dev} tasks and evaluate transfer on the 8 unseen \texttt{test} tasks:
+\begin{itemize}
+  \item \textbf{Sub-Millisecond Zero-Shot Transfer:} In a single deterministic forward pass ($<\!1.5\text{ ms}$ MLP inference, $1$ simulator verification), \texttt{DiffPolicy-SHAC-ZeroShot} achieves $\mathbf{-40.4 \pm 6.5\%}$ cycle-time reduction at $100\%$ feasibility—including $\mathbf{-34.8\%}$ on held-out Pocket tasks (surpassing single-task SHAC because multi-task training regularizes ring-transition features). While \texttt{Hard-PPO-ZeroShot} learns a competitive coarse feed heuristic ($-39.8\%$) over $160$ multi-task training episodes, its lack of analytical MRR gradients yields $\mathbf{125.9\text{ mm}^3/\text{s}}$ mean peak MRR ($+11.1\text{ mm}^3/\text{s}$ higher cutter load than SHAC's $114.8\text{ mm}^3/\text{s}$).
+  \item \textbf{16-Evaluation Few-Shot Adaptation:} Given 16 test-time evaluations, warm-started \texttt{DiffPolicy-SHAC-FewShot16} improves monotonically to $\mathbf{-43.4 \pm 14.0\%}$ ($111.5\text{ mm}^3/\text{s}$ peak MRR), approaching from-scratch \texttt{STE-Adam-16} ($-45.7\%$), whereas \texttt{Hard-PPO-FewShot16} \emph{degrades} to $-34.6\%$ because stochastic exploration perturbs converged weights over only 4 mini-batch updates.
+\end{itemize}
+
+\begin{table}[t]
+  \centering
+  \caption{\textbf{Top:} Exp3 Multi-Task Policy Transfer ($8$ Dev $\to$ $8$ Unseen Test Tasks, 3 Seeds). \textbf{Bottom:} Exp2 5-Arm Physical \& Kinematic Ablations ($8$ Test Tasks, $B = 64$). All arms achieve $100\%$ geometric feasibility; removing the MRR barrier causes severe $+128.3\%$ cutter overload.}
+  \label{tab:exp3_abl}
+  \vspace{-0.4em}
+  \resizebox{\columnwidth}{!}{%
+  \begin{tabular}{lcccc}
+    \toprule
+    \textbf{Regime / Ablation Arm} & \textbf{Evals} & \textbf{$-\Delta T_{\text{cycle}}$} ($\%$) & \textbf{Peak MRR} & \textbf{Overload} \\
+    \midrule
+    \multicolumn{5}{l}{\emph{Exp3: Unseen Test Policy Generalization}} \\
+    \texttt{Hard-PPO-ZeroShot} & $1$ & $39.8 \pm 2.8$ & $125.9$ & $13.5\%$ \\
+    \texttt{DiffPolicy-SHAC-ZeroShot} & $1$ & $\mathbf{40.4 \pm 6.5}$ & $\mathbf{114.8}$ & $\mathbf{4.1\%}$ \\
+    \texttt{Hard-PPO-FewShot16} & $16$ & $34.6 \pm 12.9$ & $108.9$ & $2.2\%$ \\
+    \texttt{DiffPolicy-SHAC-FewShot16} & $16$ & $43.4 \pm 14.0$ & $111.5$ & $3.1\%$ \\
+    \texttt{Scratch-STE-Adam-16} & $16$ & $\mathbf{45.7 \pm 5.5}$ & $\mathbf{106.3}$ & $\mathbf{1.4\%}$ \\
+    \midrule
+    \multicolumn{5}{l}{\emph{Exp2-Abl: Physical \& Kinematic Ablations ($B = 64$)}} \\
+    \texttt{Path-Only-Frozen-Feed} & $64$ & $1.2 \pm 0.9$ & $73.8$ & $0.0\%$ \\
+    \texttt{Exact-Stop-Surrogate} & $64$ & $57.1 \pm 6.7$ & $112.5$ & $3.2\%$ \\
+    \texttt{Feed-Only-Frozen-Path} & $64$ & $57.8 \pm 4.9$ & $114.8$ & $3.9\%$ \\
+    \texttt{Full-Joint-Blended-STE} & $64$ & $\mathbf{58.4 \pm 6.1}$ & $115.7$ & $4.8\%$ \\
+    \texttt{No-MRR-Barrier} ($w_{\text{MRR}}\!=\!0$) & $64$ & $67.0 \pm 5.5$ & $\mathbf{254.3}$ & $\mathbf{128.3\%}$ \\
+    \bottomrule
+  \end{tabular}%
+  }
+  \vspace{-0.8em}
+\end{table}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\columnwidth]{figures/fig4_exp3_transfer_ablations.pdf}
+  \vspace{-1.6em}
+  \caption{\textbf{Exp3 policy generalization and physical ablations.} (a) Held-out test cycle-time reductions across families for zero-shot ($1$ eval) and few-shot ($16$ evals) transfer. (b) Ablating feed optimization (\texttt{Path-Only}) collapses gains to $1.2\%$, whereas ablating the volumetric MRR barrier (\texttt{No-MRR}) triggers $+128\%$ peak cutter overload.}
+  \label{fig:exp3_abl}
+  \vspace{-0.8em}
+\end{figure}
+
+Our 5-arm ablation on the 8 held-out test tasks (Table~\ref{tab:exp3_abl} bottom, Fig.~\ref{fig:exp3_abl}b) confirms three core physical hypotheses: (1) \texttt{Path-Only-Frozen-Feed} yields only $\mathbf{1.2 \pm 0.9\%}$ speedup because blueprint pocket/island boundaries lock topological pass counts when feedrates cannot adapt to local engagement; (2) co-optimizing XY waypoints and feeds under controller-matched corner blending (\texttt{Full-Joint-Blended-STE}, $\mathbf{58.4\%}$) outperforms both \texttt{Feed-Only-Frozen-Path} ($57.8\%$) and optimizing under an \texttt{Exact-Stop-Surrogate} ($57.1\%$) by relaxing interior corner angles while accelerating low-immersion passes; and (3) setting $w_{\text{MRR}} = 0$ (\texttt{No-MRR-Barrier}) inflates apparent cycle-time gain to $67.0\%$ by commanding maximum feed through full-width slotting cuts, driving mean peak MRR to $\mathbf{254.3\text{ mm}^3/\text{s}}$ ($\mathbf{+128.3\%}$ above rated cutter limits).
+
+\subsection{Exp4: High-Resolution NC, CAMotics STL, and Haas NGC Audit}
+To verify that optimization on a $0.50\text{ mm}$ grid introduces zero discretization artifacts or post-processing regressions, Table~\ref{tab:exp4} audits all 8 held-out test parts compiled into Haas Mini Mill Next-Gen Control programs (\texttt{O01001}--\texttt{O01008}, \texttt{G54 G64} + \texttt{G187 P2 E0.05}). Across all $8/8$ test parts, aggregate cycle time drops from $\mathbf{71.03\text{ s}}$ to $\mathbf{28.47\text{ s}}$ ($\mathbf{-59.9\%}$). Every program passes our $0.25\text{ mm}$-voxel, $0.125\text{ mm}$-step \texttt{posted\_evaluator} geometric and holder/rapid safety checks with \textbf{exactly $\mathbf{0.00\text{ mm}^3}$ target gouge} and $0.00$--$1.75\text{ mm}^3$ uncut residual ($\le 0.035\%$ of billet volume). Independently, containerized \texttt{CAMotics v1.2.0} reconstructs $\mathbf{8/8}$ closed, manifold, watertight STL solids ($72{,}752$--$129{,}476$ facets) whose enclosed volumes match nominal CAM cuts within $<\!0.15\%$ and exhibit sub-voxel marching-cubes surface deviation ($\le 0.66\text{ mm}^3$) strictly lower than or equal to \texttt{Nominal-CAM} ($\le 1.75\text{ mm}^3$).
+
+\begin{table*}[t]
+  \centering
+  \caption{\textbf{Exp4 Independent High-Resolution Verification and Haas Mini Mill NGC Shop Packet Summary Across All 8 Held-Out Test Parts.} Audited on posted Haas NGC G-code (\texttt{G54 G64} + \texttt{G187 P2 E0.05}) via both a $0.125\text{ mm}$-step swept-SDF \texttt{posted\_evaluator} ($0.25\text{ mm}$ voxels) and containerized \texttt{CAMotics v1.2.0} ($0.25\text{ mm}$ octree watertight STL reconstruction).}
+  \label{tab:exp4}
+  \vspace{-0.4em}
+  \resizebox{\textwidth}{!}{%
+  \begin{tabular}{lllccccccccc}
+    \toprule
+    \textbf{Haas Prog.} & \textbf{Case ID} & \textbf{CAM Family} & \textbf{Stock} (mm) & \textbf{$T_{\text{nom}}$} (s) & \textbf{$T_{\text{DiffCAM}}$} (s) & \textbf{$-\Delta T$} ($\%$) & \textbf{Gouge} ($\text{mm}^3$) & \textbf{Res.} ($\text{mm}^3$) & \textbf{Safety} & \textbf{CAMotics STL} & \textbf{STL Vol.} ($\text{mm}^3$) \\
+    \midrule
+    \texttt{O01001} & \texttt{face-test-00} & Facing Boss & $34\!\times\!24\!\times\!8$ & $75.04$ & $32.83$ & $56.3\%$ & $0.00$ & $0.00$ & Pass & Watertight ($75.0\text{k}\triangle$) & $4246.1$ \\
+    \texttt{O01002} & \texttt{face-test-01} & Facing Boss & $32\!\times\!24\!\times\!8$ & $71.50$ & $29.72$ & $58.4\%$ & $0.00$ & $0.00$ & Pass & Watertight ($72.8\text{k}\triangle$) & $4371.3$ \\
+    \texttt{O01003} & \texttt{pocket-test-00} & Pocket Island & $32\!\times\!28\!\times\!8$ & $41.84$ & $21.51$ & $48.6\%$ & $0.00$ & $1.75$ & Pass & Watertight ($106.4\text{k}\triangle$) & $5042.5$ \\
+    \texttt{O01004} & \texttt{pocket-test-01} & Pocket Island & $34\!\times\!26\!\times\!8$ & $41.69$ & $18.88$ & $54.7\%$ & $0.00$ & $1.13$ & Pass & Watertight ($102.0\text{k}\triangle$) & $5520.0$ \\
+    \texttt{O01005} & \texttt{adapt-test-00} & Adaptive Dual & $38\!\times\!30\!\times\!8$ & $98.24$ & $39.25$ & $60.0\%$ & $0.00$ & $1.31$ & Pass & Watertight ($129.5\text{k}\triangle$) & $6681.5$ \\
+    \texttt{O01006} & \texttt{adapt-test-01} & Adaptive Dual & $36\!\times\!32\!\times\!8$ & $83.52$ & $34.57$ & $58.6\%$ & $0.00$ & $1.31$ & Pass & Watertight ($127.3\text{k}\triangle$) & $7067.5$ \\
+    \texttt{O01007} & \texttt{contour-test-00} & Contour Boss & $32\!\times\!26\!\times\!8$ & $78.77$ & $26.67$ & $66.1\%$ & $0.00$ & $0.00$ & Pass & Watertight ($76.2\text{k}\triangle$) & $4143.2$ \\
+    \texttt{O01008} & \texttt{contour-test-01} & Contour Boss & $32\!\times\!24\!\times\!8$ & $77.61$ & $24.29$ & $68.7\%$ & $0.00$ & $0.00$ & Pass & Watertight ($72.8\text{k}\triangle$) & $4204.2$ \\
+    \midrule
+    \textbf{Mean / Pass} & \multicolumn{3}{l}{\textbf{8 Held-Out Test Parts}} & $\mathbf{71.03}$ & $\mathbf{28.47}$ & $\mathbf{59.9\%}$ & $\mathbf{0.00}$ & $\le\!\mathbf{1.75}$ & $\mathbf{8/8}$ & $\mathbf{8/8}$ \textbf{Watertight} & $\Delta V < 0.15\%$ \\
+    \bottomrule
+  \end{tabular}%
+  }
+  \vspace{-0.8em}
+\end{table*}
+
+\section{Limitations and Conclusion}
+\label{sec:conclusion}
+
+\textbf{Limitations.}
+First, our current parameterization locks axial coordinates $\bar{p}_i^z$ to canonical 2.5D cutting layers; extending wall-clearance mobility weights to simultaneous 3-axis ball-endmill sculptured surfacing and 5-axis tool-orientation smoothing is a natural next step. Second, while our volumetric Peak MRR barrier prevents steady-state chip-load and torque overload, it does not model frequency-domain regenerative chatter lobes~\cite{altintas2012manufacturing} or thin-wall deflection. Third, although \texttt{DiffPolicy-SHAC} enables sub-millisecond zero-shot transfer ($-40.4\%$), topology-changing pass insertion or deletion still relies on upstream geometric CAM seeding. Finally, while our Haas Mini Mill NGC shop packets (\texttt{O01001}--\texttt{O01008}) are certified in \texttt{CAMotics v1.2.0} and high-resolution swept-SDF simulation, instrumented physical Al 6061-T6 cutting trials measuring spindle load and profilometry roughness constitute our immediate hardware milestone.
+
+\textbf{Conclusion.}
+We presented \textbf{DiffCAM}, an MIT-licensed dual-mode differentiable 3-axis milling simulator and co-optimization framework that reconciles discontinuous Boolean CSG geometry with smooth analytical policy and trajectory gradients. By combining Straight-Through Estimator stiffness continuation, controller-matched corner-blending kinematics, volumetric Peak MRR barriers, and drift-free \texttt{PositionSpline} parameterizations, DiffCAM achieves $58.5\%$ mean cycle-time reductions at $100\%$ feasibility, demonstrates a $2\times$ sample-efficiency advantage for first-order differentiable RL over zero-order RL, and delivers certified watertight \texttt{CAMotics} STL parts and shop-ready Haas Mini Mill NGC G-code.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+\end{document}

@@ -53,6 +53,12 @@ class ObjectiveSpec:
     holder_margin_mm: float = 0.0
     time_weight: float = 0.0
     air_time_weight: float = 0.0
+    mrr_weight: float = 0.0
+    mrr_limit_mm3_s: float = 100.0
+    rapid_stock_weight: float = 0.0
+    tool_gouge_margin_mm: float = 0.0
+    use_typed_segment_speeds: bool = False
+    enforce_mrr_constraint: bool = False
     reference_cycle_time_s: Optional[float] = None
     legacy_weights: LegacyTrajectoryWeights = field(default_factory=LegacyTrajectoryWeights)
     time_normalization: str = "reference_cycle_seconds"
@@ -72,8 +78,16 @@ class ObjectiveSpec:
 
     def __post_init__(self) -> None:
         for name in ("k", "gouge_weight", "residual_weight", "holder_weight", "holder_margin_mm",
-                     "time_weight", "air_time_weight"):
+                     "time_weight", "air_time_weight", "mrr_weight", "mrr_limit_mm3_s",
+                     "rapid_stock_weight", "tool_gouge_margin_mm"):
             _nonnegative_finite(getattr(self, name), name)
+        for flag_name in ("use_typed_segment_speeds", "enforce_mrr_constraint"):
+            if not isinstance(getattr(self, flag_name), bool):
+                raise ValueError(f"{flag_name} must be boolean")
+        if self.mrr_weight > 0 and self.mrr_limit_mm3_s <= 0:
+            raise ValueError("mrr_limit_mm3_s must be positive when mrr_weight > 0")
+        if self.enforce_mrr_constraint and self.mrr_limit_mm3_s <= 0:
+            raise ValueError("mrr_limit_mm3_s must be positive when enforce_mrr_constraint is True")
         if self.time_normalization != "reference_cycle_seconds":
             raise ValueError("time_normalization must be 'reference_cycle_seconds'")
         if self.reference_cycle_time_s is not None:
@@ -169,8 +183,11 @@ class CandidateEvaluator:
             raise ValueError("seed must be a non-negative integer")
         motion.validate_for_task(task)
         self.task, self.motion = task, motion
-        if motion.frame != C.Frame.MACHINE or motion.timing_rule != C.TimingRule.EXACT_STOP_CONSTANT_SPEED:
-            raise ValueError("prototype requires machine-frame exact-stop typed motion")
+        if motion.frame != C.Frame.MACHINE or motion.timing_rule not in (
+            C.TimingRule.EXACT_STOP_CONSTANT_SPEED,
+            C.TimingRule.BLENDED_ACCEL_BOUNDED,
+        ):
+            raise ValueError("prototype requires machine-frame exact-stop or blended-accel typed motion")
         self.parameterization = parameterization
         self.sim = simulator
         self.simulator_precision = simulator_precision_metadata(simulator, requested_precision=requested_precision)
@@ -266,6 +283,22 @@ class CandidateEvaluator:
         # _configure calls keep this explicitly neutral value until changed.
         self.sim.loss_shift[None] = 0.0
 
+    def _use_per_seg_speeds(self) -> bool:
+        return bool(
+            self.spec.use_typed_segment_speeds
+            or self.motion.timing_rule == C.TimingRule.BLENDED_ACCEL_BOUNDED
+            or hasattr(self.parameterization, "forward_feed_multipliers")
+        )
+
+    def _feed_multipliers(self, theta: Any) -> np.ndarray:
+        steps = self.parameterization.num_steps
+        if hasattr(self.parameterization, "forward_feed_multipliers"):
+            mult = np.asarray(self.parameterization.forward_feed_multipliers(theta), dtype=np.float64)
+            if mult.shape != (steps,) or not np.isfinite(mult).all() or np.any(mult <= 0):
+                raise ValueError("parameterization returned non-finite or non-positive feed multipliers")
+            return mult
+        return np.ones(steps, dtype=np.float64)
+
     def _configure(self) -> None:
         spec, sim = self.spec, self.sim
         if not hasattr(sim, "loss_shift"):
@@ -276,6 +309,8 @@ class CandidateEvaluator:
         sim.w_residual[None] = spec.residual_weight
         sim.holder_penalty_weight[None] = spec.holder_weight
         sim.holder_margin[None] = spec.holder_margin_mm / sim.v
+        if hasattr(sim, "tool_gouge_margin"):
+            sim.tool_gouge_margin[None] = spec.tool_gouge_margin_mm / sim.v
         # Native smooth terms are per-segment MEANS. Restore total-time scale
         # against the task's TOTAL nominal duration before that mean is taken.
         n_segments = self.parameterization.num_steps
@@ -285,6 +320,29 @@ class CandidateEvaluator:
                                 if spec.air_time_weight > 0 else 0.0)
         for descriptor in fields(spec.legacy_weights):
             getattr(sim, descriptor.name)[None] = getattr(spec.legacy_weights, descriptor.name)
+        use_per_seg = self._use_per_seg_speeds()
+        if hasattr(sim, "use_per_seg_speeds"):
+            sim.use_per_seg_speeds[None] = 1 if use_per_seg else 0
+            sim.use_blended_timing[None] = (
+                1 if self.motion.timing_rule == C.TimingRule.BLENDED_ACCEL_BOUNDED else 0
+            )
+            sim.max_accel_mm_s2[None] = float(self.task.limits.max_accel_mm_s2)
+            sim.w_mrr[None] = float(spec.mrr_weight * n_segments)
+            sim.mrr_limit_mm3_s[None] = float(spec.mrr_limit_mm3_s)
+            sim.w_rapid_stock[None] = float(spec.rapid_stock_weight)
+            if use_per_seg:
+                nom_speeds = np.zeros(sim.max_steps, dtype=np.float64)
+                is_rapid = np.zeros(sim.max_steps, dtype=np.int32)
+                rapid_spd = float(self.task.limits.rapid_mm_s)
+                for idx, seg in enumerate(self.motion.segments):
+                    if seg.kind == C.SegmentKind.RAPID:
+                        nom_speeds[idx] = rapid_spd
+                        is_rapid[idx] = 1
+                    else:
+                        nom_speeds[idx] = float(seg.feed_mm_s or rapid_spd)
+                        is_rapid[idx] = 0
+                sim.seg_nom_speed.from_numpy(simulator_array(sim, nom_speeds))
+                sim.seg_is_rapid.from_numpy(is_rapid)
         # Every physical execution is the un-clipped parameterized delta sequence.
         sim.enforce_speed_limits[None] = 0
         sim.enforce_z_floor[None] = 0
@@ -298,20 +356,39 @@ class CandidateEvaluator:
         return deltas / self.dimensions[None, :]
 
     def candidate_motion(self, theta: Any) -> C.MotionPlan:
-        """Preserve rapid/feed kinds and feed values; recompute exact-stop durations."""
+        """Preserve rapid/feed kinds; apply feed multipliers and exact-stop or blended durations."""
         positions = self.parameterization.positions(theta)
+        feed_mult = self._feed_multipliers(theta)
         motion_transform = self.task.work_to_machine.apply
         segments = []
-        for original, start_work, end_work in zip(self.motion.segments, positions[:-1], positions[1:]):
+        for original, start_work, end_work, mult in zip(
+            self.motion.segments, positions[:-1], positions[1:], feed_mult
+        ):
             start, end = motion_transform(start_work), motion_transform(end_work)
             length = math.dist(start, end)
-            duration = (length / self.task.limits.rapid_mm_s if original.kind == C.SegmentKind.RAPID
-                        else length / original.feed_mm_s)
+            if original.kind == C.SegmentKind.RAPID:
+                eff_feed = None
+                duration = length / self.task.limits.rapid_mm_s
+            else:
+                eff_feed = float(original.feed_mm_s * mult)
+                duration = length / eff_feed
             segments.append(C.Segment(
                 id=original.id, kind=original.kind, start_mm=start, end_mm=end,
-                duration_s=duration, feed_mm_s=original.feed_mm_s, tag=original.tag,
+                duration_s=duration, feed_mm_s=eff_feed, tag=original.tag,
                 source_line=original.source_line,
             ))
+        if self.motion.timing_rule == C.TimingRule.BLENDED_ACCEL_BOUNDED and segments:
+            durations = C.blended_segment_durations(
+                segments, self.task.limits.rapid_mm_s, self.task.limits.max_accel_mm_s2
+            )
+            segments = [
+                C.Segment(
+                    id=seg.id, kind=seg.kind, start_mm=seg.start_mm, end_mm=seg.end_mm,
+                    duration_s=dur, feed_mm_s=seg.feed_mm_s, tag=seg.tag,
+                    source_line=seg.source_line,
+                )
+                for seg, dur in zip(segments, durations)
+            ]
         plan = C.MotionPlan(
             frame=C.Frame.MACHINE, initial_state=self.task.initial_state, segments=tuple(segments),
             timing_rule=self.motion.timing_rule, provenance="stateless_candidate_objective",
@@ -319,8 +396,10 @@ class CandidateEvaluator:
         plan.validate_for_task(self.task)
         return plan
 
-    def _hard_time_metrics(self, theta: Any) -> tuple[float, float, float]:
-        """Use exact motion durations with sharp per-segment engagement, not native feed rates."""
+    def _hard_time_and_mrr_metrics(
+        self, theta: Any
+    ) -> tuple[float, float, float, float, float, float, float]:
+        """Use exact motion durations with sharp per-segment engagement, MRR, and rapid-stock check."""
         motion = self.candidate_motion(theta)
         steps = len(motion.segments)
         self.sim.compute_traj_diagnostics_hard(steps)
@@ -340,6 +419,27 @@ class CandidateEvaluator:
         if (air_time_s < 0 or cycle_time_s < 0 or air_time_s > cycle_time_s
                 or not all(math.isfinite(value) for value in (cycle_time_s, air_time_s, air_fraction))):
             raise ValueError("invalid exact candidate time/air-time components")
+        is_rapid = np.asarray(
+            [segment.kind == C.SegmentKind.RAPID for segment in motion.segments], dtype=bool
+        )
+        rapid_stock_overlap = float(np.sum(engagement[is_rapid & ~air])) if steps else 0.0
+        stock_box_mm3 = float(self.sim.Lx * self.sim.Ly * self.sim.Lz)
+        vol_eng_mm3 = engagement * stock_box_mm3 * (~is_rapid).astype(np.float64)
+        mrr_per_seg = vol_eng_mm3 / np.maximum(durations, 1e-6)
+        peak_mrr_mm3_s = float(np.max(mrr_per_seg)) if steps else 0.0
+        mean_mrr_mm3_s = float(np.sum(vol_eng_mm3) / max(cycle_time_s, 1e-9)) if steps else 0.0
+        if self.spec.mrr_weight > 0 and steps:
+            mrr_excess = np.maximum(0.0, mrr_per_seg / self.spec.mrr_limit_mm3_s - 1.0)
+            mrr_term = float(self.spec.mrr_weight * np.sum(mrr_excess ** 2))
+        else:
+            mrr_term = 0.0
+        return (
+            cycle_time_s, air_time_s, air_fraction,
+            peak_mrr_mm3_s, mean_mrr_mm3_s, mrr_term, rapid_stock_overlap,
+        )
+
+    def _hard_time_metrics(self, theta: Any) -> tuple[float, float, float]:
+        cycle_time_s, air_time_s, air_fraction, *_ = self._hard_time_and_mrr_metrics(theta)
         return cycle_time_s, air_time_s, air_fraction
 
     def _native_time_metrics(self) -> tuple[float, float, float]:
@@ -372,9 +472,27 @@ class CandidateEvaluator:
             },
         ))
 
-    def _gradient(self, normalized_gradient: np.ndarray) -> np.ndarray:
+    def _gradient(
+        self, normalized_gradient: np.ndarray,
+        feed_mult_gradient: Optional[np.ndarray] = None,
+        theta: Any = None,
+    ) -> np.ndarray:
         physical = normalized_gradient[:self.parameterization.num_steps] / self.dimensions[None, :]
+        if hasattr(self.parameterization, "pullback_joint") and feed_mult_gradient is not None:
+            g_mult = feed_mult_gradient[:self.parameterization.num_steps]
+            return np.asarray(
+                self.parameterization.pullback_joint(physical, g_mult, theta), dtype=np.float64
+            )
         return np.asarray(self.parameterization.pullback(physical), dtype=np.float64)
+
+    def _load_candidate_inputs(self, normalized: np.ndarray, feed_mult: np.ndarray) -> None:
+        steps = self.parameterization.num_steps
+        self.sim.loss_shift[None] = self._loss_shift_voxels()
+        self.sim.tool_delta.from_numpy(simulator_array(self.sim, normalized))
+        if hasattr(self.sim, "seg_feed_mult") and self._use_per_seg_speeds():
+            full_mult = np.ones(self.sim.max_steps, dtype=np.float64)
+            full_mult[:steps] = feed_mult
+            self.sim.seg_feed_mult.from_numpy(simulator_array(self.sim, full_mult))
 
     def _evaluate(self, theta: Any, candidate_id: str, objective_kind: str,
                   with_gradient: bool) -> CandidateEvaluation:
@@ -386,22 +504,28 @@ class CandidateEvaluator:
         steps = self.parameterization.num_steps
         voxels = steps * self.sim.Nx * self.sim.Ny * self.sim.Nz
         valid = False
+        gradient: Optional[np.ndarray] = None
+        grad_deltas_mm: Optional[np.ndarray] = None
+        grad_feed_mult: Optional[np.ndarray] = None
         try:
             normalized = self._deltas(theta)
+            feed_mult = self._feed_multipliers(theta)
             self._configure()
             reset_simulator(self.sim)
             # Official reset preserves configured fields. Apply this explicitly
             # once more for any alternative reset implementation, not ti.init.
-            self.sim.loss_shift[None] = self._loss_shift_voxels()
-            self.sim.tool_delta.from_numpy(simulator_array(self.sim, normalized))
-            forward_calls = 1
+            self._load_candidate_inputs(normalized, feed_mult)
             if objective_kind == "smooth":
+                forward_calls += 1
                 if with_gradient:
                     backward_calls = 1
                     with ti.ad.Tape(loss=self.sim.loss):
                         self.sim.forward(steps + 1)
                     normalized_gradient = self.sim.tool_delta.grad.to_numpy().copy()
-                    gradient = self._gradient(normalized_gradient)
+                    grad_deltas_mm = (normalized_gradient[:steps] / self.dimensions[None, :]).astype(np.float64)
+                    if hasattr(self.sim, "seg_feed_mult") and self._use_per_seg_speeds():
+                        grad_feed_mult = self.sim.seg_feed_mult.grad.to_numpy().copy()[:steps].astype(np.float64)
+                    gradient = self._gradient(normalized_gradient, grad_feed_mult, theta)
                     if not np.all(np.isfinite(gradient)):
                         raise FloatingPointError("non-finite candidate gradient")
                 else:
@@ -415,7 +539,11 @@ class CandidateEvaluator:
                     "final_stock": self.sim.stock.to_numpy()[steps].copy(),
                     "time_source_is_simulator_surrogate": 1.0,
                 }
-                native_metrics = spec.time_weight > 0 or spec.air_time_weight > 0
+                if grad_deltas_mm is not None:
+                    diagnostics["grad_deltas_mm"] = grad_deltas_mm
+                if grad_feed_mult is not None:
+                    diagnostics["grad_feed_mult"] = grad_feed_mult
+                native_metrics = spec.time_weight > 0 or spec.air_time_weight > 0 or spec.mrr_weight > 0
                 native_metrics = (native_metrics or spec.legacy_weights.w_air_late > 0
                                   or spec.legacy_weights.w_break > 0)
                 diagnostics["efficiency_timing_evaluated"] = float(native_metrics)
@@ -424,6 +552,23 @@ class CandidateEvaluator:
                     diagnostics.update(cycle_time_s=native_cycle, air_time_s=native_air,
                                        air_fraction=native_fraction)
             else:
+                if with_gradient:
+                    # Straight-Through Estimator (STE): analytical smooth Jacobian + exact hard forward.
+                    forward_calls += 1
+                    backward_calls = 1
+                    with ti.ad.Tape(loss=self.sim.loss):
+                        self.sim.forward(steps + 1)
+                    normalized_gradient = self.sim.tool_delta.grad.to_numpy().copy()
+                    grad_deltas_mm = (normalized_gradient[:steps] / self.dimensions[None, :]).astype(np.float64)
+                    if hasattr(self.sim, "seg_feed_mult") and self._use_per_seg_speeds():
+                        grad_feed_mult = self.sim.seg_feed_mult.grad.to_numpy().copy()[:steps].astype(np.float64)
+                    gradient = self._gradient(normalized_gradient, grad_feed_mult, theta)
+                    if not np.all(np.isfinite(gradient)):
+                        raise FloatingPointError("non-finite STE candidate gradient")
+                    self._configure()
+                    reset_simulator(self.sim)
+                    self._load_candidate_inputs(normalized, feed_mult)
+                forward_calls += 1
                 self.sim.forward_hard(steps + 1, clip_speeds=False)
                 target = self.sim.target.to_numpy() < 0
                 history = self.sim.stock.to_numpy()
@@ -444,26 +589,40 @@ class CandidateEvaluator:
                 geometry = (self.spec.gouge_weight * gouge_fraction ** 2
                             + self.spec.residual_weight * residual_fraction ** 2)
                 safety = self.spec.holder_weight * holder_fraction ** 2
-                cycle_time_s, air_time_s, air_fraction = self._hard_time_metrics(theta)
+                (cycle_time_s, air_time_s, air_fraction,
+                 peak_mrr_mm3_s, mean_mrr_mm3_s, mrr_term, rapid_stock_overlap) = (
+                    self._hard_time_and_mrr_metrics(theta)
+                )
+                rapid_term = self.spec.rapid_stock_weight * (rapid_stock_overlap ** 2)
                 reference_s = self.reference_cycle_time_s
                 if reference_s > 0:
                     time_term = self.spec.time_weight * cycle_time_s / reference_s
                     air_term = self.spec.air_time_weight * air_time_s / reference_s
                 else:
                     time_term = air_term = 0.0
-                objective = geometry + safety + time_term + air_term
+                objective = geometry + safety + time_term + air_term + mrr_term + rapid_term
                 voxel_volume_mm3 = self.task.grid.voxel_mm ** 3
                 gouge_limit = self.task.tolerances.gouge_volume_mm3 / (in_target * voxel_volume_mm3)
                 residual_limit = self.task.tolerances.completion_residual_mm3 / (
                     removal_target * voxel_volume_mm3)
-                constraint_violation = (holder_fraction + max(0.0, gouge_fraction - gouge_limit)
+                mrr_violation = (
+                    max(0.0, peak_mrr_mm3_s / self.spec.mrr_limit_mm3_s - 1.0)
+                    if self.spec.enforce_mrr_constraint else 0.0
+                )
+                constraint_violation = (holder_fraction + rapid_stock_overlap + mrr_violation
+                                        + max(0.0, gouge_fraction - gouge_limit)
                                         + max(0.0, residual_fraction - residual_limit))
-                feasible = float(holder_fraction == 0 and gouge_fraction <= gouge_limit
+                feasible = float(holder_fraction == 0
+                                 and gouge_fraction <= gouge_limit
                                  and residual_fraction <= residual_limit)
                 diagnostics = {
                     "gouge_fraction": gouge_fraction,
                     "residual_fraction": residual_fraction,
                     "holder_overlap_fraction": holder_fraction,
+                    "rapid_stock_overlap": rapid_stock_overlap,
+                    "peak_mrr_mm3_s": peak_mrr_mm3_s,
+                    "mean_mrr_mm3_s": mean_mrr_mm3_s,
+                    "mrr_term": mrr_term,
                     "geometry": geometry, "holder_proxy": safety, "final_stock": stock.copy(),
                     "cycle_time_s": cycle_time_s, "air_time_s": air_time_s,
                     "air_fraction": air_fraction, "efficiency": objective,
@@ -473,6 +632,10 @@ class CandidateEvaluator:
                     "constraint_violation": constraint_violation, "feasible": feasible,
                     "time_source_is_simulator_surrogate": 0.0,
                 }
+                if grad_deltas_mm is not None:
+                    diagnostics["grad_deltas_mm"] = grad_deltas_mm
+                if grad_feed_mult is not None:
+                    diagnostics["grad_feed_mult"] = grad_feed_mult
             if not math.isfinite(objective):
                 raise FloatingPointError("simulator returned a non-finite objective")
             components = {
@@ -487,24 +650,23 @@ class CandidateEvaluator:
             components["efficiency"] = objective
             components["reference_cycle_time_s"] = self.reference_cycle_time_s
             for name, value in diagnostics.items():
-                if name != "final_stock":
+                if name not in ("final_stock", "grad_deltas_mm", "grad_feed_mult"):
                     components[name] = float(value)
             result = C.CandidateResult(
                 candidate_id=candidate_id, theta_hash=_theta_hash(theta),
                 objective_kind=objective_kind, objective=objective, valid=True,
                 coverage=C.Coverage.INCOMPLETE, components=components,
-                gradient_available=with_gradient and objective_kind == "smooth",
+                gradient_available=with_gradient,
             )
             valid = True
-            return CandidateEvaluation(result, gradient if with_gradient and objective_kind == "smooth" else None,
-                                       diagnostics)
+            return CandidateEvaluation(result, gradient if with_gradient else None, diagnostics)
         except (ValueError, FloatingPointError) as error:
             return self._invalid(candidate_id, theta, objective_kind, str(error))
         finally:
             entry = self.ledger.finish_candidate(valid=valid, forward_calls=forward_calls,
                                                  backward_calls=backward_calls,
-                                                 segment_steps=steps if forward_calls else 0,
-                                                 voxel_steps=voxels if forward_calls else 0)
+                                                 segment_steps=steps * forward_calls,
+                                                 voxel_steps=voxels * forward_calls)
             entry["loss_shift_voxels"] = self._loss_shift_voxels()
             entry["loss_shift_mm"] = self._loss_shift_mm()
 
@@ -514,3 +676,7 @@ class CandidateEvaluator:
 
     def evaluate_candidate_with_gradient(self, theta: Any, candidate_id: str) -> CandidateEvaluation:
         return self._evaluate(theta, candidate_id, "smooth", with_gradient=True)
+
+    def evaluate_ste_with_gradient(self, theta: Any, candidate_id: str) -> CandidateEvaluation:
+        """Straight-Through Estimator: exact hard CandidateResult paired with smooth AD gradient."""
+        return self._evaluate(theta, candidate_id, "hard", with_gradient=True)
