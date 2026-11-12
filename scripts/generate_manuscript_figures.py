@@ -1533,6 +1533,429 @@ def generate_fig6_exp6_tamp_multitool(
     pdf.write(out_path)
 
 
+def _draw_arrow(
+    pdf: VectorPDFCanvas,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    *,
+    color: RGB = (0.18, 0.24, 0.34),
+    line_width: float = 1.0,
+    head_len: float = 4.2,
+    head_half_w: float = 2.1,
+    dash: Optional[Sequence[float]] = None,
+) -> None:
+    """Draw a straight line segment with a filled triangular arrowhead at ``(x2, y2)``."""
+    dx = x2 - x1
+    dy = y2 - y1
+    L = math.hypot(dx, dy)
+    if L < 1e-6:
+        return
+    ux, uy = dx / L, dy / L
+    bx = x2 - ux * (head_len * 0.75)
+    by = y2 - uy * (head_len * 0.75)
+    pdf.line(x1, y1, bx, by, stroke=color, line_width=line_width, dash=dash)
+    px, py = -uy, ux
+    hx = x2 - ux * head_len
+    hy = y2 - uy * head_len
+    pdf.polygon(
+        [(x2, y2), (hx + px * head_half_w, hy + py * head_half_w), (hx - px * head_half_w, hy - py * head_half_w)],
+        fill=color,
+    )
+
+
+def _draw_arch_card(
+    pdf: VectorPDFCanvas,
+    x: float,
+    y: float,
+    w: float,
+    h: float,
+    *,
+    header: str,
+    bullets: Sequence[str],
+    accent: RGB,
+    bg: RGB = (0.985, 0.989, 0.995),
+    header_size: float = 5.8,
+    body_size: float = 4.8,
+    line_step: float = 6.3,
+) -> None:
+    """Draw a clean titled module card with top accent header bar and concise technical bullets."""
+    hh = 11.2
+    pdf.rect(x, y, w, h, fill=bg, stroke=accent, line_width=0.75)
+    pdf.rect(x, y + h - hh, w, hh, fill=accent)
+    pdf.text(x + 0.5 * w, y + h - hh + 3.2, header, size=header_size, bold=True, rgb=(1.0, 1.0, 1.0), align="center")
+    ty = y + h - hh - 7.2
+    for b in bullets:
+        if ty < y + 2.2:
+            break
+        pdf.text(x + 3.4, ty, b, size=body_size, rgb=(0.12, 0.15, 0.20))
+        ty -= line_step
+
+
+def generate_fig_system_architecture(out_path: Path) -> None:
+    """System diagram: End-to-End Bi-Level TAMP + Dual-Mode Differentiable Cutting Architecture."""
+    pdf = VectorPDFCanvas(516.0, 214.0)
+
+    # Subtle outer frame
+    pdf.rect(2.0, 2.0, 512.0, 210.0, fill=(0.996, 0.997, 0.999), stroke=(0.80, 0.83, 0.88), line_width=0.5)
+
+    # Top stage headers across 5 pipeline columns
+    stages = [
+        (6.0, 82.0, "1. CAD & Shop Inputs", (0.27, 0.34, 0.44)),
+        (98.0, 94.0, "2. Setup & Feature Graph", (0.08, 0.43, 0.68)),
+        (202.0, 102.0, "3. Bi-Level TAMP & Physics", (0.04, 0.54, 0.44)),
+        (314.0, 114.0, "4. CAM Init, DiffSim & RL", (0.52, 0.27, 0.64)),
+        (438.0, 72.0, "5. Post & Audit", (0.76, 0.36, 0.08)),
+    ]
+    for sx, sw, slbl, scol in stages:
+        pdf.rect(sx, 198.0, sw, 11.5, fill=(0.93, 0.95, 0.98), stroke=scol, line_width=0.6)
+        pdf.text(sx + 0.5 * sw, 201.3, slbl, size=5.6, bold=True, rgb=scol, align="center")
+
+    # Column 1: Inputs & Shop Crib
+    _draw_arch_card(
+        pdf, 6.0, 127.0, 82.0, 67.0,
+        header="3D CAD Solid Input",
+        bullets=[
+            "- ISO 10303-21 .step B-Rep",
+            "- Watertight .stl Mesh",
+            "- Auto in / mm unit scale",
+            "- Cylindrical, conical,",
+            "  toroidal & B-spline faces",
+        ],
+        accent=(0.27, 0.34, 0.44),
+    )
+    _draw_arch_card(
+        pdf, 6.0, 50.0, 82.0, 71.0,
+        header="Shop Crib & Machine",
+        bullets=[
+            "- Alloy m_stock (6061, 7075,",
+            "  1018 Steel, Ti-6Al-4V)",
+            "- Crib C in T: 673 US/Metric",
+            "  tools & 72 holders",
+            "- User subset filter |C|",
+            "- P_max, RPM_max, a_max",
+        ],
+        accent=(0.33, 0.40, 0.50),
+    )
+
+    # Column 2: 6-Axis SO(3) Setup & B-Rep Feature Partition
+    _draw_arch_card(
+        pdf, 98.0, 125.0, 94.0, 69.0,
+        header="SO(3) Setup & Workholding",
+        bullets=[
+            "- Trimmed (u,v) loop mesh",
+            "- 6-cardinal R* in SO(3) score:",
+            "  open +Z area + datum - H_z",
+            "- Stock billet + facing margin",
+            "- Parallel vise jaws V_{-Y,+Y}",
+            "  & jaw Z-clearance clamp",
+        ],
+        accent=(0.08, 0.43, 0.68),
+    )
+    _draw_arch_card(
+        pdf, 98.0, 50.0, 94.0, 69.0,
+        header="Multi-Setup Feature Graph",
+        bullets=[
+            "- +Z raycast roof occlusion",
+            "- Op1 (G54) vs 180 deg flip",
+            "  Op2 (G55) carrier hat",
+            "- 2.5D pockets, bosses, ribs",
+            "- Coaxial holes, c-bores,",
+            "  c-sinks, threads, 3D splines",
+        ],
+        accent=(0.11, 0.49, 0.75),
+    )
+
+    # Column 3: TAMP Discrete Sequencer & Clean-Room Feeds/Speeds
+    _draw_arch_card(
+        pdf, 202.0, 118.0, 102.0, 76.0,
+        header="TAMP Tool-Crib DAG Search",
+        bullets=[
+            "- Admissibility: D <= w_min,",
+            "  L_stick >= dZ + d_holder",
+            "- 10-stage DAG: Probe->Face->",
+            "  Rough->Rest->3D Ball->Bore",
+            "  ->Spot->G83->Chamf->Thread",
+            "- Min J_task = Sum V_o/MRR_o",
+            "  + (|U(S)| - 1) * t_ATC (6s)",
+            "- Helical/pilot crib fallbacks",
+        ],
+        accent=(0.04, 0.54, 0.44),
+        line_step=6.05,
+    )
+    _draw_arch_card(
+        pdf, 202.0, 50.0, 102.0, 62.0,
+        header="feeds_and_speeds Physics",
+        bullets=[
+            "- Closed-form RPM, f_base, h_opt",
+            "- 6 simultaneous caps: f_max,",
+            "  power k_p*a_p*a_e*f <= P_max,",
+            "  spindle/core torque, F_max,",
+            "  deflection F*L^3/(3EI)<=d_max",
+        ],
+        accent=(0.06, 0.60, 0.49),
+        line_step=6.15,
+    )
+
+    # Column 4: CAM Seed + Dual-Mode Differentiable Sim + RL Overfitting
+    _draw_arch_card(
+        pdf, 314.0, 146.0, 114.0, 48.0,
+        header="Clean-Room CAM Seeds & Spline",
+        bullets=[
+            "- EDT Marching-Sq 2.5D/Rest, Trochoid",
+            "- Inverse-offset z_CL 3D Ball Scallop",
+            "- Helical Bore, G83 Peck, Thread Mill",
+            "- Wall-pinned p_xy = p0 + r_i tanh(u_i)",
+        ],
+        accent=(0.52, 0.27, 0.64),
+        line_step=6.1,
+    )
+    _draw_arch_card(
+        pdf, 314.0, 92.0, 114.0, 49.0,
+        header="Dual Differentiable Cutting Sim",
+        bullets=[
+            "- 3D Swept-SDF + STE (k: 25 -> 90)",
+            "- 2.5D Chronological Dexel CWE:",
+            "  h_ex = (f_k/f_tooth)*psi(a_e/D)",
+            "- Exact G187 junction grad dT/df_k",
+        ],
+        accent=(0.44, 0.22, 0.58),
+        line_step=6.1,
+    )
+    _draw_arch_card(
+        pdf, 314.0, 50.0, 114.0, 37.0,
+        header="RL Warm-Start & Test Overfit",
+        bullets=[
+            "- DiffPolicy-SHAC pi_psi (<3.5 ms)",
+            "- + K STE-Adam trajectory steps",
+            "- Stock-verified G0 air shortcuts",
+        ],
+        accent=(0.36, 0.30, 0.66),
+        line_step=6.0,
+    )
+
+    # Column 5: 6-Dialect Post & Verification
+    _draw_arch_card(
+        pdf, 438.0, 124.0, 72.0, 70.0,
+        header="6-Dialect NC Post",
+        bullets=[
+            "- Haas NGC, RS274,",
+            "  FANUC, Robodrill,",
+            "  Makino, Mazak",
+            "- T99 WIPS Probe",
+            "- G54 -> M00 Flip",
+            "  -> G55 + G43 Hn",
+        ],
+        accent=(0.76, 0.36, 0.08),
+    )
+    _draw_arch_card(
+        pdf, 438.0, 50.0, 72.0, 68.0,
+        header="Audit & WebGL Sim",
+        bullets=[
+            "- 0.00 mm3 gouge",
+            "- Vise, holder &",
+            "  rapid checks",
+            "- CAMotics v1.2 STL",
+            "- 3-Pane Tool-Lib",
+            "  WebGL + G-code",
+        ],
+        accent=(0.82, 0.43, 0.10),
+    )
+
+    # Inter-column forward dataflow & gradient arrows
+    _draw_arrow(pdf, 88.0, 160.0, 98.0, 160.0, color=(0.18, 0.28, 0.42), line_width=1.1)
+    _draw_arrow(pdf, 145.0, 125.0, 145.0, 119.0, color=(0.08, 0.43, 0.68), line_width=1.0)
+    _draw_arrow(pdf, 88.0, 84.0, 98.0, 84.0, color=(0.25, 0.32, 0.42), line_width=0.95)
+    _draw_arrow(pdf, 192.0, 95.0, 202.0, 140.0, color=(0.06, 0.46, 0.52), line_width=1.05)
+    _draw_arrow(pdf, 192.0, 155.0, 202.0, 155.0, color=(0.06, 0.46, 0.52), line_width=1.05)
+    # Orthogonal Shop Crib/Alloy -> feeds_and_speeds & TAMP channel (routed cleanly below Col 2)
+    pdf.polyline(
+        [(88.0, 58.0), (93.0, 58.0), (93.0, 45.8), (197.0, 45.8), (197.0, 68.0)],
+        stroke=(0.28, 0.36, 0.46),
+        line_width=0.9,
+        dash=(2.2, 1.5),
+    )
+    _draw_arrow(pdf, 196.5, 68.0, 202.0, 68.0, color=(0.28, 0.36, 0.46), line_width=0.95)
+    _draw_arrow(pdf, 253.0, 112.0, 253.0, 118.0, color=(0.04, 0.54, 0.44), line_width=1.0)
+    _draw_arrow(pdf, 304.0, 162.0, 314.0, 168.0, color=(0.24, 0.36, 0.54), line_width=1.1)
+    _draw_arrow(pdf, 304.0, 82.0, 314.0, 114.0, color=(0.06, 0.52, 0.46), line_width=1.05)
+
+    # Bidirectional coupling inside Column 4 (CAM Seed <-> DiffSim <-> RL/Overfit)
+    _draw_arrow(pdf, 350.0, 146.0, 350.0, 141.0, color=(0.44, 0.22, 0.58), line_width=1.0)
+    _draw_arrow(pdf, 382.0, 141.0, 382.0, 146.0, color=(0.78, 0.22, 0.34), line_width=1.0)
+    pdf.text(387.0, 141.8, "dL/dtheta", size=4.4, bold=True, rgb=(0.74, 0.16, 0.28))
+    _draw_arrow(pdf, 350.0, 92.0, 350.0, 87.0, color=(0.36, 0.30, 0.66), line_width=1.0)
+    _draw_arrow(pdf, 382.0, 87.0, 382.0, 92.0, color=(0.78, 0.22, 0.34), line_width=1.0)
+    pdf.text(387.0, 87.8, "theta_0", size=4.3, bold=True, rgb=(0.36, 0.30, 0.66))
+
+    # Col 4 -> Col 5 (optimized trajectory -> Post & Sim)
+    _draw_arrow(pdf, 428.0, 164.0, 438.0, 164.0, color=(0.64, 0.30, 0.16), line_width=1.1)
+    _draw_arrow(pdf, 428.0, 116.0, 438.0, 142.0, color=(0.64, 0.30, 0.16), line_width=1.05)
+    _draw_arrow(pdf, 428.0, 72.0, 438.0, 92.0, color=(0.64, 0.30, 0.16), line_width=1.05)
+    _draw_arrow(pdf, 474.0, 124.0, 474.0, 118.0, color=(0.76, 0.36, 0.08), line_width=1.0)
+
+    # Bottom Persistent-IPW & Multi-Setup Closed-Loop Ribbon
+    pdf.rect(98.0, 6.5, 412.0, 34.0, fill=(0.93, 0.965, 0.955), stroke=(0.04, 0.52, 0.42), line_width=0.8)
+    pdf.text(
+        304.0, 30.3,
+        "Chronological Persistent In-Process Workpiece (IPW) & Multi-Setup State Feedback (o = 1 ... O)",
+        size=5.6, bold=True, rgb=(0.03, 0.38, 0.30), align="center",
+    )
+    pdf.text(
+        304.0, 20.7,
+        "z_IPW^(o+1)(x, y) <- z_final^(o)(x, y)   |   Propagates Op1 (G54) carved dexel stock -> 180 deg Soft-Jaw Flip (M00) -> Op2 (G55) carrier-hat facing,",
+        size=4.75, rgb=(0.10, 0.22, 0.20), align="center",
+    )
+    pdf.text(
+        304.0, 12.1,
+        "enabling downstream rest-milling, 3D ball-scallop surfacing, and hole/thread tools to shortcut cleared air (dV_k = 0) & regulate exact CWE chipload.",
+        size=4.75, rgb=(0.10, 0.22, 0.20), align="center",
+    )
+    _draw_arrow(pdf, 412.0, 50.0, 412.0, 40.5, color=(0.04, 0.52, 0.42), line_width=1.1)
+    pdf.text(416.0, 43.2, "z_final", size=4.3, bold=True, rgb=(0.03, 0.40, 0.32))
+    _draw_arrow(pdf, 253.0, 40.5, 253.0, 50.0, color=(0.04, 0.52, 0.42), line_width=1.1)
+    _draw_arrow(pdf, 334.0, 40.5, 334.0, 50.0, color=(0.04, 0.52, 0.42), line_width=1.1)
+    pdf.text(338.0, 43.2, "z_IPW", size=4.3, bold=True, rgb=(0.03, 0.40, 0.32))
+
+    pdf.write(out_path)
+
+
+def generate_fig7_exp7_titan_step(
+    rdir: Path,
+    titan_eval: Dict[str, Any],
+    out_path: Path,
+) -> None:
+    """Fig 7 (Exp7): Arbitrary ISO 10303-21 STEP Benchmark across 10 TITAN Building-Block Parts."""
+    pdf = VectorPDFCanvas(512.0, 190.0)
+
+    # Panel (a): Left 2x2 showcase of 4x-MSAA Carved Stock STLs from complex STEP parts
+    pdf.text(
+        106.0, 178.0,
+        "(a) Automated ISO 10303-21 .step -> Carved Stock",
+        size=7.1, bold=True, align="center",
+    )
+    showcase = [
+        ("titan-m3", "TITAN-3M (G54, 9T)", "#10-24 Thread + Ribs (-36%)"),
+        ("titan-m4", "TITAN-4M (G54+G55, 8T)", "Op2 Soft-Jaw Flip (-42%)"),
+        ("titan-m9", "TITAN-9M (G54, 9T)", "3D B-Spline Dome (-54%)"),
+        ("titan-m10", "TITAN-10M (G54+G55, 11T)", "3D Airfoil + 11 Thr (-34%)"),
+    ]
+    tile_w, tile_h = 96.0, 74.0
+    for idx_s, (pid, top_lbl, sub_lbl) in enumerate(showcase):
+        col_i = idx_s % 2
+        row_i = idx_s // 2
+        tx = 8.0 + col_i * (tile_w + 6.0)
+        ty = 97.0 - row_i * (tile_h + 7.0)
+        bg_c = (0.978, 0.982, 0.990)
+        pdf.rect(tx, ty, tile_w, tile_h, fill=bg_c, stroke=(0.34, 0.38, 0.45), line_width=0.55)
+        mesh_p = rdir / "simulator_viewer" / "meshes" / f"{pid}_chipload_ste_stock.stl"
+        if not mesh_p.is_file():
+            mesh_p = rdir / "simulator_viewer" / "meshes" / f"{pid}_target.stl"
+        if mesh_p.is_file():
+            iso_img = _render_stl_isometric_rgb(mesh_p, width_px=240, height_px=150, bg_rgb=bg_c)
+            pdf.draw_rgb_image(iso_img, tx + 1.5, ty + 15.5, tile_w - 3.0, tile_h - 17.0)
+        pdf.rect(tx + 1.0, ty + 1.0, tile_w - 2.0, 13.8, fill=(0.91, 0.945, 0.985))
+        pdf.text(tx + 0.5 * tile_w, ty + 8.6, top_lbl, size=4.85, bold=True, rgb=(0.06, 0.22, 0.42), align="center")
+        pdf.text(tx + 0.5 * tile_w, ty + 2.8, sub_lbl, size=4.5, rgb=(0.14, 0.34, 0.24), align="center")
+
+    pdf.text(
+        106.0, 6.5,
+        "All 10/10 STEP parts: 0.000 mm3 gouge | 0 vise/holder/rapid collisions",
+        size=5.2, bold=True, rgb=(0.04, 0.44, 0.26), align="center",
+    )
+
+    # Panel (b): Right 10-part grouped bar chart across TITAN-1M .. TITAN-10M
+    ax_b = (244.0, 40.0, 260.0, 128.0)
+    parts = titan_eval.get("parts", [])
+    n_p = max(1, len(parts))
+    ymax_b = 5200.0
+    short_ticks: List[Tuple[float, str]] = []
+    for i, p in enumerate(parts):
+        tag = f"M{i + 1}"
+        if p.get("has_op2_flip"):
+            tag += "*"
+        if "3D B-spline" in p.get("features_summary", ""):
+            tag += "+"
+        short_ticks.append((float(i), tag))
+
+    _draw_axes(
+        pdf,
+        *ax_b,
+        xticks=short_ticks,
+        yticks=[(v, f"{int(v)}s") for v in (0, 1000, 2000, 3000, 4000, 5000)],
+        xmin=-0.55,
+        xmax=n_p - 0.45,
+        ymin=0.0,
+        ymax=ymax_b,
+        title="(b) 10-Part TITAN STEP Cycle Time: Naive vs. Same-Speed vs. Opt-Chipload",
+        xlabel="TITAN Aerospace Building-Block STEP Part (* = G54+G55 Flip, + = 3D Ball Scallop)",
+        ylabel="Total Multi-Tool Cycle Time (s)",
+    )
+
+    span_x = (n_p - 0.45) - (-0.55)
+    bw = 5.5
+    for i, p in enumerate(parts):
+        gx = ax_b[0] + ax_b[2] * (i - (-0.55)) / span_x
+        t_naive = float(p["naive_total_time_s"])
+        t_same = float(p["same_speed_total_time_s"])
+        t_opt = float(p["opt_chipload_total_time_s"])
+        gain_opt = float(p["opt_chipload_gain_pct"])
+        ntools = int(p["unique_tools_used"])
+
+        bars = [
+            (t_naive, (0.58, 0.63, 0.70)),
+            (t_same, (0.18, 0.66, 0.52)),
+            (t_opt, (0.03, 0.45, 0.78)),
+        ]
+        max_h = 0.0
+        for b_j, (val_s, col_b) in enumerate(bars):
+            bx = gx + (b_j - 1.5) * (bw + 0.7) + 0.35
+            bh = max(1.0, ax_b[3] * min(val_s, ymax_b) / ymax_b)
+            max_h = max(max_h, bh)
+            pdf.rect(bx, ax_b[1], bw, bh, fill=col_b, stroke=(0.18, 0.20, 0.24), line_width=0.25)
+
+        pdf.text(
+            gx,
+            ax_b[1] + max_h + 2.5,
+            f"-{gain_opt:.0f}%",
+            size=4.7,
+            bold=True,
+            rgb=(0.02, 0.34, 0.64),
+            align="center",
+        )
+        pdf.text(
+            gx,
+            ax_b[1] + max_h + 7.9,
+            f"{ntools}T",
+            size=4.2,
+            rgb=(0.30, 0.34, 0.40),
+            align="center",
+        )
+
+    # Summary callout box inside upper-left of Panel (b) (over low M1..M6 bars)
+    mean_same = float(titan_eval.get("mean_same_speed_gain_pct", 36.3))
+    mean_opt = float(titan_eval.get("mean_opt_chipload_gain_pct", 41.6))
+    pdf.rect(250.0, 134.0, 146.0, 29.0, fill=(0.94, 0.97, 1.00), stroke=(0.16, 0.42, 0.68), line_width=0.55)
+    pdf.text(323.0, 155.2, f"Mean Same-Speed Gain: -{mean_same:.1f}%", size=5.1, bold=True, rgb=(0.08, 0.44, 0.34), align="center")
+    pdf.text(323.0, 146.8, f"Mean Opt-Chipload Gain: -{mean_opt:.1f}%", size=5.2, bold=True, rgb=(0.02, 0.34, 0.64), align="center")
+    pdf.text(323.0, 138.4, "Mean 7.8 Tools / 8.8 Ops | 60/60 6-Dialect NC", size=4.65, rgb=(0.20, 0.24, 0.30), align="center")
+
+    # Legend strip at bottom right
+    leg_items = [
+        ((0.58, 0.63, 0.70), "Naive CAM"),
+        ((0.18, 0.66, 0.52), "Fair Same-Speed"),
+        ((0.03, 0.45, 0.78), "Opt-Chipload DiffCAM"),
+    ]
+    lx_cur = 252.0
+    for lc, llbl in leg_items:
+        pdf.rect(lx_cur, 6.2, 6.8, 4.6, fill=lc, stroke=(0.2, 0.2, 0.2), line_width=0.25)
+        pdf.text(lx_cur + 9.0, 6.5, llbl, size=5.2, bold=True)
+        lx_cur += 82.0
+
+    pdf.write(out_path)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     default_rdir = PROJECT_ROOT / "runs" / "pub-v2-20261110"
@@ -1553,12 +1976,14 @@ def main() -> None:
     out_dir = args.out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    f_arch = out_dir / "fig_system_architecture.pdf"
     f1 = out_dir / "fig1_hero_camotics.pdf"
     f2 = out_dir / "fig2_exp1_conditioning.pdf"
     f3 = out_dir / "fig3_exp2_convergence.pdf"
     f4 = out_dir / "fig4_exp3_transfer_ablations.pdf"
-    generated = [f1, f2, f3, f4]
+    generated = [f_arch, f1, f2, f3, f4]
 
+    generate_fig_system_architecture(f_arch)
     generate_fig1_hero(rdir, exp2_main, exp4, f1)
     generate_fig2_exp1(exp1, f2)
     generate_fig3_exp2_convergence(exp2_main, f3)
@@ -1584,6 +2009,16 @@ def main() -> None:
             f6,
         )
         generated.append(f6)
+
+    titan_p = rdir / "titan_example_parts_eval.json"
+    if titan_p.is_file():
+        f7 = out_dir / "fig7_exp7_titan_step.pdf"
+        generate_fig7_exp7_titan_step(
+            rdir,
+            json.loads(titan_p.read_text(encoding="utf-8")),
+            f7,
+        )
+        generated.append(f7)
 
     if args.mirror_dir:
         mdir = args.mirror_dir.resolve()
