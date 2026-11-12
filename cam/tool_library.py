@@ -26,8 +26,9 @@ cleanly to millimetres for :class:`benchmarks.contracts.ToolAssembly`.
 
 from __future__ import annotations
 
+import math
 from dataclasses import asdict, dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from benchmarks import contracts as C
 from cam.feeds_and_speeds import (
@@ -38,6 +39,40 @@ from cam.feeds_and_speeds import (
     compute_feeds_and_speeds,
     compute_holemaking_feeds_and_speeds,
 )
+
+_DEFAULT_UNIT_SENTINEL = "__PREFERRED__"
+
+_NON_3AXIS_MILL_ENTITY_TYPES = frozenset(
+    {
+        "turning general",
+        "turning boring",
+        "turning grooving",
+        "turning threading",
+        "laser cutter",
+        "plasma cutter",
+        "waterjet",
+        "electric arc wire",
+        "laser powder",
+        "laser wire",
+    }
+)
+
+
+def normalize_unit_system(unit_system: Optional[str]) -> Optional[str]:
+    """Normalize a user/API unit-system filter to ``'millimeters'``, ``'inches'``, or ``None`` (both)."""
+    if unit_system is None:
+        return None
+    cleaned = str(unit_system).strip().lower()
+    if cleaned in ("", "both", "all", "any", "*"):
+        return None
+    if cleaned in ("millimeters", "millimeter", "millimetres", "millimetre", "metric", "mm", "iso"):
+        return "millimeters"
+    if cleaned in ("inches", "inch", "us", "imperial", "in", "ansi", "sae"):
+        return "inches"
+    raise ValueError(
+        f"Unsupported unit_system {unit_system!r}; expected 'millimeters'/'metric'/'mm', "
+        "'inches'/'us'/'imperial'/'in', or None/'both'/'all'"
+    )
 
 
 @dataclass(frozen=True)
@@ -332,6 +367,9 @@ def _build_milling_tools(default_holder_mm: str, default_holder_in: str) -> List
     for etype, diams, fl, fl_len, stk, shk, ang, rc, rpm in specialty_mm:
         slug = etype.replace(" ", "_")
         for d in diams:
+            mm_pitch = 0.0
+            if etype == "thread mill":
+                mm_pitch = 1.0 if d <= 5.0 else (1.25 if d <= 6.5 else 1.5)
             tools.append(
                 CatalogToolRecord(
                     tool_id=f"mill_mm_{slug}_{str(d).replace('.', 'p')}",
@@ -343,17 +381,51 @@ def _build_milling_tools(default_holder_mm: str, default_holder_in: str) -> List
                     diameter_mm=d,
                     corner_radius_mm=rc,
                     tip_angle_deg=ang,
-                    pitch_mm=1.25 if etype == "thread mill" else 0.0,
+                    pitch_mm=mm_pitch,
                     flutes=fl,
                     flute_length_mm=fl_len,
                     stickout_mm=stk,
-                    shank_diameter_mm=shk,
+                    shank_diameter_mm=_std_shank_mm(d) if etype in ("chamfer mill", "counter sink") else shk,
                     overall_length_mm=stk + 30.0,
                     helix_deg=25.0,
                     max_rpm=rpm,
                     holder_id=default_holder_mm,
                 )
             )
+
+    # ISO Metric Fine/Coarse Thread Mills (M3..M12 internal cutter series)
+    iso_thread_mills = [
+        ("m3x0p5", "M3x0.5", 2.35, 0.50, 7.5, 18.0, 4.0),
+        ("m4x0p7", "M4x0.7", 3.10, 0.70, 10.0, 20.0, 6.0),
+        ("m5x0p8", "M5x0.8", 3.90, 0.80, 12.0, 22.0, 6.0),
+        ("m6x1p0", "M6x1.0", 4.80, 1.00, 14.0, 24.0, 6.0),
+        ("m8x1p25", "M8x1.25", 6.30, 1.25, 18.0, 28.0, 8.0),
+        ("m10x1p5", "M10x1.5", 7.90, 1.50, 22.0, 32.0, 8.0),
+        ("m12x1p75", "M12x1.75", 9.50, 1.75, 26.0, 36.0, 10.0),
+    ]
+    for slug_tm, lbl_tm, d_tm, pitch_tm, fl_tm, stk_tm, shk_tm in iso_thread_mills:
+        tools.append(
+            CatalogToolRecord(
+                tool_id=f"mill_mm_thread_{slug_tm}",
+                library_group="Milling Tools (Metric)",
+                entity_type="thread mill",
+                unit_system="millimeters",
+                nominal_label=f"{lbl_tm} (Ø{d_tm:g} mm Cutter) Carbide Thread Mill",
+                tool_material_id="carbide_coated",
+                diameter_mm=d_tm,
+                corner_radius_mm=0.0,
+                tip_angle_deg=60.0,
+                pitch_mm=pitch_tm,
+                flutes=3,
+                flute_length_mm=fl_tm,
+                stickout_mm=stk_tm,
+                shank_diameter_mm=shk_tm,
+                overall_length_mm=stk_tm + 30.0,
+                helix_deg=25.0,
+                max_rpm=16000.0,
+                holder_id=default_holder_mm,
+            )
+        )
 
     # Inch Milling Tools
     in_sizes = [
@@ -371,7 +443,8 @@ def _build_milling_tools(default_holder_mm: str, default_holder_in: str) -> List
     for frac_lbl, d_in in in_sizes:
         d_mm = round(d_in * INCH_MM, 4)
         sh_mm = _std_shank_in_mm(d_in)
-        fl_mm = round(max(0.125, 2.25 * d_in) * INCH_MM, 3)
+        min_loc_in = 0.375 if d_in >= 0.125 else 0.1875
+        fl_mm = round(max(min_loc_in, 2.25 * d_in) * INCH_MM, 3)
         stk_mm = round(fl_mm + max(2.5, 0.4 * d_mm), 3)
         fslug = frac_lbl.replace("/", "_")
         for etype, rc_mm, fl_cnt in (
@@ -419,28 +492,100 @@ def _build_milling_tools(default_holder_mm: str, default_holder_in: str) -> List
         slug = etype.replace(" ", "_")
         for lbl, d_in in items:
             d_mm = round(d_in * INCH_MM, 4)
+            sh_eff = _std_shank_in_mm(d_in) if etype in ("chamfer mill", "counter sink") else shk
+            rc_eff = 0.7938 if etype == "face mill" else 0.0
+            if etype == "counter sink":
+                nom_lbl = f'{lbl}" 82° ANSI Counter Sink'
+            elif etype == "chamfer mill":
+                nom_lbl = f'{lbl}" 90° Chamfer Mill'
+            else:
+                nom_lbl = f'{lbl}" {etype.title()}'
             tools.append(
                 CatalogToolRecord(
                     tool_id=f"mill_in_{slug}_{lbl.replace('/', '_').replace('.', 'p')}",
                     library_group="Milling Tools (Inch)",
                     entity_type=etype,
                     unit_system="inches",
-                    nominal_label=f'{lbl}" {etype.title()}',
+                    nominal_label=nom_lbl,
                     tool_material_id="carbide_coated",
                     diameter_mm=d_mm,
-                    corner_radius_mm=0.0,
+                    corner_radius_mm=rc_eff,
                     tip_angle_deg=ang,
                     pitch_mm=1.27 if etype == "thread mill" else 0.0,
                     flutes=fl,
                     flute_length_mm=fl_len,
                     stickout_mm=stk,
-                    shank_diameter_mm=shk,
+                    shank_diameter_mm=sh_eff,
                     overall_length_mm=stk + 28.0,
                     helix_deg=30.0,
-                    max_rpm=16000.0,
+                    max_rpm=16000.0 if etype != "face mill" else 10000.0,
                     holder_id=default_holder_in,
                 )
             )
+
+    # Additional 90° US Inch Counter Sinks (alongside 82° ANSI flat-head series above)
+    for lbl_cs, d_cs_in in (("1/4", 0.25), ("3/8", 0.375), ("1/2", 0.50)):
+        d_cs_mm = round(d_cs_in * INCH_MM, 4)
+        tools.append(
+            CatalogToolRecord(
+                tool_id=f"mill_in_counter_sink_{lbl_cs.replace('/', '_')}_90deg",
+                library_group="Milling Tools (Inch)",
+                entity_type="counter sink",
+                unit_system="inches",
+                nominal_label=f'{lbl_cs}" 90° Counter Sink',
+                tool_material_id="carbide_coated",
+                diameter_mm=d_cs_mm,
+                corner_radius_mm=0.0,
+                tip_angle_deg=90.0,
+                pitch_mm=0.0,
+                flutes=3,
+                flute_length_mm=6.35,
+                stickout_mm=22.0,
+                shank_diameter_mm=_std_shank_in_mm(d_cs_in),
+                overall_length_mm=50.0,
+                helix_deg=25.0,
+                max_rpm=12000.0,
+                holder_id=default_holder_in,
+            )
+        )
+
+    # Dedicated US UN/UNC/UNF Solid-Carbide Internal Thread Mills
+    un_thread_mills = [
+        ("8_32", '#8-32 (0.120" Cutter, 24-32 TPI)', 0.120, 32, 0.35, 0.1875),
+        ("10_24", '#10-24 (0.138" Cutter, 24 TPI)', 0.138, 24, 0.40, 0.1875),
+        ("10_32", '#10-32 (0.138" Cutter, 32 TPI)', 0.138, 32, 0.40, 0.1875),
+        ("1_4_20", '1/4-20 (0.180" Cutter, 20 TPI)', 0.180, 20, 0.55, 0.2500),
+        ("1_4_28", '1/4-28 (0.190" Cutter, 28 TPI)', 0.190, 28, 0.55, 0.2500),
+        ("5_16_18", '5/16-18 (0.235" Cutter, 18 TPI)', 0.235, 18, 0.65, 0.2500),
+        ("3_8_16", '3/8-16 (0.290" Cutter, 16 TPI)', 0.290, 16, 0.75, 0.3125),
+        ("1_2_13", '1/2-13 (0.375" Cutter, 13 TPI)', 0.375, 13, 1.00, 0.3750),
+    ]
+    for slug_un, desc_un, cut_in, tpi_un, loc_in, shk_in in un_thread_mills:
+        d_cut_mm = round(cut_in * INCH_MM, 4)
+        fl_un_mm = round(loc_in * INCH_MM, 3)
+        stk_un_mm = round(fl_un_mm + 8.0, 3)
+        tools.append(
+            CatalogToolRecord(
+                tool_id=f"mill_in_thread_{slug_un}",
+                library_group="Milling Tools (Inch)",
+                entity_type="thread mill",
+                unit_system="inches",
+                nominal_label=f"{desc_un} Carbide Thread Mill",
+                tool_material_id="carbide_coated",
+                diameter_mm=d_cut_mm,
+                corner_radius_mm=0.0,
+                tip_angle_deg=60.0,
+                pitch_mm=round(INCH_MM / tpi_un, 5),
+                flutes=3,
+                flute_length_mm=fl_un_mm,
+                stickout_mm=stk_un_mm,
+                shank_diameter_mm=_std_shank_in_mm(shk_in),
+                overall_length_mm=round(stk_un_mm + 28.0, 2),
+                helix_deg=25.0,
+                max_rpm=16000.0,
+                holder_id=default_holder_in,
+            )
+        )
     return tools
 
 
@@ -583,19 +728,22 @@ def _build_holemaking_tools(default_holder_mm: str, default_holder_in: str) -> L
             )
         )
 
-    # 4. ANSI Fractional (1/64" .. 3/4" in 1/64" steps = 48) + Number (#1..#60) + Letter (A..Z) Twist Drills (134) = 182 inch drills
+    # 4. ANSI Fractional (1/64" .. 3/4" in 1/64" steps = 46) + Number (#1..#60) + Letter (A..Z) Twist Drills
     for n64 in range(3, 49):
         d_in = n64 / 64.0
         d_mm = round(d_in * INCH_MM, 4)
         fl_len = round(max(8.0, 4.5 * d_mm), 2)
         stk = round(fl_len + 5.0, 2)
+        g_frac = math.gcd(n64, 64)
+        num_r, den_r = n64 // g_frac, 64 // g_frac
+        frac_str = f"{num_r}" if den_r == 1 else f"{num_r}/{den_r}"
         tools.append(
             CatalogToolRecord(
                 tool_id=f"hole_in_drill_{n64}_64",
                 library_group="Hole Making Tools (Inch)",
                 entity_type="drill",
                 unit_system="inches",
-                nominal_label=f'{n64}/64" ({d_in:.4f}") Carbide Twist Drill',
+                nominal_label=f'{frac_str}" ({d_in:.4f}") Carbide Twist Drill',
                 tool_material_id="carbide_coated",
                 diameter_mm=d_mm,
                 corner_radius_mm=0.0,
@@ -644,6 +792,35 @@ def _build_holemaking_tools(default_holder_mm: str, default_holder_in: str) -> L
                 overall_length_mm=round(stk + 26.0, 2),
                 helix_deg=28.0,
                 max_rpm=15000.0,
+                holder_id=default_holder_in,
+            )
+        )
+
+    # High-performance Solid-Carbide ANSI Wire Drills for standard UN tap/clearance bores
+    for gauge_num in (3, 7, 19, 21, 25, 29, 36, 43):
+        d_in = ansi_wire_in[gauge_num - 1]
+        d_mm = round(d_in * INCH_MM, 4)
+        fl_len = round(max(8.0, 4.5 * d_mm), 2)
+        stk = round(fl_len + 5.0, 2)
+        tools.append(
+            CatalogToolRecord(
+                tool_id=f"hole_in_drill_carbide_num_{gauge_num:02d}",
+                library_group="Hole Making Tools (Inch)",
+                entity_type="drill",
+                unit_system="inches",
+                nominal_label=f'#{gauge_num} ({d_in:.4f}") Solid Carbide Twist Drill',
+                tool_material_id="carbide_coated",
+                diameter_mm=d_mm,
+                corner_radius_mm=0.0,
+                tip_angle_deg=140.0,
+                pitch_mm=0.0,
+                flutes=2,
+                flute_length_mm=fl_len,
+                stickout_mm=stk,
+                shank_diameter_mm=_std_shank_in_mm(d_in),
+                overall_length_mm=round(stk + 28.0, 2),
+                helix_deg=30.0,
+                max_rpm=18000.0,
                 holder_id=default_holder_in,
             )
         )
@@ -882,7 +1059,7 @@ def _build_auxiliary_libraries(default_holder_mm: str, default_holder_in: str) -
             )
         )
 
-    # Probes (6 ruby styli)
+    # Probes (6 metric ruby styli + US inch T99 spindle probe)
     for styl_d in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0):
         aux.append(
             CatalogToolRecord(
@@ -906,6 +1083,28 @@ def _build_auxiliary_libraries(default_holder_mm: str, default_holder_in: str) -
                 holder_id=default_holder_mm,
             )
         )
+    aux.append(
+        CatalogToolRecord(
+            tool_id="probe_in_ruby_0p157",
+            library_group="Probes",
+            entity_type="probe",
+            unit_system="inches",
+            nominal_label='Ø0.1575" (4 mm) Ruby Spindle Touch Probe (T99)',
+            tool_material_id="carbide_uncoated",
+            diameter_mm=4.0,
+            corner_radius_mm=2.0,
+            tip_angle_deg=180.0,
+            pitch_mm=0.0,
+            flutes=1,
+            flute_length_mm=4.0,
+            stickout_mm=50.8,
+            shank_diameter_mm=round(0.375 * INCH_MM, 4),
+            overall_length_mm=88.9,
+            helix_deg=0.0,
+            max_rpm=0.0,
+            holder_id=default_holder_in,
+        )
+    )
 
     # Turning (Metric & Inch)
     for unit, grp in (("millimeters", "Turning Tools (Metric)"), ("inches", "Turning Tools (Inch)")):
@@ -984,6 +1183,142 @@ def _build_auxiliary_libraries(default_holder_mm: str, default_holder_in: str) -
     return aux
 
 
+def _infer_viewer_profile_3d(entity_type: str) -> str:
+    """Classify 3D WebGL visual cutter geometry profile from ``entity_type``."""
+    if entity_type in ("ball end mill", "lollipop mill"):
+        return "ball"
+    if entity_type in ("bull nose end mill", "radius mill", "form mill"):
+        return "bull_nose"
+    if entity_type in ("chamfer mill", "counter sink", "spot drill", "center drill", "tapered mill"):
+        return "chamfer_conical"
+    if entity_type == "drill":
+        return "drill_point"
+    if entity_type == "face mill":
+        return "face_mill"
+    if entity_type in ("thread mill", "tap right hand"):
+        return "thread_cutter"
+    if entity_type == "probe":
+        return "probe_stylus"
+    return "flat"
+
+
+def tool_record_to_viewer_dict(
+    tool: CatalogToolRecord,
+    holder: Optional[HolderSpec] = None,
+    tool_number: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Serialize a ``CatalogToolRecord`` + ``HolderSpec`` into a rich 3D WebGL viewer dictionary."""
+    t_num = int(tool_number) if tool_number is not None else (99 if tool.entity_type == "probe" else 1)
+    asm = tool.to_tool_assembly(tool_number=t_num, holder=holder)
+    is_3axis = tool.entity_type not in _NON_3AXIS_MILL_ENTITY_TYPES
+    return {
+        "tool_id": tool.tool_id,
+        "tool_number": t_num,
+        "library_group": tool.library_group,
+        "entity_type": tool.entity_type,
+        "cutter_kind": asm.cutter_kind.value,
+        "profile_3d": _infer_viewer_profile_3d(tool.entity_type),
+        "is_3axis_mill_compatible": is_3axis,
+        "unit_system": tool.unit_system,
+        "nominal_label": tool.nominal_label,
+        "tool_material_id": tool.tool_material_id,
+        "diameter_mm": round(float(tool.diameter_mm), 5),
+        "diameter_in": round(float(tool.diameter_mm / INCH_MM), 5),
+        "cutter_radius_mm": float(asm.cutter_radius_mm),
+        "corner_radius_mm": round(float(tool.corner_radius_mm), 5),
+        "tip_angle_deg": round(float(tool.tip_angle_deg), 2),
+        "pitch_mm": round(float(tool.pitch_mm), 5),
+        "tpi": round(float(INCH_MM / tool.pitch_mm), 2) if tool.pitch_mm > 1e-6 else None,
+        "flutes": int(tool.flutes),
+        "flute_length_mm": float(asm.flute_length_mm),
+        "stickout_mm": round(float(tool.stickout_mm), 4),
+        "overall_length_mm": round(float(tool.overall_length_mm), 4),
+        "shank_diameter_mm": round(float(tool.shank_diameter_mm), 5),
+        "shank_radius_mm": float(asm.shank_radius_mm),
+        "helix_deg": round(float(tool.helix_deg), 2),
+        "max_rpm": round(float(tool.max_rpm), 1),
+        "holder_id": holder.holder_id if holder is not None else tool.holder_id,
+        "holder_taper": holder.taper if holder is not None else None,
+        "holder_collet_system": holder.collet_system if holder is not None else None,
+        "holder_description": holder.description if holder is not None else None,
+        "holder_gauge_length_mm": round(float(holder.gauge_length_mm), 4) if holder is not None else None,
+        "holder_radius_mm": float(asm.holder_radius_mm),
+        "holder_bottom_mm": float(asm.holder_bottom_mm),
+        "holder_height_mm": float(asm.holder_height_mm),
+    }
+
+
+_STARTER_CRIB_PRESETS: Tuple[Tuple[str, str, str, str, Tuple[str, ...]], ...] = (
+    (
+        "us_haas_10t",
+        'US Haas Mini Mill Crib (12 Tools, Inch)',
+        "inches",
+        'Shop-ready US Imperial Haas Mini Mill magazine: 2" Face Mill, 1/2"-1/8" Flat End Mills, '
+        '1/4" Ball Mill, 3/8" 90° Chamfer & Spot, #21/#7/1/4" Carbide Drills, and 1/4-20 Thread Mill.',
+        (
+            "mill_in_face_mill_2",
+            "mill_in_flat_1_2",
+            "mill_in_flat_3_8",
+            "mill_in_flat_1_4",
+            "mill_in_flat_1_8",
+            "mill_in_ball_1_4",
+            "mill_in_chamfer_mill_3_8",
+            "hole_in_spot_3_8_90deg",
+            "hole_in_drill_carbide_num_21",
+            "hole_in_drill_carbide_num_07",
+            "hole_in_drill_16_64",
+            "mill_in_thread_1_4_20",
+        ),
+    ),
+    (
+        "metric_haas_10t",
+        "Metric Haas Mini Mill Crib (13 Tools, mm)",
+        "millimeters",
+        "Shop-ready ISO Metric Haas Mini Mill magazine: Ø50 Face Mill, Ø12/Ø10/Ø6/Ø3 Flat End Mills, "
+        "Ø6 Ball Mill, Ø10 90° Chamfer/Spot, Ø3.3/Ø4.2/Ø5.0/Ø6.8/Ø8.0 Carbide Drills, and Ø6 Thread Mill.",
+        (
+            "mill_mm_face_mill_50p0",
+            "mill_mm_flat_12p0",
+            "mill_mm_flat_10p0",
+            "mill_mm_flat_6p0",
+            "mill_mm_flat_3p0",
+            "mill_mm_ball_6p0",
+            "mill_mm_chamfer_mill_10p0",
+            "hole_mm_drill_3p3",
+            "hole_mm_drill_4p2",
+            "hole_mm_drill_5p0",
+            "hole_mm_drill_6p8",
+            "hole_mm_drill_8p0",
+            "mill_mm_thread_mill_6p0",
+        ),
+    ),
+    (
+        "us_minimal_4t",
+        'US Minimal 4-Tool Crib (Inch)',
+        "inches",
+        'Compact 4-tool US shop crib: 3/8" Flat, 3/16" Flat, 1/4" Ball, and 3/8" 90° Spot/Chamfer.',
+        (
+            "mill_in_flat_3_8",
+            "mill_in_flat_3_16",
+            "mill_in_ball_1_4",
+            "hole_in_spot_3_8_90deg",
+        ),
+    ),
+    (
+        "metric_minimal_4t",
+        "Metric Minimal 4-Tool Crib (mm)",
+        "millimeters",
+        "Compact 4-tool ISO Metric shop crib: Ø10 Flat, Ø4 Flat, Ø6 Ball, and Ø8 90° Spot/Chamfer.",
+        (
+            "mill_mm_flat_10p0",
+            "mill_mm_flat_4p0",
+            "mill_mm_ball_6p0",
+            "hole_mm_spot_8mm_90deg",
+        ),
+    ),
+)
+
+
 class StandardToolLibrary:
     """Queryable clean-room MIT tool, holder, and feeds-and-speeds preset catalog."""
 
@@ -999,6 +1334,83 @@ class StandardToolLibrary:
         self.tools.extend(_build_holemaking_tools(default_mm, default_in))
         self.tools.extend(_build_auxiliary_libraries(default_mm, default_in))
         self.tool_by_id: Dict[str, CatalogToolRecord] = {t.tool_id: t for t in self.tools}
+        self.preferred_unit_system: Optional[str] = "millimeters"
+        self.active_unit_filter: Optional[str] = None
+        self.has_custom_crib: bool = False
+
+    @classmethod
+    def _from_records(
+        cls,
+        holders: Sequence[HolderSpec],
+        tools: Sequence[CatalogToolRecord],
+        *,
+        preferred_unit_system: Optional[str] = None,
+        active_unit_filter: Optional[str] = None,
+        has_custom_crib: bool = False,
+    ) -> "StandardToolLibrary":
+        inst = cls.__new__(cls)
+        inst.holders = list(holders)
+        inst.holder_by_id = {h.holder_id: h for h in inst.holders}
+        inst.tools = list(tools)
+        inst.tool_by_id = {t.tool_id: t for t in inst.tools}
+        inst.preferred_unit_system = preferred_unit_system
+        inst.active_unit_filter = active_unit_filter
+        inst.has_custom_crib = has_custom_crib
+        return inst
+
+    def _resolve_unit_system(self, unit_system: Optional[str]) -> Optional[str]:
+        if unit_system == _DEFAULT_UNIT_SENTINEL:
+            return self.preferred_unit_system
+        return normalize_unit_system(unit_system)
+
+    def subset(
+        self,
+        *,
+        unit_system: Optional[str] = None,
+        allowed_tool_ids: Optional[Sequence[str]] = None,
+    ) -> "StandardToolLibrary":
+        """Construct a fast filtered view restricted by ``unit_system`` and/or ``allowed_tool_ids``."""
+        norm_unit = normalize_unit_system(unit_system)
+        has_crib = allowed_tool_ids is not None
+
+        if allowed_tool_ids is not None:
+            allowed_set = set(allowed_tool_ids)
+            sub_tools = [
+                t
+                for t in self.tools
+                if t.tool_id in allowed_set and (norm_unit is None or t.unit_system == norm_unit)
+            ]
+            # Always retain spindle touch probe(s) so WIPS G54/G55 probing remains available
+            if not any(t.entity_type == "probe" for t in sub_tools):
+                probes = [
+                    t
+                    for t in self.tools
+                    if t.entity_type == "probe" and (norm_unit is None or t.unit_system == norm_unit)
+                ]
+                if not probes:
+                    probes = [t for t in self.tools if t.entity_type == "probe"]
+                sub_tools.extend(probes)
+        elif norm_unit is not None:
+            sub_tools = [t for t in self.tools if t.unit_system == norm_unit]
+        else:
+            sub_tools = list(self.tools)
+
+        if norm_unit is not None:
+            sub_holders = [h for h in self.holders if h.unit_system == norm_unit]
+            if not sub_holders:
+                sub_holders = list(self.holders)
+        else:
+            sub_holders = list(self.holders)
+
+        # Preferred unit: explicit norm_unit if given, else None when "both" or custom crib is passed
+        pref_unit: Optional[str] = norm_unit
+        return StandardToolLibrary._from_records(
+            holders=sub_holders,
+            tools=sub_tools,
+            preferred_unit_system=pref_unit,
+            active_unit_filter=norm_unit,
+            has_custom_crib=has_crib,
+        )
 
     @property
     def total_record_count(self) -> int:
@@ -1040,8 +1452,22 @@ class StandardToolLibrary:
             and h.max_shank_mm + 1e-6 >= tool.shank_diameter_mm
         ]
         if not candidates:
+            candidates = [
+                h
+                for h in self.holders
+                if h.collet_system != "Blank" and h.max_shank_mm + 1e-6 >= tool.shank_diameter_mm
+            ]
+        if not candidates:
             candidates = [h for h in self.holders if h.collet_system != "Blank"]
-        candidates.sort(key=lambda h: (abs(h.gauge_length_mm - max(45.0, min_reach_mm)), h.body_radius_mm))
+        if not candidates:
+            candidates = list(self.holders)
+        candidates.sort(
+            key=lambda h: (
+                0 if h.unit_system == tool.unit_system else 1,
+                abs(h.gauge_length_mm - max(45.0, min_reach_mm)),
+                h.body_radius_mm,
+            )
+        )
         return candidates[0]
 
     def query_endmills(
@@ -1050,54 +1476,90 @@ class StandardToolLibrary:
         min_diameter_mm: float = 1.0,
         max_diameter_mm: float = 20.0,
         min_flute_length_mm: float = 1.0,
-        unit_system: Optional[str] = "millimeters",
+        unit_system: Optional[str] = _DEFAULT_UNIT_SENTINEL,
         entity_type: str = "flat end mill",
     ) -> List[CatalogToolRecord]:
-        out = [
-            t
-            for t in self.tools
-            if t.entity_type == entity_type
-            and t.library_group.startswith("Milling Tools")
-            and min_diameter_mm - 1e-6 <= t.diameter_mm <= max_diameter_mm + 1e-6
-            and t.flute_length_mm + 1e-6 >= min_flute_length_mm
-            and (unit_system is None or t.unit_system == unit_system)
-        ]
+        eff_unit = self._resolve_unit_system(unit_system)
+
+        def _filter(u: Optional[str]) -> List[CatalogToolRecord]:
+            return [
+                t
+                for t in self.tools
+                if t.entity_type == entity_type
+                and t.library_group.startswith("Milling Tools")
+                and min_diameter_mm - 1e-6 <= t.diameter_mm <= max_diameter_mm + 1e-6
+                and t.flute_length_mm + 1e-6 >= min_flute_length_mm
+                and (u is None or t.unit_system == u)
+            ]
+
+        out = _filter(eff_unit)
+        if not out and unit_system == _DEFAULT_UNIT_SENTINEL and self.has_custom_crib and eff_unit is not None:
+            out = _filter(None)
         out.sort(key=lambda t: t.diameter_mm)
         return out
 
     def query_face_mills_or_large_endmills(
         self,
         *,
-        max_diameter_mm: float = 50.0,
-        unit_system: Optional[str] = "millimeters",
+        max_diameter_mm: float = 51.0,
+        unit_system: Optional[str] = _DEFAULT_UNIT_SENTINEL,
     ) -> List[CatalogToolRecord]:
-        face = [
-            t
-            for t in self.tools
-            if t.entity_type in ("face mill", "flat end mill")
-            and t.library_group.startswith("Milling Tools")
-            and t.diameter_mm <= max_diameter_mm + 1e-6
-            and (unit_system is None or t.unit_system == unit_system)
-        ]
+        eff_unit = self._resolve_unit_system(unit_system)
+
+        def _filter(u: Optional[str]) -> List[CatalogToolRecord]:
+            return [
+                t
+                for t in self.tools
+                if t.entity_type in ("face mill", "flat end mill")
+                and t.library_group.startswith("Milling Tools")
+                and t.diameter_mm <= max_diameter_mm + 1e-6
+                and (u is None or t.unit_system == u)
+            ]
+
+        face = _filter(eff_unit)
+        if not face and unit_system == _DEFAULT_UNIT_SENTINEL and self.has_custom_crib and eff_unit is not None:
+            face = _filter(None)
         face.sort(key=lambda t: t.diameter_mm, reverse=True)
         return face
 
     def match_spot_drill(
         self,
         hole_diameter_mm: float,
-        unit_system: Optional[str] = "millimeters",
+        unit_system: Optional[str] = _DEFAULT_UNIT_SENTINEL,
     ) -> CatalogToolRecord:
+        eff_unit = self._resolve_unit_system(unit_system)
+        min_d = min(12.0, max(4.0, hole_diameter_mm * 0.9))
         spots = [
             t
             for t in self.tools
             if t.entity_type == "spot drill"
-            and t.tip_angle_deg == 90.0
-            and t.diameter_mm >= min(12.0, max(4.0, hole_diameter_mm * 0.9))
-            and (unit_system is None or t.unit_system == unit_system)
+            and abs(t.tip_angle_deg - 90.0) <= 1.0
+            and t.diameter_mm + 1e-6 >= min_d
+            and (eff_unit is None or t.unit_system == eff_unit)
         ]
+        if not spots and eff_unit is not None:
+            spots = [
+                t
+                for t in self.tools
+                if t.entity_type == "spot drill"
+                and abs(t.tip_angle_deg - 90.0) <= 1.0
+                and (eff_unit is None or t.unit_system == eff_unit)
+            ]
         if not spots:
             spots = [t for t in self.tools if t.entity_type == "spot drill"]
-        spots.sort(key=lambda t: t.diameter_mm)
+        if not spots:
+            # Fallback to 90° chamfer mill / countersink / center drill in restricted user cribs
+            spots = [
+                t
+                for t in self.tools
+                if t.entity_type in ("chamfer mill", "counter sink", "center drill")
+                and (eff_unit is None or t.unit_system == eff_unit)
+            ]
+        if not spots:
+            spots = [
+                t for t in self.tools if t.entity_type in ("chamfer mill", "counter sink", "center drill")
+            ]
+        spots.sort(key=lambda t: (abs(t.tip_angle_deg - 90.0), t.diameter_mm))
         return spots[0]
 
     def match_drill(
@@ -1105,25 +1567,294 @@ class StandardToolLibrary:
         hole_diameter_mm: float,
         hole_depth_mm: float,
         tol_mm: float = 0.06,
+        unit_system: Optional[str] = _DEFAULT_UNIT_SENTINEL,
     ) -> Optional[CatalogToolRecord]:
         """Find the highest-performance carbide/cobalt twist drill matching ``hole_diameter_mm``."""
+        explicit_unit = None if unit_system == _DEFAULT_UNIT_SENTINEL else normalize_unit_system(unit_system)
+        pref_unit = self.preferred_unit_system
+
         matches = [
             t
             for t in self.tools
             if t.entity_type == "drill"
             and abs(t.diameter_mm - hole_diameter_mm) <= tol_mm
             and t.flute_length_mm + 1e-6 >= hole_depth_mm
+            and (explicit_unit is None or t.unit_system == explicit_unit)
         ]
         if not matches:
             return None
-        # Prefer coated carbide over cobalt HSS, and exact diameter match
+        # Prefer coated carbide over cobalt HSS, exact diameter match, and preferred unit system on ties
         matches.sort(
             key=lambda t: (
                 0 if t.tool_material_id == "carbide_coated" else 1,
-                abs(t.diameter_mm - hole_diameter_mm),
+                round(abs(t.diameter_mm - hole_diameter_mm), 4),
+                0 if (pref_unit is None or t.unit_system == pref_unit) else 1,
             )
         )
         return matches[0]
+
+    def match_ball_endmill(
+        self,
+        target_diameter_mm: float,
+        min_flute_length_mm: float = 1.0,
+        unit_system: Optional[str] = _DEFAULT_UNIT_SENTINEL,
+    ) -> Optional[CatalogToolRecord]:
+        """Match the closest rigid ball-nose end mill for 3D surfacing / fillets."""
+        eff_unit = self._resolve_unit_system(unit_system)
+
+        def _candidates(u: Optional[str], req_flute: float) -> List[CatalogToolRecord]:
+            return [
+                t
+                for t in self.tools
+                if t.entity_type == "ball end mill"
+                and t.flute_length_mm + 1e-6 >= req_flute
+                and (u is None or t.unit_system == u)
+            ]
+
+        cands = _candidates(eff_unit, min_flute_length_mm)
+        if not cands and unit_system == _DEFAULT_UNIT_SENTINEL and self.has_custom_crib and eff_unit is not None:
+            cands = _candidates(None, min_flute_length_mm)
+        if not cands:
+            cands = _candidates(eff_unit, 0.0) or (_candidates(None, 0.0) if self.has_custom_crib else [])
+        if not cands:
+            return None
+
+        cands.sort(
+            key=lambda t: (
+                0 if t.diameter_mm <= target_diameter_mm + 0.5 else 1,
+                abs(t.diameter_mm - target_diameter_mm),
+            )
+        )
+        return cands[0]
+
+    def match_chamfer_or_countersink(
+        self,
+        min_diameter_mm: float = 4.0,
+        tip_angle_deg: float = 90.0,
+        unit_system: Optional[str] = _DEFAULT_UNIT_SENTINEL,
+    ) -> Optional[CatalogToolRecord]:
+        """Match a chamfer mill or countersink, falling back to a spot drill with matching tip angle."""
+        eff_unit = self._resolve_unit_system(unit_system)
+
+        def _search(
+            etypes: Tuple[str, ...],
+            u: Optional[str],
+            req_d: float,
+            ang_tol: float,
+        ) -> List[CatalogToolRecord]:
+            return [
+                t
+                for t in self.tools
+                if t.entity_type in etypes
+                and t.diameter_mm + 1e-6 >= req_d
+                and abs(t.tip_angle_deg - tip_angle_deg) <= ang_tol
+                and (u is None or t.unit_system == u)
+            ]
+
+        primary_types = ("chamfer mill", "counter sink")
+        hits = _search(primary_types, eff_unit, min_diameter_mm, 2.0)
+        if not hits and unit_system == _DEFAULT_UNIT_SENTINEL and self.has_custom_crib and eff_unit is not None:
+            hits = _search(primary_types, None, min_diameter_mm, 2.0)
+        if not hits:
+            hits = _search(primary_types, eff_unit, 0.0, 2.0)
+            if not hits and unit_system == _DEFAULT_UNIT_SENTINEL and self.has_custom_crib and eff_unit is not None:
+                hits = _search(primary_types, None, 0.0, 2.0)
+        if hits:
+            hits.sort(
+                key=lambda t: (
+                    0 if t.entity_type == "chamfer mill" else 1,
+                    abs(t.tip_angle_deg - tip_angle_deg),
+                    t.diameter_mm if t.diameter_mm >= min_diameter_mm else (1000.0 - t.diameter_mm),
+                )
+            )
+            return hits[0]
+
+        # Fallback: spot drill with matching tip_angle_deg (e.g. 90° spot/chamfer in minimal cribs)
+        spot_hits = _search(("spot drill",), eff_unit, min_diameter_mm, 2.0)
+        if not spot_hits:
+            spot_hits = _search(("spot drill",), eff_unit, 0.0, 2.0)
+        if not spot_hits and unit_system == _DEFAULT_UNIT_SENTINEL and self.has_custom_crib and eff_unit is not None:
+            spot_hits = _search(("spot drill",), None, 0.0, 2.0)
+        if spot_hits:
+            spot_hits.sort(
+                key=lambda t: (
+                    0 if t.diameter_mm + 1e-6 >= min_diameter_mm else 1,
+                    abs(t.tip_angle_deg - tip_angle_deg),
+                    t.diameter_mm,
+                )
+            )
+            return spot_hits[0]
+
+        return None
+
+    def match_thread_mill_or_tap(
+        self,
+        major_diameter_mm: float,
+        pitch_mm: float,
+        unit_system: Optional[str] = _DEFAULT_UNIT_SENTINEL,
+    ) -> Optional[CatalogToolRecord]:
+        """Match a helical internal thread mill (preferred) or right-hand tap for ``(major_diameter_mm, pitch_mm)``."""
+        eff_unit = self._resolve_unit_system(unit_system)
+        minor_bore_est = major_diameter_mm - 0.70 * pitch_mm
+
+        def _find_for_unit(u: Optional[str]) -> Optional[CatalogToolRecord]:
+            # 1. Physically fitting internal thread mill (cutter fits inside minor tap-drill bore)
+            tm_cands = [
+                t
+                for t in self.tools
+                if t.entity_type == "thread mill"
+                and (u is None or t.unit_system == u)
+                and 0.35 * major_diameter_mm <= t.diameter_mm <= minor_bore_est + 1e-6
+                and (t.pitch_mm <= 0.0 or t.pitch_mm <= pitch_mm + 0.35)
+            ]
+            if tm_cands:
+                tm_cands.sort(
+                    key=lambda t: (
+                        0 if abs(t.pitch_mm - pitch_mm) <= 0.08 else 1,
+                        abs(t.pitch_mm - pitch_mm),
+                        abs((major_diameter_mm - pitch_mm) - t.diameter_mm),
+                    )
+                )
+                return tm_cands[0]
+
+            # 2. Exact major-diameter & pitch right-hand tap
+            tap_cands = [
+                t
+                for t in self.tools
+                if t.entity_type == "tap right hand"
+                and (u is None or t.unit_system == u)
+                and abs(t.diameter_mm - major_diameter_mm) <= 0.18
+                and abs(t.pitch_mm - pitch_mm) <= 0.08
+            ]
+            if tap_cands:
+                tap_cands.sort(
+                    key=lambda t: (
+                        0 if "spiral_flute" in t.tool_id else 1,
+                        abs(t.diameter_mm - major_diameter_mm) + abs(t.pitch_mm - pitch_mm),
+                    )
+                )
+                return tap_cands[0]
+
+            # 3. Nominal-diameter thread mill fallback for cribs indexed by nominal thread size
+            nom_tm = [
+                t
+                for t in self.tools
+                if t.entity_type == "thread mill"
+                and (u is None or t.unit_system == u)
+                and abs(t.diameter_mm - major_diameter_mm) <= 0.25
+            ]
+            if nom_tm:
+                nom_tm.sort(key=lambda t: (abs(t.pitch_mm - pitch_mm), abs(t.diameter_mm - major_diameter_mm)))
+                return nom_tm[0]
+
+            return None
+
+        res = _find_for_unit(eff_unit)
+        if res is None and unit_system == _DEFAULT_UNIT_SENTINEL and eff_unit is not None:
+            res = _find_for_unit(None)
+        return res
+
+    def match_closest_available_drill_or_mill(
+        self,
+        hole_diameter_mm: float,
+        hole_depth_mm: float,
+    ) -> Tuple[Optional[CatalogToolRecord], str]:
+        """Match an exact twist drill, or fall back to helical endmill boring or largest pilot drill."""
+        exact = self.match_drill(hole_diameter_mm, hole_depth_mm, tol_mm=0.12)
+        if exact is not None:
+            return exact, "drill"
+
+        # Helical interpolation with an available flat end mill (diameter <= hole_diameter_mm - 0.3)
+        max_mill_d = hole_diameter_mm - 0.3
+        if max_mill_d >= 1.0:
+            mill_cands = [
+                t
+                for t in self.tools
+                if t.entity_type == "flat end mill"
+                and t.library_group.startswith("Milling Tools")
+                and t.diameter_mm <= max_mill_d + 1e-6
+                and t.flute_length_mm + 1e-6 >= hole_depth_mm
+                and (self.preferred_unit_system is None or t.unit_system == self.preferred_unit_system)
+            ]
+            if not mill_cands and self.has_custom_crib:
+                mill_cands = [
+                    t
+                    for t in self.tools
+                    if t.entity_type == "flat end mill"
+                    and t.diameter_mm <= max_mill_d + 1e-6
+                    and max(t.flute_length_mm, t.stickout_mm) + 1e-6 >= hole_depth_mm
+                ]
+            if mill_cands:
+                # Prefer largest stiff end mill <= max_mill_d (up to ~0.85 * hole_diameter_mm for chip evacuation)
+                ideal_mill_d = min(max_mill_d, 0.78 * hole_diameter_mm)
+                mill_cands.sort(
+                    key=lambda t: (
+                        0 if t.diameter_mm >= 0.40 * hole_diameter_mm else 1,
+                        abs(t.diameter_mm - ideal_mill_d),
+                        -t.diameter_mm,
+                    )
+                )
+                return mill_cands[0], "helical_bore"
+
+        # Largest available twist drill <= hole_diameter_mm
+        pilot_drills = [
+            t
+            for t in self.tools
+            if t.entity_type == "drill"
+            and t.diameter_mm <= hole_diameter_mm + 1e-6
+            and t.flute_length_mm + 1e-6 >= hole_depth_mm
+            and (self.preferred_unit_system is None or t.unit_system == self.preferred_unit_system)
+        ]
+        if not pilot_drills:
+            pilot_drills = [
+                t
+                for t in self.tools
+                if t.entity_type == "drill" and t.diameter_mm <= hole_diameter_mm + 1e-6
+            ]
+        if pilot_drills:
+            pilot_drills.sort(
+                key=lambda t: (
+                    round(hole_diameter_mm - t.diameter_mm, 4),
+                    0 if t.tool_material_id == "carbide_coated" else 1,
+                )
+            )
+            return pilot_drills[0], "pilot_drill"
+
+        return None, "none"
+
+    def get_starter_cribs(self) -> Dict[str, Dict[str, Any]]:
+        """Return curated Metric and US Imperial CNC shop starter tool cribs verified against ``self.tool_by_id``."""
+        cribs: Dict[str, Dict[str, Any]] = {}
+        for crib_id, label, unit_sys, desc, raw_ids in _STARTER_CRIB_PRESETS:
+            valid_ids = [tid for tid in raw_ids if tid in self.tool_by_id]
+            cribs[crib_id] = {
+                "id": crib_id,
+                "label": label,
+                "unit_system": unit_sys,
+                "description": desc,
+                "tool_count": len(valid_ids),
+                "tool_ids": valid_ids,
+            }
+        return cribs
+
+    def export_viewer_catalog(self) -> Dict[str, Any]:
+        """Export JSON-serializable tool/holder/crib catalog for the 3D WebGL UI and TAMP planner."""
+        return {
+            "schema": "diffcam-viewer-tool-catalog/1",
+            "license": "MIT",
+            "preferred_unit_system": self.preferred_unit_system,
+            "summary": self.summary(),
+            "starter_cribs": self.get_starter_cribs(),
+            "holders": {h.holder_id: asdict(h) for h in self.holders},
+            "tools": [
+                tool_record_to_viewer_dict(
+                    t,
+                    holder=self.holder_by_id.get(t.holder_id or ""),
+                    tool_number=99 if t.entity_type == "probe" else None,
+                )
+                for t in self.tools
+            ],
+        }
 
     def compute_tool_preset(
         self,
@@ -1136,6 +1867,16 @@ class StandardToolLibrary:
         aggressiveness: float = 1.0,
     ) -> Dict[str, object]:
         """Compute clean-room ``feeds_and_speeds`` preset for ``(tool, material, op)``."""
+        if tool.entity_type == "probe":
+            return {
+                "stock_material_id": stock_material_id,
+                "tool_material_id": tool.tool_material_id,
+                "operation_kind": "probe",
+                "diameter_mm": tool.diameter_mm,
+                "spindle_rpm": 0.0,
+                "feed_mm_s": 25.0,
+                "feed_mm_min": 1500.0,
+            }
         if tool.entity_type in ("drill", "spot drill", "center drill", "reamer", "tap right hand"):
             res = compute_holemaking_feeds_and_speeds(
                 stock_material_id=stock_material_id,

@@ -19,9 +19,17 @@
 
     <div class="toolbar-controls">
       <label class="field-group" for="case-select">
-        <span class="field-label">Benchmark Part</span>
-        <select id="case-select" class="select-input" aria-label="Select benchmark part"></select>
+        <span class="field-label">Part / Benchmark Case</span>
+        <select id="case-select" class="select-input" aria-label="Select benchmark or uploaded part"></select>
       </label>
+
+      <div class="field-group" role="group" aria-label="CAD upload and machining planner">
+        <span class="field-label">Arbitrary CAD CAM</span>
+        <div class="segmented-group">
+          <button type="button" id="btn-open-upload" class="btn btn-primary">+ Upload / Machine CAD</button>
+          <button type="button" id="btn-replan-current" class="btn btn-accent hidden" title="Re-plan current part with selected Tool Crib and Machining Options">Re-Plan w/ Crib</button>
+        </div>
+      </div>
 
       <div class="field-group" role="group" aria-label="Viewport layout mode">
         <span class="field-label">Comparison View</span>
@@ -127,7 +135,7 @@
           <label class="toggle-pill"><input type="checkbox" id="chk-billet" checked="checked"> <span>Billet Box</span></label>
           <label class="toggle-pill"><input type="checkbox" id="chk-cuts" checked="checked"> <span>G1 Path</span></label>
           <label class="toggle-pill"><input type="checkbox" id="chk-rapids" checked="checked"> <span>G0 Rapids</span></label>
-          <label class="toggle-pill"><input type="checkbox" id="chk-tool" checked="checked"> <span>3D Endmill</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-tool" checked="checked"> <span>3D Tool &amp; Holder</span></label>
           <label class="toggle-pill"><input type="checkbox" id="chk-clip"> <span>Clip Path</span></label>
           <button type="button" id="cam-iso" class="btn btn-tiny">Iso</button>
           <button type="button" id="cam-top" class="btn btn-tiny">Top</button>
@@ -152,6 +160,8 @@
             <span class="dro-axis axis-z">Z</span><span id="dro-z" class="dro-val">6.000 mm</span>
           </div>
           <div class="dro-meta">
+            <div><span class="meta-k">Active Tool:</span> <span id="dro-tool" class="meta-v accent-mono">T1 · Ø5.0mm Flat</span></div>
+            <div><span class="meta-k">Setup / Line:</span> <span id="dro-setup-line" class="meta-v">G54 Op1 · N1</span></div>
             <div><span class="meta-k">Move:</span> <span id="dro-class" class="meta-v">Cutting</span></div>
             <div><span class="meta-k">Feed:</span> <span id="dro-feed" class="meta-v">0.0 mm/s (0 mm/min)</span></div>
             <div><span class="meta-k">Engagement:</span> <span id="dro-ae" class="meta-v">0.00 mm (0%D)</span></div>
@@ -209,23 +219,136 @@
         <div id="eng-legend-row" class="eng-legend-row"></div>
       </div>
 
-      <nav class="tab-nav" role="tablist" aria-label="Tabular results tabs">
-        <button type="button" class="tab-btn active" data-tab="chipload" role="tab" aria-selected="true">Live 3-Way &amp; Chipload</button>
-        <button type="button" class="tab-btn" data-tab="case" role="tab" aria-selected="false">Part (8 Methods)</button>
-        <button type="button" class="tab-btn" data-tab="exp2" role="tab" aria-selected="false">Table I (Exp2)</button>
-        <button type="button" class="tab-btn" data-tab="audit" role="tab" aria-selected="false">Transfer &amp; Posts</button>
+      <nav class="tab-nav" role="tablist" aria-label="Inspector, G-Code, Tool Crib, and Benchmark tabs">
+        <button type="button" class="tab-btn active" data-tab="chipload" role="tab" aria-selected="true">Live 3-Way</button>
+        <button type="button" class="tab-btn" data-tab="gcode" role="tab" aria-selected="false">G-Code</button>
+        <button type="button" class="tab-btn" data-tab="tools" role="tab" aria-selected="false">Tool Crib</button>
+        <button type="button" class="tab-btn" data-tab="case" role="tab" aria-selected="false">Part &amp; Ops</button>
+        <button type="button" class="tab-btn" data-tab="exp2" role="tab" aria-selected="false">Paper Tables</button>
       </nav>
 
       <div id="tab-content" class="tab-content"></div>
 
       <footer class="howto-box">
-        <div class="howto-title">Fair Speed vs. Feeds &amp; Speeds Optimal Chipload</div>
+        <div class="howto-title">Arbitrary STEP/STL CAM, Tool Crib &amp; Live G-Code</div>
         <p class="howto-text">
-          Defaults to <strong>Same Speed Across Methods</strong> so geometry &amp; air-cut shortcuts are compared at identical feedrate. Switch to <strong>Optimization Mode (Optimal Chipload)</strong>, adjust <strong>Aggressiveness</strong>, or pick <strong>Stock / Tool Material</strong> and click <strong>Side-by-Side</strong> to compare Naive CAM, RL (SHAC), and Direct DiffCAM live.
+          Click <strong>+ Upload / Machine CAD</strong> to plan `.step` or `.stl` parts (including <strong>Titan-M1..M10</strong>), inspect live synced CNC code under <strong>G-Code</strong>, or switch <strong>Metric / US</strong> and restrict available tools under <strong>Tool Crib</strong>.
         </p>
       </footer>
     </aside>
   </main>
+
+  <div id="upload-modal" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="upload-modal-title">
+    <div class="modal-card">
+      <div class="modal-header">
+        <div>
+          <h2 id="upload-modal-title" class="modal-title">Upload CAD Part &amp; Configure Automated Machining</h2>
+          <p class="modal-subtitle">Native ISO 10303-21 STEP (.step/.stp) &amp; STL B-Rep Feature Recognition + TAMP Tool Selection + Persistent-IPW DiffCAM</p>
+        </div>
+        <button type="button" id="btn-close-upload" class="btn btn-tiny" aria-label="Close machining setup dialog">&#10005;</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="source-mode-row" role="group" aria-label="CAD geometry source">
+          <button type="button" id="src-mode-upload" class="btn btn-active">Upload .STEP / .STP / .STL File</button>
+          <button type="button" id="src-mode-example" class="btn">Example Parts (Titan-M1 .. Titan-M10)</button>
+        </div>
+
+        <div id="src-upload-panel" class="source-box">
+          <label class="dropzone" for="cad-file-input">
+            <span class="dropzone-headline">Choose a `.step`, `.stp`, or `.stl` 3D Solid Part (&le; 15 MB)</span>
+            <span id="cad-file-summary" class="dropzone-sub">No file chosen yet — select any solid CAD model from disk</span>
+            <input type="file" id="cad-file-input" class="file-input-hidden" accept=".step,.stp,.stl">
+          </label>
+        </div>
+
+        <div id="src-example-panel" class="source-box hidden">
+          <label class="field-group" for="example-part-select">
+            <span class="field-label">Select Reference STEP Part (`example_parts/`)</span>
+            <select id="example-part-select" class="select-input"></select>
+          </label>
+        </div>
+
+        <div class="modal-grid">
+          <label class="field-group" for="mach-part-title">
+            <span class="field-label">Program / Part Title</span>
+            <input type="text" id="mach-part-title" class="text-input" maxlength="48" placeholder="Auto-filled from CAD filename">
+          </label>
+
+          <label class="field-group" for="mach-unit-system">
+            <span class="field-label">Tool Library System</span>
+            <select id="mach-unit-system" class="select-input select-highlight">
+              <option value="inches">US Imperial Tool Library (inch)</option>
+              <option value="millimeters">Metric Tool Library (mm)</option>
+              <option value="both">Combined Library (Metric + US)</option>
+            </select>
+          </label>
+
+          <label class="field-group" for="mach-crib-mode">
+            <span class="field-label">Available Tool Choices</span>
+            <select id="mach-crib-mode" class="select-input">
+              <option value="selected_crib">Limit to Checked Tools in My Tool Crib</option>
+              <option value="full_unit_library">Allow Full Selected Unit Library</option>
+            </select>
+          </label>
+
+          <label class="field-group" for="mach-setup-mode">
+            <span class="field-label">6-Axis Setup &amp; Workholding</span>
+            <select id="mach-setup-mode" class="select-input">
+              <option value="auto" selected="selected">Auto 6-Axis + Op1 (G54) / Op2 (G55 Flip)</option>
+              <option value="dual_op1_op2">Force Dual Setup (Op1 G54 + Op2 G55 Hat Flip)</option>
+              <option value="single_op1">Single Setup Only (Op1 G54 Vise)</option>
+            </select>
+          </label>
+
+          <label class="field-group" for="mach-stock-mat">
+            <span class="field-label">Workpiece Stock Alloy</span>
+            <select id="mach-stock-mat" class="select-input"></select>
+          </label>
+
+          <label class="field-group" for="mach-tool-mat">
+            <span class="field-label">Preferred Tool Substrate</span>
+            <select id="mach-tool-mat" class="select-input"></select>
+          </label>
+
+          <label class="field-group" for="mach-dialect">
+            <span class="field-label">CNC Controller Post Dialect</span>
+            <select id="mach-dialect" class="select-input">
+              <option value="haas_ngc" selected="selected">Haas Mini Mill NGC (G187 P2 E0.05)</option>
+              <option value="rs274">LinuxCNC / CAMotics RS-274 (G64 P0.05)</option>
+              <option value="fanuc">FANUC 31i-B (G05.1 Q1 AICC)</option>
+              <option value="robodrill">FANUC Robodrill High-Speed</option>
+              <option value="makino">Makino Pro6 (SGI.4)</option>
+              <option value="mazak">Mazak SmoothG (G61.1)</option>
+            </select>
+          </label>
+
+          <label class="field-group" for="mach-opt-iters">
+            <span class="field-label">DiffCAM Trajectory Optimization</span>
+            <select id="mach-opt-iters" class="select-input">
+              <option value="16">Fast Interactive (16 CWE steps/op)</option>
+              <option value="28" selected="selected">Balanced Shop Quality (28 CWE steps/op)</option>
+              <option value="45">Deep Per-Part Overfit (45 CWE steps/op)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="modal-checks-row">
+          <label class="toggle-pill"><input type="checkbox" id="chk-mach-probing"> <span>Haas WIPS Spindle Probing (`T99 G65 P9995`)</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-mach-chamfer" checked="checked"> <span>Auto Chamfer / Countersink Milling</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-mach-thread" checked="checked"> <span>Auto Helical Thread Milling</span></label>
+          <button type="button" id="btn-jump-crib" class="btn btn-tiny">Configure Tool Crib (<span id="modal-crib-count">0</span> selected) &rarr;</button>
+        </div>
+
+        <div id="mach-status-box" class="status-banner hidden" aria-live="polite"></div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" id="btn-cancel-upload" class="btn">Cancel</button>
+        <button type="button" id="btn-run-machining" class="btn btn-primary">Plan Tools &amp; Optimize Trajectories</button>
+      </div>
+    </div>
+  </div>
 
   <script src="/app.js" defer="defer"></script>
 </body>

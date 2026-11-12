@@ -813,3 +813,399 @@ body {
     min-height: 460px;
   }
 }
+
+/* --- Right-Side G-Code Inspector Tab --- */
+.gcode-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: 100%;
+  min-height: 300px;
+}
+
+.gcode-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.gcode-status-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 4px 7px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.2px;
+  color: var(--text-muted);
+}
+
+.gcode-viewport {
+  flex: 1;
+  min-height: 240px;
+  max-height: 440px;
+  overflow-y: auto;
+  background: #0a0e14;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.48;
+  padding: 4px 0;
+}
+
+.gcode-line {
+  display: grid;
+  grid-template-columns: 42px 1fr;
+  gap: 8px;
+  padding: 1px 8px 1px 4px;
+  cursor: pointer;
+  white-space: pre;
+  border-left: 3px solid transparent;
+}
+
+.gcode-line:hover {
+  background: rgba(57, 197, 207, 0.09);
+}
+
+.gcode-line-active {
+  background: rgba(63, 185, 80, 0.20);
+  border-left-color: var(--accent-bright);
+}
+
+.gcode-ln {
+  text-align: right;
+  color: #5b6777;
+  user-select: none;
+  font-size: 10px;
+}
+
+.gcode-code {
+  color: var(--text-main);
+  overflow-x: hidden;
+  text-overflow: ellipsis;
+}
+
+.gc-tok-comment { color: #7d8b99; font-style: italic; }
+.gc-tok-g { color: #79c0ff; font-weight: 700; }
+.gc-tok-m { color: #ff7b72; font-weight: 700; }
+.gc-tok-t { color: #ffd43b; font-weight: 700; }
+.gc-tok-f { color: #7ee787; font-weight: 600; }
+.gc-tok-coord { color: #e6edf3; }
+
+/* --- Right-Side Tool Crib (Metric / US & Available Tools) Tab --- */
+.crib-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.crib-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.crib-filter-row {
+  display: grid;
+  grid-template-columns: 1fr 125px;
+  gap: 6px;
+}
+
+.text-input {
+  background: var(--bg-elevated);
+  color: var(--text-main);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 5px 8px;
+  font-size: 11.5px;
+  font-family: var(--font-sans);
+  width: 100%;
+}
+
+.text-input:focus, .select-input:focus {
+  outline: none;
+  border-color: var(--cyan);
+}
+
+.crib-preset-row {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.crib-summary-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  background: rgba(57, 197, 207, 0.09);
+  border: 1px solid rgba(57, 197, 207, 0.35);
+  border-radius: 5px;
+  font-size: 10.8px;
+}
+
+.crib-list {
+  max-height: 330px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: #0c1118;
+  divide-y: 1px solid var(--border);
+}
+
+.crib-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid rgba(45, 56, 72, 0.65);
+  cursor: pointer;
+}
+
+.crib-item:hover {
+  background: var(--bg-hover);
+}
+
+.crib-item-checked {
+  background: rgba(46, 160, 67, 0.11);
+}
+
+.crib-item-left {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.crib-item-left input {
+  margin: 0;
+  accent-color: var(--accent-bright);
+}
+
+.crib-item-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-main);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crib-item-sub {
+  font-family: var(--font-mono);
+  font-size: 9.8px;
+  color: var(--text-muted);
+}
+
+.crib-badges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.crib-badge {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+}
+
+.crib-badge-us {
+  border-color: rgba(210, 153, 34, 0.5);
+  color: #ffd43b;
+}
+
+.crib-badge-mm {
+  border-color: rgba(57, 197, 207, 0.5);
+  color: #76e3ea;
+}
+
+/* --- Operation Sequence Chips in Part & Ops Tab --- */
+.op-chip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 10px;
+}
+
+.op-chip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg-elevated);
+  cursor: pointer;
+  font-size: 10.8px;
+}
+
+.op-chip:hover {
+  border-color: var(--cyan);
+  background: var(--bg-hover);
+}
+
+.op-chip-active {
+  border-color: var(--accent-bright);
+  background: rgba(63, 185, 80, 0.14);
+}
+
+/* --- CAD Upload & Machining Modal --- */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: rgba(5, 8, 13, 0.78);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  backdrop-filter: blur(4px);
+}
+
+.modal-card {
+  width: 100%;
+  max-width: 720px;
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.65);
+}
+
+.modal-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.modal-subtitle {
+  margin: 3px 0 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.modal-body {
+  padding: 14px 16px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.source-mode-row {
+  display: flex;
+  gap: 6px;
+}
+
+.source-box {
+  background: var(--bg-app);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+.dropzone {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 14px;
+  border: 1.5px dashed rgba(57, 197, 207, 0.55);
+  border-radius: 6px;
+  background: rgba(57, 197, 207, 0.05);
+  cursor: pointer;
+  text-align: center;
+}
+
+.dropzone:hover {
+  background: rgba(57, 197, 207, 0.11);
+}
+
+.dropzone-headline {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--cyan);
+}
+
+.dropzone-sub {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.file-input-hidden {
+  display: none;
+}
+
+.modal-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+}
+
+.modal-checks-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 4px;
+}
+
+.status-banner {
+  padding: 8px 11px;
+  border-radius: 5px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  border: 1px solid rgba(57, 197, 207, 0.5);
+  background: rgba(57, 197, 207, 0.12);
+  color: #76e3ea;
+}
+
+.status-banner-error {
+  border-color: var(--danger);
+  background: rgba(248, 81, 73, 0.15);
+  color: #ffa198;
+}
+
+.modal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-app);
+  border-radius: 0 0 8px 8px;
+}
