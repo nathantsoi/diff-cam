@@ -129,7 +129,10 @@ def main() -> int:
             }
         )
 
-        dialect_lines = {d: len(p["lines"]) for d, p in res.gcode_by_dialect.items()}
+        dialect_lines = {
+            d: int(p["line_count"]) if "line_count" in p else (len(p["lines"]) if "lines" in p else len(p.get("text", "").splitlines()))
+            for d, p in res.gcode_by_dialect.items()
+        }
         row = {
             "part_id": res.part_id,
             "filename": spec["filename"],

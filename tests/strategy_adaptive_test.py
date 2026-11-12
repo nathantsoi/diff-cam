@@ -259,6 +259,41 @@ def test_three_island_pocket_and_exact_stop_timing() -> None:
     assert ev.metrics["original_part_gouge_volume_mm3"].value == 0.0
 
 
+def test_adaptive_stay_down_linking_and_multidepth_stepdown() -> None:
+    """Verify stay-down 2D IPW routing minimizes Z-retracts and steps down axially without lifting."""
+    for bundle in _SUITE_BUNDLES:
+        plan = generate_adaptive_toolpath(bundle.task)
+        retracts = sum(1 for seg in plan.segments if seg.tag == "retract")
+        assert retracts <= 8, f"{bundle.case.case_id} had excessive Z-retracts: {retracts}"
+
+    # Deep 3-layer pocket with standing island: must step down axially per component stay-down
+    deep_task = _build_synthetic_slot_task(
+        slot_length_mm=28.0,
+        slot_width_mm=20.0,
+        slot_depth_mm=3.6,
+        cutter_radius_mm=2.5,
+        islands_mm=(((-3.5, -3.0, -3.6), (3.5, 3.0, 0.0)),),
+    )
+    cfg = AdaptiveConfig(max_doc_mm=1.25, nominal_feed_mm_s=6.0, return_feed_multiplier=2.2)
+    plan = generate_adaptive_toolpath(deep_task, config=cfg)
+    plan.validate_for_task(deep_task)
+
+    # Single connected component across 3 axial passes should only retract once at completion!
+    retracts = sum(1 for seg in plan.segments if seg.tag == "retract")
+    assert retracts <= 2, f"expected stay-down axial stepdowns inside single component, got {retracts} retracts"
+
+    nc_text = post_motion_plan(plan, deep_task, dialect=C.Dialect.HAAS)
+    ev = evaluate_posted_gcode(
+        deep_task,
+        nc_text.encode("utf-8"),
+        dialect=C.Dialect.HAAS,
+        settings=POSTED_SETTINGS,
+    )
+    assert ev.geometry_pass is True
+    assert ev.safety_pass is True
+    assert ev.metrics["original_part_gouge_volume_mm3"].value == 0.0
+
+
 def test_adaptive_config_validation() -> None:
     with pytest.raises(ValueError, match="optimal_load_fraction"):
         AdaptiveConfig(optimal_load_fraction=1.2)
@@ -266,3 +301,5 @@ def test_adaptive_config_validation() -> None:
         AdaptiveConfig(return_feed_multiplier=0.5)
     with pytest.raises(ValueError, match="ipw_pitch_mm"):
         AdaptiveConfig(ipw_pitch_mm=-0.1)
+    with pytest.raises(ValueError, match="max_doc_mm"):
+        AdaptiveConfig(max_doc_mm=0.0)

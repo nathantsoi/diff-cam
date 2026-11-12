@@ -54,6 +54,7 @@ class AdaptiveConfig:
     retract_feed_mm_s: float = 14.0
     chord_step_mm: float = 0.75
     simplify_tol_mm: float = 0.05
+    max_doc_mm: Optional[float] = None
 
     def __post_init__(self) -> None:
         if not (0.05 <= self.optimal_load_fraction <= 0.95):
@@ -70,6 +71,8 @@ class AdaptiveConfig:
             raise ValueError("chord_step_mm must be finite and > 0.05")
         if self.simplify_tol_mm <= 0.0 or not math.isfinite(self.simplify_tol_mm):
             raise ValueError("simplify_tol_mm must be finite and positive")
+        if self.max_doc_mm is not None and (self.max_doc_mm <= 0.0 or not math.isfinite(self.max_doc_mm)):
+            raise ValueError("max_doc_mm must be finite and positive")
         for name in ("nominal_feed_mm_s", "plunge_feed_mm_s", "retract_feed_mm_s"):
             val = getattr(self, name)
             if val <= 0.0 or not math.isfinite(val):
@@ -866,6 +869,9 @@ def _min_polyline_dist(a: Sequence[Point2D], b: Sequence[Point2D]) -> Tuple[floa
 # ---------------------------------------------------------------------------
 # Toolpath Builder with Engagement-Aware Safe Linking
 # ---------------------------------------------------------------------------
+_STRUCT_8 = np.ones((3, 3), dtype=np.int32)
+
+
 class _AdaptivePathBuilder:
     def __init__(
         self,
@@ -876,6 +882,7 @@ class _AdaptivePathBuilder:
         z_safe: float,
         pz0: float,
         stock_max_z: float,
+        d_wall_grid: Optional[np.ndarray] = None,
     ) -> None:
         self.task = task
         self.config = config
@@ -883,7 +890,9 @@ class _AdaptivePathBuilder:
         self.ipw = ipw
         self.z_safe = z_safe
         self.pz0 = pz0
+        self.cur_pass_z: float = pz0
         self.stock_max_z = stock_max_z
+        self.d_wall_grid = d_wall_grid
         self.r = float(task.tool.cutter_radius_mm)
         self.d = 2.0 * self.r
         self.ae_target = config.optimal_load_fraction * self.d
@@ -937,27 +946,73 @@ class _AdaptivePathBuilder:
                 stamp_ipw=False,
             )
 
+    def _emit_link_chord(
+        self,
+        target_xy: Point2D,
+        return_tag: str,
+    ) -> None:
+        cur_xy = (self.cur_xyz[0], self.cur_xyz[1])
+        seg_len = math.hypot(target_xy[0] - cur_xy[0], target_xy[1] - cur_xy[1])
+        if seg_len <= 1e-3:
+            return
+        eff_ae = self.ipw.sweep_segment(cur_xy, target_xy, self.r, mutate=False) / max(seg_len, 1e-6)
+        ret_ae_cap = min(0.08, 0.12 * self.ae_target)
+        if eff_ae <= ret_ae_cap:
+            self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.cur_pass_z), self.return_feed, return_tag)
+        else:
+            feed = (
+                self.cut_feed
+                if eff_ae <= 0.72 * self.d
+                else max(0.35 * self.cut_feed, self.cut_feed * (0.60 * self.d / max(eff_ae, 1e-6)))
+            )
+            self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.cur_pass_z), feed, "step_link")
+
     def helical_bore_entry(
         self,
         center: Point2D,
         r_bore: float,
         r_open: float,
         margin: float,
+        *,
+        z_target: Optional[float] = None,
+        stay_down_from_z: Optional[float] = None,
+        reset_ipw_to: Optional[np.ndarray] = None,
     ) -> None:
         """Enter at ``center`` via G1 discretized helical spiral bore + radial expansion."""
-        self.retract_to_safe()
+        z_cut = self.pz0 if z_target is None else float(z_target)
         cx, cy = center
         eff_bore = max(0.0, r_bore)
         start_xy = (cx + eff_bore, cy)
 
-        self._emit(C.SegmentKind.RAPID, (start_xy[0], start_xy[1], self.z_safe), None, "approach", stamp_ipw=False)
-        z_top = min(self.z_safe, self.stock_max_z + 0.5)
-        if z_top < self.z_safe - 1e-4:
-            self._emit(C.SegmentKind.FEED, (start_xy[0], start_xy[1], z_top), self.retract_feed, "approach_z", stamp_ipw=False)
+        can_stay_down = (
+            stay_down_from_z is not None
+            and abs(self.cur_xyz[2] - stay_down_from_z) <= 1e-4
+        )
+        if can_stay_down:
+            assert stay_down_from_z is not None
+            self.cur_pass_z = float(stay_down_from_z)
+            self.link_to(start_xy, margin=margin, allow_cut_step=False, return_tag="peel_ret")
+            if abs(self.cur_xyz[2] - stay_down_from_z) <= 1e-4 and math.hypot(
+                self.cur_xyz[0] - start_xy[0], self.cur_xyz[1] - start_xy[1]
+            ) <= 2e-3:
+                z_top = float(stay_down_from_z)
+            else:
+                can_stay_down = False
+
+        if not can_stay_down:
+            self.retract_to_safe()
+            self._emit(C.SegmentKind.RAPID, (start_xy[0], start_xy[1], self.z_safe), None, "approach", stamp_ipw=False)
+            z_top = min(self.z_safe, self.stock_max_z + 0.5)
+            if z_top < self.z_safe - 1e-4:
+                self._emit(C.SegmentKind.FEED, (start_xy[0], start_xy[1], z_top), self.retract_feed, "approach_z", stamp_ipw=False)
+
+        if reset_ipw_to is not None:
+            self.ipw.remaining[:, :] = reset_ipw_to
+        self.cur_pass_z = z_cut
 
         c_step = self.config.chord_step_mm
-        dz = z_top - self.pz0
-        if eff_bore >= 0.04:
+        dz = max(0.0, z_top - z_cut)
+        if eff_bore >= 0.04 and dz > 1e-5:
             z_pitch = min(1.40, max(0.75, 0.28 * self.d))
             n_turns = max(1.0, dz / z_pitch)
             min_bore_steps = 8 if c_step <= 0.80 else 5
@@ -971,15 +1026,15 @@ class _AdaptivePathBuilder:
                 pt = (cx + eff_bore * math.cos(th), cy + eff_bore * math.sin(th), zk)
                 self._emit(C.SegmentKind.FEED, pt, self.plunge_feed, "helix_bore")
 
-            # One flat cleanup turn at pz0 so the entry bore floor is completely flat
+            # One flat cleanup turn at z_cut so the entry bore floor is completely flat
             th0 = total_angle
             for k in range(1, steps_per_turn + 1):
                 th = th0 + 2.0 * math.pi * (k / steps_per_turn)
-                pt = (cx + eff_bore * math.cos(th), cy + eff_bore * math.sin(th), self.pz0)
+                pt = (cx + eff_bore * math.cos(th), cy + eff_bore * math.sin(th), z_cut)
                 self._emit(C.SegmentKind.FEED, pt, self.cut_feed, "helix_flat")
             cur_angle = th0 + 2.0 * math.pi
         else:
-            self._emit(C.SegmentKind.FEED, (cx, cy, self.pz0), self.plunge_feed, "helix_bore")
+            self._emit(C.SegmentKind.FEED, (cx, cy, z_cut), self.plunge_feed, "helix_bore")
             cur_angle = 0.0
 
         # Archimedean radial spiral pocket opening from eff_bore out to r_open
@@ -996,14 +1051,14 @@ class _AdaptivePathBuilder:
                 th = cur_angle + frac * exp_angle
                 cand_xy = (cx + rk * math.cos(th), cy + rk * math.sin(th))
                 if _wall_distance_point(cand_xy, self.geom, self.r) >= self.r + margin - 1e-5:
-                    self._emit(C.SegmentKind.FEED, (cand_xy[0], cand_xy[1], self.pz0), self.cut_feed, "helix_expand")
+                    self._emit(C.SegmentKind.FEED, (cand_xy[0], cand_xy[1], z_cut), self.cut_feed, "helix_expand")
             cur_angle += exp_angle
             # Full cleanup circle at r_open
             for k in range(1, steps_per_turn + 1):
                 th = cur_angle + 2.0 * math.pi * (k / steps_per_turn)
                 cand_xy = (cx + r_open * math.cos(th), cy + r_open * math.sin(th))
                 if _wall_distance_point(cand_xy, self.geom, self.r) >= self.r + margin - 1e-5:
-                    self._emit(C.SegmentKind.FEED, (cand_xy[0], cand_xy[1], self.pz0), self.cut_feed, "helix_expand")
+                    self._emit(C.SegmentKind.FEED, (cand_xy[0], cand_xy[1], z_cut), self.cut_feed, "helix_expand")
 
         self.last_peel_pts = None
 
@@ -1028,6 +1083,197 @@ class _AdaptivePathBuilder:
                         return best_pt
         return best_pt
 
+    def _route_stay_down_ipw(
+        self,
+        cur_xy: Point2D,
+        target_xy: Point2D,
+        link_margin: float,
+        allow_cut_step: bool,
+    ) -> Optional[List[Point2D]]:
+        """Route a wall-safe stay-down polyline across cleared 2D IPW around islands/corners."""
+        if self.d_wall_grid is None:
+            return None
+        xs = self.ipw.xs
+        ys = self.ipw.ys
+        pitch = self.ipw.pitch
+        nx, ny = self.d_wall_grid.shape
+        if nx < 3 or ny < 3:
+            return None
+
+        walk_mask = self.d_wall_grid >= (self.r + link_margin)
+
+        def _snap_valid(pt: Point2D, from_pt: bool) -> Optional[Tuple[int, int]]:
+            ci = min(max(int(round((pt[0] - xs[0]) / pitch)), 0), nx - 1)
+            cj = min(max(int(round((pt[1] - ys[0]) / pitch)), 0), ny - 1)
+            best_ij: Optional[Tuple[int, int]] = None
+            best_d2 = float("inf")
+            for di in range(-2, 3):
+                ii = ci + di
+                if ii < 0 or ii >= nx:
+                    continue
+                for dj in range(-2, 3):
+                    jj = cj + dj
+                    if jj < 0 or jj >= ny:
+                        continue
+                    if not walk_mask[ii, jj] and self.d_wall_grid[ii, jj] < self.r + link_margin - 1e-5:
+                        continue
+                    g_pt = (float(xs[ii]), float(ys[jj]))
+                    seg_ok = (
+                        _is_segment_safe(pt, g_pt, self.geom, self.r, margin=link_margin)
+                        if from_pt
+                        else _is_segment_safe(g_pt, pt, self.geom, self.r, margin=link_margin)
+                    )
+                    if not seg_ok:
+                        continue
+                    d2 = (g_pt[0] - pt[0]) ** 2 + (g_pt[1] - pt[1]) ** 2
+                    if d2 < best_d2:
+                        best_d2 = d2
+                        best_ij = (ii, jj)
+            return best_ij
+
+        s_ij = _snap_valid(cur_xy, from_pt=True)
+        g_ij = _snap_valid(target_xy, from_pt=False)
+        if s_ij is None or g_ij is None:
+            return None
+
+        dist_uncut = ndimage.distance_transform_edt(~self.ipw.remaining) * pitch
+        cleared = dist_uncut >= max(0.0, self.r - 0.85 * pitch)
+        near_start = ((self.ipw.gx - cur_xy[0]) ** 2 + (self.ipw.gy - cur_xy[1]) ** 2) <= (
+            max(1.2 * pitch, 0.35 * self.r) ** 2
+        )
+        step_r = max(2.25 * self.ae_target, 1.5 * pitch) if allow_cut_step else max(1.2 * pitch, 0.25 * self.ae_target)
+        near_goal = ((self.ipw.gx - target_xy[0]) ** 2 + (self.ipw.gy - target_xy[1]) ** 2) <= (step_r * step_r)
+
+        base_safe = walk_mask.copy()
+        base_safe[s_ij[0], s_ij[1]] = True
+        base_safe[g_ij[0], g_ij[1]] = True
+        passable = base_safe & (cleared | near_start | near_goal)
+
+        labeled_p, _ = ndimage.label(passable, structure=_STRUCT_8)
+        comp_id = int(labeled_p[s_ij[0], s_ij[1]])
+        if comp_id == 0 or int(labeled_p[g_ij[0], g_ij[1]]) != comp_id:
+            return None
+
+        in_comp = labeled_p == comp_id
+        gi, gj = g_ij
+        si, sj = s_ij
+
+        if (si, sj) == (gi, gj):
+            raw_pts = [cur_xy, (float(xs[si]), float(ys[sj])), target_xy]
+        else:
+            g_cost = np.full((nx, ny), np.inf, dtype=np.float64)
+            parent_i = np.full((nx, ny), -1, dtype=np.int32)
+            parent_j = np.full((nx, ny), -1, dtype=np.int32)
+            g_cost[si, sj] = 0.0
+
+            diag = math.sqrt(2.0) * pitch
+            h0 = pitch * (abs(gi - si) + abs(gj - sj) + (math.sqrt(2.0) - 2.0) * min(abs(gi - si), abs(gj - sj)))
+            heap: List[Tuple[float, float, int, int]] = [(h0, 0.0, si, sj)]
+            neighbors = (
+                (-1, 0, pitch),
+                (1, 0, pitch),
+                (0, -1, pitch),
+                (0, 1, pitch),
+                (-1, -1, diag),
+                (-1, 1, diag),
+                (1, -1, diag),
+                (1, 1, diag),
+            )
+            found = False
+            while heap:
+                _, cur_g, ci, cj = heapq.heappop(heap)
+                if cur_g > g_cost[ci, cj] + 1e-12:
+                    continue
+                if ci == gi and cj == gj:
+                    found = True
+                    break
+                for di, dj, step_d in neighbors:
+                    ni, nj = ci + di, cj + dj
+                    if 0 <= ni < nx and 0 <= nj < ny and in_comp[ni, nj]:
+                        # Prevent diagonal corner cutting across wall pixels
+                        if di != 0 and dj != 0 and not (in_comp[ci + di, cj] and in_comp[ci, cj + dj]):
+                            continue
+                        w_mult = 1.0 if cleared[ni, nj] else 7.5
+                        cand_g = cur_g + step_d * w_mult
+                        if cand_g + 1e-12 < g_cost[ni, nj]:
+                            g_cost[ni, nj] = cand_g
+                            parent_i[ni, nj] = ci
+                            parent_j[ni, nj] = cj
+                            dx_g = abs(gi - ni)
+                            dy_g = abs(gj - nj)
+                            h_val = 1.001 * pitch * (dx_g + dy_g + (math.sqrt(2.0) - 2.0) * min(dx_g, dy_g))
+                            heapq.heappush(heap, (cand_g + h_val, cand_g, ni, nj))
+            if not found:
+                return None
+
+            grid_chain: List[Point2D] = []
+            ci, cj = gi, gj
+            while ci >= 0 and cj >= 0:
+                grid_chain.append((float(xs[ci]), float(ys[cj])))
+                if ci == si and cj == sj:
+                    break
+                pi, pj = int(parent_i[ci, cj]), int(parent_j[ci, cj])
+                ci, cj = pi, pj
+            grid_chain.reverse()
+            raw_pts = [cur_xy] + grid_chain + [target_xy]
+
+        # Deduplicate near-identical consecutive points
+        dedup: List[Point2D] = [raw_pts[0]]
+        for p in raw_pts[1:]:
+            if math.hypot(p[0] - dedup[-1][0], p[1] - dedup[-1][1]) > 1e-4:
+                dedup.append(p)
+        if len(dedup) < 2:
+            return None
+
+        ret_ae_cap = min(0.08, 0.12 * self.ae_target)
+        simplified: List[Point2D] = [dedup[0]]
+        idx = 0
+        n_pts = len(dedup)
+        engaged_len = 0.0
+        while idx < n_pts - 1:
+            chosen: Optional[int] = None
+            for probe in range(n_pts - 1, idx, -1):
+                seg_len = math.hypot(dedup[probe][0] - dedup[idx][0], dedup[probe][1] - dedup[idx][1])
+                if seg_len <= 1e-4:
+                    chosen = probe
+                    break
+                if not _is_segment_safe(dedup[idx], dedup[probe], self.geom, self.r, margin=link_margin):
+                    continue
+                eff_ae = self.ipw.sweep_segment(dedup[idx], dedup[probe], self.r, mutate=False) / seg_len
+                if eff_ae <= ret_ae_cap:
+                    chosen = probe
+                    break
+                if (
+                    allow_cut_step
+                    and probe == n_pts - 1
+                    and seg_len <= 2.35 * self.ae_target
+                    and eff_ae <= 1.08 * self.d
+                ):
+                    chosen = probe
+                    break
+            if chosen is None:
+                nxt = idx + 1
+                seg_len = math.hypot(dedup[nxt][0] - dedup[idx][0], dedup[nxt][1] - dedup[idx][1])
+                rem_goal = math.hypot(dedup[-1][0] - dedup[idx][0], dedup[-1][1] - dedup[idx][1])
+                if (
+                    allow_cut_step
+                    and rem_goal <= 2.5 * self.ae_target
+                    and engaged_len + seg_len <= 2.6 * self.ae_target
+                    and _is_segment_safe(dedup[idx], dedup[nxt], self.geom, self.r, margin=link_margin)
+                ):
+                    eff_ae = self.ipw.sweep_segment(dedup[idx], dedup[nxt], self.r, mutate=False) / max(seg_len, 1e-6)
+                    if eff_ae <= 1.08 * self.d:
+                        chosen = nxt
+                        engaged_len += seg_len
+            if chosen is None:
+                return None
+            simplified.append(dedup[chosen])
+            idx = chosen
+
+        if _polyline_length(simplified) > 35.0 * self.d:
+            return None
+        return simplified
+
     def link_to(
         self,
         target_xy: Point2D,
@@ -1036,33 +1282,39 @@ class _AdaptivePathBuilder:
         allow_cut_step: bool = True,
         return_tag: str = "peel_ret",
     ) -> None:
-        """Link safely from current position to ``target_xy`` at ``pz0``."""
+        """Link safely from current position to ``target_xy`` at ``cur_pass_z``."""
         cur_xy = (self.cur_xyz[0], self.cur_xyz[1])
         dist = math.hypot(target_xy[0] - cur_xy[0], target_xy[1] - cur_xy[1])
 
-        if self.cur_xyz[2] > self.pz0 + 1e-5:
+        if self.cur_xyz[2] > self.cur_pass_z + 1e-5:
             # Currently retracted at z_safe: rapid above pre-lead point, plunge, feed in
             lead_xy = self._find_cleared_plunge_lead(target_xy, margin)
             self._emit(C.SegmentKind.RAPID, (lead_xy[0], lead_xy[1], self.z_safe), None, "hop_over", stamp_ipw=False)
-            self._emit(C.SegmentKind.FEED, (lead_xy[0], lead_xy[1], self.pz0), self.plunge_feed, "hop_plunge")
+            self._emit(C.SegmentKind.FEED, (lead_xy[0], lead_xy[1], self.cur_pass_z), self.plunge_feed, "hop_plunge")
             if math.hypot(target_xy[0] - lead_xy[0], target_xy[1] - lead_xy[1]) > 1e-3:
-                self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.pz0), self.cut_feed, "lead_in")
+                self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.cur_pass_z), self.cut_feed, "lead_in")
             return
 
         if dist <= 1e-3:
             return
 
         link_margin = max(1e-4, 0.85 * margin) if margin > 1e-4 else 0.0
+        ret_ae_cap = min(0.08, 0.12 * self.ae_target)
 
         # Case 1: Direct straight chord is safe
-        if dist <= 6.5 * self.d and _is_segment_safe(cur_xy, target_xy, self.geom, self.r, margin=link_margin):
+        if dist <= 12.0 * self.d and _is_segment_safe(cur_xy, target_xy, self.geom, self.r, margin=link_margin):
             swept = self.ipw.sweep_segment(cur_xy, target_xy, self.r, mutate=False)
             eff_ae = swept / max(dist, 1e-6)
-            if eff_ae <= 0.15 * self.ae_target:
-                self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.pz0), self.return_feed, return_tag)
+            if eff_ae <= ret_ae_cap:
+                self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.cur_pass_z), self.return_feed, return_tag)
                 return
-            if allow_cut_step and dist <= 1.95 * self.ae_target and eff_ae <= 0.72 * self.d:
-                self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.pz0), self.cut_feed, "step_link")
+            if allow_cut_step and dist <= 2.25 * self.ae_target and eff_ae <= 0.75 * self.d:
+                self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.cur_pass_z), self.cut_feed, "step_link")
+                return
+            if allow_cut_step and dist <= 1.35 * self.ae_target and eff_ae <= 1.15 * self.d:
+                # Narrow-throat forward stepover: stay down at proportionally moderated feedrate
+                step_feed = max(0.35 * self.cut_feed, self.cut_feed * (0.60 * self.d / max(eff_ae, 1e-6)))
+                self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.cur_pass_z), step_feed, "step_link")
                 return
 
         # Case 2: Disengaged return to start of previous peel pass (100% cleared IPW) + short step-in
@@ -1070,23 +1322,21 @@ class _AdaptivePathBuilder:
             q_start = self.last_peel_pts[0]
             end_step = math.hypot(target_xy[0] - q_start[0], target_xy[1] - q_start[1])
             if (
-                end_step <= 1.95 * self.ae_target
+                end_step <= 2.25 * self.ae_target
                 and _is_segment_safe(q_start, target_xy, self.geom, self.r, margin=link_margin)
             ):
                 end_ae = self.ipw.sweep_segment(q_start, target_xy, self.r, mutate=False) / max(end_step, 1e-6)
-                if end_ae <= 0.72 * self.d:
+                if end_ae <= 0.78 * self.d:
                     # Try 1-chord oblique return through cleared IPW directly to q_start first
                     ret_dist = math.hypot(q_start[0] - cur_xy[0], q_start[1] - cur_xy[1])
                     if (
-                        ret_dist <= 6.5 * self.d
+                        ret_dist <= 12.0 * self.d
                         and _is_segment_safe(cur_xy, q_start, self.geom, self.r, margin=link_margin)
-                        and self.ipw.sweep_segment(cur_xy, q_start, self.r, mutate=False) / max(ret_dist, 1e-6) <= 0.15 * self.ae_target
+                        and self.ipw.sweep_segment(cur_xy, q_start, self.r, mutate=False) / max(ret_dist, 1e-6) <= ret_ae_cap
                     ):
-                        self._emit(C.SegmentKind.FEED, (q_start[0], q_start[1], self.pz0), self.return_feed, return_tag)
+                        self._emit(C.SegmentKind.FEED, (q_start[0], q_start[1], self.cur_pass_z), self.return_feed, return_tag)
                         if end_step > 1e-3:
-                            feed = self.return_feed if end_ae <= 0.15 * self.ae_target else self.cut_feed
-                            tag = return_tag if end_ae <= 0.15 * self.ae_target else "step_link"
-                            self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.pz0), feed, tag)
+                            self._emit_link_chord(target_xy, return_tag)
                         return
 
                     # Otherwise route back along simplified reversed peel corridor
@@ -1101,7 +1351,7 @@ class _AdaptivePathBuilder:
                             for probe in range(len(back_pts) - 1, idx + 1, -1):
                                 seg_len = math.hypot(back_pts[probe][0] - back_pts[idx][0], back_pts[probe][1] - back_pts[idx][1])
                                 if seg_len > 1e-4 and _is_segment_safe(back_pts[idx], back_pts[probe], self.geom, self.r, margin=link_margin):
-                                    if self.ipw.sweep_segment(back_pts[idx], back_pts[probe], self.r, mutate=False) / seg_len <= 0.15 * self.ae_target:
+                                    if self.ipw.sweep_segment(back_pts[idx], back_pts[probe], self.r, mutate=False) / seg_len <= ret_ae_cap:
                                         jumped = probe
                                         break
                             if not _is_segment_safe(back_pts[idx], back_pts[jumped], self.geom, self.r, margin=link_margin):
@@ -1110,22 +1360,27 @@ class _AdaptivePathBuilder:
                             simplified.append(back_pts[jumped])
                             idx = jumped
 
-                        if ok_route and _polyline_length(simplified) <= 6.5 * self.d:
+                        if ok_route and _polyline_length(simplified) <= 15.0 * self.d:
                             for pt in simplified[1:]:
-                                self._emit(C.SegmentKind.FEED, (pt[0], pt[1], self.pz0), self.return_feed, return_tag)
+                                self._emit_link_chord(pt, return_tag)
                             if end_step > 1e-3:
-                                feed = self.return_feed if end_ae <= 0.15 * self.ae_target else self.cut_feed
-                                tag = return_tag if end_ae <= 0.15 * self.ae_target else "step_link"
-                                self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.pz0), feed, tag)
+                                self._emit_link_chord(target_xy, return_tag)
                             return
 
-        # Case 3: Safe z_safe retract + rapid + zero-load plunge into cleared floor
+        # Case 2.5: 2D A* stay-down route across cleared IPW around standing islands / corners
+        routed = self._route_stay_down_ipw(cur_xy, target_xy, link_margin, allow_cut_step)
+        if routed is not None and len(routed) >= 2:
+            for pt in routed[1:]:
+                self._emit_link_chord(pt, return_tag)
+            return
+
+        # Case 3: Safe z_safe retract + rapid + zero-load plunge into cleared floor (disconnected chambers only)
         self.retract_to_safe()
         lead_xy = self._find_cleared_plunge_lead(target_xy, margin)
         self._emit(C.SegmentKind.RAPID, (lead_xy[0], lead_xy[1], self.z_safe), None, "hop_over", stamp_ipw=False)
-        self._emit(C.SegmentKind.FEED, (lead_xy[0], lead_xy[1], self.pz0), self.plunge_feed, "hop_plunge")
+        self._emit(C.SegmentKind.FEED, (lead_xy[0], lead_xy[1], self.cur_pass_z), self.plunge_feed, "hop_plunge")
         if math.hypot(target_xy[0] - lead_xy[0], target_xy[1] - lead_xy[1]) > 1e-3:
-            self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.pz0), self.cut_feed, "lead_in")
+            self._emit(C.SegmentKind.FEED, (target_xy[0], target_xy[1], self.cur_pass_z), self.cut_feed, "lead_in")
 
     def execute_trochoid_loop(
         self,
@@ -1156,13 +1411,13 @@ class _AdaptivePathBuilder:
 
         self.link_to(cut_pts[0], margin, allow_cut_step=True, return_tag="trochoid_ret")
         for pt in cut_pts[1:]:
-            self._emit(C.SegmentKind.FEED, (pt[0], pt[1], self.pz0), self.cut_feed, "trochoid_cut")
+            self._emit(C.SegmentKind.FEED, (pt[0], pt[1], self.cur_pass_z), self.cut_feed, "trochoid_cut")
 
         # Disengaged return inside closed disk B_rk(center) (100% cleared & wall-safe)
         if rk >= 0.70:
             mid_ret = (cx - 0.25 * rk * tx, cy - 0.25 * rk * ty)
-            self._emit(C.SegmentKind.FEED, (mid_ret[0], mid_ret[1], self.pz0), self.return_feed, "trochoid_ret")
-        self._emit(C.SegmentKind.FEED, (cut_pts[0][0], cut_pts[0][1], self.pz0), self.return_feed, "trochoid_ret")
+            self._emit(C.SegmentKind.FEED, (mid_ret[0], mid_ret[1], self.cur_pass_z), self.return_feed, "trochoid_ret")
+        self._emit(C.SegmentKind.FEED, (cut_pts[0][0], cut_pts[0][1], self.cur_pass_z), self.return_feed, "trochoid_ret")
         self.last_peel_pts = None
 
     def execute_peel_contour(
@@ -1187,12 +1442,12 @@ class _AdaptivePathBuilder:
             ordered = ring[best_i:] + ring[:best_i] + [ring[best_i]]
             self.link_to(ordered[0], margin, allow_cut_step=True, return_tag="peel_ret")
             for pt in ordered[1:]:
-                self._emit(C.SegmentKind.FEED, (pt[0], pt[1], self.pz0), self.cut_feed, "peel_cut")
+                self._emit(C.SegmentKind.FEED, (pt[0], pt[1], self.cur_pass_z), self.cut_feed, "peel_cut")
             self.last_peel_pts = None
         else:
             self.link_to(pts[0], margin, allow_cut_step=True, return_tag="peel_ret")
             for pt in pts[1:]:
-                self._emit(C.SegmentKind.FEED, (pt[0], pt[1], self.pz0), self.cut_feed, "peel_cut")
+                self._emit(C.SegmentKind.FEED, (pt[0], pt[1], self.cur_pass_z), self.cut_feed, "peel_cut")
             self.last_peel_pts = list(pts)
 
 
@@ -1319,20 +1574,38 @@ def _schedule_and_execute_contours(
     sorted_levels = sorted(by_level.keys())
 
     sched_margin = max(1e-4, 0.85 * finish_stock) if finish_stock > 1e-4 else 0.0
+
+    def _contours_coupled(wc_a: _WaveContour, wc_b: _WaveContour, max_d: float) -> bool:
+        dist, pa, pb = _min_polyline_dist(wc_a.points, wc_b.points)
+        if dist > max_d:
+            return False
+        cand_pairs = [(pa, pb), (wc_a.points[0], wc_b.points[0]), (wc_a.points[-1], wc_b.points[-1])]
+        for qa, qb in cand_pairs:
+            if math.hypot(qb[0] - qa[0], qb[1] - qa[1]) <= max_d and _is_segment_safe(
+                qa, qb, geom, builder.r, margin=0.0
+            ):
+                return True
+        return False
+
     for l_pos in range(1, len(sorted_levels)):
         prev_lvl = sorted_levels[l_pos - 1]
         cur_lvl = sorted_levels[l_pos]
         for c_idx in by_level[cur_lvl]:
             wc_cur = contours[c_idx]
             for p_idx in by_level[prev_lvl]:
-                wc_prev = contours[p_idx]
-                dist, pa, pb = _min_polyline_dist(wc_prev.points, wc_cur.points)
-                if dist <= 2.15 * a_step and _is_segment_safe(pa, pb, geom, builder.r, margin=sched_margin):
+                if _contours_coupled(contours[p_idx], wc_cur, 2.35 * a_step):
                     parents[c_idx].append(p_idx)
                     children[p_idx].append(c_idx)
+            if not parents[c_idx] and l_pos >= 2:
+                prev2_lvl = sorted_levels[l_pos - 2]
+                for p_idx in by_level[prev2_lvl]:
+                    if _contours_coupled(contours[p_idx], wc_cur, 3.40 * a_step):
+                        parents[c_idx].append(p_idx)
+                        children[p_idx].append(c_idx)
 
     rem_deps = [len(p) for p in parents]
     done = [False] * n_c
+    ret_ae_cap = min(0.08, 0.12 * builder.ae_target)
 
     def _entry_point(wc: _WaveContour) -> Point2D:
         if not wc.is_closed and wc.length_mm <= 1.25 * d_tool and wc.channel_clearance_mm <= 0.48 * d_tool:
@@ -1356,7 +1629,11 @@ def _schedule_and_execute_contours(
         def _score(idx: int) -> Tuple[int, float, int]:
             ep = _entry_point(contours[idx])
             d_cur = math.hypot(ep[0] - cur_xy[0], ep[1] - cur_xy[1])
-            can_cur = d_cur <= 6.5 * d_tool and _is_segment_safe(cur_xy, ep, geom, builder.r, margin=sched_margin)
+            wall_ok = d_cur <= 6.5 * d_tool and _is_segment_safe(cur_xy, ep, geom, builder.r, margin=sched_margin)
+            can_cur = wall_ok and (
+                d_cur <= 2.35 * a_step
+                or (builder.ipw.sweep_segment(cur_xy, ep, builder.r, mutate=False) / max(d_cur, 1e-6)) <= ret_ae_cap
+            )
             if peel_origin is not None:
                 d_orig = math.hypot(ep[0] - peel_origin[0], ep[1] - peel_origin[1])
                 if d_orig <= 2.2 * a_step and _is_segment_safe(peel_origin, ep, geom, builder.r, margin=sched_margin):
@@ -1477,11 +1754,13 @@ def _sweep_residual_ipw(
 
         labeled, n_comp = ndimage.label(candidates)
         swept_any = False
+
+        # Order residual components nearest-first to current cutter position to keep links short & stay-down
+        comp_strokes: List[List[Tuple[Point2D, Point2D]]] = []
         for c_id in range(1, n_comp + 1):
             idxs = np.argwhere(labeled == c_id)
             if idxs.size == 0:
                 continue
-            # Group by X columns into boustrophedon scan segments spaced by <= 0.65 * ae_target
             unique_i = np.unique(idxs[:, 0])
             step_i = max(1, int(math.floor(0.65 * builder.ae_target / builder.ipw.pitch)))
             sel_i = sorted(set(list(unique_i[::step_i]) + [int(unique_i[-1])]))
@@ -1489,7 +1768,6 @@ def _sweep_residual_ipw(
             strokes: List[Tuple[Point2D, Point2D]] = []
             for rank, i_val in enumerate(sel_i):
                 js = np.sort(idxs[idxs[:, 0] == i_val, 1])
-                # Split discontinuous runs in j
                 splits = np.where(np.diff(js) > 1)[0] + 1
                 runs = np.split(js, splits)
                 if rank % 2 == 1:
@@ -1500,16 +1778,31 @@ def _sweep_residual_ipw(
                     if rank % 2 == 1:
                         pa, pb = pb, pa
                     strokes.append((pa, pb))
+            if strokes:
+                comp_strokes.append(strokes)
+
+        while comp_strokes:
+            cur_xy = (builder.cur_xyz[0], builder.cur_xyz[1])
+            best_k = min(
+                range(len(comp_strokes)),
+                key=lambda k: min(
+                    math.hypot(comp_strokes[k][0][0][0] - cur_xy[0], comp_strokes[k][0][0][1] - cur_xy[1]),
+                    math.hypot(comp_strokes[k][-1][1][0] - cur_xy[0], comp_strokes[k][-1][1][1] - cur_xy[1]),
+                ),
+            )
+            strokes = comp_strokes.pop(best_k)
+            if math.hypot(strokes[-1][1][0] - cur_xy[0], strokes[-1][1][1] - cur_xy[1]) + 1e-6 < math.hypot(
+                strokes[0][0][0] - cur_xy[0], strokes[0][0][1] - cur_xy[1]
+            ):
+                strokes = [(pb, pa) for pa, pb in reversed(strokes)]
 
             for pa, pb in strokes:
                 if builder.ipw.sweep_segment(pa, pb, builder.r, mutate=False) <= 1e-6:
                     continue
-                # Step into cleanup stroke incrementally if uncut engagement is large
                 builder.link_to(pa, margin, allow_cut_step=True, return_tag="cleanup_ret")
                 if math.hypot(pb[0] - pa[0], pb[1] - pa[1]) > 1e-3:
-                    builder._emit(C.SegmentKind.FEED, (pb[0], pb[1], builder.pz0), builder.cut_feed, "ipw_cleanup")
+                    builder._emit(C.SegmentKind.FEED, (pb[0], pb[1], builder.cur_pass_z), builder.cut_feed, "ipw_cleanup")
                 else:
-                    # Single-point corner touch
                     builder.ipw.sweep_segment(pa, pa, builder.r, mutate=True)
                 swept_any = True
 
@@ -1665,9 +1958,21 @@ def generate_adaptive_toolpath(
     f_mask = cavity_mask & (d_wall_grid >= r + rough_margin)
     labeled_f, n_comp = ndimage.label(f_mask)
 
-    builder = _AdaptivePathBuilder(task, config, geom, ipw, z_safe, pz0, stock_max_z)
+    builder = _AdaptivePathBuilder(task, config, geom, ipw, z_safe, pz0, stock_max_z, d_wall_grid=d_wall_grid)
 
-    # Order roughing components from largest to smallest
+    total_depth = max(0.0, stock_max_z - pz0)
+    max_doc = (
+        float(config.max_doc_mm)
+        if config.max_doc_mm is not None
+        else min(0.85 * float(task.tool.flute_length_mm), 2.2 * d)
+    )
+    n_z_passes = max(1, int(math.ceil((total_depth - 1e-6) / max(max_doc, 0.25))))
+    z_passes = [
+        pz0 if m == n_z_passes else (stock_max_z - (m / n_z_passes) * total_depth)
+        for m in range(1, n_z_passes + 1)
+    ]
+
+    # Order roughing components from largest to smallest (cleared depth-first per component)
     comp_order = sorted(
         range(1, n_comp + 1),
         key=lambda cid: int(np.count_nonzero(labeled_f == cid)),
@@ -1708,10 +2013,6 @@ def generate_adaptive_toolpath(
         if not np.any(ipw.remaining & reach_check):
             continue
 
-        # Stage 1: Helical spiral bore + Archimedean radial pocket expansion
-        builder.helical_bore_entry(entry_xy, r_bore, r_open, margin=rough_margin)
-
-        # Stage 2: Geodesic wavefront circular trochoids (channels) + offset peels (chambers)
         seed_r = max(pitch * 0.8, r_open)
         seed_mask = ((ipw.gx - entry_xy[0]) ** 2 + (ipw.gy - entry_xy[1]) ** 2) <= (seed_r * seed_r)
         if not np.any(comp_mask & seed_mask):
@@ -1730,7 +2031,24 @@ def generate_adaptive_toolpath(
             rough_margin,
             config,
         )
-        _schedule_and_execute_contours(contours, builder, geom, rough_margin)
+
+        pre_comp_rem = ipw.remaining.copy() if n_z_passes > 1 else None
+        for m_idx, z_pass in enumerate(z_passes):
+            prev_z = z_passes[m_idx - 1] if m_idx > 0 else None
+            # Stage 1: Helical spiral bore + Archimedean radial pocket expansion (stay-down between passes)
+            builder.helical_bore_entry(
+                entry_xy,
+                r_bore,
+                r_open,
+                margin=rough_margin,
+                z_target=z_pass,
+                stay_down_from_z=prev_z,
+                reset_ipw_to=pre_comp_rem if m_idx > 0 else None,
+            )
+            # Stage 2: Geodesic wavefront circular trochoids (channels) + offset peels (chambers)
+            _schedule_and_execute_contours(contours, builder, geom, rough_margin)
+
+    builder.cur_pass_z = pz0
 
     # Stage 3a: Pre-compute coverage of analytical wall/island finishing loops and sweep any
     # remaining uncut interior pockets before running the wall finishing passes.
@@ -1752,11 +2070,17 @@ def generate_adaptive_toolpath(
 
     # Stage 3b: Exact analytical wall-finishing loops around outer pocket & standing islands
     remaining_chains = list(finish_chains)
+
+    def _chain_entry_dist(ch: List[Point2D], cxy: Point2D) -> float:
+        if len(ch) >= 4 and math.hypot(ch[0][0] - ch[-1][0], ch[0][1] - ch[-1][1]) <= 1e-4:
+            return min(math.hypot(v[0] - cxy[0], v[1] - cxy[1]) for v in ch[:-1])
+        return math.hypot(ch[0][0] - cxy[0], ch[0][1] - cxy[1])
+
     while remaining_chains:
         cur_xy = (builder.cur_xyz[0], builder.cur_xyz[1])
         best_c_idx = min(
             range(len(remaining_chains)),
-            key=lambda i: math.hypot(remaining_chains[i][0][0] - cur_xy[0], remaining_chains[i][0][1] - cur_xy[1]),
+            key=lambda i: _chain_entry_dist(remaining_chains[i], cur_xy),
         )
         chain = remaining_chains.pop(best_c_idx)
         # Rotate closed finishing loop to start at the corner nearest to the current cutter XY

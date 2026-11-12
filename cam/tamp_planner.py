@@ -1617,8 +1617,8 @@ def _plan_arbitrary_cad_operations(
     has_op1_cavities = bool(np.any(features.z_target_grid_mm < z_part_top - 0.25))
     if has_op1_cavities:
         tnum_r1, hld_r1, asm_r1 = _assign_tnum(t_rough)
-        doc_r1 = min(4.5, 0.60 * t_rough.diameter_mm)
-        woc_r1 = 0.40 * t_rough.diameter_mm
+        doc_r1 = min(11.0, 0.75 * t_rough.flute_length_mm, 1.10 * t_rough.diameter_mm)
+        woc_r1 = 0.30 * t_rough.diameter_mm
         fs_r1 = compute_feeds_and_speeds(
             stock_material_id=stock_material_id,
             tool_material_id=_eff_tool_mat(t_rough),
@@ -1641,7 +1641,7 @@ def _plan_arbitrary_cad_operations(
                 target_hex_mm=fs_r1.chip_thickness_mm,
                 doc_mm=doc_r1,
                 woc_mm=woc_r1,
-                notes=f"G54 Multi-level 2.5D silhouette & pocket roughing with {t_rough.nominal_label}",
+                notes=f"G54 Adaptive depth-first stay-down roughing with {t_rough.nominal_label}",
                 setup_index=1,
                 work_offset="G54",
             )
@@ -1649,8 +1649,8 @@ def _plan_arbitrary_cad_operations(
 
         if t_finish.tool_id != t_rough.tool_id and t_finish.diameter_mm <= t_rough.diameter_mm - 1.0:
             tnum_fn, hld_fn, asm_fn = _assign_tnum(t_finish)
-            doc_fn = min(4.0, 0.65 * t_finish.diameter_mm)
-            woc_fn = 0.28 * t_finish.diameter_mm
+            doc_fn = min(10.0, 0.78 * t_finish.flute_length_mm, 1.25 * t_finish.diameter_mm)
+            woc_fn = 0.25 * t_finish.diameter_mm
             fs_fn = compute_feeds_and_speeds(
                 stock_material_id=stock_material_id,
                 tool_material_id=_eff_tool_mat(t_finish),
@@ -1739,8 +1739,8 @@ def _plan_arbitrary_cad_operations(
             )
             if int(np.sum(op2_recess_cells)) >= 12:
                 tnum_r2, hld_r2, asm_r2 = _assign_tnum(t_rough)
-                doc_r2 = min(4.0, 0.55 * t_rough.diameter_mm)
-                woc_r2 = 0.40 * t_rough.diameter_mm
+                doc_r2 = min(10.0, 0.72 * t_rough.flute_length_mm, 1.05 * t_rough.diameter_mm)
+                woc_r2 = 0.30 * t_rough.diameter_mm
                 fs_r2 = compute_feeds_and_speeds(
                     stock_material_id=stock_material_id,
                     tool_material_id=_eff_tool_mat(t_rough),
@@ -2944,6 +2944,8 @@ def execute_tamp_pipeline(
                     base_feed_mm_s=op.base_feed_mm_s,
                     radial_stock_mm=0.04 if op.op_kind == "levelset_rest_finish" else 0.06,
                     is_rest=(op.op_kind == "levelset_rest_finish"),
+                    holder_bottom_mm=float(op.tool_assembly.holder_bottom_mm),
+                    holder_radius_mm=float(op.tool_assembly.holder_radius_mm),
                 )
                 if op.op_kind == "levelset_rest_finish":
                     z_unpruned = np.full_like(z_active, z_top_st)
@@ -2960,6 +2962,8 @@ def execute_tamp_pipeline(
                         base_feed_mm_s=op.base_feed_mm_s,
                         radial_stock_mm=0.04,
                         is_rest=False,
+                        holder_bottom_mm=float(op.tool_assembly.holder_bottom_mm),
+                        holder_radius_mm=float(op.tool_assembly.holder_radius_mm),
                     )
                     if naive_override.segments and (
                         sum(s.duration_s for s in nom_p.segments) > sum(s.duration_s for s in naive_override.segments)

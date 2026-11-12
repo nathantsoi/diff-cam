@@ -66,6 +66,20 @@ def test_tamp_us_vs_metric_library_and_restricted_tool_crib() -> None:
     )
     assert res_us.safety_pass is True
     assert res_us.opt_chipload_total_time_s < res_us.naive_total_time_s
+    # Verify stay-down depth-first clearing avoids excessive Z-safe lifts on roughing & rest-finishing
+    m1_segs = res_us.viewer_variants["chipload_ste"]["segments"]
+    rough_lifts = sum(
+        1
+        for s in m1_segs
+        if "levelset_rough" in s["op_id"] and s["end"][2] > s["start"][2] + 1.0 and s["end"][2] >= 5.5
+    )
+    rest_lifts = sum(
+        1
+        for s in m1_segs
+        if "rest_finish" in s["op_id"] and s["end"][2] > s["start"][2] + 1.0 and s["end"][2] >= 5.5
+    )
+    assert rough_lifts <= 15, f"expected stay-down roughing on Titan-M1, got {rough_lifts} Z-lifts"
+    assert rest_lifts <= 35, f"expected stay-down rest-finishing on Titan-M1, got {rest_lifts} Z-lifts"
     for op in res_us.operations:
         if op.tool_record.entity_type != "probe":
             assert op.tool_record.unit_system == "inches"
@@ -348,3 +362,50 @@ def test_interactive_upload_replan_and_csrf_security(tmp_path: Path) -> None:
         srv.shutdown()
         srv.server_close()
         th.join(timeout=5.0)
+
+
+def test_levelset_clearing_depth_first_stay_down_two_pockets() -> None:
+    """Verify two disconnected multi-depth pockets are cleared depth-first stay-down (<= 3 Z-safe lifts)."""
+    import numpy as np
+    from cam.arbitrary_cad_ops import build_levelset_clearing_motion_plan
+
+    xs = np.linspace(-30.0, 30.0, 121)
+    ys = np.linspace(-15.0, 15.0, 61)
+    gx, gy = np.meshgrid(xs, ys, indexing="ij")
+    z_tgt = np.zeros_like(gx)
+    # Pocket A on left (x in [-24, -6]) and Pocket B on right (x in [6, 24]), both 9.0 mm deep
+    pck_a = (gx >= -24.0) & (gx <= -6.0) & (gy >= -9.0) & (gy <= 9.0)
+    pck_b = (gx >= 6.0) & (gx <= 24.0) & (gy >= -9.0) & (gy <= 9.0)
+    z_tgt[pck_a] = -9.0
+    z_tgt[pck_b] = -9.0
+    z_ipw = np.zeros_like(gx)
+
+    plan = build_levelset_clearing_motion_plan(
+        xs,
+        ys,
+        z_tgt,
+        z_ipw,
+        cutter_radius_mm=3.0,
+        z_top_start_mm=0.0,
+        z_bottom_limit_mm=-9.0,
+        doc_mm=3.0,
+        woc_mm=2.0,
+        base_feed_mm_s=15.0,
+        z_safe_mm=6.0,
+    )
+    z_lifts = [
+        s
+        for s in plan.segments
+        if s.end_mm[2] > s.start_mm[2] + 1.0 and s.end_mm[2] >= 5.5
+    ]
+    # Only 2 Z-safe retracts needed (1 after finishing all 3 depths of Pocket A, 1 after finishing Pocket B)!
+    assert len(z_lifts) <= 3, f"expected depth-first stay-down clearing, got {len(z_lifts)} Z-lifts"
+
+    # Confirm sign of X does not flip-flop across Z-levels: all cuts on first pocket finish before second pocket starts
+    cut_sides = [
+        -1 if 0.5 * (s.start_mm[0] + s.end_mm[0]) < 0.0 else 1
+        for s in plan.segments
+        if max(s.start_mm[2], s.end_mm[2]) < -0.5
+    ]
+    side_switches = sum(1 for a, b in zip(cut_sides, cut_sides[1:]) if a != b)
+    assert side_switches == 1, f"expected 1 pocket-to-pocket transition (depth-first), got {side_switches}"

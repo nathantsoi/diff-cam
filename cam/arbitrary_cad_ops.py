@@ -12,11 +12,12 @@ Provides clean-room MIT toolpath synthesis for arbitrary STEP/STL geometries:
 from __future__ import annotations
 
 import dataclasses
+import heapq
 import math
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
-from scipy.ndimage import distance_transform_edt
+from scipy.ndimage import distance_transform_edt, label
 
 from algorithms.chipload_opt import (
     _sweep_removes_or_updates_dexels,
@@ -267,6 +268,21 @@ def build_facing_motion_plan(
     return _make_motion_plan_from_segs(segs, z_safe_mm, rapid_mm_s, provenance="diffcam:facing")
 
 
+_STRUCT_8_CAD = np.ones((3, 3), dtype=np.int32)
+
+
+def _rotate_closed_loop_nearest(loop: np.ndarray, cur_xy: Tuple[float, float]) -> np.ndarray:
+    """Cyclically shift a closed 2D loop so vertex 0 is nearest ``cur_xy`` (preserving climb orientation)."""
+    if len(loop) < 4:
+        return loop
+    ring = loop[:-1]
+    d2 = (ring[:, 0] - cur_xy[0]) ** 2 + (ring[:, 1] - cur_xy[1]) ** 2
+    best_i = int(np.argmin(d2))
+    if best_i == 0:
+        return loop
+    return np.vstack([ring[best_i:], ring[:best_i], ring[best_i : best_i + 1]])
+
+
 def build_levelset_clearing_motion_plan(
     xs: np.ndarray,
     ys: np.ndarray,
@@ -283,19 +299,37 @@ def build_levelset_clearing_motion_plan(
     is_rest: bool = False,
     rapid_mm_s: float = 100.0,
     z_safe_mm: float = 6.0,
+    holder_bottom_mm: float = 35.0,
+    holder_radius_mm: float = 0.0,
 ) -> C.MotionPlan:
-    """Arbitrary-silhouette 2.5D multi-level offset pocket/boss/rest clearing via Euclidean EDT."""
+    """Depth-first adaptive stay-down 2.5D pocket/boss/rest clearing via Euclidean EDT & live IPW."""
     pitch = float(xs[1] - xs[0]) if len(xs) > 1 else 0.5
     nx, ny = z_target_safe.shape
+    x0_g = float(xs[0])
+    y0_g = float(ys[0])
     segs: List[C.Segment] = []
     cur = (0.0, 0.0, z_safe_mm)
     sid = 0
+
+    z_hi = float(z_top_start_mm)
+    z_lo = max(float(z_bottom_limit_mm), float(np.min(z_target_safe)))
+    if z_hi - z_lo <= 0.12:
+        return _make_motion_plan_from_segs([], z_safe_mm, rapid_mm_s, provenance="diffcam:levelset_25d")
+
+    # Live simulated dexel IPW updated on every FEED move for chronological stay-down routing
+    z_sim = z_ipw.copy()
+    z_min_s = float(min(z_lo - 5.0, np.min(z_target_safe) - 2.0))
+    z_max_s = float(max(z_safe_mm + 2.0, np.max(z_ipw) + 2.0))
 
     def _push(pt: Tuple[float, float, float], kind: C.SegmentKind, feed: Optional[float]) -> None:
         nonlocal cur, sid
         dist = math.dist(cur, pt)
         if dist <= 1e-6:
             return
+        if kind != C.SegmentKind.RAPID:
+            _sweep_removes_or_updates_dexels(
+                xs, ys, z_sim, x0_g, y0_g, pitch, cutter_radius_mm, z_min_s, z_max_s, cur, pt, mutate=True
+            )
         spd = rapid_mm_s if kind == C.SegmentKind.RAPID or feed is None else feed
         segs.append(
             C.Segment(
@@ -310,34 +344,79 @@ def build_levelset_clearing_motion_plan(
         cur = pt
         sid += 1
 
-    # Determine distinct Z floors + intermediate axial stepdowns
-    z_hi = float(z_top_start_mm)
-    z_lo = max(float(z_bottom_limit_mm), float(np.min(z_target_safe)))
-    if z_hi - z_lo <= 0.12:
-        return _make_motion_plan_from_segs([], z_safe_mm, rapid_mm_s, provenance="diffcam:levelset_25d")
+    # 1. Detect genuine horizontal floors (ignoring angled chamfer/countersink/fillet slopes)
+    gx_sl = np.zeros_like(z_target_safe)
+    gy_sl = np.zeros_like(z_target_safe)
+    if nx >= 3:
+        gx_sl[1:-1, :] = 0.5 * np.abs(z_target_safe[2:, :] - z_target_safe[:-2, :])
+    if ny >= 3:
+        gy_sl[:, 1:-1] = 0.5 * np.abs(z_target_safe[:, 2:] - z_target_safe[:, :-2])
+    flat_tol = max(0.035, 0.09 * pitch)
+    in_band = (z_target_safe >= z_lo - 0.05) & (z_target_safe <= z_hi - 0.12)
+    flat_cells = in_band & (gx_sl <= flat_tol) & (gy_sl <= flat_tol)
 
-    step_z = max(0.5, float(doc_mm))
-    n_steps = max(1, int(math.ceil((z_hi - z_lo) / step_z)))
-    # Also snap to modal horizontal pocket/step floors in z_target_safe so floors have zero axial residual!
-    quant_floors = np.unique(np.round(z_target_safe[(z_target_safe >= z_lo - 0.05) & (z_target_safe <= z_hi - 0.12)] * 20.0) / 20.0)
-    uniform_levels = [round(z_hi - (k + 1) * ((z_hi - z_lo) / n_steps), 4) for k in range(n_steps)]
-    cand_levels = sorted(set(uniform_levels + [round(float(zf), 4) for zf in quant_floors if z_lo - 0.02 <= zf <= z_hi - 0.12]), reverse=True)
-    # Coalesce levels closer than 0.22 mm (preserving exact floors)
-    z_levels: List[float] = []
-    floor_set = {round(float(zf), 4) for zf in quant_floors}
-    for zv in cand_levels:
-        if not z_levels or (z_levels[-1] - zv) >= 0.25 or zv in floor_set:
-            if z_levels and (z_levels[-1] - zv) < 0.18 and z_levels[-1] not in floor_set:
-                z_levels[-1] = zv
+    true_floors: List[float] = []
+    if np.any(flat_cells):
+        q_vals = np.round(z_target_safe[flat_cells] * 20.0) / 20.0
+        u_vals, u_cnts = np.unique(q_vals, return_counts=True)
+        min_floor_px = max(10, int(math.ceil(3.5 / max(pitch * pitch, 1e-4))))
+        floor_cands = [
+            (float(v), int(c))
+            for v, c in zip(u_vals, u_cnts)
+            if c >= min_floor_px and (z_lo - 0.02 <= float(v) <= z_hi - 0.12)
+        ]
+        floor_cands.sort(key=lambda vc: vc[0], reverse=True)
+        merged: List[Tuple[float, int]] = []
+        for fv, fc in floor_cands:
+            if merged and (merged[-1][0] - fv) < 0.25:
+                if fc > merged[-1][1]:
+                    merged[-1] = (fv, fc)
             else:
+                merged.append((fv, fc))
+        true_floors = [round(fv, 4) for fv, _ in merged]
+
+    if np.any(z_target_safe <= z_lo + 0.08):
+        if not true_floors or abs(true_floors[-1] - z_lo) > 0.18:
+            if true_floors and (true_floors[-1] - z_lo) < 0.25:
+                true_floors[-1] = round(z_lo, 4)
+            else:
+                true_floors.append(round(z_lo, 4))
+    elif not true_floors:
+        true_floors.append(round(z_lo, 4))
+
+    true_floors = sorted(set(true_floors), reverse=True)
+
+    # Subdivide intervals between z_hi and each true floor evenly by step_z (zero thin slivers)
+    step_z = max(0.5, float(doc_mm))
+    z_levels: List[float] = []
+    z_prev_f = z_hi
+    for zf in true_floors:
+        dz_int = z_prev_f - zf
+        if dz_int <= 0.14:
+            if not z_levels:
+                z_levels.append(zf)
+            else:
+                z_levels[-1] = zf
+            z_prev_f = zf
+            continue
+        n_sub = max(1, int(math.ceil((dz_int - 0.08) / step_z)))
+        for s_i in range(1, n_sub + 1):
+            zv = zf if s_i == n_sub else round(z_prev_f - (s_i / n_sub) * dz_int, 4)
+            if not z_levels or (z_levels[-1] - zv) >= 0.15:
                 z_levels.append(zv)
+            else:
+                z_levels[-1] = zv
+        z_prev_f = zf
+
+    if not z_levels:
+        return _make_motion_plan_from_segs([], z_safe_mm, rapid_mm_s, provenance="diffcam:levelset_25d")
     if len(z_levels) > 14:
-        # Keep runtime tight on very deep parts while preserving lowest floor
         idx_keep = np.unique(np.round(np.linspace(0, len(z_levels) - 1, 12)).astype(int))
         z_levels = [z_levels[i] for i in idx_keep]
 
-    # Pad grid by 2 cells around outer perimeter so exterior open contours close outside stock cleanly
-    pad = max(2, int(math.ceil((cutter_radius_mm + 1.0) / pitch)))
+    # Pad grid by >= 2.15 * R + 1.5 mm around outer stock perimeter so open exterior contours have
+    # a continuous, stock-free stay-down linking corridor around the outside of the billet.
+    pad = max(3, int(math.ceil((2.15 * cutter_radius_mm + 1.5) / pitch)))
     xs_pad = np.concatenate(
         [
             xs[0] - np.arange(pad, 0, -1, dtype=np.float64) * pitch,
@@ -352,106 +431,630 @@ def build_levelset_clearing_motion_plan(
             ys[-1] + np.arange(1, pad + 1, dtype=np.float64) * pitch,
         ]
     )
+    nx_p, ny_p = len(xs_pad), len(ys_pad)
+    x0_p, y0_p = float(xs_pad[0]), float(ys_pad[0])
 
     step_xy = max(0.35, float(woc_mm))
     r_req = cutter_radius_mm + max(0.05, radial_stock_mm) + 0.55 * pitch
+    reach_r = cutter_radius_mm * (0.82 if is_rest else 0.96)
+    simp_tol = min(0.10, 0.18 * pitch)
+    closed_tol = max(0.35, 1.15 * pitch)
 
-    def _local_ipw_ceil(px_c: float, py_c: float) -> float:
-        rad_c = cutter_radius_mm + 1.5 * pitch
-        ix0_c = max(0, int(math.floor((px_c - rad_c - xs[0]) / pitch)))
-        ix1_c = min(nx, int(math.ceil((px_c + rad_c - xs[0]) / pitch)) + 1)
-        iy0_c = max(0, int(math.floor((py_c - rad_c - ys[0]) / pitch)))
-        iy1_c = min(ny, int(math.ceil((py_c + rad_c - ys[0]) / pitch)) + 1)
+    safe_cache: Dict[float, np.ndarray] = {}
+
+    def _get_safe_mask(z_val: float) -> np.ndarray:
+        zk = round(float(z_val), 3)
+        cached = safe_cache.get(zk)
+        if cached is not None:
+            return cached
+        p_sol = np.zeros((nx_p, ny_p), dtype=bool)
+        p_sol[pad : pad + nx, pad : pad + ny] = z_target_safe > (zk + 0.035)
+        d_prt = (
+            distance_transform_edt(~p_sol) * pitch
+            if np.any(p_sol)
+            else np.full((nx_p, ny_p), 999.0, dtype=np.float64)
+        )
+        sm = d_prt >= r_req
+        safe_cache[zk] = sm
+        return sm
+
+    def _local_sim_ceil(px_c: float, py_c: float, extra_r: float = 0.0) -> float:
+        rad_c = max(0.05, cutter_radius_mm + extra_r - 0.35 * pitch)
+        ix0_c = max(0, int(math.floor((px_c - rad_c - x0_g) / pitch)))
+        ix1_c = min(nx, int(math.ceil((px_c + rad_c - x0_g) / pitch)) + 1)
+        iy0_c = max(0, int(math.floor((py_c - rad_c - y0_g) / pitch)))
+        iy1_c = min(ny, int(math.ceil((py_c + rad_c - y0_g) / pitch)) + 1)
         if ix0_c < ix1_c and iy0_c < iy1_c:
-            return float(np.max(z_ipw[ix0_c:ix1_c, iy0_c:iy1_c]))
-        return float(np.max(z_ipw))
+            sub_x = xs[ix0_c:ix1_c, None] - px_c
+            sub_y = ys[None, iy0_c:iy1_c] - py_c
+            disk = (sub_x * sub_x + sub_y * sub_y) <= (rad_c * rad_c)
+            if np.any(disk):
+                return float(np.max(z_sim[ix0_c:ix1_c, iy0_c:iy1_c][disk]))
+            return float(z_sim[min(max(int(round((px_c - x0_g) / pitch)), 0), nx - 1), min(max(int(round((py_c - y0_g) / pitch)), 0), ny - 1)])
+        return z_min_s
 
-    for z_cut in z_levels:
-        part_solid = np.zeros((nx + 2 * pad, ny + 2 * pad), dtype=bool)
-        part_solid[pad : pad + nx, pad : pad + ny] = z_target_safe > (z_cut + 0.035)
+    def _chord_in_mask(pa_xy: Tuple[float, float], pb_xy: Tuple[float, float], mask_2d: np.ndarray) -> bool:
+        d_xy = math.hypot(pb_xy[0] - pa_xy[0], pb_xy[1] - pa_xy[1])
+        n_chk = max(2, int(math.ceil(d_xy / max(0.35 * pitch, 0.18))))
+        for s_k in range(n_chk + 1):
+            u_f = s_k / n_chk
+            mx = pa_xy[0] + u_f * (pb_xy[0] - pa_xy[0])
+            my = pa_xy[1] + u_f * (pb_xy[1] - pa_xy[1])
+            ix_m = int(round((mx - x0_p) / pitch))
+            iy_m = int(round((my - y0_p) / pitch))
+            if not (0 <= ix_m < nx_p and 0 <= iy_m < ny_p and mask_2d[ix_m, iy_m]):
+                return False
+        return True
 
-        ipw_solid = np.zeros((nx + 2 * pad, ny + 2 * pad), dtype=bool)
-        ipw_solid[pad : pad + nx, pad : pad + ny] = z_ipw > (z_cut + 0.06)
+    def _holder_safe_chord(pa_xy: Tuple[float, float], pb_xy: Tuple[float, float], z_tip: float) -> bool:
+        if holder_radius_mm <= cutter_radius_mm + 0.1:
+            return True
+        z_hld = z_tip + holder_bottom_mm
+        if z_hld > z_max_s:
+            return True
+        ix0 = max(0, int(math.floor((min(pa_xy[0], pb_xy[0]) - holder_radius_mm - x0_g) / pitch)))
+        ix1 = min(nx, int(math.ceil((max(pa_xy[0], pb_xy[0]) + holder_radius_mm - x0_g) / pitch)) + 1)
+        iy0 = max(0, int(math.floor((min(pa_xy[1], pb_xy[1]) - holder_radius_mm - y0_g) / pitch)))
+        iy1 = min(ny, int(math.ceil((max(pa_xy[1], pb_xy[1]) + holder_radius_mm - y0_g) / pitch)) + 1)
+        if ix0 < ix1 and iy0 < iy1 and float(np.max(z_sim[ix0:ix1, iy0:iy1])) > z_hld - 0.15:
+            return False
+        return True
+
+    def _route_cleared_glide(
+        pa_xy: Tuple[float, float],
+        pb_xy: Tuple[float, float],
+        z_glide: float,
+        safe_2d: np.ndarray,
+    ) -> Optional[List[Tuple[float, float]]]:
+        """Find a collision-free stay-down 2D path at ``z_glide`` through cleared IPW."""
+        r_chk = max(0.08, cutter_radius_mm - 0.02)
+        # Fast check 1: direct straight chord in 100% cleared air (strictly <= 1e-7 for early-exit probe!)
+        if (
+            _chord_in_mask(pa_xy, pb_xy, safe_2d)
+            and _holder_safe_chord(pa_xy, pb_xy, z_glide)
+            and _sweep_removes_or_updates_dexels(
+                xs, ys, z_sim, x0_g, y0_g, pitch, r_chk, z_min_s, z_max_s,
+                (pa_xy[0], pa_xy[1], z_glide), (pb_xy[0], pb_xy[1], z_glide), mutate=False,
+            ) <= 1e-7
+        ):
+            return [pa_xy, pb_xy]
+
+        # Build cleared-IPW passable grid at z_glide
+        uncut_g = np.zeros((nx_p, ny_p), dtype=bool)
+        uncut_g[pad : pad + nx, pad : pad + ny] = z_sim > (z_glide - 0.05)
+        if np.any(uncut_g):
+            dist_uncut = distance_transform_edt(~uncut_g) * pitch
+            clr_mask = dist_uncut >= max(0.0, cutter_radius_mm - 0.55 * pitch)
+        else:
+            clr_mask = np.ones((nx_p, ny_p), dtype=bool)
+
+        if holder_radius_mm > cutter_radius_mm + 0.1 and (z_glide + holder_bottom_mm) <= z_max_s:
+            hld_obs = np.zeros((nx_p, ny_p), dtype=bool)
+            hld_obs[pad : pad + nx, pad : pad + ny] = z_sim > (z_glide + holder_bottom_mm - 0.15)
+            if np.any(hld_obs):
+                clr_mask = clr_mask & ((distance_transform_edt(~hld_obs) * pitch) >= (holder_radius_mm + 0.5 * pitch))
+
+        passable = safe_2d & clr_mask
+
+        def _snap_p(pt_xy: Tuple[float, float]) -> Optional[Tuple[int, int]]:
+            ci = min(max(int(round((pt_xy[0] - x0_p) / pitch)), 0), nx_p - 1)
+            cj = min(max(int(round((pt_xy[1] - y0_p) / pitch)), 0), ny_p - 1)
+            best_ij: Optional[Tuple[int, int]] = None
+            best_d2 = float("inf")
+            for di in range(-2, 3):
+                ii = ci + di
+                if ii < 0 or ii >= nx_p:
+                    continue
+                for dj in range(-2, 3):
+                    jj = cj + dj
+                    if jj < 0 or jj >= ny_p:
+                        continue
+                    if not passable[ii, jj]:
+                        continue
+                    gpt = (float(xs_pad[ii]), float(ys_pad[jj]))
+                    if not _chord_in_mask(pt_xy, gpt, safe_2d) or not _holder_safe_chord(pt_xy, gpt, z_glide):
+                        continue
+                    if _sweep_removes_or_updates_dexels(
+                        xs, ys, z_sim, x0_g, y0_g, pitch, r_chk, z_min_s, z_max_s,
+                        (pt_xy[0], pt_xy[1], z_glide), (gpt[0], gpt[1], z_glide), mutate=False,
+                    ) > 1e-7:
+                        continue
+                    d2 = (gpt[0] - pt_xy[0]) ** 2 + (gpt[1] - pt_xy[1]) ** 2
+                    if d2 < best_d2:
+                        best_d2 = d2
+                        best_ij = (ii, jj)
+            return best_ij
+
+        s_ij = _snap_p(pa_xy)
+        g_ij = _snap_p(pb_xy)
+        if s_ij is None or g_ij is None:
+            return None
+
+        pass_work = passable.copy()
+        pass_work[s_ij[0], s_ij[1]] = True
+        pass_work[g_ij[0], g_ij[1]] = True
+
+        lbl_p, _ = label(pass_work, structure=_STRUCT_8_CAD)
+        cid_p = int(lbl_p[s_ij[0], s_ij[1]])
+        if cid_p == 0 or int(lbl_p[g_ij[0], g_ij[1]]) != cid_p:
+            return None
+
+        in_c = lbl_p == cid_p
+        si, sj = s_ij
+        gi, gj = g_ij
+        if (si, sj) == (gi, gj):
+            raw_chain = [pa_xy, (float(xs_pad[si]), float(ys_pad[sj])), pb_xy]
+        else:
+            g_cost = np.full((nx_p, ny_p), np.inf, dtype=np.float64)
+            par_i = np.full((nx_p, ny_p), -1, dtype=np.int32)
+            par_j = np.full((nx_p, ny_p), -1, dtype=np.int32)
+            g_cost[si, sj] = 0.0
+            diag = math.sqrt(2.0) * pitch
+            nbrs = (
+                (-1, 0, pitch), (1, 0, pitch), (0, -1, pitch), (0, 1, pitch),
+                (-1, -1, diag), (-1, 1, diag), (1, -1, diag), (1, 1, diag),
+            )
+            h_init = pitch * (abs(gi - si) + abs(gj - sj) + (math.sqrt(2.0) - 2.0) * min(abs(gi - si), abs(gj - sj)))
+            heap: List[Tuple[float, float, int, int]] = [(h_init, 0.0, si, sj)]
+            found = False
+            while heap:
+                _, cg, ci, cj = heapq.heappop(heap)
+                if cg > g_cost[ci, cj] + 1e-12:
+                    continue
+                if ci == gi and cj == gj:
+                    found = True
+                    break
+                for di, dj, sd in nbrs:
+                    ni, nj = ci + di, cj + dj
+                    if 0 <= ni < nx_p and 0 <= nj < ny_p and in_c[ni, nj]:
+                        if di != 0 and dj != 0 and not (in_c[ci + di, cj] and in_c[ci, cj + dj]):
+                            continue
+                        ng = cg + sd
+                        if ng + 1e-12 < g_cost[ni, nj]:
+                            g_cost[ni, nj] = ng
+                            par_i[ni, nj] = ci
+                            par_j[ni, nj] = cj
+                            dxi, dyi = abs(gi - ni), abs(gj - nj)
+                            hv = 1.001 * pitch * (dxi + dyi + (math.sqrt(2.0) - 2.0) * min(dxi, dyi))
+                            heapq.heappush(heap, (ng + hv, ng, ni, nj))
+            if not found:
+                return None
+            pts_grid: List[Tuple[float, float]] = []
+            ci, cj = gi, gj
+            while ci >= 0 and cj >= 0:
+                pts_grid.append((float(xs_pad[ci]), float(ys_pad[cj])))
+                if ci == si and cj == sj:
+                    break
+                ci, cj = int(par_i[ci, cj]), int(par_j[ci, cj])
+            pts_grid.reverse()
+            raw_chain = [pa_xy] + pts_grid + [pb_xy]
+
+        dedup: List[Tuple[float, float]] = [raw_chain[0]]
+        for p in raw_chain[1:]:
+            if math.hypot(p[0] - dedup[-1][0], p[1] - dedup[-1][1]) > 1e-4:
+                dedup.append(p)
+        if len(dedup) < 2:
+            return None
+
+        # Greedy collision-free stay-down chord simplification
+        simp: List[Tuple[float, float]] = [dedup[0]]
+        idx_s = 0
+        n_d = len(dedup)
+        while idx_s < n_d - 1:
+            jumped = idx_s + 1
+            for prb in range(n_d - 1, idx_s + 1, -1):
+                qa, qb = dedup[idx_s], dedup[prb]
+                if (
+                    _chord_in_mask(qa, qb, safe_2d)
+                    and _holder_safe_chord(qa, qb, z_glide)
+                    and _sweep_removes_or_updates_dexels(
+                        xs, ys, z_sim, x0_g, y0_g, pitch, r_chk, z_min_s, z_max_s,
+                        (qa[0], qa[1], z_glide), (qb[0], qb[1], z_glide), mutate=False,
+                    ) <= 1e-7
+                ):
+                    jumped = prb
+                    break
+            qa, qb = dedup[idx_s], dedup[jumped]
+            if not _chord_in_mask(qa, qb, safe_2d) or not _holder_safe_chord(qa, qb, z_glide):
+                return None
+            simp.append(qb)
+            idx_s = jumped
+
+        tot_len = sum(math.hypot(simp[k + 1][0] - simp[k][0], simp[k + 1][1] - simp[k][1]) for k in range(len(simp) - 1))
+        if tot_len > 280.0:
+            return None
+        return simp
+
+    # 2. Extract connected pocket/contour regions across all Z levels
+    # Each node: (l_idx, z_cut, reg_mask, loops_with_rank[(rank, arr, is_closed)], centroid_xy)
+    region_nodes: List[Tuple[int, float, np.ndarray, List[Tuple[int, np.ndarray, bool]], Tuple[float, float]]] = []
+    ipw_init_pad = np.zeros((nx_p, ny_p), dtype=np.float64) - 1e6
+    ipw_init_pad[pad : pad + nx, pad : pad + ny] = z_ipw
+
+    for l_idx, z_cut in enumerate(z_levels):
+        safe_mask = _get_safe_mask(z_cut)
+        ipw_solid = ipw_init_pad > (z_cut + 0.06)
         if not np.any(ipw_solid):
             continue
-
-        dist_part = (
-            distance_transform_edt(~part_solid) * pitch
-            if np.any(part_solid)
-            else np.full_like(part_solid, 999.0, dtype=np.float64)
-        )
         dist_ipw = distance_transform_edt(~ipw_solid) * pitch
-
-        reach_r = cutter_radius_mm * (0.82 if is_rest else 0.96)
-        safe_mask = dist_part >= r_req
         active = safe_mask & (dist_ipw <= reach_r)
-        if int(np.sum(active)) < 4:
+        if int(np.count_nonzero(active)) < 4:
             continue
 
-        # Inward distance from boundary of active cutting zone
-        d_in = distance_transform_edt(active) * pitch
-        d_max = float(np.max(d_in))
-        if d_max <= 0.15 * pitch:
+        # Cluster active cells into distinct spatial pockets/regions within safe_mask
+        bridge_mm = (2.1 * cutter_radius_mm if is_rest else 0.75 * cutter_radius_mm) + pitch
+        bridged = safe_mask & ((distance_transform_edt(~active) * pitch) <= bridge_mm)
+        lbl_reg, n_reg = label(bridged, structure=_STRUCT_8_CAD)
+
+        for r_id in range(1, n_reg + 1):
+            reg_active = active & (lbl_reg == r_id)
+            if int(np.count_nonzero(reg_active)) < 4:
+                continue
+            d_in = distance_transform_edt(reg_active) * pitch
+            d_max = float(np.max(d_in))
+            if d_max <= 0.15 * pitch:
+                continue
+
+            iso_vals: List[float] = [max(0.65 * pitch, min(0.30 * step_xy, 0.55 * d_max))]
+            lv = iso_vals[0] + step_xy
+            while lv < d_max - 0.20 * pitch and len(iso_vals) < 36:
+                iso_vals.append(lv)
+                lv += step_xy
+
+            reg_loops: List[Tuple[int, np.ndarray, bool]] = []
+            for rnk, iv in enumerate(reversed(iso_vals)):
+                lps = trace_iso_contours_2d(xs_pad, ys_pad, d_in, iv, simplify_tol_mm=simp_tol)
+                for lp in lps:
+                    is_cl = len(lp) >= 4 and math.hypot(float(lp[0, 0] - lp[-1, 0]), float(lp[0, 1] - lp[-1, 1])) <= closed_tol
+                    if is_cl:
+                        lp = np.vstack([lp[:-1], lp[0:1]])
+                    reg_loops.append((rnk, lp, is_cl))
+
+            if not reg_loops:
+                continue
+            pts_ij = np.argwhere(reg_active)
+            c_xy = (float(xs_pad[int(round(float(pts_ij[:, 0].mean())))]), float(ys_pad[int(round(float(pts_ij[:, 1].mean())))]))
+            region_nodes.append((l_idx, z_cut, reg_active, reg_loops, c_xy))
+
+    if not region_nodes:
+        return _make_motion_plan_from_segs([], z_safe_mm, rapid_mm_s, provenance="diffcam:levelset_25d")
+
+    # 3. Build top-down prerequisite DAG (cutter overlap + holder clearance) for depth-first traversal
+    n_nodes = len(region_nodes)
+    parents: List[List[int]] = [[] for _ in range(n_nodes)]
+    children: List[List[int]] = [[] for _ in range(n_nodes)]
+
+    for v_idx in range(n_nodes):
+        lv_v, zv, mask_v, _, _ = region_nodes[v_idx]
+        if lv_v == 0:
             continue
+        edt_v = distance_transform_edt(~mask_v) * pitch
+        cut_zone = edt_v <= (cutter_radius_mm + 0.65 * step_xy + pitch)
+        use_hld = holder_radius_mm > cutter_radius_mm + 0.1 and (zv + holder_bottom_mm) < (z_hi + 0.5)
+        hld_zone = edt_v <= (holder_radius_mm + cutter_radius_mm + 2.0 * pitch) if use_hld else None
 
-        # Generate offset iso-levels spaced by step_xy (starting >= 0.65 * pitch inside active mask)
-        iso_vals: List[float] = [max(0.65 * pitch, min(0.30 * step_xy, 0.55 * d_max))]
-        lv = iso_vals[0] + step_xy
-        while lv < d_max - 0.20 * pitch and len(iso_vals) < 36:
-            iso_vals.append(lv)
-            lv += step_xy
+        for u_idx in range(v_idx):
+            lv_u, zu, mask_u, _, _ = region_nodes[u_idx]
+            if lv_u >= lv_v:
+                continue
+            need_dep = bool(np.any(mask_u & cut_zone))
+            if not need_dep and hld_zone is not None and zu >= (zv + holder_bottom_mm - 1.0):
+                need_dep = bool(np.any(mask_u & hld_zone))
+            if need_dep:
+                parents[v_idx].append(u_idx)
+                children[u_idx].append(v_idx)
 
-        # Order inner-to-outer so enclosed pockets ramp near center and spiral out; open borders enter gently
-        ordered_loops: List[np.ndarray] = []
-        simp_tol = min(0.10, 0.18 * pitch)
-        for iv in reversed(iso_vals):
-            loops = trace_iso_contours_2d(xs_pad, ys_pad, d_in, iv, simplify_tol_mm=simp_tol)
-            ordered_loops.extend(loops)
+    rem_deps = [len(p) for p in parents]
+    done_node = [False] * n_nodes
+    last_node: Optional[int] = None
 
-        for loop in ordered_loops:
-            sx, sy = float(loop[0, 0]), float(loop[0, 1])
-            # Check if we can stay down safely between adjacent offset rings without crossing part_solid
-            can_link_direct = False
-            if abs(cur[2] - z_cut) <= 1e-4 and math.hypot(sx - cur[0], sy - cur[1]) <= 2.4 * step_xy + cutter_radius_mm:
-                can_link_direct = True
-                for alpha in (0.25, 0.5, 0.75):
-                    mx = cur[0] + alpha * (sx - cur[0])
-                    my = cur[1] + alpha * (sy - cur[1])
-                    ix_m = int(round((mx - xs_pad[0]) / pitch))
-                    iy_m = int(round((my - ys_pad[0]) / pitch))
-                    if not (0 <= ix_m < len(xs_pad) and 0 <= iy_m < len(ys_pad) and safe_mask[ix_m, iy_m]):
-                        can_link_direct = False
-                        break
+    def _ramp_and_trace_loop(loop: np.ndarray, is_cl: bool, z_from: float, z_cut: float) -> None:
+        sx, sy = float(loop[0, 0]), float(loop[0, 1])
+        dz_r = z_from - z_cut
+        seg_vecs = np.diff(loop, axis=0)
+        seg_lens = np.hypot(seg_vecs[:, 0], seg_vecs[:, 1])
+        tot_lp_len = float(np.sum(seg_lens))
 
-            if can_link_direct:
-                _push((sx, sy, z_cut), C.SegmentKind.FEED, 0.85 * base_feed_mm_s)
-            else:
-                if cur[2] < z_safe_mm - 1e-5:
-                    _push((cur[0], cur[1], z_safe_mm), C.SegmentKind.RAPID, None)
-                _push((sx, sy, z_safe_mm), C.SegmentKind.RAPID, None)
-                # Never rapid below local remaining IPW stock ceiling + 0.65 mm
-                z_loc_top = _local_ipw_ceil(sx, sy)
-                if len(loop) >= 2:
-                    z_loc_top = max(z_loc_top, _local_ipw_ceil(float(loop[1, 0]), float(loop[1, 1])))
-                z_ramp_top = z_cut + max(1.0, doc_mm + 0.5)
-                z_above = min(z_safe_mm, max(z_ramp_top, z_loc_top + 0.65))
-                _push((sx, sy, z_above), C.SegmentKind.RAPID, None)
-                if z_above > z_ramp_top + 0.4:
-                    _push((sx, sy, z_ramp_top), C.SegmentKind.FEED, 1.25 * base_feed_mm_s)
-                if len(loop) >= 2 and math.hypot(float(loop[1, 0]) - sx, float(loop[1, 1]) - sy) >= 0.6:
-                    nx_p, ny_p = float(loop[1, 0]), float(loop[1, 1])
-                    z_mid = 0.5 * (min(z_above, z_ramp_top) + z_cut)
-                    _push((nx_p, ny_p, z_mid), C.SegmentKind.FEED, 0.60 * base_feed_mm_s)
-                    _push((sx, sy, z_cut), C.SegmentKind.FEED, 0.60 * base_feed_mm_s)
-                else:
-                    _push((sx, sy, z_cut), C.SegmentKind.FEED, 0.50 * base_feed_mm_s)
+        # Check if stock along loop is already cleared near z_cut
+        s_step = max(1, len(loop) // 16)
+        max_sim_lp = max(_local_sim_ceil(float(loop[k, 0]), float(loop[k, 1])) for k in range(0, len(loop), s_step))
+        if dz_r <= 0.04 or max_sim_lp <= z_cut + 0.05:
+            if abs(cur[2] - z_cut) > 1e-5:
+                _push((sx, sy, z_cut), C.SegmentKind.FEED, 1.15 * base_feed_mm_s if max_sim_lp <= z_cut + 0.05 else 0.70 * base_feed_mm_s)
+            for k in range(1, len(loop)):
+                _push((float(loop[k, 0]), float(loop[k, 1]), z_cut), C.SegmentKind.FEED, base_feed_mm_s)
+            return
 
+        z_eff_top = min(z_from, max(z_cut + 0.35, max_sim_lp + 0.35))
+        if cur[2] > z_eff_top + 0.05:
+            _push((sx, sy, z_eff_top), C.SegmentKind.FEED, 1.35 * base_feed_mm_s)
+        dz_eff = max(0.0, z_eff_top - z_cut)
+        ramp_run = min(50.0, max(1.8, 4.2 * dz_eff))
+
+        if is_cl and tot_lp_len >= 1.0 and len(loop) >= 4:
+            # Continuous helical contour ramp around closed loop directly into flat 360° pass
+            ring = loop[:-1]
+            n_r = len(ring)
+            traveled = 0.0
+            r_idx = 0
+            guard_steps = 0
+            while traveled < ramp_run - 1e-4 and guard_steps < max(24, 8 * n_r):
+                nxt_i = (r_idx + 1) % n_r
+                pa_r = ring[r_idx]
+                pb_r = ring[nxt_i]
+                ds = float(math.hypot(float(pb_r[0] - pa_r[0]), float(pb_r[1] - pa_r[1])))
+                if ds > 1e-6:
+                    traveled = min(ramp_run, traveled + ds)
+                    zk = z_eff_top - (traveled / ramp_run) * dz_eff
+                    _push((float(pb_r[0]), float(pb_r[1]), zk), C.SegmentKind.FEED, 0.68 * base_feed_mm_s)
+                r_idx = nxt_i
+                guard_steps += 1
+            # Full flat cleanup circuit starting seamlessly at r_idx
+            for step_c in range(1, n_r + 1):
+                vi = (r_idx + step_c) % n_r
+                _push((float(ring[vi, 0]), float(ring[vi, 1]), z_cut), C.SegmentKind.FEED, base_feed_mm_s)
+        elif tot_lp_len >= 0.6 and len(loop) >= 2:
+            # Smooth back-and-forth contour ramp along open chain prefix back to loop[0] at z_cut
+            half_run = min(tot_lp_len, max(0.7, 0.5 * ramp_run))
+            fwd_pts: List[Tuple[float, float]] = [(sx, sy)]
+            acc_d = 0.0
+            for k in range(1, len(loop)):
+                px_k, py_k = float(loop[k, 0]), float(loop[k, 1])
+                ds = math.hypot(px_k - fwd_pts[-1][0], py_k - fwd_pts[-1][1])
+                if ds <= 1e-6:
+                    continue
+                if acc_d + ds >= half_run:
+                    t_f = (half_run - acc_d) / ds
+                    fwd_pts.append((fwd_pts[-1][0] + t_f * (px_k - fwd_pts[-1][0]), fwd_pts[-1][1] + t_f * (py_k - fwd_pts[-1][1])))
+                    acc_d = half_run
+                    break
+                fwd_pts.append((px_k, py_k))
+                acc_d += ds
+            z_mid = 0.5 * (z_eff_top + z_cut)
+            d_so_far = 0.0
+            for k in range(1, len(fwd_pts)):
+                d_so_far += math.hypot(fwd_pts[k][0] - fwd_pts[k - 1][0], fwd_pts[k][1] - fwd_pts[k - 1][1])
+                zk = z_eff_top - (d_so_far / max(acc_d, 1e-6)) * (z_eff_top - z_mid)
+                _push((fwd_pts[k][0], fwd_pts[k][1], zk), C.SegmentKind.FEED, 0.65 * base_feed_mm_s)
+            d_so_far = 0.0
+            for k in range(len(fwd_pts) - 2, -1, -1):
+                d_so_far += math.hypot(fwd_pts[k][0] - fwd_pts[k + 1][0], fwd_pts[k][1] - fwd_pts[k + 1][1])
+                zk = z_mid - (d_so_far / max(acc_d, 1e-6)) * (z_mid - z_cut)
+                _push((fwd_pts[k][0], fwd_pts[k][1], zk), C.SegmentKind.FEED, 0.65 * base_feed_mm_s)
+            for k in range(1, len(loop)):
+                _push((float(loop[k, 0]), float(loop[k, 1]), z_cut), C.SegmentKind.FEED, base_feed_mm_s)
+        else:
+            _push((sx, sy, z_cut), C.SegmentKind.FEED, 0.50 * base_feed_mm_s)
             for k in range(1, len(loop)):
                 _push((float(loop[k, 0]), float(loop[k, 1]), z_cut), C.SegmentKind.FEED, base_feed_mm_s)
 
-        if cur[2] < z_safe_mm - 1e-5:
-            _push((cur[0], cur[1], z_safe_mm), C.SegmentKind.RAPID, None)
+    def _safe_retract_z_safe() -> None:
+        if cur[2] >= z_safe_mm - 1e-5:
+            return
+        p_up = (cur[0], cur[1], z_safe_mm)
+        v_probe = _sweep_removes_or_updates_dexels(
+            xs, ys, z_sim, x0_g, y0_g, pitch, cutter_radius_mm, z_min_s, z_max_s, cur, p_up, mutate=False
+        )
+        if v_probe <= 1e-7:
+            _push(p_up, C.SegmentKind.RAPID, None)
+        else:
+            _push(p_up, C.SegmentKind.FEED, min(rapid_mm_s * 0.85, 2.2 * base_feed_mm_s))
 
+    # 4. Execute Region DAG Depth-First with Stay-Down Linking
+    v_glide = min(rapid_mm_s * 0.85, 2.25 * base_feed_mm_s)
+    rem_count = n_nodes
+    while rem_count > 0:
+        ready = [i for i in range(n_nodes) if not done_node[i] and rem_deps[i] == 0]
+        if not ready:
+            min_lv = min(region_nodes[i][0] for i in range(n_nodes) if not done_node[i])
+            ready = [i for i in range(n_nodes) if not done_node[i] and region_nodes[i][0] == min_lv]
+
+        cur_xy_now = (cur[0], cur[1])
+        down_now = cur[2] < z_safe_mm - 0.25
+
+        def _node_entry_xy(n_i: int) -> Tuple[float, float]:
+            _, _, _, lps_n, c_xy_n = region_nodes[n_i]
+            if not lps_n:
+                return c_xy_n
+            _, lp0, is_cl0 = lps_n[0]
+            if is_cl0:
+                d2 = (lp0[:, 0] - cur_xy_now[0]) ** 2 + (lp0[:, 1] - cur_xy_now[1]) ** 2
+                bi = int(np.argmin(d2))
+                return (float(lp0[bi, 0]), float(lp0[bi, 1]))
+            return (float(lp0[0, 0]), float(lp0[0, 1]))
+
+        def _node_score(n_i: int) -> Tuple[int, int, float, int]:
+            lv_i, z_i, _, _, _ = region_nodes[n_i]
+            is_child = 0 if (last_node is not None and n_i in children[last_node]) else 1
+            ep = _node_entry_xy(n_i)
+            d_xy = math.hypot(ep[0] - cur_xy_now[0], ep[1] - cur_xy_now[1])
+            same_cav = 1
+            if down_now:
+                sm_ref = _get_safe_mask(max(cur[2], z_i))
+                ix_a = min(max(int(round((cur_xy_now[0] - x0_p) / pitch)), 0), nx_p - 1)
+                iy_a = min(max(int(round((cur_xy_now[1] - y0_p) / pitch)), 0), ny_p - 1)
+                ix_b = min(max(int(round((ep[0] - x0_p) / pitch)), 0), nx_p - 1)
+                iy_b = min(max(int(round((ep[1] - y0_p) / pitch)), 0), ny_p - 1)
+                if sm_ref[ix_a, iy_a] and sm_ref[ix_b, iy_b]:
+                    if _chord_in_mask(cur_xy_now, ep, sm_ref):
+                        same_cav = 0
+                    else:
+                        lbl_s, _ = label(sm_ref, structure=_STRUCT_8_CAD)
+                        if lbl_s[ix_a, iy_a] > 0 and lbl_s[ix_a, iy_a] == lbl_s[ix_b, iy_b]:
+                            same_cav = 0
+            return (is_child, same_cav, d_xy, lv_i)
+
+        pick_n = min(ready, key=_node_score)
+        done_node[pick_n] = True
+        rem_count -= 1
+        for ch_i in children[pick_n]:
+            rem_deps[ch_i] = max(0, rem_deps[ch_i] - 1)
+
+        _, z_cut, reg_mask, reg_loops, _ = region_nodes[pick_n]
+        safe_mask_cut = _get_safe_mask(z_cut)
+
+        # Within-region prerequisite-safe contour continuation (keeps multi-lobe offsets stay-down)
+        n_lp = len(reg_loops)
+        lp_parents: List[List[int]] = [[] for _ in range(n_lp)]
+        lp_children: List[List[int]] = [[] for _ in range(n_lp)]
+        by_rnk: Dict[int, List[int]] = {}
+        for li, (rnk, _, _) in enumerate(reg_loops):
+            by_rnk.setdefault(rnk, []).append(li)
+        rnk_sorted = sorted(by_rnk.keys())
+        dep_rad2 = (2.45 * step_xy + pitch) ** 2
+        for r_pos in range(1, len(rnk_sorted)):
+            prev_r = rnk_sorted[r_pos - 1]
+            cur_r = rnk_sorted[r_pos]
+            for ci_l in by_rnk[cur_r]:
+                pts_c = reg_loops[ci_l][1]
+                for pi_l in by_rnk[prev_r]:
+                    pts_p = reg_loops[pi_l][1]
+                    # Subsample up to 24 vertices for fast O(1) min-distance check
+                    sc = pts_c[:: max(1, len(pts_c) // 24)]
+                    sp = pts_p[:: max(1, len(pts_p) // 24)]
+                    d2_min = float(np.min((sc[:, None, 0] - sp[None, :, 0]) ** 2 + (sc[:, None, 1] - sp[None, :, 1]) ** 2))
+                    if d2_min <= dep_rad2:
+                        lp_parents[ci_l].append(pi_l)
+                        lp_children[pi_l].append(ci_l)
+
+        lp_rem = [len(p) for p in lp_parents]
+        lp_done = [False] * n_lp
+        lp_left = n_lp
+
+        while lp_left > 0:
+            lp_ready = [i for i in range(n_lp) if not lp_done[i] and lp_rem[i] == 0]
+            if not lp_ready:
+                min_rk = min(reg_loops[i][0] for i in range(n_lp) if not lp_done[i])
+                lp_ready = [i for i in range(n_lp) if not lp_done[i] and reg_loops[i][0] == min_rk]
+
+            cxy = (cur[0], cur[1])
+
+            def _lp_dist(li: int) -> Tuple[float, int]:
+                rnk_l, arr_l, cl_l = reg_loops[li]
+                if cl_l:
+                    d2 = (arr_l[:, 0] - cxy[0]) ** 2 + (arr_l[:, 1] - cxy[1]) ** 2
+                    return (float(math.sqrt(float(np.min(d2)))), rnk_l)
+                return (math.hypot(float(arr_l[0, 0]) - cxy[0], float(arr_l[0, 1]) - cxy[1]), rnk_l)
+
+            pick_l = min(lp_ready, key=_lp_dist)
+            lp_done[pick_l] = True
+            lp_left -= 1
+            for ch_l in lp_children[pick_l]:
+                lp_rem[ch_l] = max(0, lp_rem[ch_l] - 1)
+
+            _, loop_raw, is_cl = reg_loops[pick_l]
+            loop = _rotate_closed_loop_nearest(loop_raw, (cur[0], cur[1])) if is_cl else loop_raw
+            sx, sy = float(loop[0, 0]), float(loop[0, 1])
+
+            linked_stay_down = False
+            if cur[2] < z_safe_mm - 0.2:
+                dist_xy = math.hypot(sx - cur[0], sy - cur[1])
+                # Tier 1: Direct horizontal stepover at z_cut
+                if (
+                    abs(cur[2] - z_cut) <= 1e-4
+                    and dist_xy <= 2.65 * step_xy + cutter_radius_mm
+                    and _chord_in_mask((cur[0], cur[1]), (sx, sy), safe_mask_cut)
+                    and _holder_safe_chord((cur[0], cur[1]), (sx, sy), z_cut)
+                ):
+                    z_mid_ceil = _local_sim_ceil(0.5 * (cur[0] + sx), 0.5 * (cur[1] + sy))
+                    if z_mid_ceil <= z_cut + doc_mm + 0.65:
+                        _push((sx, sy, z_cut), C.SegmentKind.FEED, 0.88 * base_feed_mm_s)
+                        for k in range(1, len(loop)):
+                            _push((float(loop[k, 0]), float(loop[k, 1]), z_cut), C.SegmentKind.FEED, base_feed_mm_s)
+                        linked_stay_down = True
+
+                # Tier 2 & 3: Stay-down cleared-IPW glide (direct chord, 2D A*, or cleared-pocket lateral lead-in)
+                if not linked_stay_down:
+                    z_ref = max(cur[2], z_cut)
+                    z_glide = min(z_safe_mm - 0.35, z_ref + 0.22)
+                    r_air_chk = max(0.08, cutter_radius_mm - 0.02)
+                    rise_ok = True
+                    if z_glide > cur[2] + 1e-4:
+                        v_up = _sweep_removes_or_updates_dexels(
+                            xs, ys, z_sim, x0_g, y0_g, pitch, r_air_chk, z_min_s, z_max_s,
+                            cur, (cur[0], cur[1], z_glide), mutate=False,
+                        )
+                        if v_up > 1e-7 or not _holder_safe_chord((cur[0], cur[1]), (cur[0], cur[1]), cur[2]):
+                            rise_ok = False
+                    if rise_ok:
+                        sm_ref = _get_safe_mask(z_ref)
+                        glide_pts = _route_cleared_glide((cur[0], cur[1]), (sx, sy), z_glide, sm_ref)
+                        if glide_pts is not None and len(glide_pts) >= 2:
+                            if abs(cur[2] - z_glide) > 1e-5:
+                                _push((cur[0], cur[1], z_glide), C.SegmentKind.FEED, v_glide)
+                            for gx_p, gy_p in glide_pts[1:]:
+                                _push((gx_p, gy_p, z_glide), C.SegmentKind.FEED, v_glide)
+                            _ramp_and_trace_loop(loop, is_cl, z_glide, z_cut)
+                            linked_stay_down = True
+                        else:
+                            # Rest-pocket lateral lead-in: find a nearby cleared pocket interior point
+                            # already machined down to z_cut and step laterally into (sx, sy, z_cut)!
+                            lead_r_px = max(2, int(math.ceil((1.75 * cutter_radius_mm + step_xy) / pitch)))
+                            ci_t = min(max(int(round((sx - x0_p) / pitch)), 0), nx_p - 1)
+                            cj_t = min(max(int(round((sy - y0_p) / pitch)), 0), ny_p - 1)
+                            best_lead: Optional[Tuple[float, float]] = None
+                            best_ld2 = float("inf")
+                            for di_l in range(-lead_r_px, lead_r_px + 1, max(1, lead_r_px // 4)):
+                                ii_l = ci_t + di_l
+                                if ii_l < 0 or ii_l >= nx_p:
+                                    continue
+                                for dj_l in range(-lead_r_px, lead_r_px + 1, max(1, lead_r_px // 4)):
+                                    jj_l = cj_t + dj_l
+                                    if jj_l < 0 or jj_l >= ny_p or not safe_mask_cut[ii_l, jj_l] or not sm_ref[ii_l, jj_l]:
+                                        continue
+                                    lx, ly = float(xs_pad[ii_l]), float(ys_pad[jj_l])
+                                    ld2 = (lx - sx) ** 2 + (ly - sy) ** 2
+                                    if ld2 >= best_ld2 or ld2 < (0.3 * pitch) ** 2:
+                                        continue
+                                    if _local_sim_ceil(lx, ly, extra_r=0.10) > z_cut + 0.04:
+                                        continue
+                                    if not _chord_in_mask((lx, ly), (sx, sy), safe_mask_cut) or not _holder_safe_chord((lx, ly), (sx, sy), z_cut):
+                                        continue
+                                    if _local_sim_ceil(0.5 * (lx + sx), 0.5 * (ly + sy)) > z_cut + doc_mm + 0.65:
+                                        continue
+                                    best_ld2 = ld2
+                                    best_lead = (lx, ly)
+                            if best_lead is not None:
+                                g_lead = _route_cleared_glide((cur[0], cur[1]), best_lead, z_glide, sm_ref)
+                                if g_lead is not None and len(g_lead) >= 2:
+                                    v_drop = _sweep_removes_or_updates_dexels(
+                                        xs, ys, z_sim, x0_g, y0_g, pitch, r_air_chk, z_min_s, z_max_s,
+                                        (best_lead[0], best_lead[1], z_glide), (best_lead[0], best_lead[1], z_cut), mutate=False,
+                                    )
+                                    if v_drop <= 1e-7:
+                                        if abs(cur[2] - z_glide) > 1e-5:
+                                            _push((cur[0], cur[1], z_glide), C.SegmentKind.FEED, v_glide)
+                                        for gx_p, gy_p in g_lead[1:]:
+                                            _push((gx_p, gy_p, z_glide), C.SegmentKind.FEED, v_glide)
+                                        _push((best_lead[0], best_lead[1], z_cut), C.SegmentKind.FEED, v_glide)
+                                        _push((sx, sy, z_cut), C.SegmentKind.FEED, 0.72 * base_feed_mm_s)
+                                        for k in range(1, len(loop)):
+                                            _push((float(loop[k, 0]), float(loop[k, 1]), z_cut), C.SegmentKind.FEED, base_feed_mm_s)
+                                        linked_stay_down = True
+
+            # Tier 4: Safe z_safe_mm retract + rapid + contour ramp (only across solid walls/bosses)
+            if not linked_stay_down:
+                _safe_retract_z_safe()
+                _push((sx, sy, z_safe_mm), C.SegmentKind.RAPID, None)
+                z_loc_top = _local_sim_ceil(sx, sy)
+                for k_chk in range(1, min(len(loop), 6)):
+                    z_loc_top = max(z_loc_top, _local_sim_ceil(float(loop[k_chk, 0]), float(loop[k_chk, 1])))
+                z_ramp_top = max(z_cut + 0.6, min(z_cut + max(1.0, doc_mm + 0.5), max(z_cut + 0.6, z_loc_top + 0.45)))
+                z_above = min(z_safe_mm, max(z_ramp_top, z_loc_top + 0.75))
+                if z_above < z_safe_mm - 1e-4:
+                    v_dn = _sweep_removes_or_updates_dexels(
+                        xs, ys, z_sim, x0_g, y0_g, pitch, cutter_radius_mm, z_min_s, z_max_s,
+                        (sx, sy, z_safe_mm), (sx, sy, z_above), mutate=False,
+                    )
+                    if v_dn <= 1e-7:
+                        _push((sx, sy, z_above), C.SegmentKind.RAPID, None)
+                    else:
+                        _push((sx, sy, z_above), C.SegmentKind.FEED, v_glide)
+                _ramp_and_trace_loop(loop, is_cl, cur[2], z_cut)
+
+        last_node = pick_n
+
+    _safe_retract_z_safe()
     _push((0.0, 0.0, z_safe_mm), C.SegmentKind.RAPID, None)
     return _make_motion_plan_from_segs(segs, z_safe_mm, rapid_mm_s, provenance="diffcam:levelset_25d")
 
@@ -658,43 +1261,57 @@ def build_helical_bore_motion_plan(
         r_helix = min(r_max_orbit, max(0.15, 0.36 * diam))
         pitch_rev = max(0.4, min(1.6, 0.28 * diam, doc_mm))
         z_entry = z_top + 0.5
-        total_dz = z_entry - z_bot
-        n_revs = max(1.0, total_dz / pitch_rev)
-        pts_per_rev = 16
-        n_helix_pts = max(12, int(math.ceil(n_revs * pts_per_rev)))
 
         _push((cx + r_helix, cy, z_safe_mm), C.SegmentKind.RAPID, None)
         _push((cx + r_helix, cy, min(z_safe_mm, z_entry + 1.0)), C.SegmentKind.RAPID, None)
-        # Helical ramp down to z_bot
-        for k in range(1, n_helix_pts + 1):
-            frac = k / n_helix_pts
-            ang = 2.0 * math.pi * n_revs * frac
-            zk = z_entry - frac * total_dz
-            _push((cx + r_helix * math.cos(ang), cy + r_helix * math.sin(ang), zk), C.SegmentKind.FEED, 0.72 * base_feed_mm_s)
 
-        # If bore is wider than core helix, step outward in axial layers of doc_mm
-        if r_max_orbit > r_helix + 0.08:
-            n_z_layers = max(1, int(math.ceil((z_top - z_bot) / max(doc_mm, 0.8))))
-            for lz_i in range(n_z_layers):
-                z_layer = z_top - (lz_i + 1) * ((z_top - z_bot) / n_z_layers)
-                if lz_i > 0 or abs(cur[2] - z_layer) > 0.2:
-                    _push((cx, cy, cur[2]), C.SegmentKind.FEED, base_feed_mm_s)
-                    _push((cx, cy, z_safe_mm), C.SegmentKind.RAPID, None)
-                    _push((cx + r_helix, cy, z_safe_mm), C.SegmentKind.RAPID, None)
-                    _push((cx + r_helix, cy, min(z_safe_mm, z_entry + 1.0)), C.SegmentKind.RAPID, None)
-                    _push((cx + r_helix, cy, z_layer), C.SegmentKind.FEED, 1.25 * base_feed_mm_s)
-                n_rad = max(1, int(math.ceil((r_max_orbit - r_helix) / max(woc_mm, 0.4))))
-                for r_i in range(1, n_rad + 1):
-                    rk = r_helix + (r_i / n_rad) * (r_max_orbit - r_helix)
-                    n_circ = max(16, min(36, int(math.ceil(2.0 * math.pi * rk / 1.2))))
-                    for c_i in range(n_circ + 1):
-                        th = 2.0 * math.pi * (c_i / n_circ)
-                        _push((cx + rk * math.cos(th), cy + rk * math.sin(th), z_layer), C.SegmentKind.FEED, base_feed_mm_s)
-        else:
-            # Cleanup 360° circle at z_bot
-            for c_i in range(1, 19):
-                th = 2.0 * math.pi * (c_i / 18.0)
-                _push((cx + r_max_orbit * math.cos(th), cy + r_max_orbit * math.sin(th), z_bot), C.SegmentKind.FEED, base_feed_mm_s)
+        # Stay-down helical bore + continuous Archimedean radial spiral per axial layer (zero mid-bore retracts)
+        layer_step = min(max(doc_mm, 1.5), 1.25 * diam)
+        n_z_layers = max(1, int(math.ceil((z_top - z_bot) / layer_step)))
+        z_prev_layer = z_entry
+        cur_ang = 0.0
+
+        for lz_i in range(n_z_layers):
+            z_layer = z_bot if lz_i == n_z_layers - 1 else (z_top - (lz_i + 1) * ((z_top - z_bot) / n_z_layers))
+            if lz_i > 0:
+                _push(
+                    (cx + r_helix * math.cos(cur_ang), cy + r_helix * math.sin(cur_ang), z_prev_layer),
+                    C.SegmentKind.FEED,
+                    1.35 * base_feed_mm_s,
+                )
+
+            dz_l = max(0.05, z_prev_layer - z_layer)
+            n_revs = max(1.0, dz_l / pitch_rev)
+            n_helix_pts = max(12, int(math.ceil(n_revs * 16)))
+            for k in range(1, n_helix_pts + 1):
+                frac = k / n_helix_pts
+                ang = cur_ang + 2.0 * math.pi * n_revs * frac
+                zk = z_prev_layer - frac * dz_l
+                _push((cx + r_helix * math.cos(ang), cy + r_helix * math.sin(ang), zk), C.SegmentKind.FEED, 0.72 * base_feed_mm_s)
+            cur_ang += 2.0 * math.pi * n_revs
+
+            if r_max_orbit > r_helix + 0.06:
+                rad_step = max(woc_mm, 0.4)
+                exp_turns = max(1.0, (r_max_orbit - r_helix) / rad_step)
+                pts_turn = max(16, min(32, int(math.ceil(2.0 * math.pi * r_max_orbit / 1.2))))
+                n_exp = max(16, int(math.ceil(exp_turns * pts_turn)))
+                for s_i in range(1, n_exp + 1):
+                    frac = s_i / n_exp
+                    rk = r_helix + frac * (r_max_orbit - r_helix)
+                    ang = cur_ang + 2.0 * math.pi * exp_turns * frac
+                    _push((cx + rk * math.cos(ang), cy + rk * math.sin(ang), z_layer), C.SegmentKind.FEED, base_feed_mm_s)
+                cur_ang += 2.0 * math.pi * exp_turns
+                for c_i in range(1, pts_turn + 1):
+                    ang = cur_ang + 2.0 * math.pi * (c_i / pts_turn)
+                    _push((cx + r_max_orbit * math.cos(ang), cy + r_max_orbit * math.sin(ang), z_layer), C.SegmentKind.FEED, base_feed_mm_s)
+                cur_ang += 2.0 * math.pi
+            else:
+                for c_i in range(1, 19):
+                    ang = cur_ang + 2.0 * math.pi * (c_i / 18.0)
+                    _push((cx + r_max_orbit * math.cos(ang), cy + r_max_orbit * math.sin(ang), z_layer), C.SegmentKind.FEED, base_feed_mm_s)
+                cur_ang += 2.0 * math.pi
+
+            z_prev_layer = z_layer
 
         # Lead to bore center before rapid retract so wall has zero dwell mark
         _push((cx, cy, cur[2]), C.SegmentKind.FEED, base_feed_mm_s)
@@ -1124,7 +1741,7 @@ def optimize_arbitrary_cwe_plan(
                 xs, ys, z_work, x0_g, y0_g, pitch, r_rapid_chk, z_min_s, z_max_s,
                 seg.start_mm, seg.end_mm, mutate=False,
             )
-            if rap_probe <= 0.005:
+            if rap_probe <= 1e-7:
                 continue
             sub_segs[k] = dataclasses.replace(
                 seg,
@@ -1163,9 +1780,9 @@ def optimize_arbitrary_cwe_plan(
         if naive_nominal_override is None:
             naive_plan = base_sub_plan
 
-    # 3. Shortcut verified contiguous zero-engagement air-feed chains via full-radius safe rapid bridge!
-    #    (Checks against BOTH initial z_ipw and evolved z_work with full physical cutter radius r_rapid_chk!)
-    z_guard = np.maximum(z_ipw, z_work)
+    # 3. Chronological stay-down greedy chord shortcutting across zero-engagement air-feed chains
+    #    (Never pops stay-down pocket links up to z_safe_mm; shortcuts collision-free stay-down sub-chords!)
+    z_chrono = z_ipw.copy()
     shortcut_segs: List[C.Segment] = []
     idx = 0
     while idx < n_s:
@@ -1175,63 +1792,55 @@ def optimize_arbitrary_cwe_plan(
             while j < n_s and is_feed[j] and rem_vols[j] <= 1e-4:
                 air_len += len_arr[j]
                 j += 1
-            p_start = sub_segs[idx].start_mm
-            p_end = sub_segs[j - 1].end_mm
             if air_len >= 5.5:
-                orig_air_t = air_len / max(base_feed_mm_s, 1e-6)
-                direct_probe_v = _sweep_removes_or_updates_dexels(
-                    xs, ys, z_guard, x0_g, y0_g, pitch, r_rapid_chk, z_min_s, z_max_s,
-                    p_start, p_end, mutate=False,
-                )
-                d_chord = math.dist(p_start, p_end)
-                if direct_probe_v <= 0.005 and d_chord > 1e-6 and (d_chord / rapid_mm_s + 0.18) < orig_air_t:
-                    shortcut_segs.append(
-                        C.Segment(
-                            id=f"sc_r{idx:05d}",
-                            kind=C.SegmentKind.RAPID,
-                            start_mm=p_start,
-                            end_mm=p_end,
-                            feed_mm_s=None,
-                            duration_s=d_chord / rapid_mm_s,
+                z_guard_now = np.maximum(np.maximum(z_chrono, z_work), z_target_safe + 0.08)
+                cur_m = idx
+                while cur_m < j:
+                    best_end = cur_m
+                    for prb_m in range(j - 1, cur_m, -1):
+                        pa_c = sub_segs[cur_m].start_mm
+                        pb_c = sub_segs[prb_m].end_mm
+                        d_c = math.dist(pa_c, pb_c)
+                        if d_c <= 1e-6:
+                            best_end = prb_m
+                            break
+                        prb_v = _sweep_removes_or_updates_dexels(
+                            xs, ys, z_guard_now, x0_g, y0_g, pitch, r_rapid_chk, z_min_s, z_max_s,
+                            pa_c, pb_c, mutate=False,
                         )
-                    )
-                else:
-                    p_up_a = (p_start[0], p_start[1], z_safe_mm)
-                    p_up_b = (p_end[0], p_end[1], z_safe_mm)
-                    up_probe = _sweep_removes_or_updates_dexels(
-                        xs, ys, z_guard, x0_g, y0_g, pitch, r_rapid_chk, z_min_s, z_max_s,
-                        p_start, p_up_a, mutate=False,
-                    )
-                    top_probe = _sweep_removes_or_updates_dexels(
-                        xs, ys, z_guard, x0_g, y0_g, pitch, r_rapid_chk, z_min_s, z_max_s,
-                        p_up_a, p_up_b, mutate=False,
-                    )
-                    bridge_t = (
-                        (math.dist(p_start, p_up_a) + math.dist(p_up_a, p_up_b)) / rapid_mm_s
-                        + math.dist(p_up_b, p_end) / max(base_feed_mm_s, 1e-6)
-                        + 0.45
-                    )
-                    if air_len >= 22.0 and up_probe <= 0.005 and top_probe <= 0.005 and bridge_t < orig_air_t:
-                        for pa_r, pb_r, tag_s in ((p_start, p_up_a, "u"), (p_up_a, p_up_b, "b"), (p_up_b, p_end, "d")):
-                            if math.dist(pa_r, pb_r) > 1e-6:
-                                shortcut_segs.append(
-                                    C.Segment(
-                                        id=f"sc_{tag_s}{idx:05d}",
-                                        kind=C.SegmentKind.RAPID if tag_s != "d" else C.SegmentKind.FEED,
-                                        start_mm=pa_r,
-                                        end_mm=pb_r,
-                                        feed_mm_s=None if tag_s != "d" else base_feed_mm_s,
-                                        duration_s=math.dist(pa_r, pb_r) / (rapid_mm_s if tag_s != "d" else base_feed_mm_s),
-                                    )
-                                )
+                        if prb_v <= 1e-7:
+                            best_end = prb_m
+                            break
+                    pa_s = sub_segs[cur_m].start_mm
+                    pb_s = sub_segs[best_end].end_mm
+                    d_s = math.dist(pa_s, pb_s)
+                    if best_end > cur_m and d_s <= 1e-6:
+                        cur_m = best_end + 1
+                    elif best_end > cur_m and d_s >= 4.5:
+                        shortcut_segs.append(
+                            C.Segment(
+                                id=f"sc_sd{cur_m:05d}",
+                                kind=C.SegmentKind.RAPID if max(pa_s[2], pb_s[2]) >= z_safe_mm - 0.1 else C.SegmentKind.FEED,
+                                start_mm=pa_s,
+                                end_mm=pb_s,
+                                feed_mm_s=None if max(pa_s[2], pb_s[2]) >= z_safe_mm - 0.1 else base_feed_mm_s,
+                                duration_s=d_s / (rapid_mm_s if max(pa_s[2], pb_s[2]) >= z_safe_mm - 0.1 else max(base_feed_mm_s, 1e-6)),
+                            )
+                        )
+                        cur_m = best_end + 1
                     else:
-                        for m_i in range(idx, j):
-                            shortcut_segs.append(sub_segs[m_i])
+                        shortcut_segs.append(sub_segs[cur_m])
+                        cur_m += 1
             else:
                 for m_i in range(idx, j):
                     shortcut_segs.append(sub_segs[m_i])
             idx = j
         else:
+            if is_feed[idx]:
+                _sweep_removes_or_updates_dexels(
+                    xs, ys, z_chrono, x0_g, y0_g, pitch, cutter_radius_mm, z_min_s, z_max_s,
+                    sub_segs[idx].start_mm, sub_segs[idx].end_mm, mutate=True,
+                )
             shortcut_segs.append(sub_segs[idx])
             idx += 1
 
