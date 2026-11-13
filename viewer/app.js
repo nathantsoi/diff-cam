@@ -722,7 +722,12 @@
     }
     if (Array.isArray(children)) {
       for (const child of children) {
-        if (child) node.appendChild(child);
+        if (child === null || child === undefined || child === false) continue;
+        if (typeof child === "string" || typeof child === "number") {
+          node.appendChild(document.createTextNode(String(child)));
+        } else {
+          node.appendChild(child);
+        }
       }
     }
     return node;
