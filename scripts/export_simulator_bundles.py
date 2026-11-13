@@ -30,6 +30,8 @@ from benchmarks.milling_suite import CORNER_RADIUS_KEY, MillingTaskBundle, build
 from cam.config import MachineConfig
 from cam.feeds_and_speeds import export_feeds_speeds_catalog_json, infer_case_nominal_doc_woc_mm
 from cam.posts import post_motion_plan
+from cam.probing import build_setup_sheet
+from cam.tamp_planner import select_kurt_dx6_workholding
 from scripts.summarize_campaign_tables import METHODS, summarize
 from verification.simulator_export import (
     build_target_part_stl_bytes,
@@ -673,6 +675,97 @@ def export_all_simulator_bundles(
             2.0 * float(tool.cutter_radius_mm),
             bundle.case.family,
         )
+        stock_min_t = (
+            float(bundle.case.stock_min_mm[0]),
+            float(bundle.case.stock_min_mm[1]),
+            float(bundle.case.stock_min_mm[2]),
+        )
+        stock_max_t = (
+            float(bundle.case.stock_max_mm[0]),
+            float(bundle.case.stock_max_mm[1]),
+            float(bundle.case.stock_max_mm[2]),
+        )
+        bench_grip_z = max(
+            1.5,
+            min(
+                4.0,
+                round((float(geom_params["pocket_min_mm"][2]) - stock_min_t[2]) * 0.5, 2),
+            ),
+        )
+        workholding_spec, _ = select_kurt_dx6_workholding(
+            stock_min_t,
+            stock_max_t,
+            vise_grip_z_mm=bench_grip_z,
+            top_face_depth_mm=max(0.0, stock_max_t[2] - float(geom_params["pocket_max_mm"][2])),
+            has_op2=False,
+        )
+        tool_dict_single = {
+            "tool_number": int(tool.tool_number),
+            "cutter_radius_mm": float(tool.cutter_radius_mm),
+            "diameter_mm": 2.0 * float(tool.cutter_radius_mm),
+            "flute_length_mm": float(tool.flute_length_mm),
+            "shank_radius_mm": float(tool.shank_radius_mm),
+            "holder_radius_mm": float(tool.holder_radius_mm),
+            "holder_bottom_mm": float(tool.holder_bottom_mm),
+            "holder_height_mm": float(tool.holder_height_mm),
+            "stickout_mm": float(tool.holder_bottom_mm),
+            "entity_type": "flat end mill",
+            "nominal_label": f"Ø{2.0 * float(tool.cutter_radius_mm):.1f} mm Solid Carbide End Mill",
+        }
+        setup_sheet_single = build_setup_sheet(
+            part_id=cid,
+            part_title=cid,
+            program_number=1001,
+            stock_material_id="al_6061_t6",
+            primary_dialect="haas_ngc",
+            stock_min_mm=stock_min_t,
+            stock_max_mm=stock_max_t,
+            part_min_mm=(
+                float(geom_params["pocket_min_mm"][0]),
+                float(geom_params["pocket_min_mm"][1]),
+                float(geom_params["pocket_min_mm"][2]),
+            ),
+            part_max_mm=(
+                float(geom_params["pocket_max_mm"][0]),
+                float(geom_params["pocket_max_mm"][1]),
+                float(geom_params["pocket_max_mm"][2]),
+            ),
+            workholding=workholding_spec,
+            tools_table={
+                "99": {
+                    "tool_number": 99,
+                    "tool_id": "probe_omp40_2_mm_6mm",
+                    "entity_type": "probe",
+                    "diameter_mm": 6.0,
+                    "cutter_radius_mm": 3.0,
+                    "flute_length_mm": 6.0,
+                    "flutes": 1,
+                    "stickout_mm": 50.0,
+                    "holder_bottom_mm": 50.0,
+                    "nominal_label": "Renishaw OMP40-2 Optical Spindle Probe (Ø6.0 mm Ruby Stylus, 50 mm Stem)",
+                    "holder_description": "BT30 / CAT40 Optical Probe Shank",
+                },
+                str(int(tool.tool_number)): tool_dict_single,
+            },
+            operations_table=[
+                {
+                    "op_index": 1,
+                    "op_id": "s1_op1_wips_probe",
+                    "op_kind": "wips_probe",
+                    "setup_index": 1,
+                    "work_offset": "G54",
+                    "tool_number": 99,
+                },
+                {
+                    "op_index": 2,
+                    "op_id": "op2_milling",
+                    "op_kind": bundle.case.family,
+                    "setup_index": 1,
+                    "work_offset": "G54",
+                    "tool_number": int(tool.tool_number),
+                },
+            ],
+        )
         case_payload = {
             "schema": "diffcam-viewer-case/3",
             "case_id": cid,
@@ -701,6 +794,8 @@ def export_all_simulator_bundles(
                 "holder_bottom_mm": float(tool.holder_bottom_mm),
                 "holder_height_mm": float(tool.holder_height_mm),
             },
+            "workholding": workholding_spec,
+            "setup_sheet": setup_sheet_single,
             "target_stl_url": f"/data/meshes/{target_stl_name}",
             "rustcnc_download_url": f"/downloads/rustcnc/{rustcnc_filename}",
             "rustcnc_sha256": rustcnc_info["sha256"],

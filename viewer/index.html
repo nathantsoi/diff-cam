@@ -122,6 +122,7 @@
               <option value="mrr">Inst. MRR mm³/s (Tight Fit)</option>
               <option value="engaged_air">Engaged vs. Air-Cut</option>
               <option value="tool_number">Tool Number (Multi-Tool TAMP)</option>
+              <option value="operation">Operation Sequence (Multi-Op TAMP)</option>
             </select>
           </label>
           <label class="inline-select-group" for="path-width-slider">
@@ -131,6 +132,7 @@
         </div>
 
         <div class="layer-toggles" role="group" aria-label="Visibility and camera">
+          <label class="toggle-pill"><input type="checkbox" id="chk-vise" checked="checked"> <span>Kurt DX6 Vise</span></label>
           <label class="toggle-pill"><input type="checkbox" id="chk-target"> <span>Target CAD</span></label>
           <label class="toggle-pill"><input type="checkbox" id="chk-billet" checked="checked"> <span>Billet Box</span></label>
           <label class="toggle-pill"><input type="checkbox" id="chk-cuts" checked="checked"> <span>G1 Path</span></label>
@@ -142,6 +144,19 @@
           <button type="button" id="cam-front" class="btn btn-tiny">Front</button>
           <button type="button" id="cam-fit" class="btn btn-tiny">Fit</button>
         </div>
+      </div>
+
+      <div id="op-bar" class="op-bar" role="region" aria-label="Multi-operation filter and workholding">
+        <div class="op-bar-actions">
+          <span class="op-bar-label">Ops</span>
+          <button type="button" id="btn-ops-all" class="btn btn-tiny btn-active" title="Show all planned operations">All Ops</button>
+          <button type="button" id="btn-ops-g54" class="btn btn-tiny hidden" title="Filter to Setup 1 (G54 Hard Jaws)">G54</button>
+          <button type="button" id="btn-ops-g55" class="btn btn-tiny hidden" title="Filter to Setup 2 (G55 Soft Jaws)">G55</button>
+          <button type="button" id="btn-prev-op" class="btn btn-tiny" title="Jump to previous operation">&#9664; Op</button>
+          <button type="button" id="btn-next-op" class="btn btn-tiny" title="Jump to next operation">Op &#9654;</button>
+        </div>
+        <div id="op-pills-strip" class="op-pills-strip" role="group" aria-label="Operation visibility toggles"></div>
+        <div id="vise-status-pill" class="vise-status-pill" title="TAMP-selected Kurt DX6 workholding setup">Kurt DX6 6&quot; &middot; G54 Hard Jaws</div>
       </div>
 
       <div class="canvas-stage">
@@ -161,6 +176,8 @@
           </div>
           <div class="dro-meta">
             <div><span class="meta-k">Active Tool:</span> <span id="dro-tool" class="meta-v accent-mono">T1 · Ø5.0mm Flat</span></div>
+            <div><span class="meta-k">Operation:</span> <span id="dro-op" class="meta-v">Op 1 / 1</span></div>
+            <div><span class="meta-k">Workholding:</span> <span id="dro-workholding" class="meta-v">Kurt DX6 · G54</span></div>
             <div><span class="meta-k">Setup / Line:</span> <span id="dro-setup-line" class="meta-v">G54 Op1 · N1</span></div>
             <div><span class="meta-k">Move:</span> <span id="dro-class" class="meta-v">Cutting</span></div>
             <div><span class="meta-k">Feed:</span> <span id="dro-feed" class="meta-v">0.0 mm/s (0 mm/min)</span></div>
@@ -202,7 +219,10 @@
             <option value="8">8.0x</option>
           </select>
         </label>
-        <input type="range" id="time-slider" class="time-slider" min="0" max="1000" value="0" step="1" aria-label="Simulation timeline">
+        <div class="timeline-stack">
+          <div id="op-timeline-mount" class="op-timeline-mount" title="Click an operation block to jump &amp; inspect"></div>
+          <input type="range" id="time-slider" class="time-slider" min="0" max="1000" value="0" step="1" aria-label="Simulation timeline">
+        </div>
         <div id="time-readout" class="time-readout">0.00 / 0.00 s</div>
       </div>
     </section>
@@ -223,16 +243,16 @@
         <button type="button" class="tab-btn active" data-tab="chipload" role="tab" aria-selected="true">Live 3-Way</button>
         <button type="button" class="tab-btn" data-tab="gcode" role="tab" aria-selected="false">G-Code</button>
         <button type="button" class="tab-btn" data-tab="tools" role="tab" aria-selected="false">Tool Crib</button>
-        <button type="button" class="tab-btn" data-tab="case" role="tab" aria-selected="false">Part &amp; Ops</button>
+        <button type="button" class="tab-btn" data-tab="case" role="tab" aria-selected="false">Setup Sheet &amp; Tools</button>
         <button type="button" class="tab-btn" data-tab="exp2" role="tab" aria-selected="false">Paper Tables</button>
       </nav>
 
       <div id="tab-content" class="tab-content"></div>
 
       <footer class="howto-box">
-        <div class="howto-title">Arbitrary STEP/STL CAM, Tool Crib &amp; Live G-Code</div>
+        <div class="howto-title">WIPS-R Probing, Setup Sheet &amp; Arbitrary STEP/STL CAM</div>
         <p class="howto-text">
-          Click <strong>+ Upload / Machine CAD</strong> to plan `.step` or `.stl` parts (including <strong>Titan-M1..M10</strong>), inspect live synced CNC code under <strong>G-Code</strong>, or switch <strong>Metric / US</strong> and restrict available tools under <strong>Tool Crib</strong>.
+          Open <strong>Setup Sheet &amp; Tools</strong> to view part/probe positioning (`OMP40-2` + `OTS`) and the per-tool offset schedule, or click <strong>+ Upload / Machine CAD</strong> to plan `.step`/`.stl` parts with automatic first-step and post-flip probing.
         </p>
       </footer>
     </aside>
@@ -331,11 +351,21 @@
               <option value="45">Deep Per-Part Overfit (45 CWE steps/op)</option>
             </select>
           </label>
+
+          <label class="field-group" for="mach-probing-profile">
+            <span class="field-label">Probe &amp; Toolsetter Hardware</span>
+            <select id="mach-probing-profile" class="select-input">
+              <option value="haas_wips_r" selected="selected">Haas WIPS-R (OMP40-2 + OTS)</option>
+              <option value="renishaw_inspection_plus">Renishaw Inspection Plus (OMP40-2 + OTS)</option>
+              <option value="rs274_g38">RS274NGC G38.2 + G10 L1 Touch Probe</option>
+            </select>
+          </label>
         </div>
 
         <div class="modal-checks-row">
-          <label class="toggle-pill"><input type="checkbox" id="chk-mach-probing"> <span>Haas WIPS Spindle Probing (`T99 G65 P9995`)</span></label>
-          <label class="toggle-pill"><input type="checkbox" id="chk-mach-chamfer" checked="checked"> <span>Auto Chamfer / Countersink Milling</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-mach-probing" checked="checked"> <span>OMP40-2 WCS Probing (Step 1 + Flip Re-Probe)</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-mach-ots" checked="checked"> <span>OTS Auto Tool Setting (Length H + Rot. Dia D)</span></label>
+          <label class="toggle-pill"><input type="checkbox" id="chk-mach-chamfer" checked="checked"> <span>Auto Chamfer / Countersink</span></label>
           <label class="toggle-pill"><input type="checkbox" id="chk-mach-thread" checked="checked"> <span>Auto Helical Thread Milling</span></label>
           <button type="button" id="btn-jump-crib" class="btn btn-tiny">Configure Tool Crib (<span id="modal-crib-count">0</span> selected) &rarr;</button>
         </div>

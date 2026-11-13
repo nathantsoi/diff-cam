@@ -126,27 +126,54 @@ def test_tamp_us_vs_metric_library_and_restricted_tool_crib() -> None:
         opt_iters_per_op=8,
     )
     assert res_crib.safety_pass is True
-    used_ids = {op.tool_record.tool_id for op in res_crib.operations}
+    assert res_crib.operations[0].op_kind == "wips_probe"
+    assert res_crib.operations[0].tool_number == 99
+    used_ids = {op.tool_record.tool_id for op in res_crib.operations if op.tool_record.entity_type != "probe"}
     assert used_ids.issubset(set(allowed_crib))
     assert any(op.op_kind == "helical_bore" for op in res_crib.operations)
 
 
 def test_probing_dual_setup_6_dialects_and_3d_ball_scallop() -> None:
-    # Dual-setup G54 + M00 Flip + G55 + T99 WIPS probing across all 6 CNC controller dialects
+    # Dual-setup G54 + M00 Flip + G55 + T99 WIPS-R (OMP40-2 + OTS) probing across all 6 CNC controller dialects
     res_op2 = execute_tamp_pipeline(
         EXAMPLE_PARTS_DIR / "Titan-M4.step",
         part_id="test-m4-dual",
         title="TITAN-4M Op1+Op2+Probe",
         unit_system="inches",
         setup_mode="dual_op1_op2",
-        enable_probing=True,
         opt_iters_per_op=8,
     )
     assert res_op2.safety_pass is True
-    assert any(op.op_kind == "wips_probe" and op.tool_number == 99 for op in res_op2.operations)
-    assert any(op.setup_index == 2 and op.work_offset == "G55" for op in res_op2.operations)
+    assert res_op2.vise_collision is False
+    # Step 1 is OMP40-2 probing on G54
+    assert res_op2.operations[0].op_kind == "wips_probe"
+    assert res_op2.operations[0].setup_index == 1
+    assert res_op2.operations[0].work_offset == "G54"
+    assert res_op2.operations[0].tool_number == 99
+    # First operation after M00 part flip (Setup 2) is OMP40-2 re-probing on G55!
+    op2_ops = [op for op in res_op2.operations if op.setup_index == 2]
+    assert len(op2_ops) >= 2
+    assert op2_ops[0].op_kind == "wips_probe"
+    assert op2_ops[0].work_offset == "G55"
+    assert op2_ops[0].tool_number == 99
     assert "99" in res_op2.tools_table
     assert res_op2.tools_table["99"]["entity_type"] == "probe"
+    assert "omp40_2" in res_op2.tools_table["99"]["tool_id"]
+
+    # Verify Setup Sheet metadata for webapp (both G54 initial & G55 post-flip + per-tool OTS schedule)
+    sheet = res_op2.setup_sheet
+    assert sheet["schema"] == "diffcam-setup-sheet/1"
+    assert sheet["probing_enabled"] is True
+    assert sheet["probe_after_flip"] is True
+    assert sheet["ots_enabled"] is True
+    assert sheet["probe_package"]["profile_id"] == "haas_wips_r"
+    assert len(sheet["setups"]) == 2
+    assert sheet["setups"][0]["work_offset"] == "G54"
+    assert sheet["setups"][1]["work_offset"] == "G55"
+    assert sheet["setups"][0]["side_touch_z_mm"] > sheet["setups"][0]["jaw_top_z_mm"]
+    assert sheet["setups"][1]["side_touch_z_mm"] > sheet["setups"][1]["jaw_top_z_mm"]
+    assert sheet["tools_schedule"][0]["tool_number"] == 99
+    assert any(t["ots_mode"] == "ots_length_and_diameter" for t in sheet["tools_schedule"])
 
     opt_segs = res_op2.viewer_variants["chipload_ste"]["segments"]
     for dialect in SUPPORTED_MULTI_DIALECTS:
@@ -161,11 +188,13 @@ def test_probing_dual_setup_6_dialects_and_3d_ball_scallop() -> None:
         assert len(seg_map) == len(opt_segs)
         assert all(1 <= ln <= line_count for ln in seg_map)
 
-    # Haas WIPS probing uses Renishaw Protected Positioning / Z-surface macros without flood coolant
+    # Haas WIPS-R emits Renishaw OTS tool setting (P9995 A0. B3./B1. C2.) + OMP40-2 WCS probing (G54 & G55)
     haas_txt = res_op2.gcode_by_dialect["haas_ngc"]["text"]
-    assert "G65 P9832" in haas_txt
-    assert "G65 P9995" in haas_txt or "G65 P9811" in haas_txt
-    # RS274 uses G38.2 touch probe
+    assert "G65 P9995 A0. B3. C2." in haas_txt
+    assert haas_txt.count("G65 P9832") == 2  # once for G54 Step 1, once for G55 post-flip!
+    assert "G65 P9995 W54. A20." in haas_txt
+    assert "G65 P9995 W55. A20." in haas_txt
+    # RS274 uses G38.2 touch probe + G10 L1/L20
     assert "G38.2" in res_op2.gcode_by_dialect["rs274"]["text"]
 
     # 3D sculptured B-spline ball-endmill scallop surfacing on Titan-M9
@@ -177,8 +206,46 @@ def test_probing_dual_setup_6_dialects_and_3d_ball_scallop() -> None:
         opt_iters_per_op=8,
     )
     assert res_3d.safety_pass is True
+    assert res_3d.operations[0].op_kind == "wips_probe"
     assert any(op.op_kind == "3d_ball_scallop" for op in res_3d.operations)
     assert any(t["entity_type"] == "ball end mill" for t in res_3d.tools_table.values())
+
+
+def test_flexible_custom_probing_driver_registration() -> None:
+    from cam.probing import PROBING_DRIVERS, HaasWipsRDriver, ProbingConfig, SpindleProbeSpec, register_probing_driver
+
+    class CustomShopProbeDriver(HaasWipsRDriver):
+        profile_id = "custom_shop_probe_test"
+        package_label = "Custom Shop Spindle Probe + Laser Setter"
+
+        def default_config(self) -> ProbingConfig:
+            return ProbingConfig(
+                profile_id=self.profile_id,
+                spindle_probe=SpindleProbeSpec(
+                    model_id="custom_omp60",
+                    label="Custom OMP60 Probe",
+                    tool_number=98,
+                    stylus_diameter_mm=6.0,
+                    stylus_length_mm=60.0,
+                ),
+            )
+
+    register_probing_driver(CustomShopProbeDriver())
+    try:
+        res = execute_tamp_pipeline(
+            EXAMPLE_PARTS_DIR / "Titan-M1.step",
+            part_id="test-custom-probe",
+            title="Custom Probe Driver Test",
+            probing_profile="custom_shop_probe_test",
+            opt_iters_per_op=4,
+        )
+        assert res.safety_pass is True
+        assert res.operations[0].op_kind == "wips_probe"
+        assert res.operations[0].tool_number == 98
+        assert "T98 M6" in res.haas_ngc_program
+        assert res.setup_sheet["probe_package"]["profile_id"] == "custom_shop_probe_test"
+    finally:
+        PROBING_DRIVERS.pop("custom_shop_probe_test", None)
 
 
 def _start_test_server(tmp_path: Path) -> Tuple[SimulatorHTTPServer, int, threading.Thread]:

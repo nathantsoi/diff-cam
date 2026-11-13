@@ -639,7 +639,9 @@
         ),
         setup_index: Number(src.setup_index || 1),
         work_offset: src.work_offset || (Number(src.setup_index || 1) === 2 ? "G55" : "G54"),
+        op_index: src.op_index !== undefined ? Number(src.op_index) : undefined,
         op_id: src.op_id || "",
+        op_kind: src.op_kind || "",
         gcode_line: src.gcode_line !== undefined ? Number(src.gcode_line) : null,
       };
       tCursor += dur;
@@ -1874,7 +1876,7 @@
   }
 
   function computeTightColorRange(plans, mode) {
-    if (mode === "engaged_air" || mode === "tool_number") {
+    if (mode === "engaged_air" || mode === "tool_number" || mode === "operation") {
       return { min: 1.0, max: 4.0, span: 3.0, constant: false };
     }
     let vMin = Infinity;
@@ -1913,7 +1915,37 @@
     [0.520, 0.880, 0.240], // T8: Lime Chartreuse
   ];
 
-  function cutSegmentColorRgb(seg, mode, rangeObj) {
+  const OP_PALETTE_RGB = [
+    [0.220, 0.741, 0.973], // Op 1: #38bdf8 Sky Cyan
+    [0.204, 0.827, 0.600], // Op 2: #34d399 Emerald
+    [0.984, 0.749, 0.141], // Op 3: #fbbf24 Amber Gold
+    [0.957, 0.447, 0.714], // Op 4: #f472b6 Flamingo Rose
+    [0.655, 0.545, 0.980], // Op 5: #a78bfa Violet
+    [0.984, 0.573, 0.235], // Op 6: #fb923c Tangerine
+    [0.176, 0.831, 0.749], // Op 7: #2dd4bf Teal
+    [0.973, 0.443, 0.443], // Op 8: #f87171 Coral Red
+    [0.639, 0.902, 0.208], // Op 9: #a3e635 Lime
+    [0.376, 0.647, 0.980], // Op 10: #60a5fa Periwinkle
+    [0.910, 0.475, 0.976], // Op 11: #e879f9 Fuchsia
+    [0.992, 0.878, 0.278], // Op 12: #fde047 Lemon
+  ];
+
+  const OP_PALETTE_HEX = [
+    "#38bdf8",
+    "#34d399",
+    "#fbbf24",
+    "#f472b6",
+    "#a78bfa",
+    "#fb923c",
+    "#2dd4bf",
+    "#f87171",
+    "#a3e635",
+    "#60a5fa",
+    "#e879f9",
+    "#fde047",
+  ];
+
+  function cutSegmentColorRgb(seg, mode, rangeObj, opColorIndexMap) {
     if (mode === "engaged_air") {
       return seg.engaged ? [0.18, 0.85, 0.45] : [0.94, 0.39, 0.58];
     }
@@ -1924,6 +1956,18 @@
       }
       const tIdx = Math.max(0, (tNum - 1) % TOOL_PALETTE_RGB.length);
       return TOOL_PALETTE_RGB[tIdx];
+    }
+    if (mode === "operation") {
+      const opKey = resolveSegmentOpKey(seg);
+      let cIdx = 0;
+      if (opColorIndexMap && opColorIndexMap.has(opKey)) {
+        cIdx = opColorIndexMap.get(opKey);
+      } else if (seg.op_index !== undefined) {
+        cIdx = Math.max(0, Number(seg.op_index) - 1);
+      } else {
+        cIdx = Math.max(0, Number(seg.tool_number || 1) - 1);
+      }
+      return OP_PALETTE_RGB[cIdx % OP_PALETTE_RGB.length];
     }
     const val = extractSegmentMetric(seg, mode);
     if (val === null) {
@@ -1936,14 +1980,578 @@
     return sampleFiveStopRgb((val - rangeObj.min) / rangeObj.span);
   }
 
+  // --- Multi-Operation Keying & Kurt DX6 Workholding Geometry Synthesis ---
+  function resolveSegmentOpKey(seg) {
+    if (!seg) return "op_default";
+    if (seg.op_id && String(seg.op_id).trim() !== "") {
+      return String(seg.op_id);
+    }
+    const sIdx = Number(seg.setup_index || 1);
+    const tNum = Number(seg.tool_number || 1);
+    return "s" + sIdx + "_t" + tNum;
+  }
+
+  function formatShortOpKind(rawKind, rawId) {
+    const k = String(rawKind || rawId || "mill").toLowerCase();
+    const map = {
+      facing: "Face",
+      pocket_adaptive: "Rough",
+      pocket_rest: "Rest",
+      levelset_rough: "Rough",
+      levelset_rest_finish: "Rest Finish",
+      helical_bore: "Helix Bore",
+      exterior_contour: "Contour",
+      freeform_3d_surfacing: "3D Surf",
+      spot_drill: "Spot",
+      peck_drill: "Drill",
+      counterbore_mill: "C-Bore",
+      countersink: "C-Sink",
+      chamfer_contour: "Chamfer",
+      thread_mill: "Thread",
+      op2_hat_facing: "Op2 Hat Face",
+      op2_adaptive_pocket: "Op2 Pocket",
+      wips_probe: "WIPS Probe",
+    };
+    if (map[k]) return map[k];
+    const clean = k.replace(/^s[12]_op\d+_/, "").replace(/_/g, " ").trim();
+    return clean.length > 14 ? clean.slice(0, 14) : clean || "Mill";
+  }
+
+  function deriveCaseOperations(caseData, variant) {
+    const segs = (variant && variant.plan && variant.plan.segments) || [];
+    const opsTable = (caseData && Array.isArray(caseData.operations_table) && caseData.operations_table) || [];
+    const tableByOpId = new Map();
+    for (let i = 0; i < opsTable.length; i++) {
+      const row = opsTable[i];
+      if (row && row.op_id) {
+        tableByOpId.set(String(row.op_id), row);
+      }
+    }
+
+    const opMap = new Map();
+    const ordered = [];
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i];
+      const key = resolveSegmentOpKey(s);
+      let entry = opMap.get(key);
+      if (!entry) {
+        const meta = tableByOpId.get(key) || null;
+        const setupIndex = Number((meta && meta.setup_index) || s.setup_index || 1);
+        const workOffset = String(
+          (meta && meta.work_offset) || s.work_offset || (setupIndex === 2 ? "G55" : "G54")
+        );
+        const toolNumber = Number((meta && meta.tool_number) || s.tool_number || (caseData && caseData.tool && caseData.tool.tool_number) || 1);
+        const toolSpec = resolveToolSpecForSegment(caseData, s);
+        const opIndex = ordered.length + 1;
+        const cIdx = (opIndex - 1) % OP_PALETTE_RGB.length;
+        const rawKind = (meta && meta.op_kind) || s.op_kind || (caseData && caseData.family) || "milling";
+        entry = {
+          key,
+          opIndex,
+          opId: key,
+          opKind: String(rawKind),
+          shortKind: formatShortOpKind(rawKind, key),
+          setupIndex,
+          workOffset,
+          toolNumber,
+          toolLabel: (meta && meta.tool_label) || formatActiveToolLabel(toolSpec),
+          notes: (meta && meta.notes) || "",
+          t0S: Number(s.t0_s !== undefined ? s.t0_s : s.t0 || 0.0),
+          t1S: Number(s.t1_s !== undefined ? s.t1_s : s.t1 || 0.0),
+          firstCutT0S: null,
+          durationS: 0.0,
+          firstSegIdx: i,
+          lastSegIdx: i,
+          segCount: 0,
+          cutSegCount: 0,
+          colorIdx: cIdx,
+          colorRgb: OP_PALETTE_RGB[cIdx],
+          colorHex: OP_PALETTE_HEX[cIdx],
+        };
+        opMap.set(key, entry);
+        ordered.push(entry);
+      }
+      const st0 = Number(s.t0_s !== undefined ? s.t0_s : s.t0 || 0.0);
+      const st1 = Number(s.t1_s !== undefined ? s.t1_s : s.t1 || 0.0);
+      if (st0 < entry.t0S) entry.t0S = st0;
+      if (st1 > entry.t1S) entry.t1S = st1;
+      entry.lastSegIdx = i;
+      entry.segCount += 1;
+      if (s.kind !== "rapid") {
+        entry.cutSegCount += 1;
+        if (entry.firstCutT0S === null) {
+          entry.firstCutT0S = st0;
+        }
+      }
+    }
+
+    for (let i = 0; i < ordered.length; i++) {
+      ordered[i].durationS = Math.max(0.0, ordered[i].t1S - ordered[i].t0S);
+      if (ordered[i].firstCutT0S === null) {
+        ordered[i].firstCutT0S = ordered[i].t0S;
+      }
+    }
+    return ordered;
+  }
+
+  // Resolve TAMP Kurt DX6 workholding specification (uses exported caseData.workholding or synthesizes exact DX6 dimensions).
+  function resolveCaseWorkholding(caseData) {
+    const sMin = (caseData && caseData.stock_min_mm) || [-25, -20, -12];
+    const sMax = (caseData && caseData.stock_max_mm) || [25, 20, 0];
+    const sx0 = Number(sMin[0]), sy0 = Number(sMin[1]), sz0 = Number(sMin[2]);
+    const sx1 = Number(sMax[0]), sy1 = Number(sMax[1]), sz1 = Number(sMax[2]);
+    const lx = Math.max(1.0, sx1 - sx0);
+    const ly = Math.max(1.0, sy1 - sy0);
+    const lz = Math.max(2.0, sz1 - sz0);
+
+    if (caseData && caseData.workholding && caseData.workholding.setups) {
+      return caseData.workholding;
+    }
+
+    const jawWidth = 152.4;      // 6.000"
+    const jawHeight = 44.45;     // 1.750"
+    const jawThickness = 19.05;  // 0.750"
+    const softJawThick = 25.4;   // 1.000"
+    const maxOpenStd = 228.6;    // 9.000"
+    const bedHeight = 73.025;    // 2.875"
+    const bodyLength = 429.26;   // 16.90"
+    const parallelThick = 3.175; // 0.125"
+
+    const pMin = (caseData && caseData.pocket_min_mm) || [sx0 + 2, sy0 + 2, sz0 + 2.5];
+    const pMax = (caseData && caseData.pocket_max_mm) || [sx1 - 2, sy1 - 2, sz1];
+    const cadMeta = (caseData && caseData.cad_metadata) || {};
+    const partDims = Array.isArray(cadMeta.part_dims_mm) ? cadMeta.part_dims_mm : [lx - 2.0, ly - 2.0, Math.max(2.0, lz - 3.5)];
+    const hasOp2 = Boolean(
+      cadMeta.has_op2_flip ||
+        ((caseData && caseData.operations_table) || []).some((op) => Number(op.setup_index || 1) >= 2)
+    );
+
+    const floorMargin = Number(pMin[2]) - sz0;
+    const gripZ = Math.max(1.5, Math.min(3.5, floorMargin > 1.8 ? Math.min(2.5, floorMargin * 0.55) : 2.0));
+    const clampAxis = ly > maxOpenStd && lx <= maxOpenStd ? "X" : "Y";
+    const op1SpanMin = clampAxis === "Y" ? sy0 : sx0;
+    const op1SpanMax = clampAxis === "Y" ? sy1 : sx1;
+    const crossMin = clampAxis === "Y" ? sx0 : sy0;
+    const crossMax = clampAxis === "Y" ? sx1 : sy1;
+    const jawOpenOp1 = op1SpanMax - op1SpanMin;
+    const jawMounting = jawOpenOp1 > maxOpenStd ? "reversed_exterior" : "standard_interior";
+
+    const jawTopOp1 = sz0 + gripZ;
+    const bedZOp1 = jawTopOp1 - jawHeight;
+    const tableZOp1 = bedZOp1 - bedHeight;
+    const parallelHeight = Math.max(6.0, jawHeight - gripZ);
+
+    const op2HalfSpan = 0.5 * Math.max(6.0, Number(clampAxis === "Y" ? partDims[1] : partDims[0]) || (op1SpanMax - op1SpanMin));
+    const op2HalfCross = 0.5 * Math.max(6.0, Number(clampAxis === "Y" ? partDims[0] : partDims[1]) || (crossMax - crossMin));
+    const jawTopOp2 = Math.min(sz1 - gripZ - 1.2, sz1 - 1.5);
+    const seatZOp2 = Math.min(sz0 + Math.max(0.0, sz1 - Number(pMax[2] || 0.0)), jawTopOp2 - 2.5);
+    const bedZOp2 = jawTopOp2 - jawHeight;
+    const tableZOp2 = bedZOp2 - bedHeight;
+
+    return {
+      vise_model: "kurt_dx6_6in",
+      vise_label: 'Kurt DX6 CrossOver 6" Machine Vise',
+      jaw_width_mm: jawWidth,
+      jaw_height_mm: jawHeight,
+      jaw_thickness_mm: jawThickness,
+      soft_jaw_thickness_mm: softJawThick,
+      max_opening_standard_mm: maxOpenStd,
+      max_opening_reversed_mm: 386.0,
+      bed_height_mm: bedHeight,
+      body_length_mm: bodyLength,
+      clamping_axis: clampAxis,
+      jaw_mounting: jawMounting,
+      engagement_width_mm: Math.min(jawWidth, crossMax - crossMin),
+      has_op2_soft_jaws: hasOp2,
+      summary:
+        'Kurt DX6 6" (' +
+        clampAxis +
+        "-clamp, " +
+        jawOpenOp1.toFixed(1) +
+        " mm open, " +
+        gripZ.toFixed(1) +
+        " mm bite on " +
+        parallelHeight.toFixed(2) +
+        " mm parallels" +
+        (hasOp2 ? " → G55 6061 Soft Jaws)" : ")"),
+      setups: {
+        "1": {
+          setup_index: 1,
+          work_offset: "G54",
+          jaw_type: "hardened_steel_parallels",
+          label: "Kurt DX6 · G54 Hard Jaws + " + parallelHeight.toFixed(2) + " mm Parallels",
+          short_label: "Kurt DX6 · G54 Hard Jaws",
+          clamping_axis: clampAxis,
+          jaw_mounting: jawMounting,
+          jaw_opening_mm: jawOpenOp1,
+          clamped_span_min_mm: op1SpanMin,
+          clamped_span_max_mm: op1SpanMax,
+          cross_span_min_mm: crossMin,
+          cross_span_max_mm: crossMax,
+          grip_z_mm: gripZ,
+          jaw_top_z_mm: jawTopOp1,
+          parallel_height_mm: parallelHeight,
+          parallel_thickness_mm: parallelThick,
+          seat_z_mm: sz0,
+          bed_z_mm: bedZOp1,
+          table_z_mm: tableZOp1,
+          jaw_thickness_mm: jawThickness,
+          jaw_height_mm: jawHeight,
+        },
+        "2": {
+          setup_index: 2,
+          work_offset: "G55",
+          jaw_type: "machined_6061_soft_jaws",
+          label: "Kurt DX6 · G55 Contoured 6061 Soft Jaws",
+          short_label: "Kurt DX6 · G55 Soft Jaws",
+          clamping_axis: clampAxis,
+          jaw_mounting: jawMounting,
+          jaw_opening_mm: 2.0 * op2HalfSpan,
+          clamped_span_min_mm: -op2HalfSpan,
+          clamped_span_max_mm: op2HalfSpan,
+          cross_span_min_mm: -op2HalfCross,
+          cross_span_max_mm: op2HalfCross,
+          grip_z_mm: Math.max(2.0, jawTopOp2 - seatZOp2),
+          jaw_top_z_mm: jawTopOp2,
+          parallel_height_mm: 0.0,
+          parallel_thickness_mm: 0.0,
+          seat_z_mm: seatZOp2,
+          bed_z_mm: bedZOp2,
+          table_z_mm: tableZOp2,
+          jaw_thickness_mm: softJawThick,
+          jaw_height_mm: jawHeight,
+        },
+      },
+    };
+  }
+
+  // Procedural Clean-Room 3D Triangle Mesh Generator for the Kurt DX6 CrossOver 6" CNC Machine Vise.
+  // Built in local vise coordinates (U = cross-jaw width [-76.2..+76.2], V = clamping axis [-rear fixed..+front hex], Z = world Z),
+  // then mapped cleanly to world (X, Y, Z) for either Y-clamping (default) or 90-deg X-clamping!
+  function buildKurtDx6ViseMesh(caseData, setupIndex) {
+    const wh = resolveCaseWorkholding(caseData);
+    const setupKey = Number(setupIndex || 1) >= 2 ? "2" : "1";
+    const st = (wh.setups && wh.setups[setupKey]) || wh.setups["1"];
+    const clampAxis = String(st.clamping_axis || wh.clamping_axis || "Y");
+    const isSoftJaws = st.jaw_type === "machined_6061_soft_jaws" || setupKey === "2";
+    const isReversed = st.jaw_mounting === "reversed_exterior";
+
+    const jawW = Number(wh.jaw_width_mm || 152.4);
+    const halfW = 0.5 * jawW; // 76.2 mm
+    const jawH = Number(st.jaw_height_mm || wh.jaw_height_mm || 44.45);
+    const jawT = Number(st.jaw_thickness_mm || (isSoftJaws ? 25.4 : 19.05));
+    const bedH = Number(wh.bed_height_mm || 73.025);
+    const spanMin = Number(st.clamped_span_min_mm);
+    const spanMax = Number(st.clamped_span_max_mm);
+    const crossMin = Number(st.cross_span_min_mm || -25.0);
+    const crossMax = Number(st.cross_span_max_mm || 25.0);
+    const jawTopZ = Number(st.jaw_top_z_mm);
+    const bedZ = Number(st.bed_z_mm !== undefined ? st.bed_z_mm : jawTopZ - jawH);
+    const tableZ = Number(st.table_z_mm !== undefined ? st.table_z_mm : bedZ - bedH);
+    const seatZ = Number(st.seat_z_mm !== undefined ? st.seat_z_mm : jawTopZ - Number(st.grip_z_mm || 2.0));
+    const parH = Number(st.parallel_height_mm || 0.0);
+    const parT = Number(st.parallel_thickness_mm || 3.175);
+
+    const posArr = [];
+    const nrmArr = [];
+    const colArr = [];
+
+    function toWorldPt(u, v, z) {
+      // Y-clamp: U -> +X, V -> +Y, Z -> +Z (det = +1)
+      // X-clamp: U -> -Y, V -> +X, Z -> +Z (90 deg rotation in XY, det = +1 preserves triangle winding!)
+      if (clampAxis === "X") {
+        return [v, -u, z];
+      }
+      return [u, v, z];
+    }
+
+    function toWorldVec(nu, nv, nz) {
+      if (clampAxis === "X") {
+        return [nv, -nu, nz];
+      }
+      return [nu, nv, nz];
+    }
+
+    function pushTriLocal(p0, p1, p2, rgb) {
+      const w0 = toWorldPt(p0[0], p0[1], p0[2]);
+      const w1 = toWorldPt(p1[0], p1[1], p1[2]);
+      const w2 = toWorldPt(p2[0], p2[1], p2[2]);
+      const e1x = w1[0] - w0[0], e1y = w1[1] - w0[1], e1z = w1[2] - w0[2];
+      const e2x = w2[0] - w0[0], e2y = w2[1] - w0[1], e2z = w2[2] - w0[2];
+      let nx = e1y * e2z - e1z * e2y;
+      let ny = e1z * e2x - e1x * e2z;
+      let nz = e1x * e2y - e1y * e2x;
+      const nLen = Math.hypot(nx, ny, nz);
+      if (nLen < 1e-9) return;
+      nx /= nLen; ny /= nLen; nz /= nLen;
+      posArr.push(w0[0], w0[1], w0[2], w1[0], w1[1], w1[2], w2[0], w2[1], w2[2]);
+      nrmArr.push(nx, ny, nz, nx, ny, nz, nx, ny, nz);
+      colArr.push(rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2], rgb[0], rgb[1], rgb[2]);
+    }
+
+    function pushQuadLocal(p0, p1, p2, p3, rgb) {
+      pushTriLocal(p0, p1, p2, rgb);
+      pushTriLocal(p0, p2, p3, rgb);
+    }
+
+    function addBoxUVZ(u0, u1, v0, v1, z0, z1, rgb, topRgb) {
+      if (u1 <= u0 + 1e-5 || v1 <= v0 + 1e-5 || z1 <= z0 + 1e-5) return;
+      const cTop = topRgb || rgb;
+      // +Z top
+      pushQuadLocal([u0, v0, z1], [u1, v0, z1], [u1, v1, z1], [u0, v1, z1], cTop);
+      // -Z bottom
+      pushQuadLocal([u0, v1, z0], [u1, v1, z0], [u1, v0, z0], [u0, v0, z0], rgb);
+      // -V rear
+      pushQuadLocal([u1, v0, z0], [u1, v0, z1], [u0, v0, z1], [u0, v0, z0], rgb);
+      // +V front
+      pushQuadLocal([u0, v1, z0], [u0, v1, z1], [u1, v1, z1], [u1, v1, z0], rgb);
+      // -U left
+      pushQuadLocal([u0, v0, z0], [u0, v0, z1], [u0, v1, z1], [u0, v1, z0], rgb);
+      // +U right
+      pushQuadLocal([u1, v1, z0], [u1, v1, z1], [u1, v0, z1], [u1, v0, z0], rgb);
+    }
+
+    // Sloped gusset prism on -V or +V side (characteristic Kurt DX6 angled fixed-tower & movable-carriage ribs)
+    function addGussetRibUVZ(u0, u1, vBaseStart, vBaseEnd, vTopStart, vTopEnd, z0, z1, rgb) {
+      const p00 = [u0, vBaseStart, z0], p10 = [u1, vBaseStart, z0];
+      const p11 = [u1, vBaseEnd, z0], p01 = [u0, vBaseEnd, z0];
+      const q00 = [u0, vTopStart, z1], q10 = [u1, vTopStart, z1];
+      const q11 = [u1, vTopEnd, z1], q01 = [u0, vTopEnd, z1];
+      pushQuadLocal(q00, q10, q11, q01, rgb); // top
+      pushQuadLocal(p01, p11, p10, p00, rgb); // bottom
+      pushQuadLocal(p10, q10, q00, p00, rgb); // -V sloped/vertical face
+      pushQuadLocal(p01, q01, q11, p11, rgb); // +V sloped/vertical face
+      pushQuadLocal(p00, q00, q01, p01, rgb); // -U side
+      pushQuadLocal(p11, q11, q10, p10, rgb); // +U side
+    }
+
+    // Cylinder / Hex-prism along V axis (leadscrew, thrust collar, hex drive nut, cap-screw heads)
+    function addCylinderAlongV(uCenter, zCenter, v0, v1, radius, nSides, rgb, capEnds) {
+      for (let i = 0; i < nSides; i++) {
+        const a0 = (2.0 * Math.PI * i) / nSides;
+        const a1 = (2.0 * Math.PI * (i + 1)) / nSides;
+        const c0 = Math.cos(a0), s0 = Math.sin(a0);
+        const c1 = Math.cos(a1), s1 = Math.sin(a1);
+        const uA = uCenter + radius * c0, zA = zCenter + radius * s0;
+        const uB = uCenter + radius * c1, zB = zCenter + radius * s1;
+        // Outward normal around +V axis requires winding [uA,v0] -> [uA,v1] -> [uB,v1] -> [uB,v0]
+        const wA0 = toWorldPt(uA, v0, zA);
+        const wA1 = toWorldPt(uA, v1, zA);
+        const wB1 = toWorldPt(uB, v1, zB);
+        const wB0 = toWorldPt(uB, v0, zB);
+        const nMid = toWorldVec(0.5 * (c0 + c1), 0.0, 0.5 * (s0 + s1));
+        const nl = Math.hypot(nMid[0], nMid[1], nMid[2]) || 1.0;
+        const nx = nMid[0] / nl, ny = nMid[1] / nl, nz = nMid[2] / nl;
+        posArr.push(
+          wA0[0], wA0[1], wA0[2], wA1[0], wA1[1], wA1[2], wB1[0], wB1[1], wB1[2],
+          wA0[0], wA0[1], wA0[2], wB1[0], wB1[1], wB1[2], wB0[0], wB0[1], wB0[2]
+        );
+        for (let k = 0; k < 6; k++) {
+          nrmArr.push(nx, ny, nz);
+          colArr.push(rgb[0], rgb[1], rgb[2]);
+        }
+        if (capEnds) {
+          pushTriLocal([uCenter, v1, zCenter], [uB, v1, zB], [uA, v1, zA], rgb);
+          pushTriLocal([uCenter, v0, zCenter], [uA, v0, zA], [uB, v0, zB], rgb);
+        }
+      }
+    }
+
+    // Material palette (Kurt DX6 CrossOver)
+    const kurtBlue = [0.115, 0.365, 0.665];
+    const kurtBlueDark = [0.085, 0.275, 0.520];
+    const groundWaySteel = [0.710, 0.750, 0.800];
+    const castChannelDark = [0.160, 0.195, 0.245];
+    const hardenedJawSteel = [0.245, 0.275, 0.325];
+    const hardenedJawFace = [0.330, 0.370, 0.430];
+    const softJawAlum = [0.700, 0.770, 0.850];
+    const softJawSeat = [0.800, 0.860, 0.925];
+    const parallelSteel = [0.820, 0.855, 0.900];
+    const screwSteel = [0.600, 0.645, 0.700];
+    const blackOxideBolt = [0.120, 0.135, 0.160];
+
+    // Fixed & movable jaw plate positions along V:
+    // Standard interior mounting: jaw plates sit between fixed tower (-V) and movable carriage (+V).
+    // Reversed exterior mounting: jaw plates bolt onto the outer faces for extra-wide stock (> 228.6 mm).
+    let fixedPlateV0, fixedPlateV1, fixedTowerFrontV, fixedTowerRearV;
+    let movPlateV0, movPlateV1, movCarriageFrontV, movCarriageRearV;
+
+    if (!isReversed) {
+      fixedPlateV1 = spanMin;
+      fixedPlateV0 = spanMin - jawT;
+      fixedTowerFrontV = fixedPlateV0;
+      fixedTowerRearV = fixedTowerFrontV - 66.0;
+
+      movPlateV0 = spanMax;
+      movPlateV1 = spanMax + jawT;
+      movCarriageRearV = movPlateV1;
+      movCarriageFrontV = movCarriageRearV + 68.0;
+    } else {
+      fixedPlateV1 = spanMin;
+      fixedPlateV0 = spanMin - jawT;
+      fixedTowerRearV = fixedPlateV1;
+      fixedTowerFrontV = fixedTowerRearV + 62.0;
+
+      movPlateV0 = spanMax;
+      movPlateV1 = spanMax + jawT;
+      movCarriageFrontV = movPlateV0;
+      movCarriageRearV = movCarriageFrontV - 64.0;
+    }
+
+    const bodyRearV = Math.min(fixedTowerRearV - 10.0, fixedPlateV0 - 12.0);
+    const minBodyLen = Number(wh.body_length_mm || 429.26);
+    const bodyFrontV = Math.max(bodyRearV + minBodyLen, movCarriageFrontV + 34.0);
+
+    // 1. Kurt DX6 Ductile-Iron Base Frame + Precision Ground Side Ways + Central Chip/Screw Channel
+    const wayRailW = 41.0;
+    const channelHalfU = halfW - wayRailW; // 35.2 mm central screw slot
+    const channelFloorZ = tableZ + 26.0;
+    const wayPlateThick = 5.5;
+
+    // Lower solid base floor & side walls
+    addBoxUVZ(-halfW, halfW, bodyRearV, bodyFrontV, tableZ, channelFloorZ, kurtBlueDark, castChannelDark);
+    addBoxUVZ(-halfW, -channelHalfU, bodyRearV, bodyFrontV, channelFloorZ, bedZ - wayPlateThick, kurtBlue, kurtBlue);
+    addBoxUVZ(channelHalfU, halfW, bodyRearV, bodyFrontV, channelFloorZ, bedZ - wayPlateThick, kurtBlue, kurtBlue);
+    // Precision-ground hardened bed ways on top of left & right rails
+    addBoxUVZ(-halfW, -channelHalfU, bodyRearV + 6.0, bodyFrontV - 8.0, bedZ - wayPlateThick, bedZ, groundWaySteel, groundWaySteel);
+    addBoxUVZ(channelHalfU, halfW, bodyRearV + 6.0, bodyFrontV - 8.0, bedZ - wayPlateThick, bedZ, groundWaySteel, groundWaySteel);
+    // Front & rear bed end bridges
+    addBoxUVZ(-channelHalfU, channelHalfU, bodyRearV, bodyRearV + 26.0, channelFloorZ, bedZ, kurtBlue, groundWaySteel);
+    addBoxUVZ(-channelHalfU, channelHalfU, bodyFrontV - 24.0, bodyFrontV, channelFloorZ, bedZ - 2.0, kurtBlue, kurtBlue);
+
+    // Hold-down toe-clamp side ears / bolt flanges along tableZ (signature CNC vise table mounting slots)
+    const flangeH = 15.5;
+    const flangeOut = 17.5;
+    const midV = 0.5 * (bodyRearV + bodyFrontV);
+    for (const vCenter of [bodyRearV + 58.0, midV, bodyFrontV - 62.0]) {
+      addBoxUVZ(-halfW - flangeOut, -halfW, vCenter - 22.0, vCenter - 6.0, tableZ, tableZ + flangeH, kurtBlueDark, groundWaySteel);
+      addBoxUVZ(-halfW - flangeOut, -halfW, vCenter + 6.0, vCenter + 22.0, tableZ, tableZ + flangeH, kurtBlueDark, groundWaySteel);
+      addBoxUVZ(-halfW - flangeOut, -halfW, vCenter - 6.0, vCenter + 6.0, tableZ, tableZ + 6.5, castChannelDark, castChannelDark);
+
+      addBoxUVZ(halfW, halfW + flangeOut, vCenter - 22.0, vCenter - 6.0, tableZ, tableZ + flangeH, kurtBlueDark, groundWaySteel);
+      addBoxUVZ(halfW, halfW + flangeOut, vCenter + 6.0, vCenter + 22.0, tableZ, tableZ + flangeH, kurtBlueDark, groundWaySteel);
+      addBoxUVZ(halfW, halfW + flangeOut, vCenter - 6.0, vCenter + 6.0, tableZ, tableZ + 6.5, castChannelDark, castChannelDark);
+    }
+
+    // 2. Stationary Rear Fixed-Jaw Tower (Kurt DX6 CrossOver high-rigidity cast tower + twin rear gusset ribs)
+    const towerTopZ = jawTopZ - 2.2;
+    const fV0 = Math.min(fixedTowerRearV, fixedTowerFrontV);
+    const fV1 = Math.max(fixedTowerRearV, fixedTowerFrontV);
+    addBoxUVZ(-halfW, halfW, fV0 + 18.0, fV1, bedZ, towerTopZ, kurtBlue, kurtBlue);
+    // Sloped rear DX6 CrossOver buttress & twin reinforcement ribs
+    addGussetRibUVZ(-halfW, -halfW + 26.0, fV0 - 4.0, fV0 + 18.0, fV0 + 14.0, fV0 + 18.0, bedZ, towerTopZ - 2.0, kurtBlueDark);
+    addGussetRibUVZ(halfW - 26.0, halfW, fV0 - 4.0, fV0 + 18.0, fV0 + 14.0, fV0 + 18.0, bedZ, towerTopZ - 2.0, kurtBlueDark);
+    addGussetRibUVZ(-halfW + 26.0, halfW - 26.0, fV0 + 3.0, fV0 + 18.0, fV0 + 16.0, fV0 + 18.0, bedZ, towerTopZ - 7.0, kurtBlue);
+
+    // 3. Sliding AngLock Movable Jaw Carriage (+V)
+    const mV0 = Math.min(movCarriageRearV, movCarriageFrontV);
+    const mV1 = Math.max(movCarriageRearV, movCarriageFrontV);
+    const carriageTopZ = jawTopZ - 3.0;
+    addBoxUVZ(-halfW + 2.0, halfW - 2.0, mV0, mV0 + 38.0, bedZ + 0.4, carriageTopZ, kurtBlue, kurtBlue);
+    addGussetRibUVZ(
+      -halfW + 4.0,
+      halfW - 4.0,
+      mV0 + 38.0,
+      mV1,
+      mV0 + 38.0,
+      mV0 + 46.0,
+      bedZ + 0.4,
+      carriageTopZ - 3.0,
+      kurtBlueDark
+    );
+    // Movable nut keel inside central channel
+    addBoxUVZ(-channelHalfU + 3.0, channelHalfU - 3.0, mV0 + 4.0, mV1 - 6.0, channelFloorZ + 6.0, bedZ + 1.0, castChannelDark, castChannelDark);
+
+    // 4. Enclosed Acme Leadscrew + Front Thrust Bearing Collar + 3/4" Hex Wrench Drive Boss (+V)
+    const screwZ = bedZ - 22.0;
+    addCylinderAlongV(0.0, screwZ, fV1 - 10.0, bodyFrontV + 6.0, 12.5, 14, screwSteel, true);
+    // Kurt Blue front bearing boss
+    addCylinderAlongV(0.0, screwZ, bodyFrontV - 2.0, bodyFrontV + 14.0, 22.0, 16, kurtBlueDark, true);
+    // Silver thrust collar
+    addCylinderAlongV(0.0, screwZ, bodyFrontV + 14.0, bodyFrontV + 23.0, 17.5, 16, groundWaySteel, true);
+    // 6-sided 3/4" hex drive end
+    addCylinderAlongV(0.0, screwZ, bodyFrontV + 23.0, bodyFrontV + 42.0, 11.0, 6, hardenedJawFace, true);
+
+    // 5. Fixed & Movable Jaw Plates + Counterbored Socket-Head Cap Screws + Parallels / Contoured Soft-Jaw Step
+    if (!isSoftJaws) {
+      // Setup 1 (G54): Hardened ground steel jaw plates + precision ground parallels
+      addBoxUVZ(-halfW, halfW, fixedPlateV0, fixedPlateV1, bedZ, jawTopZ, hardenedJawSteel, hardenedJawFace);
+      addBoxUVZ(-halfW, halfW, movPlateV0, movPlateV1, bedZ, jawTopZ, hardenedJawSteel, hardenedJawFace);
+
+      // Socket-head cap screws (two per jaw at U = +-49.2 mm, Z = bedZ + 22.2 mm)
+      const boltZ = bedZ + 0.5 * jawH;
+      for (const uBolt of [-49.2, 49.2]) {
+        if (!isReversed) {
+          addCylinderAlongV(uBolt, boltZ, fixedPlateV1 - 3.0, fixedPlateV1 + 0.25, 6.2, 12, blackOxideBolt, true);
+          addCylinderAlongV(uBolt, boltZ, movPlateV0 - 0.25, movPlateV0 + 3.0, 6.2, 12, blackOxideBolt, true);
+        } else {
+          addCylinderAlongV(uBolt, boltZ, fixedPlateV0 - 0.25, fixedPlateV0 + 3.0, 6.2, 12, blackOxideBolt, true);
+          addCylinderAlongV(uBolt, boltZ, movPlateV1 - 3.0, movPlateV1 + 0.25, 6.2, 12, blackOxideBolt, true);
+        }
+      }
+
+      // Precision ground steel parallels resting on bedZ against fixed & movable clamping faces
+      if (parH > 1.0 && !isReversed) {
+        const parTopZ = Math.min(seatZ, bedZ + parH);
+        const effParT = Math.min(parT, Math.max(0.8, 0.42 * (spanMax - spanMin)));
+        addBoxUVZ(-halfW + 1.0, halfW - 1.0, spanMin, spanMin + effParT, bedZ, parTopZ, parallelSteel, parallelSteel);
+        addBoxUVZ(-halfW + 1.0, halfW - 1.0, spanMax - effParT, spanMax, bedZ, parTopZ, parallelSteel, parallelSteel);
+      }
+    } else {
+      // Setup 2 (G55): CNC-machined 6061-T6 Aluminum Contoured Soft Jaws!
+      // Outer soft jaw blocks sit behind the clamped part span, while a CNC-milled step pocket at seatZ
+      // supports the flipped Op1 part perimeter cleanly below the carrier-hat facing plane.
+      const stepDepthV = Math.min(8.0, 0.35 * jawT);
+      const pocketU0 = Math.max(-halfW + 4.0, crossMin - 0.4);
+      const pocketU1 = Math.min(halfW - 4.0, crossMax + 0.4);
+
+      // Base portion of soft jaws (from bedZ up to seatZ, extending inward by stepDepthV to form precision seating ledge!)
+      addBoxUVZ(-halfW, halfW, fixedPlateV0, spanMin + stepDepthV, bedZ, seatZ, softJawAlum, softJawSeat);
+      addBoxUVZ(-halfW, halfW, spanMax - stepDepthV, movPlateV1, bedZ, seatZ, softJawAlum, softJawSeat);
+
+      // Upper clamping wall from seatZ to jawTopZ:
+      // Back spine behind clamping face
+      addBoxUVZ(-halfW, halfW, fixedPlateV0, spanMin, seatZ, jawTopZ, softJawAlum, softJawSeat);
+      addBoxUVZ(-halfW, halfW, spanMax, movPlateV1, seatZ, jawTopZ, softJawAlum, softJawSeat);
+      // Side locating shoulders outside [pocketU0, pocketU1] so the contoured pocket visibly cradles the flipped part!
+      if (pocketU0 > -halfW + 5.0) {
+        addBoxUVZ(-halfW, pocketU0, spanMin, spanMin + stepDepthV, seatZ, jawTopZ, softJawAlum, softJawSeat);
+        addBoxUVZ(-halfW, pocketU0, spanMax - stepDepthV, spanMax, seatZ, jawTopZ, softJawAlum, softJawSeat);
+      }
+      if (pocketU1 < halfW - 5.0) {
+        addBoxUVZ(pocketU1, halfW, spanMin, spanMin + stepDepthV, seatZ, jawTopZ, softJawAlum, softJawSeat);
+        addBoxUVZ(pocketU1, halfW, spanMax - stepDepthV, spanMax, seatZ, jawTopZ, softJawAlum, softJawSeat);
+      }
+
+      const boltZ = bedZ + 0.46 * jawH;
+      for (const uBolt of [-49.2, 49.2]) {
+        addCylinderAlongV(uBolt, boltZ, fixedPlateV0 - 0.25, fixedPlateV0 + 3.0, 6.2, 12, blackOxideBolt, true);
+        addCylinderAlongV(uBolt, boltZ, movPlateV1 - 3.0, movPlateV1 + 0.25, 6.2, 12, blackOxideBolt, true);
+      }
+    }
+
+    return {
+      positions: new Float32Array(posArr),
+      normals: new Float32Array(nrmArr),
+      colors: new Float32Array(colArr),
+      vertexCount: posArr.length / 3,
+      setupInfo: st,
+      workholding: wh,
+    };
+  }
+
   // Extrude 3D segments into 4-sided 3D prism tubes (24 vertices / segment) so path width scales cleanly on all GPUs.
   // When zFlipSum is provided, Op2 (setup_index === 2, G55) moves are stored in workpiece-attached G54 coordinates
   // so flipping the workpiece with mat4FlipX180(zFlipSum) during Op2 aligns stock, CAD, and toolpath ribbons!
-  function buildThickPathTubeGeometry(segments, wantRapid, radiusMm, colorFn, zFlipSum) {
+  // Optional segmentFilterFn(seg, idx) lets users visualize any single or multi-operation subset cleanly.
+  function buildThickPathTubeGeometry(segments, wantRapid, radiusMm, colorFn, zFlipSum, segmentFilterFn) {
     const matchedIndices = [];
     for (let i = 0; i < segments.length; i++) {
       const isR = segments[i].kind === "rapid";
       if (isR === wantRapid) {
+        if (segmentFilterFn && !segmentFilterFn(segments[i], i)) {
+          continue;
+        }
         const st = segments[i].start;
         const en = segments[i].end;
         const len = Math.hypot(en[0] - st[0], en[1] - st[1], en[2] - st[2]);
@@ -2034,8 +2642,8 @@
     };
   }
 
-  // --- Build Static Grid + G54 Triad + Billet Wireframe Lines (Auto-Scaled to Part Size) ---
-  function buildSceneGuideLines(stockMin, stockMax) {
+  // --- Build Static Machine Table Grid + G54 Triad + Billet Wireframe Lines ---
+  function buildSceneGuideLines(stockMin, stockMax, workholding) {
     const verts = [];
     const cols = [];
     function addSeg(a, b, rgba) {
@@ -2045,17 +2653,21 @@
 
     const spanX = Math.abs(stockMax[0] - stockMin[0]);
     const spanY = Math.abs(stockMax[1] - stockMin[1]);
-    const maxSpan = Math.max(50.0, spanX, spanY);
-    const gridStep = maxSpan > 120.0 ? 25 : 10;
-    const gridExtent = Math.max(50, Math.ceil((maxSpan * 0.82) / gridStep) * gridStep);
-    const zFloor = stockMin[2] - 0.05;
+    const maxSpan = Math.max(180.0, spanX, spanY);
+    const gridStep = maxSpan > 220.0 ? 25 : 20;
+    const gridExtent = Math.max(240, Math.ceil((maxSpan * 1.35) / gridStep) * gridStep);
+    const setup1 = workholding && workholding.setups && workholding.setups["1"];
+    const zFloor =
+      setup1 && Number.isFinite(Number(setup1.table_z_mm))
+        ? Number(setup1.table_z_mm) - 0.15
+        : stockMin[2] - 115.5;
     for (let g = -gridExtent; g <= gridExtent; g += gridStep) {
       const c = g === 0 ? [0.26, 0.33, 0.43, 0.65] : [0.18, 0.23, 0.30, 0.42];
       addSeg([-gridExtent, g, zFloor], [gridExtent, g, zFloor], c);
       addSeg([g, -gridExtent, zFloor], [g, gridExtent, zFloor], c);
     }
 
-    const axisLen = Math.max(10.0, Math.min(28.0, maxSpan * 0.16));
+    const axisLen = Math.max(10.0, Math.min(28.0, Math.max(50.0, spanX, spanY) * 0.16));
     const zTriad = Math.max(0.08, stockMax[2] + 0.08);
     addSeg([0, 0, zTriad], [axisLen, 0, zTriad], [1.0, 0.42, 0.42, 1.0]);
     addSeg([0, 0, zTriad], [0, axisLen, zTriad], [0.45, 0.92, 0.52, 1.0]);
@@ -2079,6 +2691,18 @@
       addSeg(corners[i], corners[j], bc);
     }
 
+    // Highlight the Kurt DX6 jaw-bite keep-out line around the billet perimeter in Setup 1
+    if (setup1 && Number.isFinite(Number(setup1.jaw_top_z_mm))) {
+      const zGrip = Number(setup1.jaw_top_z_mm);
+      if (zGrip > z0 + 0.1 && zGrip < z1 - 0.1) {
+        const gc = [0.98, 0.68, 0.18, 0.62];
+        addSeg([x0, y0, zGrip], [x1, y0, zGrip], gc);
+        addSeg([x1, y0, zGrip], [x1, y1, zGrip], gc);
+        addSeg([x1, y1, zGrip], [x0, y1, zGrip], gc);
+        addSeg([x0, y1, zGrip], [x0, y0, zGrip], gc);
+      }
+    }
+
     return {
       positions: new Float32Array(verts),
       colors: new Float32Array(cols),
@@ -2089,12 +2713,405 @@
   }
 
   function defaultCamDistance(caseData) {
-    if (!caseData || !caseData.stock_min_mm || !caseData.stock_max_mm) return 108.0;
+    if (!caseData || !caseData.stock_min_mm || !caseData.stock_max_mm) return 145.0;
     const dx = Number(caseData.stock_max_mm[0]) - Number(caseData.stock_min_mm[0]);
     const dy = Number(caseData.stock_max_mm[1]) - Number(caseData.stock_min_mm[1]);
     const dz = Number(caseData.stock_max_mm[2]) - Number(caseData.stock_min_mm[2]);
     const diag = Math.hypot(dx, dy, dz);
-    return Math.max(76.0, Math.min(520.0, diag * 1.56));
+    return Math.max(125.0, Math.min(620.0, diag * 1.72));
+  }
+
+  // --- Resolve or Synthesize Haas WIPS-R (OMP40-2 + OTS) Setup Sheet & Per-Tool Schedule ---
+  function computeSafeSideTouchZMm(zTopMm, sideDepthMm, jawTopZMm, stockMinZMm) {
+    let desired = Number(zTopMm) - Math.abs(Number(sideDepthMm || 3.5));
+    const floors = [];
+    if (Number.isFinite(jawTopZMm)) floors.push(Number(jawTopZMm) + 0.55);
+    if (Number.isFinite(stockMinZMm)) floors.push(Number(stockMinZMm) + 0.50);
+    if (floors.length > 0) {
+      desired = Math.max(desired, Math.max.apply(null, floors));
+    }
+    return Number(Math.min(Number(zTopMm) - 0.60, desired).toFixed(3));
+  }
+
+  function classifyOtsModeForTool(etype, diameterMm, otsEnabled) {
+    const et = String(etype || "flat end mill").toLowerCase();
+    if (et === "probe") {
+      return {
+        mode: "spindle_probe_master",
+        label: "OMP40-2 Master WCS Probe (P9832)",
+      };
+    }
+    if (!otsEnabled) {
+      return { mode: "manual_offset", label: "Manual Length / Radius Offset" };
+    }
+    const pointTypes = [
+      "drill",
+      "spot drill",
+      "center drill",
+      "countersink",
+      "chamfer mill",
+      "engraving",
+      "tap right hand",
+      "tap left hand",
+      "reamer",
+    ];
+    if (pointTypes.indexOf(et) >= 0 || Number(diameterMm || 0) < 1.5) {
+      return {
+        mode: "ots_centerline_length",
+        label: "OTS Non-Rotating Centerline Length (B1)",
+      };
+    }
+    return {
+      mode: "ots_length_and_diameter",
+      label: "OTS Length + Rotating Diameter (B3)",
+    };
+  }
+
+  function resolveCaseSetupSheet(caseData, variant) {
+    if (!caseData) return null;
+    if (
+      caseData.setup_sheet &&
+      Array.isArray(caseData.setup_sheet.setups) &&
+      caseData.setup_sheet.setups.length > 0 &&
+      Array.isArray(caseData.setup_sheet.tools_schedule)
+    ) {
+      return caseData.setup_sheet;
+    }
+
+    const smin = (caseData.stock_min_mm || [-25, -20, -10]).map(Number);
+    const smax = (caseData.stock_max_mm || [25, 20, 0]).map(Number);
+    const pmin = (caseData.pocket_min_mm || [smin[0] + 2, smin[1] + 2, smin[2] + 2]).map(Number);
+    const pmax = (caseData.pocket_max_mm || [smax[0] - 2, smax[1] - 2, smax[2]]).map(Number);
+    const lx = Number((smax[0] - smin[0]).toFixed(2));
+    const ly = Number((smax[1] - smin[1]).toFixed(2));
+    const lz = Number((smax[2] - smin[2]).toFixed(2));
+    const cx = Number((0.5 * (smin[0] + smax[0])).toFixed(3));
+    const cy = Number((0.5 * (smin[1] + smax[1])).toFixed(3));
+
+    const wh = caseData.workholding || resolveCaseWorkholding(caseData);
+    const derivedOps = deriveCaseOperations(caseData, variant || (caseData.variants && caseData.variants[0]));
+    const hasOp2 = Boolean(
+      (wh && wh.has_op2_soft_jaws) || derivedOps.some((o) => Number(o.setupIndex || 1) >= 2)
+    );
+    const clampAxis = String((wh && wh.clamping_axis) || "Y").toUpperCase();
+    const s1Wh = (wh && wh.setups && wh.setups["1"]) || {};
+    const s2Wh = (wh && wh.setups && wh.setups["2"]) || {};
+    const jawTopS1 = Number(
+      s1Wh.jaw_top_z_mm !== undefined ? s1Wh.jaw_top_z_mm : smin[2] + 2.0
+    );
+    const zSideS1 = computeSafeSideTouchZMm(0.0, 3.5, jawTopS1, smin[2]);
+    const rStylus = 3.0; // Ø6.0 mm Renishaw OMP40-2 ruby ball
+
+    const fixedRef =
+      clampAxis === "Y"
+        ? "Fixed Rear Jaw (+Y / Stationary Vise Body) — set X workstop on left (-X) billet face."
+        : "Fixed Left Jaw (-X / Stationary Vise Body) — set Y workstop on front (-Y) billet face.";
+
+    const setups = [
+      {
+        setup_index: 1,
+        work_offset: "G54",
+        stage_badge: "INITIAL PROBE · STEP 1",
+        title: "Setup 1 (G54) — Raw Billet Clamping & OMP40-2 Pre-Start Position",
+        vise_configuration:
+          String(s1Wh.label || "") ||
+          "Kurt DX6 Hardened Jaws + " + Number(s1Wh.parallel_height_mm || 42.45).toFixed(2) + " mm Parallels",
+        clamping_axis: clampAxis,
+        jaw_opening_mm: Number(s1Wh.jaw_opening_mm !== undefined ? s1Wh.jaw_opening_mm : clampAxis === "Y" ? ly : lx),
+        grip_z_mm: Number(s1Wh.grip_z_mm !== undefined ? s1Wh.grip_z_mm : 2.0),
+        parallel_height_mm: Number(s1Wh.parallel_height_mm !== undefined ? s1Wh.parallel_height_mm : 42.45),
+        jaw_top_z_mm: Number(jawTopS1.toFixed(3)),
+        fixed_jaw_reference: fixedRef,
+        wcs_datum_description:
+          "Top-Center of Raw Stock Billet (X = 0.000, Y = 0.000, Z = 0.000 at unmachined top face)",
+        probe_start_xyz_mm: [cx, cy, 10.0],
+        probe_start_xyz_in: [
+          Number((cx / INCH_MM).toFixed(4)),
+          Number((cy / INCH_MM).toFixed(4)),
+          Number((10.0 / INCH_MM).toFixed(4)),
+        ],
+        xy_jog_tolerance_mm: 5.0,
+        z_jog_tolerance_mm: 3.0,
+        probed_span_xy_mm: [lx, ly],
+        side_touch_z_mm: zSideS1,
+        radial_clearance_mm: 8.0,
+        touch_points_mm: [
+          { id: "Z_TOP", label: "1. Top Face Z0 Datum", xyz_mm: [cx, cy, 0.0] },
+          { id: "X_NEG", label: "2. -X Billet Wall", xyz_mm: [Number((smin[0] - rStylus).toFixed(3)), cy, zSideS1] },
+          { id: "X_POS", label: "3. +X Billet Wall", xyz_mm: [Number((smax[0] + rStylus).toFixed(3)), cy, zSideS1] },
+          { id: "Y_NEG", label: "4. -Y Billet Wall", xyz_mm: [cx, Number((smin[1] - rStylus).toFixed(3)), zSideS1] },
+          { id: "Y_POS", label: "5. +Y Billet Wall", xyz_mm: [cx, Number((smax[1] + rStylus).toFixed(3)), zSideS1] },
+        ],
+        checklist: [
+          "Verify Renishaw OMP40-2 (T99, Ø6.0 mm ruby ball) in spindle/ATC and Renishaw OTS clear on right (+X) table.",
+          "Seat " +
+            lx.toFixed(1) +
+            " × " +
+            ly.toFixed(1) +
+            " × " +
+            lz.toFixed(1) +
+            " mm billet on " +
+            Number(s1Wh.parallel_height_mm || 42.45).toFixed(2) +
+            " mm parallels in Kurt DX6 (" +
+            Number(s1Wh.grip_z_mm || 2.0).toFixed(1) +
+            " mm grip bite); tap down flush.",
+          "Handle-jog T99 OMP40-2 ruby tip over billet top-center within ±5 mm XY and Z = +10 mm (+0.39 in) above top surface; set rough initial G54 XYZ.",
+          "Press Cycle Start: OTS sets length (H) & rotating diameter (D) for cutting tools, then OMP40-2 probes exact G54 Z0 and XY web center before Op1 cutting.",
+        ],
+      },
+    ];
+
+    if (hasOp2) {
+      const jawTopS2 = Number(s2Wh.jaw_top_z_mm !== undefined ? s2Wh.jaw_top_z_mm : -3.2);
+      const zSideS2 = computeSafeSideTouchZMm(0.0, 3.5, jawTopS2, smin[2]);
+      setups.push({
+        setup_index: 2,
+        work_offset: "G55",
+        stage_badge: "POST-FLIP RE-PROBE · AFTER M00",
+        title: "Setup 2 (G55) — 180° Part Flip in Soft Jaws & OMP40-2 Re-Probing",
+        vise_configuration:
+          String(s2Wh.label || "") || "Kurt DX6 Machined 6061-T6 Contoured Soft Jaws",
+        clamping_axis: clampAxis,
+        jaw_opening_mm: Number(s2Wh.jaw_opening_mm !== undefined ? s2Wh.jaw_opening_mm : clampAxis === "Y" ? ly : lx),
+        grip_z_mm: Number(s2Wh.grip_z_mm !== undefined ? s2Wh.grip_z_mm : 4.0),
+        seat_z_mm: Number(s2Wh.seat_z_mm !== undefined ? s2Wh.seat_z_mm : -6.0),
+        jaw_top_z_mm: Number(jawTopS2.toFixed(3)),
+        fixed_jaw_reference:
+          "Contoured G55 6061-T6 Soft Jaws — flip part 180° around X-axis (Y -> -Y, Z -> -Z) so carrier hat faces +Z.",
+        wcs_datum_description:
+          "Top-Center of Flipped Carrier Hat / Part in G55 Soft Jaws (X = 0.000, Y = 0.000, Z = 0.000 at flipped top)",
+        probe_start_xyz_mm: [cx, cy, 10.0],
+        probe_start_xyz_in: [
+          Number((cx / INCH_MM).toFixed(4)),
+          Number((cy / INCH_MM).toFixed(4)),
+          Number((10.0 / INCH_MM).toFixed(4)),
+        ],
+        xy_jog_tolerance_mm: 5.0,
+        z_jog_tolerance_mm: 3.0,
+        probed_span_xy_mm: [lx, ly],
+        side_touch_z_mm: zSideS2,
+        radial_clearance_mm: 8.0,
+        touch_points_mm: [
+          { id: "Z_TOP", label: "1. Flipped Top Z0 Datum", xyz_mm: [cx, cy, 0.0] },
+          { id: "X_NEG", label: "2. -X Flipped Hat Wall", xyz_mm: [Number((smin[0] - rStylus).toFixed(3)), cy, zSideS2] },
+          { id: "X_POS", label: "3. +X Flipped Hat Wall", xyz_mm: [Number((smax[0] + rStylus).toFixed(3)), cy, zSideS2] },
+          { id: "Y_NEG", label: "4. -Y Flipped Hat Wall", xyz_mm: [cx, Number((smin[1] - rStylus).toFixed(3)), zSideS2] },
+          { id: "Y_POS", label: "5. +Y Flipped Hat Wall", xyz_mm: [cx, Number((smax[1] + rStylus).toFixed(3)), zSideS2] },
+        ],
+        checklist: [
+          "At M00 program stop, open Kurt DX6 jaws, clear chips with air blast, and clean G55 contoured 6061 soft jaws.",
+          "Flip Op1-machined part 180° about the X-axis (unmachined Op1 grip hat faces +Z) and torque into G55 soft-jaw pocket.",
+          "Verify G55 rough seed is within ±5 mm of flipped center (side touches clear soft jaws at Z = " +
+            zSideS2.toFixed(2) +
+            " mm > jaw top " +
+            jawTopS2.toFixed(2) +
+            " mm).",
+          "Press Cycle Start: T99 OMP40-2 automatically re-probes exact G55 Z0 and XY center before facing off the carrier hat and finishing Op2.",
+        ],
+      });
+    }
+
+    // Build combined per-tool list (T99 OMP40-2 Spindle Probe + all cutting tools)
+    const opsByTnum = new Map();
+    for (const op of derivedOps) {
+      const tn = Number(op.toolNumber || 1);
+      if (!opsByTnum.has(tn)) opsByTnum.set(tn, []);
+      opsByTnum.get(tn).push("Op" + op.opIndex + " (" + op.workOffset + ")");
+    }
+
+    const rawToolMap = new Map();
+    rawToolMap.set(99, {
+      tool_number: 99,
+      tool_id: "probe_omp40_2_mm_6mm",
+      entity_type: "probe",
+      diameter_mm: 6.0,
+      flutes: 1,
+      flute_length_mm: 6.0,
+      stickout_mm: 50.0,
+      nominal_label: "Renishaw OMP40-2 Optical Spindle Probe (Ø6.0 mm Ruby Stylus, 50 mm Stem)",
+      holder_description: "BT30 / CAT40 Optical Probe Shank",
+    });
+
+    const tbl = caseData.tools_table;
+    if (tbl && typeof tbl === "object") {
+      const entries = Array.isArray(tbl) ? tbl : Object.values(tbl);
+      for (const item of entries) {
+        if (!item) continue;
+        const tn = Number(item.tool_number || item.t_number || 1);
+        rawToolMap.set(tn, item);
+      }
+    }
+    if (rawToolMap.size <= 1 && caseData.tool) {
+      const t0 = caseData.tool;
+      const tn0 = Number(t0.tool_number || 1);
+      const d0 = Number(t0.diameter_mm || 2.0 * Number(t0.cutter_radius_mm || 2.5));
+      rawToolMap.set(tn0, {
+        tool_number: tn0,
+        tool_id: t0.tool_id || "T" + tn0,
+        entity_type: t0.entity_type || "flat end mill",
+        diameter_mm: d0,
+        flutes: Number(t0.flutes || 3),
+        flute_length_mm: Number(t0.flute_length_mm || 12.0),
+        stickout_mm: Number(t0.stickout_mm || t0.holder_bottom_mm || 24.0),
+        nominal_label:
+          t0.nominal_label || "Ø" + d0.toFixed(2) + " mm Solid Carbide End Mill",
+        holder_description: t0.holder_description || "BT30 / CAT40 ER Collet Chuck",
+      });
+    }
+
+    const sortedTnums = Array.from(rawToolMap.keys()).sort((a, b) => {
+      if (a === 99) return -1;
+      if (b === 99) return 1;
+      return a - b;
+    });
+
+    const toolsSchedule = [];
+    for (const tn of sortedTnums) {
+      const rec = rawToolMap.get(tn);
+      const dMm = Number(rec.diameter_mm || 2.0 * Number(rec.cutter_radius_mm || 3.0));
+      const stickMm = Number(rec.stickout_mm || rec.holder_bottom_mm || 30.0);
+      const fluteMm = Number(rec.flute_length_mm || 0.5 * stickMm);
+      const flutes = Math.max(1, Number(rec.flutes || (tn === 99 ? 1 : 3)));
+      const etype = String(rec.entity_type || (tn === 99 ? "probe" : "flat end mill"));
+      const lbl = String(rec.nominal_label || rec.label || "Tool T" + tn);
+      const hld = String(rec.holder_description || rec.holder_id || "BT30 / CAT40 Collet");
+      const otsInfo = classifyOtsModeForTool(etype, dMm, true);
+      const macroStr =
+        otsInfo.mode === "spindle_probe_master"
+          ? "T" + tn + " Master OMP40-2 (G65 P9832 / P9811 / P9812)"
+          : "G65 P9995 A0. " +
+            (otsInfo.mode === "ots_length_and_diameter" ? "B3." : "B1.") +
+            " C2. T" +
+            tn +
+            ". E" +
+            stickMm.toFixed(1) +
+            " D" +
+            dMm.toFixed(2);
+      const usedOps =
+        opsByTnum.get(tn) ||
+        (tn === 99 ? (hasOp2 ? ["Pre-Op1 (G54)", "Post-Flip (G55)"] : ["Pre-Op1 (G54)"]) : ["Op1 (G54)"]);
+      toolsSchedule.push({
+        tool_number: tn,
+        offset_registers: "H" + tn + (otsInfo.mode === "ots_length_and_diameter" ? " / D" + tn : ""),
+        tool_id: String(rec.tool_id || "t" + tn),
+        label: lbl,
+        entity_type: etype,
+        diameter_mm: Number(dMm.toFixed(3)),
+        diameter_in: Number((dMm / INCH_MM).toFixed(4)),
+        flutes,
+        flute_length_mm: Number(fluteMm.toFixed(2)),
+        stickout_mm: Number(stickMm.toFixed(2)),
+        stickout_in: Number((stickMm / INCH_MM).toFixed(3)),
+        holder_label: hld,
+        ots_mode: otsInfo.mode,
+        ots_mode_label: otsInfo.label,
+        ots_macro_preview: macroStr,
+        used_in_ops: usedOps,
+      });
+    }
+
+    return {
+      schema: "diffcam-setup-sheet/1",
+      part_id: String(caseData.case_id || "part"),
+      part_title: String(caseData.part_title || caseData.case_id || "Part"),
+      program_number: 2001,
+      stock_material_id: String(caseData.stock_material_id || "al_6061_t6"),
+      primary_dialect: "haas_ngc",
+      probing_enabled: true,
+      probe_after_flip: hasOp2,
+      ots_enabled: true,
+      probe_package: {
+        profile_id: "haas_wips_r",
+        package_label: "Haas WIPS-R (Renishaw OMP40-2 Spindle Probe + OTS Tool Setter)",
+        package_url: "https://haascnc.com/productivity/probe-system/wips-r",
+        spindle_probe: {
+          model_id: "renishaw_omp40_2",
+          label: "Renishaw OMP40-2 Optical Spindle Probe",
+          tool_number: 99,
+          stylus_diameter_mm: 6.0,
+          stylus_length_mm: 50.0,
+          body_diameter_mm: 40.0,
+          pre_position_z_mm: 10.0,
+          xy_jog_tolerance_mm: 5.0,
+        },
+        tool_setter: {
+          model_id: "renishaw_ots",
+          label: "Renishaw OTS Optical Table Tool Setter",
+          stylus_disc_diameter_mm: 12.7,
+        },
+      },
+      stock_dims_mm: [lx, ly, lz],
+      stock_min_mm: smin,
+      stock_max_mm: smax,
+      part_dims_mm: [
+        Number((pmax[0] - pmin[0]).toFixed(2)),
+        Number((pmax[1] - pmin[1]).toFixed(2)),
+        Number((pmax[2] - pmin[2]).toFixed(2)),
+      ],
+      has_op2_flip: hasOp2,
+      setups,
+      tools_schedule: toolsSchedule,
+    };
+  }
+
+  function formatSetupSheetMarkdown(sheet) {
+    if (!sheet) return "";
+    const out = [];
+    const progStr = "O" + String(Number(sheet.program_number || 2001)).padStart(5, "0");
+    const dims = sheet.stock_dims_mm || [0, 0, 0];
+    const pkg = (sheet.probe_package && sheet.probe_package.package_label) || "Haas WIPS-R (OMP40-2 + OTS)";
+    out.push("# CNC SETUP SHEET — " + progStr + " (" + sheet.part_title + ")");
+    out.push("- Part ID: " + sheet.part_id + " | Material: " + String(sheet.stock_material_id || "").toUpperCase());
+    out.push("- Raw Billet: " + dims[0] + " × " + dims[1] + " × " + dims[2] + " mm");
+    out.push("- Probing System: " + pkg);
+    out.push("");
+    for (const st of sheet.setups || []) {
+      const pStart = st.probe_start_xyz_mm || [0, 0, 10];
+      out.push("## " + st.title);
+      out.push("- Work Offset: " + st.work_offset + " | Vise: " + st.vise_configuration);
+      out.push("- Datum Origin: " + st.wcs_datum_description);
+      out.push(
+        "- Pre-Run OMP40-2 Position: X=" +
+          pStart[0] +
+          " mm, Y=" +
+          pStart[1] +
+          " mm (±" +
+          st.xy_jog_tolerance_mm +
+          " mm), Z=+" +
+          pStart[2] +
+          " mm | Side Web Touch Z=" +
+          st.side_touch_z_mm +
+          " mm (Jaw Top Z=" +
+          st.jaw_top_z_mm +
+          " mm)"
+      );
+      for (let i = 0; i < (st.checklist || []).length; i++) {
+        out.push("  " + (i + 1) + ". " + st.checklist[i]);
+      }
+      out.push("");
+    }
+    out.push("## Tool Crib & Renishaw OTS Calibration Schedule");
+    for (const t of sheet.tools_schedule || []) {
+      out.push(
+        "- T" +
+          t.tool_number +
+          " (" +
+          t.offset_registers +
+          "): " +
+          t.label +
+          " | Ø" +
+          t.diameter_mm +
+          " mm (" +
+          t.diameter_in +
+          " in) | Stickout " +
+          t.stickout_mm +
+          " mm | " +
+          t.ots_macro_preview +
+          " | Ops: " +
+          (t.used_in_ops || []).join(", ")
+      );
+    }
+    return out.join("\n");
   }
 
   function createPaneSlot(gl) {
@@ -2135,6 +3152,8 @@
       activeToolLabel: "T1",
       activeSetupIndex: 1,
       activeWorkOffset: "G54",
+      activeOpKey: "",
+      activeOpLabel: "Op 1",
       activeGcodeLine: 1,
       finished: false,
     };
@@ -2272,6 +3291,12 @@
         toolCol: gl.createBuffer(),
         guidePos: gl.createBuffer(),
         guideCol: gl.createBuffer(),
+        vise1Pos: gl.createBuffer(),
+        vise1Nrm: gl.createBuffer(),
+        vise1Col: gl.createBuffer(),
+        vise2Pos: gl.createBuffer(),
+        vise2Nrm: gl.createBuffer(),
+        vise2Col: gl.createBuffer(),
       },
       toolMeshCache: new Map(),
       panes: [createPaneSlot(gl), createPaneSlot(gl), createPaneSlot(gl)],
@@ -2332,9 +3357,21 @@
 
     targetCount: 0,
     toolCount: 0,
+    vise1Count: 0,
+    vise2Count: 0,
+    workholding: null,
     guideGridCount: 0,
     guideBilletOffset: 0,
     guideBilletCount: 0,
+
+    // Multi-Operation Visualization & Filter State
+    operations: [],
+    opByKey: new Map(),
+    opColorIndexMap: new Map(),
+    opFilterMode: "all", // "all" | "custom"
+    selectedOpKeys: new Set(),
+    activeOpKey: "",
+    setupSheetActiveIdx: 1,
 
     playing: true,
     firstBoot: true,
@@ -2546,12 +3583,23 @@
       return;
     }
     if (mode === "tool_number") {
-      titleEl.textContent = "Multi-Tool TAMP Sequence (T1 → T4)";
+      titleEl.textContent = "Multi-Tool TAMP Sequence (T1 → T" + Math.max(4, state.operations.length) + ")";
       barEl.className = "legend-gradient mode-tight";
       minEl.textContent = "T1 Rough/Face";
       midEl.textContent = "T2 Rest / T3 Spot";
-      maxEl.textContent = "T4 Peck Drill";
+      maxEl.textContent = "T4+ Drill/Finish";
       subEl.textContent = "Automated StandardToolLibrary + Persistent-IPW TAMP";
+      return;
+    }
+    if (mode === "operation") {
+      const nOps = Math.max(1, state.operations.length);
+      const midOp = Math.max(1, Math.ceil(nOps * 0.5));
+      titleEl.textContent = "Multi-Operation TAMP Sequence (Op 1 → Op " + nOps + ")";
+      barEl.className = "legend-gradient mode-operation";
+      minEl.textContent = "Op 1";
+      midEl.textContent = "Op " + midOp;
+      maxEl.textContent = "Op " + nOps;
+      subEl.textContent = "Toggle Ops in top strip to isolate or overlay multiple operations";
       return;
     }
 
@@ -2589,6 +3637,311 @@
     return Number(caseData.stock_min_mm[2]) + Number(caseData.stock_max_mm[2]);
   }
 
+  function isSegmentVisibleUnderOpFilter(seg) {
+    if (state.opFilterMode !== "custom") return true;
+    const key = resolveSegmentOpKey(seg);
+    return state.selectedOpKeys.has(key);
+  }
+
+  function refreshOperationsForCurrentVariant(resetSelection) {
+    const ops = deriveCaseOperations(state.currentCase, state.currentVariant);
+    state.operations = ops;
+    state.opByKey = new Map();
+    state.opColorIndexMap = new Map();
+    for (let i = 0; i < ops.length; i++) {
+      state.opByKey.set(ops[i].key, ops[i]);
+      state.opColorIndexMap.set(ops[i].key, ops[i].colorIdx);
+    }
+
+    if (resetSelection || state.opFilterMode !== "custom") {
+      state.opFilterMode = "all";
+      state.selectedOpKeys = new Set(ops.map((o) => o.key));
+    } else {
+      const kept = new Set();
+      for (const op of ops) {
+        if (state.selectedOpKeys.has(op.key)) kept.add(op.key);
+      }
+      if (kept.size === 0 || kept.size === ops.length) {
+        state.opFilterMode = "all";
+        state.selectedOpKeys = new Set(ops.map((o) => o.key));
+      } else {
+        state.selectedOpKeys = kept;
+      }
+    }
+    renderOperationBar();
+  }
+
+  function applyOpSelectionSet(nextKeysSet, jumpToFirstSelected) {
+    const allKeys = state.operations.map((o) => o.key);
+    if (!nextKeysSet || nextKeysSet.size === 0 || nextKeysSet.size >= allKeys.length) {
+      state.opFilterMode = "all";
+      state.selectedOpKeys = new Set(allKeys);
+    } else {
+      state.opFilterMode = "custom";
+      state.selectedOpKeys = new Set(nextKeysSet);
+    }
+    if (jumpToFirstSelected) {
+      const firstOp = state.operations.find((o) => state.selectedOpKeys.has(o.key));
+      if (firstOp) {
+        state.playing = false;
+        const playBtn = document.getElementById("btn-play");
+        if (playBtn) playBtn.textContent = "Play";
+        state.playTimeS = Number(firstOp.firstCutT0S !== undefined ? firstOp.firstCutT0S : firstOp.t0S);
+      }
+    }
+    renderOperationBar();
+    rebuildAllPaneToolpaths();
+    updateScrubberAndDro();
+    if (state.activeTab === "case") {
+      renderInspectorTab();
+    }
+  }
+
+  function scrubToOperation(opEntry, jumpToEnd) {
+    if (!opEntry) return;
+    if (state.opFilterMode === "custom" && !state.selectedOpKeys.has(opEntry.key)) {
+      state.selectedOpKeys.add(opEntry.key);
+      if (state.selectedOpKeys.size >= state.operations.length) {
+        state.opFilterMode = "all";
+      }
+      rebuildAllPaneToolpaths();
+    }
+    state.playing = false;
+    const playBtn = document.getElementById("btn-play");
+    if (playBtn) playBtn.textContent = "Play";
+    state.playTimeS = jumpToEnd
+      ? Math.max(0.0, Number(opEntry.t1S) - 1e-4)
+      : Number(opEntry.firstCutT0S !== undefined ? opEntry.firstCutT0S : opEntry.t0S);
+    renderOperationBar();
+    updateScrubberAndDro();
+    if (state.activeTab === "case") {
+      renderInspectorTab();
+    }
+  }
+
+  function stepOperation(delta) {
+    if (!state.operations || state.operations.length === 0) return;
+    const curKey = state.activeOpKey;
+    let curIdx = state.operations.findIndex((o) => o.key === curKey);
+    if (curIdx < 0) curIdx = 0;
+    const nextIdx = Math.max(0, Math.min(state.operations.length - 1, curIdx + delta));
+    const targetOp = state.operations[nextIdx];
+    scrubToOperation(targetOp, false);
+  }
+
+  function updateViseStatusPill(setupIdx) {
+    const wh = state.workholding || resolveCaseWorkholding(state.currentCase);
+    const sKey = Number(setupIdx || 1) >= 2 ? "2" : "1";
+    const st = (wh && wh.setups && wh.setups[sKey]) || (wh && wh.setups && wh.setups["1"]) || null;
+    const pill = document.getElementById("vise-status-pill");
+    if (pill && st) {
+      pill.textContent =
+        st.short_label +
+        " · " +
+        Number(st.jaw_opening_mm || 0).toFixed(1) +
+        "mm (" +
+        String(st.clamping_axis || "Y") +
+        ")";
+      pill.title = String(st.label || wh.summary || "");
+      pill.classList.toggle("vise-status-pill-soft", sKey === "2");
+    }
+    const droWh = document.getElementById("dro-workholding");
+    if (droWh && st) {
+      droWh.textContent =
+        sKey === "2"
+          ? "Kurt DX6 · G55 6061 Soft Jaws"
+          : "Kurt DX6 · G54 Hard Jaws (" + Number(st.grip_z_mm || 2.0).toFixed(1) + "mm bite)";
+    }
+  }
+
+  function renderOperationBar() {
+    const strip = document.getElementById("op-pills-strip");
+    const btnAll = document.getElementById("btn-ops-all");
+    const btnG54 = document.getElementById("btn-ops-g54");
+    const btnG55 = document.getElementById("btn-ops-g55");
+    if (!strip) return;
+
+    const ops = state.operations || [];
+    const hasG55 = ops.some((o) => o.setupIndex >= 2);
+    if (btnG54) btnG54.classList.toggle("hidden", !hasG55);
+    if (btnG55) btnG55.classList.toggle("hidden", !hasG55);
+
+    const isAll = state.opFilterMode !== "custom" || state.selectedOpKeys.size >= ops.length;
+    const onlyG54 =
+      hasG55 &&
+      !isAll &&
+      ops.every((o) => (o.setupIndex === 1) === state.selectedOpKeys.has(o.key));
+    const onlyG55 =
+      hasG55 &&
+      !isAll &&
+      ops.every((o) => (o.setupIndex >= 2) === state.selectedOpKeys.has(o.key));
+
+    if (btnAll) btnAll.classList.toggle("btn-active", isAll);
+    if (btnG54) btnG54.classList.toggle("btn-active", onlyG54);
+    if (btnG55) btnG55.classList.toggle("btn-active", onlyG55);
+
+    const pills = [];
+    for (let i = 0; i < ops.length; i++) {
+      const op = ops[i];
+      const checked = isAll || state.selectedOpKeys.has(op.key);
+      const isCurrent = state.activeOpKey === op.key;
+      const clsParts = ["op-pill"];
+      if (!checked) clsParts.push("op-pill-muted");
+      if (isCurrent) clsParts.push("op-pill-current");
+      if (op.setupIndex >= 2) clsParts.push("op-pill-g55");
+
+      const chk = el("input", {
+        type: "checkbox",
+        className: "op-pill-chk",
+        "aria-label": "Toggle visibility for Op " + op.opIndex + " " + op.shortKind,
+        title: "Check/uncheck to overlay multiple operations simultaneously",
+      });
+      chk.checked = checked;
+      chk.addEventListener("change", (ev) => {
+        ev.stopPropagation();
+        const nextSet = new Set(isAll ? ops.map((o) => o.key) : state.selectedOpKeys);
+        if (chk.checked) {
+          nextSet.add(op.key);
+        } else {
+          nextSet.delete(op.key);
+        }
+        applyOpSelectionSet(nextSet, false);
+      });
+
+      const jumpBtn = el(
+        "button",
+        {
+          type: "button",
+          className: "op-pill-jump",
+          title:
+            "Op " +
+            op.opIndex +
+            " (" +
+            op.workOffset +
+            " · T" +
+            op.toolNumber +
+            " · " +
+            op.opKind +
+            " · " +
+            op.durationS.toFixed(1) +
+            "s) — Click to scrub, Shift+Click to solo",
+        },
+        [
+          el("span", { className: "op-swatch op-swatch-" + op.colorIdx }),
+          el("span", {
+            text:
+              (hasG55 ? op.workOffset + " " : "") +
+              "Op" +
+              op.opIndex +
+              " T" +
+              op.toolNumber +
+              " " +
+              op.shortKind,
+          }),
+        ]
+      );
+      jumpBtn.addEventListener("click", (ev) => {
+        if (ev.shiftKey) {
+          applyOpSelectionSet(new Set([op.key]), true);
+        } else {
+          scrubToOperation(op, false);
+        }
+      });
+
+      pills.push(el("div", { className: clsParts.join(" "), "data-op-key": op.key }, [chk, jumpBtn]));
+    }
+    strip.replaceChildren(...pills);
+  }
+
+  function syncOperationBarCurrentHighlight() {
+    const strip = document.getElementById("op-pills-strip");
+    if (!strip) return;
+    for (const child of Array.from(strip.children)) {
+      const k = child.getAttribute("data-op-key");
+      child.classList.toggle("op-pill-current", Boolean(k && k === state.activeOpKey));
+    }
+  }
+
+  function renderOperationTimelineSvg(playFrac) {
+    const mount = document.getElementById("op-timeline-mount");
+    if (!mount) return;
+    const ops = state.operations || [];
+    const totalT = Math.max(state.totalDurationS, 1e-6);
+    const isAll = state.opFilterMode !== "custom" || state.selectedOpKeys.size >= ops.length;
+    const children = [];
+
+    let g55StartX = null;
+    for (let i = 0; i < ops.length; i++) {
+      const op = ops[i];
+      const x0 = Math.max(0, Math.min(999, Math.round((op.t0S / totalT) * 1000)));
+      const x1 = Math.max(x0 + 2, Math.min(1000, Math.round((op.t1S / totalT) * 1000)));
+      const vis = isAll || state.selectedOpKeys.has(op.key);
+      if (op.setupIndex >= 2 && g55StartX === null) {
+        g55StartX = x0;
+      }
+      const rect = svgEl("rect", {
+        x: String(x0),
+        y: "0",
+        width: String(Math.max(1, x1 - x0 - 1)),
+        height: "13",
+        fill: op.colorHex,
+        "fill-opacity": vis ? (state.activeOpKey === op.key ? "1.0" : "0.78") : "0.18",
+      });
+      rect.appendChild(
+        svgEl("title", null, [
+          "Op " +
+            op.opIndex +
+            " (" +
+            op.workOffset +
+            " T" +
+            op.toolNumber +
+            " " +
+            op.shortKind +
+            "): " +
+            op.t0S.toFixed(1) +
+            "s – " +
+            op.t1S.toFixed(1) +
+            "s",
+        ])
+      );
+      rect.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        scrubToOperation(op, false);
+      });
+      children.push(rect);
+    }
+
+    if (g55StartX !== null) {
+      children.push(
+        svgEl("rect", {
+          x: String(Math.max(0, g55StartX - 1)),
+          y: "0",
+          width: "3",
+          height: "13",
+          fill: "#ffd43b",
+        })
+      );
+    }
+
+    const playX = Math.max(0, Math.min(997, Math.round(playFrac * 1000) - 1));
+    children.push(
+      svgEl("rect", {
+        x: String(playX),
+        y: "0",
+        width: "3",
+        height: "13",
+        fill: "#ffffff",
+      })
+    );
+
+    const svg = svgEl(
+      "svg",
+      { viewBox: "0 0 1000 13", preserveAspectRatio: "none", class: "op-timeline-svg" },
+      children
+    );
+    mount.replaceChildren(svg);
+  }
+
   // --- Upload 3D Thick Ribbon Buffers for All Active Panes ---
   function rebuildAllPaneToolpaths() {
     if (!renderer || !state.currentCase) return;
@@ -2606,6 +3959,7 @@
     const cutRadius = state.pathWidthMm;
     const rapidRadius = Math.max(0.08, state.pathWidthMm * 0.58);
     const zFlipSum = getCaseZFlipSum(state.currentCase);
+    const segFilter = state.opFilterMode === "custom" ? isSegmentVisibleUnderOpFilter : null;
 
     for (let p = 0; p < nPanes; p++) {
       const slot = renderer.panes[p];
@@ -2616,8 +3970,9 @@
         segs,
         false,
         cutRadius,
-        (s) => cutSegmentColorRgb(s, state.pathColorMode, state.tightRange),
-        zFlipSum
+        (s) => cutSegmentColorRgb(s, state.pathColorMode, state.tightRange, state.opColorIndexMap),
+        zFlipSum,
+        segFilter
       );
       uploadBuffer(gl, slot.cutPos, cutGeom.positions, false);
       uploadBuffer(gl, slot.cutNrm, cutGeom.normals, false);
@@ -2631,7 +3986,8 @@
         true,
         rapidRadius,
         () => [0.96, 0.65, 0.14],
-        zFlipSum
+        zFlipSum,
+        segFilter
       );
       uploadBuffer(gl, slot.rapidPos, rapGeom.positions, false);
       uploadBuffer(gl, slot.rapidNrm, rapGeom.normals, false);
@@ -2769,6 +4125,7 @@
     }
     document.getElementById("btn-play").textContent = state.playing ? "Pause" : "Play";
 
+    refreshOperationsForCurrentVariant(false);
     rebuildAllPaneToolpaths();
     renderInspectorTab();
     updateScrubberAndDro();
@@ -2946,13 +4303,15 @@
         "%)"
     );
 
-    // Emit Tool Crib Table header
+    // Emit Tool Crib Table header & collect cutting tools for Renishaw OTS calibration
     const seenTools = new Set();
+    const otsToolSpecs = [];
     for (let i = 0; i < segs.length; i++) {
       const tNum = Number(segs[i].tool_number || 1);
       if (!seenTools.has(tNum)) {
         seenTools.add(tNum);
         const tSpec = resolveToolSpecForSegment(caseData, segs[i]);
+        otsToolSpecs.push({ tNum, tSpec });
         lines.push(
           "(T" +
             tNum +
@@ -2969,6 +4328,83 @@
       lines.push("G17 G21 G40 G49 G80 G90 G91.1 G94");
     } else {
       lines.push("G00 G17 G21 G40 G49 G80 G90 G94");
+    }
+
+    // Emit Haas WIPS-R / Renishaw OTS Automatic Tool Setting Preamble for cutting tools
+    const cuttingForOts = otsToolSpecs.filter(
+      (item) => String(item.tSpec.entity_type || "").toLowerCase() !== "probe" && item.tNum < 90
+    );
+    if (cuttingForOts.length > 0) {
+      lines.push("(--- HAAS WIPS-R : RENISHAW OTS AUTO TOOL SETTING ---)");
+      for (const item of cuttingForOts) {
+        const dMm = Number(item.tSpec.diameter_mm || 5.0);
+        const stkMm = Number(item.tSpec.holder_bottom_mm || 28.0);
+        const otsMode = classifyOtsModeForTool(item.tSpec.entity_type, dMm, true);
+        const bArg = otsMode.mode === "ots_length_and_diameter" ? "B3." : "B1.";
+        lines.push("T" + item.tNum + " M06");
+        if (dial === "haas_ngc") {
+          lines.push(
+            "G65 P9995 A0. " +
+              bArg +
+              " C2. T" +
+              item.tNum +
+              ". E" +
+              stkMm.toFixed(2) +
+              " D" +
+              dMm.toFixed(3) +
+              " (OTS SET H" +
+              item.tNum +
+              ")"
+          );
+        } else if (dial === "rs274") {
+          lines.push("G38.2 Z-25.000 F120.0 (OTS TOUCH TOOL T" + item.tNum + ")");
+          lines.push("G10 L1 P" + item.tNum + " Z#5063 R" + (0.5 * dMm).toFixed(4));
+        } else {
+          lines.push(
+            "G65 P9857 " + bArg + " T" + item.tNum + ". D" + dMm.toFixed(3) + " (OTS SET H" + item.tNum + ")"
+          );
+        }
+      }
+      lines.push(dial === "fanuc" || dial === "makino" ? "G28 G91 Z0.0" : "G90 G53 G00 Z0.0");
+      if (dial === "fanuc" || dial === "makino") lines.push("G90");
+    }
+
+    // If case does not already start with an explicit T99 probe segment, emit Step-1 OMP40-2 WCS probe!
+    const sminFb = (caseData.stock_min_mm || [-25, -20, -10]).map(Number);
+    const smaxFb = (caseData.stock_max_mm || [25, 20, 0]).map(Number);
+    const sxFb = Math.max(4.0, smaxFb[0] - sminFb[0]).toFixed(3);
+    const syFb = Math.max(4.0, smaxFb[1] - sminFb[1]).toFixed(3);
+    const firstIsProbe =
+      segs.length > 0 &&
+      (Number(segs[0].tool_number || 1) >= 90 || String(segs[0].entity_type || "").toLowerCase() === "probe");
+    if (!firstIsProbe) {
+      lines.push("(--- STEP 1 : RENISHAW OMP40-2 WCS PROBE G54 ---)");
+      lines.push("T99 M06");
+      lines.push("G54");
+      lines.push("G90 G00 X0.000 Y0.000");
+      lines.push("G43 H99 Z25.000");
+      if (dial === "haas_ngc") {
+        lines.push("G65 P9832 (WIPS-R OMP40-2 OPTICAL PROBE ON)");
+        lines.push("G65 P9810 Z10.000 F1500.0");
+        lines.push("G65 P9811 Z0.000 Q5.000 S1. (SET G54 TOP Z0 DATUM)");
+        lines.push("G65 P9812 X" + sxFb + " Z-3.500 Q5.000 R8.000 S1. (SET G54 X WEB CENTER)");
+        lines.push("G65 P9812 Y" + syFb + " Z-3.500 Q5.000 R8.000 S1. (SET G54 Y WEB CENTER)");
+        lines.push("G65 P9995 W54. A20. X" + sxFb + " Y" + syFb + " Z-3.500");
+        lines.push("G65 P9833 (WIPS-R OMP40-2 OPTICAL PROBE OFF)");
+      } else if (dial === "rs274") {
+        lines.push("G38.2 Z-5.000 F150.0 (PROBE G54 TOP Z0)");
+        lines.push("G10 L20 P1 Z0.000");
+        lines.push("G00 Z15.000");
+      } else {
+        lines.push("G65 P9832 (OMP40-2 PROBE ON)");
+        lines.push("G65 P9810 Z10.000 F1500.0");
+        lines.push("G65 P9811 Z0.000 Q5.000 S1.");
+        lines.push("G65 P9812 X" + sxFb + " Z-3.500 Q5.000 R8.000 S1.");
+        lines.push("G65 P9812 Y" + syFb + " Z-3.500 Q5.000 R8.000 S1.");
+        lines.push("G65 P9833 (OMP40-2 PROBE OFF)");
+      }
+      lines.push(dial === "fanuc" || dial === "makino" ? "G28 G91 Z0.0" : "G90 G53 G00 Z0.0");
+      if (dial === "fanuc" || dial === "makino") lines.push("G90");
     }
 
     let curTool = -1;
@@ -3177,6 +4613,11 @@
         : slot.activeSetupIndex === 2
           ? "G55"
           : "G54";
+    slot.activeOpKey = refSegForTool ? resolveSegmentOpKey(refSegForTool) : "";
+    const opMeta = state.opByKey.get(slot.activeOpKey);
+    slot.activeOpLabel = opMeta
+      ? "Op " + opMeta.opIndex + " / " + Math.max(1, state.operations.length) + " · " + opMeta.shortKind
+      : "Op 1 / " + Math.max(1, state.operations.length);
     slot.activeGcodeLine = resolveGcodeLineForSeg(activeSegIndex, activeSeg);
 
     if (slot.dexelSim && state.stockMode !== "static_stl") {
@@ -3274,7 +4715,12 @@
               el(
                 "span",
                 { className: "sbs-kv-muted" },
-                [slot.activeWorkOffset + " · " + slot.activeToolLabel.slice(0, 22)]
+                [
+                  slot.activeWorkOffset +
+                    " " +
+                    (state.opByKey.has(slot.activeOpKey) ? "Op" + state.opByKey.get(slot.activeOpKey).opIndex + " · " : "· ") +
+                    slot.activeToolLabel.slice(0, 18),
+                ]
               ),
               el(
                 "span",
@@ -3357,9 +4803,12 @@
 
     const refSlot = state.layoutMode === "sbs" ? renderer.panes[2] : renderer.panes[0];
     if (refSlot) {
+      state.activeOpKey = refSlot.activeOpKey || "";
       highlightActiveGcodeLine(refSlot.activeGcodeLine);
+      updateViseStatusPill(refSlot.activeSetupIndex);
     }
-
+    syncOperationBarCurrentHighlight();
+    renderOperationTimelineSvg(playFrac);
     renderEngagementBar(playFrac);
 
     if (state.layoutMode === "sbs") {
@@ -3414,6 +4863,8 @@
     document.getElementById("dro-z").textContent = pos[2].toFixed(3) + " mm";
     const droToolEl = document.getElementById("dro-tool");
     if (droToolEl) droToolEl.textContent = slot.activeToolLabel;
+    const droOpEl = document.getElementById("dro-op");
+    if (droOpEl) droOpEl.textContent = slot.activeOpLabel;
     const droSetupEl = document.getElementById("dro-setup-line");
     if (droSetupEl) {
       droSetupEl.textContent =
@@ -3480,7 +4931,23 @@
       }
 
       const gl = renderer.gl;
-      const guides = buildSceneGuideLines(caseData.stock_min_mm, caseData.stock_max_mm);
+      state.workholding = resolveCaseWorkholding(caseData);
+      state.opFilterMode = "all";
+      state.selectedOpKeys = new Set();
+
+      const viseMesh1 = buildKurtDx6ViseMesh(caseData, 1);
+      uploadBuffer(gl, renderer.shared.vise1Pos, viseMesh1.positions, false);
+      uploadBuffer(gl, renderer.shared.vise1Nrm, viseMesh1.normals, false);
+      uploadBuffer(gl, renderer.shared.vise1Col, viseMesh1.colors, false);
+      state.vise1Count = viseMesh1.vertexCount;
+
+      const viseMesh2 = buildKurtDx6ViseMesh(caseData, 2);
+      uploadBuffer(gl, renderer.shared.vise2Pos, viseMesh2.positions, false);
+      uploadBuffer(gl, renderer.shared.vise2Nrm, viseMesh2.normals, false);
+      uploadBuffer(gl, renderer.shared.vise2Col, viseMesh2.colors, false);
+      state.vise2Count = viseMesh2.vertexCount;
+
+      const guides = buildSceneGuideLines(caseData.stock_min_mm, caseData.stock_max_mm, state.workholding);
       uploadBuffer(gl, renderer.shared.guidePos, guides.positions, false);
       uploadBuffer(gl, renderer.shared.guideCol, guides.colors, false);
       state.guideGridCount = guides.gridCount;
@@ -4157,14 +5624,644 @@
       return;
     }
 
+  // --- 2-Panel Shop Setup Sheet SVG Diagram (Top XY Table + Front XZ Elevation) ---
+  function buildSetupSheetDiagramSvg(sheet, setupObj) {
+    const dims = sheet.stock_dims_mm || [50, 40, 15];
+    const pDims = sheet.part_dims_mm || [dims[0] - 2, dims[1] - 2, dims[2] - 2];
+    const lx = Math.max(12.0, Number(dims[0] || 50));
+    const ly = Math.max(12.0, Number(dims[1] || 40));
+    const lz = Math.max(4.0, Number(dims[2] || 15));
+    const isOp2 = Number(setupObj.setup_index || 1) >= 2;
+    const wcs = String(setupObj.work_offset || (isOp2 ? "G55" : "G54"));
+    const jawTopZ = Number(setupObj.jaw_top_z_mm !== undefined ? setupObj.jaw_top_z_mm : -2.0);
+    const sideTouchZ = Number(setupObj.side_touch_z_mm !== undefined ? setupObj.side_touch_z_mm : -3.5);
+    const preZ = Number((setupObj.probe_start_xyz_mm && setupObj.probe_start_xyz_mm[2]) || 10.0);
+    const xyTol = Number(setupObj.xy_jog_tolerance_mm || 5.0);
+    const spSpec = (sheet.probe_package && sheet.probe_package.spindle_probe) || {};
+    const prbTnum = Number(spSpec.tool_number || 99);
+
+    // Scale stock aspect ratio cleanly inside Left Top-View panel (center x=116, y=116)
+    const maxAspect = Math.max(lx / 112.0, ly / 76.0, 1e-6);
+    const stockW = Math.max(58.0, Math.min(116.0, lx / maxAspect));
+    const stockH = Math.max(42.0, Math.min(78.0, ly / maxAspect));
+    const partW = Math.max(38.0, stockW * Math.min(0.95, Math.max(0.68, Number(pDims[0] || lx) / lx)));
+    const partH = Math.max(28.0, stockH * Math.min(0.95, Math.max(0.68, Number(pDims[1] || ly) / ly)));
+    const topCx = 114;
+    const topCy = 115;
+    const sx0 = Math.round(topCx - stockW * 0.5);
+    const sy0 = Math.round(topCy - stockH * 0.5);
+    const px0 = Math.round(topCx - partW * 0.5);
+    const py0 = Math.round(topCy - partH * 0.5);
+    const jawW = Math.round(stockW + 28);
+    const jawX0 = Math.round(topCx - jawW * 0.5);
+
+    const nodes = [];
+
+    // Outer frame + Left/Right panel backgrounds
+    nodes.push(svgEl("rect", { x: "2", y: "2", width: "536", height: "214", rx: "6", class: "setup-svg-bg" }));
+    nodes.push(svgEl("rect", { x: "8", y: "24", width: "256", height: "184", rx: "4", class: "setup-svg-pane" }));
+    nodes.push(svgEl("rect", { x: "274", y: "24", width: "258", height: "184", rx: "4", class: "setup-svg-pane" }));
+
+    // Panel Titles
+    nodes.push(
+      svgEl("text", { x: "14", y: "16", class: "setup-svg-heading" }, [
+        "TOP VIEW (XY) · " + wcs + (isOp2 ? " SOFT-JAW FLIP" : " HARD JAWS + OTS"),
+      ])
+    );
+    nodes.push(
+      svgEl("text", { x: "280", y: "16", class: "setup-svg-heading" }, [
+        "FRONT ELEVATION (XZ) · T" + prbTnum + " OMP40-2 HEIGHT",
+      ])
+    );
+
+    // --- LEFT PANEL: TOP VIEW (XY) ---
+    //Kurt DX6 Fixed Jaw (+Y top in plan view) & Movable Jaw (-Y bottom in plan view)
+    nodes.push(
+      svgEl("rect", {
+        x: String(jawX0),
+        y: String(sy0 - 17),
+        width: String(jawW),
+        height: "16",
+        rx: "2",
+        class: isOp2 ? "setup-svg-softjaw" : "setup-svg-hardjaw",
+      })
+    );
+    nodes.push(
+      svgEl("text", { x: String(topCx), y: String(sy0 - 6), "text-anchor": "middle", class: "setup-svg-jaw-lbl" }, [
+        isOp2 ? "G55 CONTOURED SOFT JAW (+Y)" : "KURT DX6 FIXED JAW (+Y REF)",
+      ])
+    );
+    nodes.push(
+      svgEl("rect", {
+        x: String(jawX0),
+        y: String(sy0 + Math.round(stockH) + 1),
+        width: String(jawW),
+        height: "15",
+        rx: "2",
+        class: isOp2 ? "setup-svg-softjaw" : "setup-svg-hardjaw",
+      })
+    );
+    nodes.push(
+      svgEl(
+        "text",
+        {
+          x: String(topCx),
+          y: String(sy0 + Math.round(stockH) + 12),
+          "text-anchor": "middle",
+          class: "setup-svg-jaw-lbl",
+        },
+        [isOp2 ? "MOVABLE SOFT JAW (-Y CLAMP)" : "MOVABLE JAW (-Y CLAMP ↑)"]
+      )
+    );
+
+    // Workstop on -X side (Setup 1) or 180-deg X-flip axis callout (Setup 2)
+    if (!isOp2) {
+      nodes.push(
+        svgEl("rect", {
+          x: String(sx0 - 9),
+          y: String(sy0 + 4),
+          width: "8",
+          height: String(Math.max(14, Math.round(stockH) - 8)),
+          rx: "1.5",
+          class: "setup-svg-stop",
+        })
+      );
+      nodes.push(
+        svgEl("text", { x: String(sx0 - 12), y: String(topCy + 3), "text-anchor": "end", class: "setup-svg-dim" }, [
+          "STOP",
+        ])
+      );
+    } else {
+      nodes.push(
+        svgEl("line", {
+          x1: String(sx0 - 16),
+          y1: String(topCy),
+          x2: String(sx0 + Math.round(stockW) + 16),
+          y2: String(topCy),
+          class: "setup-svg-flip-axis",
+        })
+      );
+    }
+
+    // Stock billet & inner part outline
+    nodes.push(
+      svgEl("rect", {
+        x: String(sx0),
+        y: String(sy0),
+        width: String(Math.round(stockW)),
+        height: String(Math.round(stockH)),
+        rx: "2",
+        class: "setup-svg-stock",
+      })
+    );
+    nodes.push(
+      svgEl("rect", {
+        x: String(px0),
+        y: String(py0),
+        width: String(Math.round(partW)),
+        height: String(Math.round(partH)),
+        rx: "3",
+        class: "setup-svg-part",
+      })
+    );
+
+    // ±5 mm manual probe jog tolerance ring & WCS origin crosshair (X=0, Y=0)
+    nodes.push(
+      svgEl("circle", {
+        cx: String(topCx),
+        cy: String(topCy),
+        r: "13",
+        class: "setup-svg-jog-ring",
+      })
+    );
+    nodes.push(
+      svgEl("line", {
+        x1: String(topCx - 17),
+        y1: String(topCy),
+        x2: String(topCx + 17),
+        y2: String(topCy),
+        class: "setup-svg-crosshair",
+      })
+    );
+    nodes.push(
+      svgEl("line", {
+        x1: String(topCx),
+        y1: String(topCy - 17),
+        x2: String(topCx),
+        y2: String(topCy + 17),
+        class: "setup-svg-crosshair",
+      })
+    );
+    nodes.push(
+      svgEl("circle", {
+        cx: String(topCx),
+        cy: String(topCy),
+        r: "4.2",
+        class: "setup-svg-ruby",
+      })
+    );
+    nodes.push(
+      svgEl("text", { x: String(topCx + 7), y: String(topCy - 6), class: "setup-svg-wcs-lbl" }, [
+        wcs + " (0,0)",
+      ])
+    );
+
+    // 4 OMP40-2 side-web touch points (-X, +X, -Y, +Y)
+    const sidePts = [
+      [sx0 - 5, topCy, sx0, topCy],
+      [sx0 + Math.round(stockW) + 5, topCy, sx0 + Math.round(stockW), topCy],
+      [topCx, sy0 - 5, topCx, sy0],
+      [topCx, sy0 + Math.round(stockH) + 5, topCx, sy0 + Math.round(stockH)],
+    ];
+    for (const [cxP, cyP, txP, tyP] of sidePts) {
+      nodes.push(svgEl("line", { x1: String(cxP), y1: String(cyP), x2: String(txP), y2: String(tyP), class: "setup-svg-touch-line" }));
+      nodes.push(svgEl("circle", { cx: String(cxP), cy: String(cyP), r: "2.8", class: "setup-svg-ruby" }));
+    }
+
+    // Billet XY dimension label
+    nodes.push(
+      svgEl("text", { x: String(topCx), y: "199", "text-anchor": "middle", class: "setup-svg-note" }, [
+        lx.toFixed(1) + " × " + ly.toFixed(1) + " mm · Jog XY ±" + xyTol.toFixed(0) + " mm",
+      ])
+    );
+
+    // Renishaw OTS Optical Table Tool Setter on right (+X) side of machine table
+    nodes.push(
+      svgEl("rect", { x: "212", y: "66", width: "44", height: "86", rx: "4", class: "setup-svg-ots-base" })
+    );
+    nodes.push(svgEl("circle", { cx: "234", cy: "95", r: "10", class: "setup-svg-ots-disc" }));
+    nodes.push(svgEl("line", { x1: "218", y1: "122", x2: "250", y2: "122", class: "setup-svg-optical" }));
+    nodes.push(
+      svgEl("text", { x: "234", y: "137", "text-anchor": "middle", class: "setup-svg-ots-lbl" }, ["OTS"])
+    );
+    nodes.push(
+      svgEl("text", { x: "234", y: "147", "text-anchor": "middle", class: "setup-svg-dim" }, ["+X TBL"])
+    );
+
+    // --- RIGHT PANEL: FRONT ELEVATION (XZ) ---
+    const elCx = 403;
+    const z0Y = 114; // Top datum Z = 0.0
+    const stockPxH = Math.max(28, Math.min(48, Math.round(lz * 1.9)));
+    const stockBotY = z0Y + stockPxH;
+    const bedY = stockBotY + 18;
+    const scaleZ = stockPxH / Math.max(lz, 1.0);
+    const jawTopY = Math.max(z0Y + 5, Math.min(stockBotY - 3, Math.round(z0Y + Math.abs(jawTopZ) * scaleZ)));
+    const sideTouchY = Math.max(z0Y + 3, Math.min(jawTopY - 4, Math.round(z0Y + Math.abs(sideTouchZ) * scaleZ)));
+    const probeBallCy = z0Y - 24;
+
+    // Vise bed
+    nodes.push(svgEl("rect", { x: "288", y: String(bedY), width: "230", height: "14", rx: "2", class: "setup-svg-visebed" }));
+    nodes.push(
+      svgEl("text", { x: String(elCx), y: String(bedY + 10), "text-anchor": "middle", class: "setup-svg-jaw-lbl" }, [
+        "KURT DX6 PRECISION VISE BED",
+      ])
+    );
+
+    // Parallels (Op1) or Soft-Jaw Seat Step (Op2) + Left/Right Jaws in XZ view
+    const stLeft = elCx - 48;
+    const stRight = elCx + 48;
+    if (!isOp2) {
+      nodes.push(svgEl("rect", { x: String(stLeft + 2), y: String(stockBotY), width: "10", height: "18", class: "setup-svg-parallel" }));
+      nodes.push(svgEl("rect", { x: String(stRight - 12), y: String(stockBotY), width: "10", height: "18", class: "setup-svg-parallel" }));
+    } else {
+      nodes.push(svgEl("rect", { x: String(stLeft - 24), y: String(stockBotY), width: "144", height: "18", class: "setup-svg-softjaw" }));
+    }
+    nodes.push(
+      svgEl("rect", {
+        x: String(stLeft - 26),
+        y: String(jawTopY),
+        width: "26",
+        height: String(bedY - jawTopY),
+        rx: "2",
+        class: isOp2 ? "setup-svg-softjaw" : "setup-svg-hardjaw",
+      })
+    );
+    nodes.push(
+      svgEl("rect", {
+        x: String(stRight),
+        y: String(jawTopY),
+        width: "26",
+        height: String(bedY - jawTopY),
+        rx: "2",
+        class: isOp2 ? "setup-svg-softjaw" : "setup-svg-hardjaw",
+      })
+    );
+
+    // Stock billet in XZ
+    nodes.push(
+      svgEl("rect", {
+        x: String(stLeft),
+        y: String(z0Y),
+        width: "96",
+        height: String(stockPxH),
+        rx: "2",
+        class: "setup-svg-stock",
+      })
+    );
+    if (isOp2) {
+      // Highlight carrier hat at top of flipped Op2 part
+      nodes.push(
+        svgEl("rect", {
+          x: String(stLeft),
+          y: String(z0Y),
+          width: "96",
+          height: "8",
+          class: "setup-svg-hat",
+        })
+      );
+    }
+
+    // Z = 0.0 Top Datum dashed line
+    nodes.push(svgEl("line", { x1: "284", y1: String(z0Y), x2: "524", y2: String(z0Y), class: "setup-svg-datum-line" }));
+    nodes.push(
+      svgEl("text", { x: "286", y: String(z0Y - 4), class: "setup-svg-wcs-lbl" }, [wcs + " Z = 0.0"])
+    );
+
+    // Safe Side Web Touch Z marker & ruby side ball
+    nodes.push(
+      svgEl("line", {
+        x1: String(stRight),
+        y1: String(sideTouchY),
+        x2: "522",
+        y2: String(sideTouchY),
+        class: "setup-svg-sidez-line",
+      })
+    );
+    nodes.push(
+      svgEl("circle", { cx: String(stRight + 4), cy: String(sideTouchY), r: "3.2", class: "setup-svg-ruby" })
+    );
+    nodes.push(
+      svgEl("text", { x: "522", y: String(sideTouchY - 3), "text-anchor": "end", class: "setup-svg-dim" }, [
+        "Web Z " + sideTouchZ.toFixed(2) + " > Jaw " + jawTopZ.toFixed(2),
+      ])
+    );
+
+    // T99 Renishaw OMP40-2 Spindle Probe Assembly hovering at Z = +10 mm above top center
+    nodes.push(svgEl("rect", { x: String(elCx - 16), y: "30", width: "32", height: "14", rx: "2", class: "setup-svg-probe-body" }));
+    nodes.push(svgEl("rect", { x: String(elCx - 16), y: "44", width: "32", height: "4", class: "setup-svg-optical" }));
+    nodes.push(svgEl("rect", { x: String(elCx - 2), y: "48", width: "4", height: String(probeBallCy - 48), class: "setup-svg-stem" }));
+    nodes.push(svgEl("circle", { cx: String(elCx), cy: String(probeBallCy), r: "4.6", class: "setup-svg-ruby" }));
+    nodes.push(
+      svgEl("line", {
+        x1: String(elCx),
+        y1: String(probeBallCy + 6),
+        x2: String(elCx),
+        y2: String(z0Y - 2),
+        class: "setup-svg-touch-line",
+      })
+    );
+    nodes.push(
+      svgEl("text", { x: String(elCx + 21), y: "41", class: "setup-svg-wcs-lbl" }, ["T" + prbTnum + " OMP40-2"])
+    );
+    nodes.push(
+      svgEl("text", { x: String(elCx + 10), y: String(probeBallCy + 3), class: "setup-svg-note" }, [
+        "Start Z = +" + preZ.toFixed(0) + " mm (+" + (preZ / INCH_MM).toFixed(2) + '")',
+      ])
+    );
+    nodes.push(
+      svgEl("text", { x: String(elCx), y: "199", "text-anchor": "middle", class: "setup-svg-note" }, [
+        isOp2
+          ? "After M00: Flip 180° around X → Re-Probe G55 Top & XY"
+          : "Pre-Run: Jog Ruby Tip +10 mm Over Billet Center (±5 mm)",
+      ])
+    );
+
+    return svgEl("svg", { viewBox: "0 0 540 218", class: "setup-svg", role: "img", "aria-label": "Part and OMP40-2 probe setup diagram" }, nodes);
+  }
+
+  function renderSetupSheetAndToolsSection(container) {
+    const sheet = resolveCaseSetupSheet(state.currentCase, state.currentVariant);
+    if (!sheet) return;
+
+    const setups = sheet.setups || [];
+    if (state.setupSheetActiveIdx > setups.length) {
+      state.setupSheetActiveIdx = 1;
+    }
+    const activeSetup =
+      setups.find((s) => Number(s.setup_index) === Number(state.setupSheetActiveIdx)) || setups[0];
+
+    const pkg = sheet.probe_package || {};
+    const progCode = "O" + String(Number(sheet.program_number || 2001)).padStart(5, "0");
+    const sDims = sheet.stock_dims_mm || [0, 0, 0];
+
+    const copySheetBtn = el("button", {
+      type: "button",
+      className: "btn btn-tiny",
+      text: "Copy Setup Sheet",
+    });
+    copySheetBtn.addEventListener("click", async () => {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(formatSetupSheetMarkdown(sheet));
+          copySheetBtn.textContent = "Copied ✓";
+          setTimeout(() => {
+            copySheetBtn.textContent = "Copy Setup Sheet";
+          }, 1400);
+        }
+      } catch (_err) {
+        copySheetBtn.textContent = "Copy N/A";
+      }
+    });
+
+    const probeOp = (state.operations || []).find(
+      (o) =>
+        Number(o.setupIndex || 1) === Number(activeSetup.setup_index || 1) &&
+        (String(o.kind || "").indexOf("probe") >= 0 || Number(o.toolNumber) >= 90)
+    );
+    const headerActions = [copySheetBtn];
+    if (probeOp) {
+      const scrubProbeBtn = el("button", {
+        type: "button",
+        className: "btn btn-tiny btn-accent",
+        text: "Scrub " + activeSetup.work_offset + " Probe",
+      });
+      scrubProbeBtn.addEventListener("click", () => scrubToOperation(probeOp, false));
+      headerActions.unshift(scrubProbeBtn);
+    }
+
+    // 1. Setup Sheet Header Banner
+    container.appendChild(
+      el("div", { className: "setup-sheet-card" }, [
+        el("div", { className: "setup-card-header" }, [
+          el("div", null, [
+            el("div", {
+              className: "setup-card-title",
+              text: progCode + " · " + sheet.part_title + " — Shop Setup Sheet",
+            }),
+            el("div", {
+              className: "setup-card-sub",
+              text:
+                String(pkg.package_label || "Haas WIPS-R (Renishaw OMP40-2 + OTS)") +
+                " · Billet " +
+                Number(sDims[0]).toFixed(1) +
+                " × " +
+                Number(sDims[1]).toFixed(1) +
+                " × " +
+                Number(sDims[2]).toFixed(1) +
+                " mm",
+            }),
+          ]),
+          el("div", { className: "op-row-actions" }, headerActions),
+        ]),
+
+        // Setup 1 (G54) / Setup 2 (G55 Post-Flip) Selector Pills
+        setups.length > 1
+          ? el(
+              "div",
+              { className: "setup-stage-tabs" },
+              setups.map((st) => {
+                const isSel = Number(st.setup_index) === Number(activeSetup.setup_index);
+                const b = el("button", {
+                  type: "button",
+                  className: isSel ? "btn btn-tiny btn-active" : "btn btn-tiny",
+                  text:
+                    "Setup " +
+                    st.setup_index +
+                    " (" +
+                    st.work_offset +
+                    "): " +
+                    (Number(st.setup_index) >= 2 ? "Post-Flip Re-Probe" : "Initial Step-1 Probe"),
+                });
+                b.addEventListener("click", () => {
+                  state.setupSheetActiveIdx = Number(st.setup_index);
+                  const targetProbe = (state.operations || []).find(
+                    (o) => Number(o.setupIndex || 1) === Number(st.setup_index)
+                  );
+                  if (targetProbe) {
+                    scrubToOperation(targetProbe, false);
+                  }
+                  renderInspectorTab();
+                });
+                return b;
+              })
+            )
+          : el("div", { className: "setup-stage-badge-row" }, [
+              el("span", { className: "ots-badge ots-badge-probe", text: activeSetup.stage_badge || "STEP 1 · G54 PROBE" }),
+              el("span", { className: "setup-stage-ref", text: activeSetup.vise_configuration || "" }),
+            ]),
+
+        // Key Part-to-Probe Positioning Coordinates Grid
+        el("div", { className: "setup-kv-grid" }, [
+          el("div", { className: "setup-kv-box" }, [
+            el("span", { className: "setup-kv-label", text: activeSetup.work_offset + " WCS Datum Origin" }),
+            el("span", { className: "setup-kv-val", text: "Top-Center (X0, Y0, Z0)" }),
+          ]),
+          el("div", { className: "setup-kv-box" }, [
+            el("span", { className: "setup-kv-label", text: "Pre-Run OMP40-2 Tip Pos" }),
+            el("span", {
+              className: "setup-kv-val setup-kv-cyan",
+              text:
+                "X0 Y0 (±" +
+                Number(activeSetup.xy_jog_tolerance_mm || 5) +
+                "mm), Z +" +
+                Number((activeSetup.probe_start_xyz_mm || [0, 0, 10])[2]).toFixed(0) +
+                "mm",
+            }),
+          ]),
+          el("div", { className: "setup-kv-box" }, [
+            el("span", { className: "setup-kv-label", text: "Side Web Touch Z (Safe)" }),
+            el("span", {
+              className: "setup-kv-val setup-kv-good",
+              text:
+                "Z " +
+                Number(activeSetup.side_touch_z_mm || -3.5).toFixed(2) +
+                " mm (> Jaw " +
+                Number(activeSetup.jaw_top_z_mm || -5.0).toFixed(2) +
+                ")",
+            }),
+          ]),
+        ]),
+
+        // 2-Panel Positioning Diagram (Top XY + Front XZ)
+        el("div", { className: "setup-diagram-wrap" }, [buildSetupSheetDiagramSvg(sheet, activeSetup)]),
+
+        // Operator Pre-Start Positioning Checklist
+        el(
+          "ol",
+          { className: "setup-checklist" },
+          (activeSetup.checklist || []).map((line) => el("li", { text: String(line) }))
+        ),
+      ])
+    );
+
+    // 2. Combined Per-Tool List & Renishaw OTS Calibration Schedule
+    const toolsSched = sheet.tools_schedule || [];
+    if (toolsSched.length > 0) {
+      container.appendChild(
+        el("div", {
+          className: "section-heading",
+          text: "Program Tool List & Renishaw OTS Offsets (" + toolsSched.length + " Tools)",
+        })
+      );
+      const toolRows = toolsSched.map((t) => {
+        const isPrb = t.ots_mode === "spindle_probe_master" || t.entity_type === "probe";
+        const badgeCls = isPrb
+          ? "ots-badge ots-badge-probe"
+          : t.ots_mode === "ots_length_and_diameter"
+            ? "ots-badge ots-badge-rot"
+            : "ots-badge ots-badge-len";
+        const badgeShort = isPrb
+          ? "OMP40-2 WCS"
+          : t.ots_mode === "ots_length_and_diameter"
+            ? "OTS Len+Dia (B3)"
+            : "OTS Len (B1)";
+
+        const firstOpForTool = (state.operations || []).find(
+          (o) => Number(o.toolNumber) === Number(t.tool_number)
+        );
+        const tBtn = el("button", {
+          type: "button",
+          className: "btn btn-tiny",
+          text: "T" + t.tool_number,
+          title: firstOpForTool ? "Scrub to first operation with T" + t.tool_number : t.offset_registers,
+        });
+        if (firstOpForTool) {
+          tBtn.addEventListener("click", () => scrubToOperation(firstOpForTool, false));
+        }
+
+        return {
+          raw: t,
+          cells: [
+            el("div", { className: "tool-sched-id" }, [
+              tBtn,
+              el("span", { className: "tool-sched-reg", text: t.offset_registers }),
+            ]),
+            el("div", { className: "tool-sched-desc" }, [
+              el("div", { className: "tool-sched-name", text: t.label }),
+              el("div", {
+                className: "tool-sched-sub",
+                text: t.holder_label + " · Used: " + (t.used_in_ops || []).join(", "),
+              }),
+            ]),
+            "Ø" +
+              Number(t.diameter_mm).toFixed(2) +
+              "mm (" +
+              Number(t.diameter_in).toFixed(3) +
+              '") · Out ' +
+              Number(t.stickout_mm).toFixed(1) +
+              "mm",
+            el("div", { className: "tool-sched-ots" }, [
+              el("span", { className: badgeCls, text: badgeShort }),
+              el("div", { className: "tool-sched-macro", text: t.ots_macro_preview }),
+            ]),
+          ],
+        };
+      });
+
+      container.appendChild(
+        buildTable(
+          ["Tool / Reg", "Tool & Holder (Used In)", "Dia / Stickout", "WIPS-R Calibration"],
+          toolRows,
+          (r) => {
+            const activeOp = state.opByKey.get(state.activeOpKey);
+            return activeOp && Number(activeOp.toolNumber) === Number(r.raw.tool_number);
+          }
+        )
+      );
+    }
+  }
+
     if (state.activeTab === "case") {
-      // Show Multi-Tool CAD Setup, Tool Crib & Clickable Operation Sequence when present
+      renderSetupSheetAndToolsSection(container);
+
+      const wh = state.workholding || resolveCaseWorkholding(state.currentCase);
+      if (wh && wh.setups) {
+        const s1 = wh.setups["1"];
+        const s2 = wh.setups["2"];
+        const hasOp2 = Boolean(
+          wh.has_op2_soft_jaws || (state.operations || []).some((o) => o.setupIndex >= 2)
+        );
+        container.appendChild(
+          el("div", {
+            className: "section-heading",
+            text: "TAMP Workholding — " + String(wh.vise_label || 'Kurt DX6 CrossOver 6" Machine Vise'),
+          })
+        );
+        const whRows = [
+          {
+            cells: [
+              "Vise & Jaw Mode",
+              String(wh.clamping_axis || "Y") +
+                "-Axis Clamp · " +
+                (wh.jaw_mounting === "reversed_exterior" ? "Reversed Exterior" : "Standard Interior"),
+              Number(wh.jaw_width_mm || 152.4).toFixed(1) + " × " + Number(wh.jaw_height_mm || 44.45).toFixed(2) + " mm",
+            ],
+          },
+          {
+            cells: [
+              "Op1 (G54)",
+              "Hardened Steel Jaws + " + Number((s1 && s1.parallel_height_mm) || 42.45).toFixed(2) + " mm Parallels",
+              "Open " +
+                Number((s1 && s1.jaw_opening_mm) || 0).toFixed(1) +
+                " mm · Bite " +
+                Number((s1 && s1.grip_z_mm) || 2.0).toFixed(1) +
+                " mm",
+            ],
+          },
+        ];
+        if (hasOp2 && s2) {
+          whRows.push({
+            cells: [
+              "Op2 (G55 Flip)",
+              "Machined 6061-T6 Contoured Soft Jaws",
+              "Open " +
+                Number(s2.jaw_opening_mm || 0).toFixed(1) +
+                " mm · Step Z " +
+                Number(s2.seat_z_mm || 0).toFixed(1) +
+                " mm",
+            ],
+          });
+        }
+        container.appendChild(buildTable(["Stage", "Workholding Configuration", "Clamping Span"], whRows));
+      }
+
+      // 2. Multi-Tool CAD B-Rep Summary when present
       const cadMeta = state.currentCase.cad_metadata || null;
       if (cadMeta) {
         container.appendChild(
           el("div", {
             className: "section-heading",
-            text: "CAD B-Rep & 6-Axis Workholding Summary",
+            text: "CAD B-Rep & 6-Axis Recognition Summary",
           })
         );
         const metaRows = [
@@ -4194,51 +6291,70 @@
         }
       }
 
-      const opsList = state.currentCase.operations_table || [];
-      if (opsList.length > 0) {
+      // 3. Multi-Operation Interactive Table (Toggle multiple ops, Solo, or Scrub Start/End)
+      const derivedOps = state.operations || [];
+      if (derivedOps.length > 0) {
+        const isAll =
+          state.opFilterMode !== "custom" || state.selectedOpKeys.size >= derivedOps.length;
         container.appendChild(
           el("div", {
             className: "section-heading",
-            text: "Planned Multi-Tool Operations (Click to Scrub 3D Tool)",
+            text:
+              "Operations (" +
+              (isAll ? "All " + derivedOps.length : state.selectedOpKeys.size + " / " + derivedOps.length) +
+              " Visible — Check to Overlay Multiple)",
           })
         );
-        const chipWrap = el("div", { className: "op-chip-list" });
-        const segs = (state.currentVariant && state.currentVariant.plan && state.currentVariant.plan.segments) || [];
-        for (const op of opsList) {
-          const wcs = op.work_offset || (Number(op.setup_index || 1) === 2 ? "G55" : "G54");
-          const chip = el("div", { className: "op-chip" }, [
-            el("span", null, [
-              el("strong", { className: "accent-mono", text: wcs + " T" + op.tool_number + " · " }),
-              String(op.op_kind || op.op_id) + " — " + String(op.tool_label || ""),
-            ]),
-            el("span", {
-              className: "meta-v",
-              text: Number(op.opt_cycle_s || op.cycle_s || 0).toFixed(1) + "s",
-            }),
-          ]);
-          chip.addEventListener("click", () => {
-            // Find first segment belonging to this op or tool_number + setup
-            let targetT = 0.0;
-            for (let i = 0; i < segs.length; i++) {
-              const s = segs[i];
-              if (
-                (op.op_id && s.op_id === op.op_id) ||
-                (Number(s.tool_number) === Number(op.tool_number) &&
-                  Number(s.setup_index || 1) === Number(op.setup_index || 1) &&
-                  s.kind !== "rapid")
-              ) {
-                targetT = Number(s.t0_s || 0.0);
-                break;
-              }
-            }
-            state.playing = false;
-            document.getElementById("btn-play").textContent = "Play";
-            state.playTimeS = targetT;
-            updateScrubberAndDro();
+
+        const opRows = derivedOps.map((op) => {
+          const vis = isAll || state.selectedOpKeys.has(op.key);
+          const chk = el("input", {
+            type: "checkbox",
+            className: "op-row-chk",
+            "aria-label": "Show Op " + op.opIndex,
           });
-          chipWrap.appendChild(chip);
-        }
-        container.appendChild(chipWrap);
+          chk.checked = vis;
+          chk.addEventListener("change", () => {
+            const nextSet = new Set(isAll ? derivedOps.map((o) => o.key) : state.selectedOpKeys);
+            if (chk.checked) nextSet.add(op.key);
+            else nextSet.delete(op.key);
+            applyOpSelectionSet(nextSet, false);
+          });
+
+          const btnStart = el(
+            "button",
+            { type: "button", className: "btn btn-tiny", text: "Scrub", title: "Jump playhead to operation start" }
+          );
+          btnStart.addEventListener("click", () => scrubToOperation(op, false));
+
+          const btnSolo = el(
+            "button",
+            { type: "button", className: "btn btn-tiny", text: "Solo", title: "Isolate only this operation's toolpath" }
+          );
+          btnSolo.addEventListener("click", () => applyOpSelectionSet(new Set([op.key]), true));
+
+          return {
+            raw: op,
+            cells: [
+              el("span", { className: "op-row-actions" }, [
+                chk,
+                el("span", { className: "op-swatch op-swatch-" + op.colorIdx }),
+                el("strong", { className: "accent-mono", text: "Op" + op.opIndex }),
+              ]),
+              op.workOffset + " · T" + op.toolNumber + " " + op.shortKind,
+              op.durationS.toFixed(1) + "s",
+              el("span", { className: "op-row-actions" }, [btnStart, btnSolo]),
+            ],
+          };
+        });
+
+        container.appendChild(
+          buildTable(
+            ["Show", "Setup / Tool / Op", "Dur.", "Inspect"],
+            opRows,
+            (r) => r.raw.key === state.activeOpKey
+          )
+        );
       }
 
       if ((state.currentCase.benchmark_table || []).length > 0) {
@@ -4436,7 +6552,7 @@
     gl.clearColor(0.055, 0.075, 0.105, 1.0);
     gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-    const proj = mat4Perspective((40.0 * Math.PI) / 180.0, pw / Math.max(ph, 1), 0.5, 2400.0);
+    const proj = mat4Perspective((40.0 * Math.PI) / 180.0, pw / Math.max(ph, 1), 0.5, 4200.0);
     const vp = mat4Multiply(proj, view);
     const ident = mat4Identity();
     const workpieceModel =
@@ -4455,6 +6571,18 @@
 
     gl.disable(gl.BLEND);
     gl.depthMask(true);
+
+    // 0. Stationary TAMP-Selected Kurt DX6 CrossOver 6" Machine Vise (G54 Hard Jaws + Parallels vs G55 Soft Jaws)
+    if (flags.showVise) {
+      const useSetup2Vise = slot.activeSetupIndex >= 2 && state.vise2Count > 0;
+      const vPos = useSetup2Vise ? renderer.shared.vise2Pos : renderer.shared.vise1Pos;
+      const vNrm = useSetup2Vise ? renderer.shared.vise2Nrm : renderer.shared.vise1Nrm;
+      const vCol = useSetup2Vise ? renderer.shared.vise2Col : renderer.shared.vise1Col;
+      const vCnt = useSetup2Vise ? state.vise2Count : state.vise1Count;
+      if (vCnt > 0) {
+        drawMeshBuffer(vPos, vNrm, vCol, vCnt, vp, ident, eye, [0.12, 0.36, 0.66], true, 1.0, 0.0);
+      }
+    }
 
     // 1. Solid Target CAD underneath in Glass mode
     if (state.stockMode === "live_glass" && state.targetCount > 0) {
@@ -4612,7 +6740,32 @@
 
     if (state.playing && state.totalDurationS > 1e-6) {
       const dt = Math.min((nowMs - state.lastFrameMs) * 0.001, 0.1);
-      state.playTimeS += dt * state.speed;
+      let nextT = state.playTimeS + dt * state.speed;
+      // When custom multi-operation filter is active, skip unselected operation intervals smoothly!
+      if (state.opFilterMode === "custom" && state.selectedOpKeys.size > 0 && state.operations.length > 0) {
+        const selOps = state.operations.filter((o) => state.selectedOpKeys.has(o.key));
+        if (selOps.length > 0) {
+          const lastSelEnd = selOps[selOps.length - 1].t1S;
+          if (nextT >= lastSelEnd) {
+            nextT = lastSelEnd;
+            state.playing = false;
+            document.getElementById("btn-play").textContent = "Play";
+          } else {
+            const insideAny = selOps.some((o) => nextT >= o.t0S - 1e-4 && nextT <= o.t1S + 1e-4);
+            if (!insideAny) {
+              const upcoming = selOps.find((o) => o.t0S > nextT - 1e-4);
+              if (upcoming) {
+                nextT = upcoming.t0S;
+              } else {
+                nextT = lastSelEnd;
+                state.playing = false;
+                document.getElementById("btn-play").textContent = "Play";
+              }
+            }
+          }
+        }
+      }
+      state.playTimeS = nextT;
       if (state.playTimeS >= state.totalDurationS) {
         state.playTimeS = state.totalDurationS;
         state.playing = false;
@@ -4648,7 +6801,9 @@
     ];
     const view = mat4LookAt(eye, state.cam.target, [0.0, 0.0, 1.0]);
 
+    const chkViseEl = document.getElementById("chk-vise");
     const flags = {
+      showVise: chkViseEl ? chkViseEl.checked : true,
       showStock: document.getElementById("chk-stock").checked,
       showTarget: document.getElementById("chk-target").checked || state.stockMode === "live_glass",
       showBillet: document.getElementById("chk-billet").checked,
@@ -5047,6 +7202,9 @@
       return;
     }
     const cid = String(state.currentCase.case_id || "");
+    const profEl = document.getElementById("mach-probing-profile");
+    const otsEl = document.getElementById("chk-mach-ots");
+    const prbEl = document.getElementById("chk-mach-probing");
     const payload = {
       source_mode: "replan_case",
       case_id: cid,
@@ -5060,9 +7218,9 @@
       tool_material_id: state.toolMaterialId,
       controller_dialect: state.gcodeDialect,
       opt_iters: 24,
-      enable_probing: Boolean(
-        document.getElementById("chk-mach-probing") && document.getElementById("chk-mach-probing").checked
-      ),
+      enable_probing: prbEl ? Boolean(prbEl.checked) : true,
+      probing_profile: profEl ? String(profEl.value || "haas_wips_r") : "haas_wips_r",
+      enable_ots: otsEl ? Boolean(otsEl.checked) : true,
       enable_chamfer: true,
       enable_threading: true,
     };
@@ -5215,10 +7373,65 @@
       updateScrubberAndDro();
     });
 
+    const btnOpsAll = document.getElementById("btn-ops-all");
+    if (btnOpsAll) {
+      btnOpsAll.addEventListener("click", () => {
+        applyOpSelectionSet(new Set(state.operations.map((o) => o.key)), false);
+      });
+    }
+    const btnOpsG54 = document.getElementById("btn-ops-g54");
+    if (btnOpsG54) {
+      btnOpsG54.addEventListener("click", () => {
+        const g54Keys = state.operations.filter((o) => o.setupIndex === 1).map((o) => o.key);
+        applyOpSelectionSet(new Set(g54Keys), true);
+      });
+    }
+    const btnOpsG55 = document.getElementById("btn-ops-g55");
+    if (btnOpsG55) {
+      btnOpsG55.addEventListener("click", () => {
+        const g55Keys = state.operations.filter((o) => o.setupIndex >= 2).map((o) => o.key);
+        if (g55Keys.length > 0) {
+          applyOpSelectionSet(new Set(g55Keys), true);
+        }
+      });
+    }
+    const btnPrevOp = document.getElementById("btn-prev-op");
+    if (btnPrevOp) {
+      btnPrevOp.addEventListener("click", () => stepOperation(-1));
+    }
+    const btnNextOp = document.getElementById("btn-next-op");
+    if (btnNextOp) {
+      btnNextOp.addEventListener("click", () => stepOperation(1));
+    }
+    const opTimelineMount = document.getElementById("op-timeline-mount");
+    if (opTimelineMount) {
+      opTimelineMount.addEventListener("click", (e) => {
+        const rect = opTimelineMount.getBoundingClientRect();
+        if (rect.width > 4 && state.totalDurationS > 1e-6) {
+          const frac = Math.max(0.0, Math.min(1.0, (e.clientX - rect.left) / rect.width));
+          state.playing = false;
+          document.getElementById("btn-play").textContent = "Play";
+          state.playTimeS = frac * state.totalDurationS;
+          updateScrubberAndDro();
+        }
+      });
+    }
+
     document.getElementById("btn-play").addEventListener("click", () => {
       if (state.totalDurationS <= 1e-6) return;
-      if (!state.playing && state.playTimeS >= state.totalDurationS - 1e-4) {
-        state.playTimeS = 0.0;
+      if (!state.playing) {
+        if (state.opFilterMode === "custom" && state.selectedOpKeys.size > 0 && state.operations.length > 0) {
+          const selOps = state.operations.filter((o) => state.selectedOpKeys.has(o.key));
+          if (selOps.length > 0) {
+            const firstStart = selOps[0].t0S;
+            const lastEnd = selOps[selOps.length - 1].t1S;
+            if (state.playTimeS >= lastEnd - 1e-4 || state.playTimeS < firstStart - 1e-4) {
+              state.playTimeS = firstStart;
+            }
+          }
+        } else if (state.playTimeS >= state.totalDurationS - 1e-4) {
+          state.playTimeS = 0.0;
+        }
       }
       state.playing = !state.playing;
       state.lastFrameMs = performance.now();
@@ -5373,6 +7586,12 @@
           controller_dialect: document.getElementById("mach-dialect").value,
           opt_iters: Number(document.getElementById("mach-opt-iters").value || 28),
           enable_probing: document.getElementById("chk-mach-probing").checked,
+          probing_profile: document.getElementById("mach-probing-profile")
+            ? document.getElementById("mach-probing-profile").value
+            : "haas_wips_r",
+          enable_ots: document.getElementById("chk-mach-ots")
+            ? document.getElementById("chk-mach-ots").checked
+            : true,
           enable_chamfer: document.getElementById("chk-mach-chamfer").checked,
           enable_threading: document.getElementById("chk-mach-thread").checked,
         };
@@ -5450,6 +7669,12 @@
       computeTightColorRange,
       buildThickPathTubeGeometry,
       buildToolAssemblyMesh,
+      resolveCaseWorkholding,
+      resolveCaseSetupSheet,
+      formatSetupSheetMarkdown,
+      buildKurtDx6ViseMesh,
+      deriveCaseOperations,
+      cutSegmentColorRgb,
       mat4FlipX180,
     };
   }

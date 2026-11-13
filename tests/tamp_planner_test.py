@@ -14,13 +14,17 @@ from algorithms.chipload_opt import (
 from benchmarks.milling_suite import build_milling_suite
 from cam.feeds_and_speeds import compute_holemaking_feeds_and_speeds
 from cam.tamp_planner import (
+    KURT_DX6_JAW_HEIGHT_MM,
+    KURT_DX6_JAW_WIDTH_MM,
     HoleBlueprint,
     PocketBlueprint,
     PrismaticPartBlueprint,
     build_stl_from_blueprint,
     execute_tamp_pipeline,
+    export_tamp_result_to_viewer_bundle,
     load_stl_mesh,
     recognize_part_from_stl,
+    select_kurt_dx6_workholding,
 )
 from cam.tool_library import DEFAULT_TOOL_LIBRARY
 
@@ -159,3 +163,61 @@ def test_shac_warmstart_fast_inference_trajectory_overfitting() -> None:
     )
     assert overfit.posted_eval is not None and overfit.posted_eval["geometry_pass"] is True
     assert overfit.telemetry["summary"]["optimal_hex_pct"] > zs.telemetry["summary"]["optimal_hex_pct"]
+
+
+def test_kurt_dx6_workholding_selection_and_viewer_export(tmp_path) -> None:
+    # 1. Standard Y-axis interior jaw clamping with parallels and Op2 G55 soft jaws
+    wh_std, jaws_std = select_kurt_dx6_workholding(
+        (-50.0, -25.0, -23.0),
+        (50.0, 25.0, 0.0),
+        part_min_mm=(-49.5, -24.5, -21.0),
+        part_max_mm=(49.5, 24.5, -1.5),
+        vise_grip_z_mm=2.0,
+        top_face_depth_mm=1.5,
+        has_op2=True,
+    )
+    assert wh_std["vise_model"] == "kurt_dx6_6in"
+    assert wh_std["jaw_width_mm"] == pytest.approx(KURT_DX6_JAW_WIDTH_MM)
+    assert wh_std["jaw_height_mm"] == pytest.approx(KURT_DX6_JAW_HEIGHT_MM)
+    assert wh_std["clamping_axis"] == "Y"
+    assert wh_std["jaw_mounting"] == "standard_interior"
+    assert wh_std["has_op2_soft_jaws"] is True
+    s1 = wh_std["setups"]["1"]
+    s2 = wh_std["setups"]["2"]
+    assert s1["jaw_opening_mm"] == pytest.approx(50.0)
+    assert s1["parallel_height_mm"] == pytest.approx(KURT_DX6_JAW_HEIGHT_MM - 2.0)
+    assert s1["jaw_top_z_mm"] == pytest.approx(-21.0)
+    assert s2["jaw_type"] == "machined_6061_soft_jaws"
+    assert s2["jaw_opening_mm"] == pytest.approx(49.0)
+    assert s2["jaw_top_z_mm"] < -2.0  # safely below G55 Op2 carrier-hat facing plane
+    assert len(jaws_std) == 2
+
+    # 2. Automatic 90-deg X-axis rotation when Y exceeds 9.0" (228.6 mm) but X fits standard interior jaws
+    wh_x, _ = select_kurt_dx6_workholding((-80.0, -130.0, -20.0), (80.0, 130.0, 0.0))
+    assert wh_x["clamping_axis"] == "X"
+    assert wh_x["jaw_mounting"] == "standard_interior"
+    assert wh_x["setups"]["1"]["jaw_opening_mm"] == pytest.approx(160.0)
+
+    # 3. Reversed exterior jaw mode when both X and Y exceed 228.6 mm
+    wh_rev, _ = select_kurt_dx6_workholding((-130.0, -125.0, -20.0), (130.0, 125.0, 0.0))
+    assert wh_rev["jaw_mounting"] == "reversed_exterior"
+
+    # 4. End-to-end TAMP bundle export embeds Kurt DX6 workholding & per-segment op metadata
+    bp = PrismaticPartBlueprint(
+        part_id="tamp-dx6-00",
+        title="Kurt DX6 Export Test",
+        outer_min_mm=(-16.0, -12.0, -7.0),
+        outer_max_mm=(16.0, 12.0, 0.0),
+        stock_top_margin_mm=1.0,
+        vise_grip_z_mm=2.0,
+        pockets=(PocketBlueprint(min_xy_mm=(-10.0, -7.0), max_xy_mm=(10.0, 7.0), floor_z_mm=-2.5, corner_fillet_mm=2.0),),
+        holes=(HoleBlueprint(center_xy_mm=(0.0, 0.0), diameter_mm=4.0, z_top_mm=0.0, z_bottom_mm=-6.0),),
+    )
+    stl_bytes = build_stl_from_blueprint(bp, pitch_mm=0.25)
+    res = execute_tamp_pipeline(stl_bytes, part_id="tamp-dx6-00", opt_iters_per_op=8)
+    case_json, _ = export_tamp_result_to_viewer_bundle(res, tmp_path / "dx6_run")
+    assert case_json["workholding"]["vise_model"] == "kurt_dx6_6in"
+    assert "Kurt DX6" in case_json["cad_metadata"]["workholding_summary"]
+    segs = case_json["variants"][0]["plan"]["segments"]
+    assert len(segs) > 5
+    assert all("op_id" in s and "op_kind" in s and "op_index" in s for s in segs)

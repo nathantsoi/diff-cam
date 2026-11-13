@@ -1059,7 +1059,51 @@ def _build_auxiliary_libraries(default_holder_mm: str, default_holder_in: str) -
             )
         )
 
-    # Probes (6 metric ruby styli + US inch T99 spindle probe)
+    # Probes (Haas WIPS-R Renishaw OMP40-2 optical spindle probes + metric/inch ruby styli)
+    aux.append(
+        CatalogToolRecord(
+            tool_id="probe_omp40_2_mm_6mm",
+            library_group="Probes",
+            entity_type="probe",
+            unit_system="millimeters",
+            nominal_label="Renishaw OMP40-2 Optical Spindle Probe (Ø6 mm Ruby, T99)",
+            tool_material_id="carbide_uncoated",
+            diameter_mm=6.0,
+            corner_radius_mm=3.0,
+            tip_angle_deg=180.0,
+            pitch_mm=0.0,
+            flutes=1,
+            flute_length_mm=6.0,
+            stickout_mm=50.0,
+            shank_diameter_mm=6.0,
+            overall_length_mm=100.0,
+            helix_deg=0.0,
+            max_rpm=0.0,
+            holder_id=default_holder_mm,
+        )
+    )
+    aux.append(
+        CatalogToolRecord(
+            tool_id="probe_omp40_2_in_6mm",
+            library_group="Probes",
+            entity_type="probe",
+            unit_system="inches",
+            nominal_label='Renishaw OMP40-2 Optical Spindle Probe (Ø0.2362" / 6 mm Ruby, T99)',
+            tool_material_id="carbide_uncoated",
+            diameter_mm=6.0,
+            corner_radius_mm=3.0,
+            tip_angle_deg=180.0,
+            pitch_mm=0.0,
+            flutes=1,
+            flute_length_mm=6.0,
+            stickout_mm=50.0,
+            shank_diameter_mm=round(0.375 * INCH_MM, 4),
+            overall_length_mm=100.0,
+            helix_deg=0.0,
+            max_rpm=0.0,
+            holder_id=default_holder_in,
+        )
+    )
     for styl_d in (1.0, 2.0, 3.0, 4.0, 5.0, 6.0):
         aux.append(
             CatalogToolRecord(
@@ -1821,6 +1865,28 @@ class StandardToolLibrary:
             return pilot_drills[0], "pilot_drill"
 
         return None, "none"
+
+    def match_spindle_probe(
+        self,
+        *,
+        model_hint: str = "omp40_2",
+        unit_system: Optional[str] = _DEFAULT_UNIT_SENTINEL,
+    ) -> Optional[CatalogToolRecord]:
+        """Select a spindle probe record (preferring Renishaw OMP40-2 when ``model_hint`` matches)."""
+        eff_unit = self._resolve_unit_system(unit_system)
+        hint_l = str(model_hint or "").strip().lower()
+        cands = [t for t in self.tools if t.entity_type == "probe"]
+        if not cands:
+            cands = [t for t in DEFAULT_TOOL_LIBRARY.tools if t.entity_type == "probe"]
+        if not cands:
+            return None
+        cands.sort(
+            key=lambda t: (
+                0 if (hint_l and hint_l in t.tool_id.lower()) else 1,
+                0 if (eff_unit is None or t.unit_system == eff_unit) else 1,
+            )
+        )
+        return cands[0]
 
     def get_starter_cribs(self) -> Dict[str, Dict[str, Any]]:
         """Return curated Metric and US Imperial CNC shop starter tool cribs verified against ``self.tool_by_id``."""

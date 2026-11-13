@@ -1209,3 +1209,383 @@ body {
   background: var(--bg-app);
   border-radius: 0 0 8px 8px;
 }
+
+/* Multi-Operation Strip, Kurt DX6 Workholding Badge & Operation Timeline */
+.op-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  background: rgba(20, 27, 36, 0.94);
+  border-bottom: 1px solid var(--border);
+  min-height: 30px;
+}
+
+.op-bar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.op-bar-label {
+  font-size: 9.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.45px;
+  color: var(--cyan);
+  margin-right: 2px;
+}
+
+.op-pills-strip {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex: 1;
+  min-width: 0;
+  overflow-x: auto;
+  padding: 1px 0;
+  scrollbar-width: thin;
+}
+
+.op-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--border);
+  background: var(--bg-elevated);
+  font-size: 10.3px;
+  font-family: var(--font-mono);
+  color: var(--text-main);
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: border-color 0.12s ease, opacity 0.12s ease, background 0.12s ease;
+}
+
+.op-pill-muted {
+  opacity: 0.44;
+  background: rgba(13, 17, 23, 0.65);
+}
+
+.op-pill-current {
+  border-color: var(--cyan);
+  background: rgba(57, 197, 207, 0.16);
+  box-shadow: 0 0 0 1px rgba(57, 197, 207, 0.35);
+}
+
+.op-pill-g55 {
+  border-left: 2px solid #f59f00;
+}
+
+.op-pill-chk {
+  margin: 0;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
+
+.op-pill-jump {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font: inherit;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.op-pill-jump:hover {
+  color: #ffffff;
+}
+
+.op-swatch {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.op-swatch-0 { background: #38bdf8; }
+.op-swatch-1 { background: #34d399; }
+.op-swatch-2 { background: #fbbf24; }
+.op-swatch-3 { background: #f472b6; }
+.op-swatch-4 { background: #a78bfa; }
+.op-swatch-5 { background: #fb923c; }
+.op-swatch-6 { background: #2dd4bf; }
+.op-swatch-7 { background: #f87171; }
+.op-swatch-8 { background: #a3e635; }
+.op-swatch-9 { background: #60a5fa; }
+.op-swatch-10 { background: #e879f9; }
+.op-swatch-11 { background: #fde047; }
+
+.vise-status-pill {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 99px;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  background: rgba(28, 92, 168, 0.28);
+  color: #93c5fd;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.vise-status-pill-soft {
+  border-color: rgba(245, 159, 0, 0.55);
+  background: rgba(245, 159, 0, 0.18);
+  color: #ffd43b;
+}
+
+.timeline-stack {
+  flex: 1;
+  min-width: 140px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.op-timeline-mount {
+  width: 100%;
+  height: 13px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: #0d1117;
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.op-timeline-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.mode-operation {
+  background: linear-gradient(90deg, #38bdf8 0%, #34d399 20%, #fbbf24 40%, #f472b6 60%, #a78bfa 80%, #fb923c 100%);
+}
+
+.op-row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.op-row-chk {
+  margin: 0;
+  accent-color: var(--cyan);
+  cursor: pointer;
+}
+
+/* --- Shop Setup Sheet & Per-Tool WIPS-R (OMP40-2 + OTS) Schedule --- */
+.setup-sheet-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 10px;
+  margin-bottom: 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(57, 197, 207, 0.42);
+  background: linear-gradient(180deg, rgba(20, 29, 41, 0.96) 0%, rgba(13, 18, 26, 0.96) 100%);
+}
+
+.setup-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.setup-card-title {
+  font-size: 11.8px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+.setup-card-sub {
+  margin-top: 2px;
+  font-family: var(--font-mono);
+  font-size: 9.8px;
+  color: var(--cyan);
+}
+
+.setup-stage-tabs {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.setup-stage-badge-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.setup-stage-ref {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+}
+
+.setup-kv-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.setup-kv-box {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 5px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+  background: rgba(11, 15, 22, 0.85);
+}
+
+.setup-kv-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.35px;
+  color: var(--text-muted);
+}
+
+.setup-kv-val {
+  font-family: var(--font-mono);
+  font-size: 10.2px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.setup-kv-cyan { color: #76e3ea; }
+.setup-kv-good { color: #56d364; }
+
+.setup-diagram-wrap {
+  border-radius: 5px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #090d13;
+}
+
+.setup-svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.setup-svg-bg { fill: #090d13; stroke: #222d3d; stroke-width: 1; }
+.setup-svg-pane { fill: #0d141e; stroke: #253244; stroke-width: 1; }
+.setup-svg-heading { fill: #9fb1c6; font-family: var(--font-mono); font-size: 8.5px; font-weight: 700; letter-spacing: 0.35px; }
+.setup-svg-hardjaw { fill: #2c3544; stroke: #64748b; stroke-width: 1; }
+.setup-svg-softjaw { fill: #334863; stroke: #f59f00; stroke-width: 1.1; }
+.setup-svg-jaw-lbl { fill: #cbd5e1; font-family: var(--font-mono); font-size: 7.4px; font-weight: 600; }
+.setup-svg-stop { fill: #b45309; stroke: #fbbf24; stroke-width: 1; }
+.setup-svg-flip-axis { stroke: #f59f00; stroke-width: 1.1; stroke-dasharray: 4 3; }
+.setup-svg-stock { fill: rgba(46, 160, 67, 0.24); stroke: #3fb950; stroke-width: 1.3; }
+.setup-svg-part { fill: rgba(56, 189, 248, 0.16); stroke: #76e3ea; stroke-width: 1; stroke-dasharray: 3 2; }
+.setup-svg-hat { fill: rgba(245, 159, 0, 0.32); stroke: #fbbf24; stroke-width: 1; }
+.setup-svg-jog-ring { fill: rgba(244, 63, 94, 0.10); stroke: #fb7185; stroke-width: 1; stroke-dasharray: 2.5 2; }
+.setup-svg-crosshair { stroke: #76e3ea; stroke-width: 1.1; }
+.setup-svg-ruby { fill: #f43f5e; stroke: #ffe4e6; stroke-width: 0.9; }
+.setup-svg-touch-line { stroke: #fb7185; stroke-width: 1.2; stroke-dasharray: 2 1.5; }
+.setup-svg-wcs-lbl { fill: #ffffff; font-family: var(--font-mono); font-size: 8.2px; font-weight: 700; }
+.setup-svg-dim { fill: #94a3b8; font-family: var(--font-mono); font-size: 7.4px; }
+.setup-svg-note { fill: #76e3ea; font-family: var(--font-mono); font-size: 7.8px; font-weight: 600; }
+.setup-svg-ots-base { fill: #1e293b; stroke: #475569; stroke-width: 1.1; }
+.setup-svg-ots-disc { fill: #94a3b8; stroke: #e2e8f0; stroke-width: 1.2; }
+.setup-svg-ots-lbl { fill: #e2e8f0; font-family: var(--font-mono); font-size: 8px; font-weight: 700; }
+.setup-svg-optical { fill: #22c55e; stroke: #4ade80; stroke-width: 1.2; }
+.setup-svg-visebed { fill: #1d4ed8; stroke: #60a5fa; stroke-width: 1; }
+.setup-svg-parallel { fill: #94a3b8; stroke: #cbd5e1; stroke-width: 0.9; }
+.setup-svg-datum-line { stroke: #38bdf8; stroke-width: 1; stroke-dasharray: 4 2.5; }
+.setup-svg-sidez-line { stroke: #4ade80; stroke-width: 1; stroke-dasharray: 2.5 2; }
+.setup-svg-probe-body { fill: #475569; stroke: #cbd5e1; stroke-width: 1; }
+.setup-svg-stem { fill: #f1f5f9; }
+
+.setup-checklist {
+  margin: 0;
+  padding-left: 17px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10.6px;
+  line-height: 1.38;
+  color: var(--text-main);
+}
+
+.tool-sched-id {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.tool-sched-reg {
+  font-family: var(--font-mono);
+  font-size: 9.2px;
+  color: var(--text-muted);
+}
+
+.tool-sched-desc {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.tool-sched-name {
+  font-size: 10.6px;
+  font-weight: 600;
+  color: var(--text-main);
+}
+
+.tool-sched-sub {
+  font-family: var(--font-mono);
+  font-size: 9.3px;
+  color: var(--text-muted);
+}
+
+.tool-sched-ots {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.tool-sched-macro {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: #94a3b8;
+}
+
+.ots-badge {
+  display: inline-block;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 9.2px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.ots-badge-probe {
+  background: rgba(244, 63, 94, 0.18);
+  border: 1px solid rgba(244, 63, 94, 0.55);
+  color: #fda4af;
+}
+
+.ots-badge-rot {
+  background: rgba(46, 160, 67, 0.18);
+  border: 1px solid rgba(63, 185, 80, 0.55);
+  color: #7ee787;
+}
+
+.ots-badge-len {
+  background: rgba(57, 197, 207, 0.16);
+  border: 1px solid rgba(57, 197, 207, 0.50);
+  color: #76e3ea;
+}

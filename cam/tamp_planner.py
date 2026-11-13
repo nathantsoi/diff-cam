@@ -78,6 +78,13 @@ from cam.multi_dialect_post import (
     format_all_dialects_multitool,
     normalize_multi_dialect,
 )
+from cam.probing import (
+    ProbingConfig,
+    build_setup_sheet,
+    build_wcs_probe_motion_plan,
+    compute_safe_side_touch_z_mm,
+    make_probing_config,
+)
 from cam.step_brep import (
     BRepChamferFeature,
     BRepFreeformRegion,
@@ -342,8 +349,21 @@ def build_stl_from_blueprint(bp: PrismaticPartBlueprint, pitch_mm: float = 0.25)
 
 
 # ---------------------------------------------------------------------------
-# 2. STL Feature Recognition + Stock & Workholding Setup Planner
+# 2. STL Feature Recognition + Stock & Workholding Setup Planner (Kurt DX6)
 # ---------------------------------------------------------------------------
+KURT_DX6_MODEL_ID = "kurt_dx6_6in"
+KURT_DX6_MODEL_LABEL = 'Kurt DX6 CrossOver 6" Machine Vise'
+KURT_DX6_JAW_WIDTH_MM = 152.4          # 6.000 in
+KURT_DX6_JAW_HEIGHT_MM = 44.45         # 1.750 in
+KURT_DX6_JAW_THICKNESS_MM = 19.05      # 0.750 in
+KURT_DX6_SOFT_JAW_THICKNESS_MM = 25.4  # 1.000 in (6061-T6 aluminum blank)
+KURT_DX6_MAX_OPENING_STD_MM = 228.6    # 9.000 in (standard interior jaws)
+KURT_DX6_MAX_OPENING_REV_MM = 386.0    # 15.20 in (reversed exterior jaws)
+KURT_DX6_BED_HEIGHT_MM = 73.025        # 2.875 in (table to precision slide ways)
+KURT_DX6_BODY_LENGTH_MM = 429.26       # 16.90 in (overall cast ductile-iron body)
+KURT_DX6_PARALLEL_THICKNESS_MM = 3.175 # 0.125 in (precision ground steel parallels)
+
+
 @dataclass(frozen=True)
 class ViseJawZone:
     """Clamping jaw collision AABB in G54 work coordinates (mm)."""
@@ -351,6 +371,182 @@ class ViseJawZone:
     label: str
     min_mm: Tuple[float, float, float]
     max_mm: Tuple[float, float, float]
+
+
+def select_kurt_dx6_workholding(
+    stock_min_mm: Tuple[float, float, float],
+    stock_max_mm: Tuple[float, float, float],
+    *,
+    part_min_mm: Optional[Tuple[float, float, float]] = None,
+    part_max_mm: Optional[Tuple[float, float, float]] = None,
+    vise_grip_z_mm: float = 2.0,
+    top_face_depth_mm: float = 1.5,
+    has_op2: bool = False,
+) -> Tuple[Dict[str, Any], Tuple[ViseJawZone, ...]]:
+    """Select TAMP Kurt DX6 clamping axis, jaw mounting, parallels, Op2 soft jaws, and collision AABBs."""
+    sx0, sy0, sz0 = (float(stock_min_mm[0]), float(stock_min_mm[1]), float(stock_min_mm[2]))
+    sx1, sy1, sz1 = (float(stock_max_mm[0]), float(stock_max_mm[1]), float(stock_max_mm[2]))
+    lx = max(1.0, sx1 - sx0)
+    ly = max(1.0, sy1 - sy0)
+    lz = max(2.0, sz1 - sz0)
+
+    pmin = part_min_mm if part_min_mm is not None else (sx0 + 1.0, sy0 + 1.0, sz0 + max(0.5, vise_grip_z_mm))
+    pmax = part_max_mm if part_max_mm is not None else (sx1 - 1.0, sy1 - 1.0, sz1 - max(0.0, top_face_depth_mm))
+
+    grip_z = round(max(1.0, min(float(vise_grip_z_mm), lz * 0.45)), 4)
+
+    # TAMP clamping orientation selection:
+    # Default shop orientation clamps along Y (fixed jaw at -Y, movable jaw at +Y).
+    # If Y span exceeds standard 9.0" DX6 interior jaw opening while X fits inside 9.0",
+    # rotate the vise 90 deg on the machine table to clamp along X without reversing jaws.
+    if ly > KURT_DX6_MAX_OPENING_STD_MM and lx <= KURT_DX6_MAX_OPENING_STD_MM:
+        clamp_axis = "X"
+        op1_span_min, op1_span_max = sx0, sx1
+        cross_min, cross_max = sy0, sy1
+        op2_span_min, op2_span_max = float(pmin[0]), float(pmax[0])
+        op2_cross_min, op2_cross_max = float(pmin[1]), float(pmax[1])
+    else:
+        clamp_axis = "Y"
+        op1_span_min, op1_span_max = sy0, sy1
+        cross_min, cross_max = sx0, sx1
+        # In G55 (mat4FlipX180 around Z = sz0 + sz1), Y flips sign: y_g55 = -y_g54
+        op2_span_min, op2_span_max = -float(pmax[1]), -float(pmin[1])
+        op2_cross_min, op2_cross_max = float(pmin[0]), float(pmax[0])
+
+    jaw_opening_op1 = round(op1_span_max - op1_span_min, 4)
+    jaw_mounting = (
+        "reversed_exterior"
+        if jaw_opening_op1 > KURT_DX6_MAX_OPENING_STD_MM
+        else "standard_interior"
+    )
+
+    jaw_half_w = 0.5 * KURT_DX6_JAW_WIDTH_MM
+    cross_center = 0.5 * (cross_min + cross_max)
+    jaw_cross_min = round(cross_center - jaw_half_w, 4)
+    jaw_cross_max = round(cross_center + jaw_half_w, 4)
+    engagement_width = round(min(KURT_DX6_JAW_WIDTH_MM, cross_max - cross_min), 4)
+
+    jaw_top_op1 = round(sz0 + grip_z, 4)
+    bed_z_op1 = round(jaw_top_op1 - KURT_DX6_JAW_HEIGHT_MM, 4)
+    table_z_op1 = round(bed_z_op1 - KURT_DX6_BED_HEIGHT_MM, 4)
+    parallel_height_mm = round(max(6.0, KURT_DX6_JAW_HEIGHT_MM - grip_z), 4)
+    jaw_t = KURT_DX6_JAW_THICKNESS_MM
+
+    if clamp_axis == "Y":
+        fixed_aabb_min = (jaw_cross_min, round(op1_span_min - jaw_t, 4), bed_z_op1)
+        fixed_aabb_max = (jaw_cross_max, round(op1_span_min, 4), jaw_top_op1)
+        mov_aabb_min = (jaw_cross_min, round(op1_span_max, 4), bed_z_op1)
+        mov_aabb_max = (jaw_cross_max, round(op1_span_max + jaw_t, 4), jaw_top_op1)
+        fixed_label = "Kurt DX6 Fixed Jaw (-Y)"
+        mov_label = "Kurt DX6 Movable Jaw (+Y)"
+    else:
+        fixed_aabb_min = (round(op1_span_min - jaw_t, 4), jaw_cross_min, bed_z_op1)
+        fixed_aabb_max = (round(op1_span_min, 4), jaw_cross_max, jaw_top_op1)
+        mov_aabb_min = (round(op1_span_max, 4), jaw_cross_min, bed_z_op1)
+        mov_aabb_max = (round(op1_span_max + jaw_t, 4), jaw_cross_max, jaw_top_op1)
+        fixed_label = "Kurt DX6 Fixed Jaw (-X)"
+        mov_label = "Kurt DX6 Movable Jaw (+X)"
+
+    vise_jaws = (
+        ViseJawZone(label=fixed_label, min_mm=fixed_aabb_min, max_mm=fixed_aabb_max),
+        ViseJawZone(label=mov_label, min_mm=mov_aabb_min, max_mm=mov_aabb_max),
+    )
+
+    # Op2 (G55) machined 6061-T6 contoured soft jaws:
+    # Under G55 flip z_g55 = (sz0 + sz1) - z_g54:
+    # - Op1 carrier hat occupies z in [sz1 - grip_z, sz1] (e.g. [-2.0, 0.0]), machined away by hat facing!
+    # - Machined Op1 part body occupies z in [sz0 + top_face_depth, sz1 - grip_z].
+    # Soft jaws clamp the machined Op1 perimeter with jaw top safely below the hat facing cut plane!
+    z_flip_sum = sz0 + sz1
+    part_top_flipped_z = round(z_flip_sum - float(pmax[2]), 4)
+    hat_cut_floor_z = round(sz1 - grip_z, 4)
+    jaw_top_op2 = round(min(hat_cut_floor_z - 1.2, sz1 - 1.5), 4)
+    step_seat_z_op2 = round(min(part_top_flipped_z, jaw_top_op2 - 2.5), 4)
+    soft_jaw_height = KURT_DX6_JAW_HEIGHT_MM
+    bed_z_op2 = round(jaw_top_op2 - soft_jaw_height, 4)
+    table_z_op2 = round(bed_z_op2 - KURT_DX6_BED_HEIGHT_MM, 4)
+    jaw_opening_op2 = round(max(4.0, op2_span_max - op2_span_min), 4)
+    grip_z_op2 = round(max(2.0, jaw_top_op2 - step_seat_z_op2), 4)
+
+    setups_dict: Dict[str, Any] = {
+        "1": {
+            "setup_index": 1,
+            "work_offset": "G54",
+            "jaw_type": "hardened_steel_parallels",
+            "label": f'Kurt DX6 · G54 Hard Jaws + {parallel_height_mm:.2f} mm Parallels',
+            "short_label": "Kurt DX6 · G54 Hard Jaws",
+            "clamping_axis": clamp_axis,
+            "jaw_mounting": jaw_mounting,
+            "jaw_opening_mm": jaw_opening_op1,
+            "clamped_span_min_mm": round(op1_span_min, 4),
+            "clamped_span_max_mm": round(op1_span_max, 4),
+            "cross_span_min_mm": round(cross_min, 4),
+            "cross_span_max_mm": round(cross_max, 4),
+            "grip_z_mm": grip_z,
+            "jaw_top_z_mm": jaw_top_op1,
+            "parallel_height_mm": parallel_height_mm,
+            "parallel_thickness_mm": KURT_DX6_PARALLEL_THICKNESS_MM,
+            "seat_z_mm": round(sz0, 4),
+            "bed_z_mm": bed_z_op1,
+            "table_z_mm": table_z_op1,
+            "jaw_thickness_mm": KURT_DX6_JAW_THICKNESS_MM,
+            "jaw_height_mm": KURT_DX6_JAW_HEIGHT_MM,
+        },
+        "2": {
+            "setup_index": 2,
+            "work_offset": "G55",
+            "jaw_type": "machined_6061_soft_jaws",
+            "label": "Kurt DX6 · G55 Contoured 6061 Soft Jaws",
+            "short_label": "Kurt DX6 · G55 Soft Jaws",
+            "clamping_axis": clamp_axis,
+            "jaw_mounting": jaw_mounting,
+            "jaw_opening_mm": jaw_opening_op2,
+            "clamped_span_min_mm": round(op2_span_min, 4),
+            "clamped_span_max_mm": round(op2_span_max, 4),
+            "cross_span_min_mm": round(op2_cross_min, 4),
+            "cross_span_max_mm": round(op2_cross_max, 4),
+            "grip_z_mm": grip_z_op2,
+            "jaw_top_z_mm": jaw_top_op2,
+            "parallel_height_mm": 0.0,
+            "parallel_thickness_mm": 0.0,
+            "seat_z_mm": step_seat_z_op2,
+            "bed_z_mm": bed_z_op2,
+            "table_z_mm": table_z_op2,
+            "jaw_thickness_mm": KURT_DX6_SOFT_JAW_THICKNESS_MM,
+            "jaw_height_mm": soft_jaw_height,
+        },
+    }
+
+    mount_note = "Reversed Exterior Jaws" if jaw_mounting == "reversed_exterior" else "Standard Interior Jaws"
+    summary_str = (
+        f'Kurt DX6 6" ({clamp_axis}-clamp, {mount_note}, {jaw_opening_op1:.1f} mm open, '
+        f"{grip_z:.1f} mm bite on {parallel_height_mm:.2f} mm parallels"
+        + (" → G55 6061 Soft Jaws)" if has_op2 else ")")
+    )
+
+    workholding_spec: Dict[str, Any] = {
+        "vise_model": KURT_DX6_MODEL_ID,
+        "vise_label": KURT_DX6_MODEL_LABEL,
+        "jaw_width_mm": KURT_DX6_JAW_WIDTH_MM,
+        "jaw_height_mm": KURT_DX6_JAW_HEIGHT_MM,
+        "jaw_thickness_mm": KURT_DX6_JAW_THICKNESS_MM,
+        "soft_jaw_thickness_mm": KURT_DX6_SOFT_JAW_THICKNESS_MM,
+        "max_opening_standard_mm": KURT_DX6_MAX_OPENING_STD_MM,
+        "max_opening_reversed_mm": KURT_DX6_MAX_OPENING_REV_MM,
+        "bed_height_mm": KURT_DX6_BED_HEIGHT_MM,
+        "body_length_mm": KURT_DX6_BODY_LENGTH_MM,
+        "clamping_axis": clamp_axis,
+        "jaw_mounting": jaw_mounting,
+        "engagement_width_mm": engagement_width,
+        "has_op2_soft_jaws": bool(has_op2),
+        "summary": summary_str,
+        "keepout_zones_g54": [
+            {"label": z.label, "min_mm": list(z.min_mm), "max_mm": list(z.max_mm)}
+            for z in vise_jaws
+        ],
+        "setups": setups_dict,
+    }
+    return workholding_spec, vise_jaws
 
 
 @dataclass(frozen=True)
@@ -543,18 +739,14 @@ def load_cad_part(
     part_min = (bmin[0] + shift[0], bmin[1] + shift[1], bmin[2] + shift[2])
     part_max = (bmax[0] + shift[0], bmax[1] + shift[1], bmax[2] + shift[2])
 
-    jaw_top = -lz + grip_z
-    vise_jaws = (
-        ViseJawZone(
-            label="Fixed Vise Jaw (-Y)",
-            min_mm=(-0.5 * lx - 5.0, -0.5 * ly - 12.0, -lz - 8.0),
-            max_mm=(0.5 * lx + 5.0, -0.5 * ly, jaw_top),
-        ),
-        ViseJawZone(
-            label="Movable Vise Jaw (+Y)",
-            min_mm=(-0.5 * lx - 5.0, 0.5 * ly, -lz - 8.0),
-            max_mm=(0.5 * lx + 5.0, 0.5 * ly + 12.0, jaw_top),
-        ),
+    _, vise_jaws = select_kurt_dx6_workholding(
+        stock_min,
+        stock_max,
+        part_min_mm=part_min,
+        part_max_mm=part_max,
+        vise_grip_z_mm=grip_z,
+        top_face_depth_mm=top_margin,
+        has_op2=False,
     )
 
     shifted_tris = step_res.oriented_triangles_mm + np.asarray(shift, dtype=np.float64)[None, None, :]
@@ -776,18 +968,14 @@ def recognize_part_from_stl(
     part_max = (bmax[0] + shift[0], bmax[1] + shift[1], bmax[2] + shift[2])
 
     # Parallel vise jaws gripping bottom [-lz, -lz + grip_z] along +/-Y faces
-    jaw_top = -lz + grip_z
-    vise_jaws = (
-        ViseJawZone(
-            label="Fixed Vise Jaw (-Y)",
-            min_mm=(-0.5 * lx - 5.0, -0.5 * ly - 12.0, -lz - 8.0),
-            max_mm=(0.5 * lx + 5.0, -0.5 * ly, jaw_top),
-        ),
-        ViseJawZone(
-            label="Movable Vise Jaw (+Y)",
-            min_mm=(-0.5 * lx - 5.0, 0.5 * ly, -lz - 8.0),
-            max_mm=(0.5 * lx + 5.0, 0.5 * ly + 12.0, jaw_top),
-        ),
+    _, vise_jaws = select_kurt_dx6_workholding(
+        stock_min,
+        stock_max,
+        part_min_mm=part_min,
+        part_max_mm=part_max,
+        vise_grip_z_mm=grip_z,
+        top_face_depth_mm=top_margin,
+        has_op2=False,
     )
 
     xs, ys, z_part_raw = rasterize_stl_top_heightfield(
@@ -1047,6 +1235,8 @@ class TAMPMultiToolResult:
     tools_table: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     operations_table: List[Dict[str, Any]] = field(default_factory=list)
     cad_metadata: Dict[str, Any] = field(default_factory=dict)
+    workholding: Dict[str, Any] = field(default_factory=dict)
+    setup_sheet: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
 
 
@@ -1138,6 +1328,7 @@ def _plan_arbitrary_cad_operations(
     atc_swap_time_s: float,
     setup_mode: str,
     enable_probing: bool,
+    probing_config: Optional[ProbingConfig] = None,
     enable_chamfer: bool,
     enable_threading: bool,
     warnings_out: List[str],
@@ -1146,6 +1337,12 @@ def _plan_arbitrary_cad_operations(
     ops: List[PlannedOperationSpec] = []
     tool_num_map: Dict[str, int] = {}
     next_tnum = 1
+    eff_probing = (
+        probing_config
+        if probing_config is not None
+        else make_probing_config(enabled=enable_probing)
+    )
+    prb_tnum = int(eff_probing.spindle_probe.tool_number)
 
     def _eff_tool_mat(rec: CatalogToolRecord) -> str:
         return tool_material_override or rec.tool_material_id
@@ -1155,10 +1352,10 @@ def _plan_arbitrary_cad_operations(
     def _assign_tnum(rec: CatalogToolRecord) -> Tuple[int, HolderSpec, C.ToolAssembly]:
         nonlocal next_tnum
         if rec.entity_type == "probe":
-            tnum = 99
+            tnum = prb_tnum
         elif rec.tool_id not in tool_num_map:
-            if next_tnum == 99:
-                next_tnum = 100
+            if next_tnum == prb_tnum:
+                next_tnum += 1
             tool_num_map[rec.tool_id] = next_tnum
             tnum = next_tnum
             next_tnum += 1
@@ -1166,9 +1363,14 @@ def _plan_arbitrary_cad_operations(
             tnum = tool_num_map[rec.tool_id]
         hld = library.select_holder_for_tool(rec, taper="BT30")
         asm = rec.to_tool_assembly(tnum, holder=hld)
+        req_stick = (
+            max(float(asm.holder_bottom_mm), float(eff_probing.spindle_probe.stylus_length_mm))
+            if rec.entity_type == "probe"
+            else max(float(asm.holder_bottom_mm), min_shop_stickout)
+        )
         asm = dataclasses.replace(
             asm,
-            holder_bottom_mm=max(float(asm.holder_bottom_mm), min_shop_stickout),
+            holder_bottom_mm=req_stick,
         )
         return tnum, hld, asm
 
@@ -1203,13 +1405,16 @@ def _plan_arbitrary_cad_operations(
     t_finish = fin_pool[-1]
 
     def _add_probe_op(setup_idx: int, wcs: str) -> None:
-        probes = [t for t in library.tools if t.entity_type == "probe"] or [
-            t for t in DEFAULT_TOOL_LIBRARY.tools if t.entity_type == "probe"
-        ]
-        if not probes:
+        hint = "omp40_2" if "omp40" in eff_probing.spindle_probe.model_id.lower() else ""
+        pr = library.match_spindle_probe(model_hint=hint)
+        if pr is None:
             return
-        pr = probes[0]
         tnum, hld, asm = _assign_tnum(pr)
+        stage_desc = (
+            "post-flip soft-jaw WCS re-probing"
+            if setup_idx >= 2
+            else "initial stock & top Z0 WCS probing"
+        )
         ops.append(
             PlannedOperationSpec(
                 op_index=len(ops) + 1,
@@ -1220,11 +1425,11 @@ def _plan_arbitrary_cad_operations(
                 holder_spec=hld,
                 tool_assembly=asm,
                 spindle_rpm=0.0,
-                base_feed_mm_s=25.0,
+                base_feed_mm_s=float(eff_probing.spindle_probe.touch_feed_mm_s),
                 target_hex_mm=0.0,
                 doc_mm=0.0,
                 woc_mm=pr.diameter_mm,
-                notes=f"{wcs} spindle touch-probe stock & Z datum calibration ({pr.nominal_label})",
+                notes=f"{wcs} {eff_probing.spindle_probe.label} — {stage_desc} ({pr.nominal_label})",
                 setup_index=setup_idx,
                 work_offset=wcs,
             )
@@ -1563,7 +1768,7 @@ def _plan_arbitrary_cad_operations(
                     )
 
     # ---------------- SETUP 1: G54 Top Machining ----------------
-    if enable_probing:
+    if eff_probing.enabled and eff_probing.enable_spindle_wcs_probe:
         _add_probe_op(1, "G54")
 
     span_xy_min = min(
@@ -1695,7 +1900,7 @@ def _plan_arbitrary_cad_operations(
     # ---------------- SETUP 2: G55 Soft-Jaw Flip (Carrier-Hat + Underside Features) ----------------
     do_op2 = (setup_mode == "dual_op1_op2") or (setup_mode == "auto" and features.requires_op2_flip)
     if do_op2:
-        if enable_probing:
+        if eff_probing.enabled and eff_probing.enable_spindle_wcs_probe and eff_probing.probe_after_flip:
             _add_probe_op(2, "G55")
 
         hat_depth = max(0.5, float(features.vise_grip_z_mm))
@@ -1786,7 +1991,10 @@ def plan_tamp_operations(
     allowed_tool_ids: Optional[Sequence[str]] = None,
     tool_material_override: Optional[str] = None,
     setup_mode: str = "auto",
-    enable_probing: bool = False,
+    enable_probing: bool = True,
+    probing_profile: str = "haas_wips_r",
+    enable_ots_tool_setter: bool = True,
+    probing_config: Optional[ProbingConfig] = None,
     enable_chamfer: bool = True,
     enable_threading: bool = True,
     warnings_out: Optional[List[str]] = None,
@@ -1795,12 +2003,23 @@ def plan_tamp_operations(
     if unit_system is not None or allowed_tool_ids is not None:
         library = library.subset(unit_system=unit_system, allowed_tool_ids=allowed_tool_ids)
 
+    eff_probing = (
+        probing_config
+        if probing_config is not None
+        else make_probing_config(
+            enabled=enable_probing,
+            profile_id=probing_profile,
+            enable_spindle_wcs_probe=enable_probing,
+            enable_tool_setter=enable_ots_tool_setter,
+            probe_after_flip=True,
+        )
+    )
+
     use_arbitrary = (
         features.is_step_cad
         or library.has_custom_crib
         or unit_system is not None
         or allowed_tool_ids is not None
-        or enable_probing
         or setup_mode == "dual_op1_op2"
     )
     if use_arbitrary:
@@ -1814,7 +2033,8 @@ def plan_tamp_operations(
             mach=mach_arb,
             atc_swap_time_s=atc_swap_time_s,
             setup_mode=setup_mode,
-            enable_probing=enable_probing,
+            enable_probing=eff_probing.enabled,
+            probing_config=eff_probing,
             enable_chamfer=enable_chamfer,
             enable_threading=enable_threading,
             warnings_out=w_list,
@@ -1823,14 +2043,52 @@ def plan_tamp_operations(
     mach = machine or MachineEnvelopeSpec(max_feed_mm_s=20.0)
     ops: List[PlannedOperationSpec] = []
     tool_num_map: Dict[str, int] = {}
+    prb_tnum = int(eff_probing.spindle_probe.tool_number)
 
     def _assign_tnum(rec: CatalogToolRecord) -> Tuple[int, HolderSpec, C.ToolAssembly]:
-        if rec.tool_id not in tool_num_map:
-            tool_num_map[rec.tool_id] = len(tool_num_map) + 1
-        tnum = tool_num_map[rec.tool_id]
+        if rec.entity_type == "probe":
+            tnum = prb_tnum
+        else:
+            if rec.tool_id not in tool_num_map:
+                cand_t = len(tool_num_map) + 1
+                if cand_t >= prb_tnum:
+                    cand_t += 1
+                tool_num_map[rec.tool_id] = cand_t
+            tnum = tool_num_map[rec.tool_id]
         hld = library.select_holder_for_tool(rec, taper="BT30")
         asm = rec.to_tool_assembly(tnum, holder=hld)
+        if rec.entity_type == "probe":
+            asm = dataclasses.replace(
+                asm,
+                holder_bottom_mm=max(float(asm.holder_bottom_mm), float(eff_probing.spindle_probe.stylus_length_mm)),
+            )
         return tnum, hld, asm
+
+    # STEP 1: Haas WIPS-R / Renishaw OMP40-2 Initial Stock & Top Z0 WCS Probing (G54)
+    if eff_probing.enabled and eff_probing.enable_spindle_wcs_probe:
+        hint = "omp40_2" if "omp40" in eff_probing.spindle_probe.model_id.lower() else ""
+        pr_rec = library.match_spindle_probe(model_hint=hint)
+        if pr_rec is not None:
+            tnum_p, hld_p, asm_p = _assign_tnum(pr_rec)
+            ops.append(
+                PlannedOperationSpec(
+                    op_index=len(ops) + 1,
+                    op_id=f"s1_op{len(ops) + 1}_wips_probe",
+                    op_kind="wips_probe",
+                    tool_number=tnum_p,
+                    tool_record=pr_rec,
+                    holder_spec=hld_p,
+                    tool_assembly=asm_p,
+                    spindle_rpm=0.0,
+                    base_feed_mm_s=float(eff_probing.spindle_probe.touch_feed_mm_s),
+                    target_hex_mm=0.0,
+                    doc_mm=0.0,
+                    woc_mm=pr_rec.diameter_mm,
+                    notes=f"G54 {eff_probing.spindle_probe.label} — initial stock & top Z0 WCS probing ({pr_rec.nominal_label})",
+                    setup_index=1,
+                    work_offset="G54",
+                )
+            )
 
     # Determine finishing cutter upper bound from tightest pocket corner radius & channel width
     max_finish_d = min(
@@ -2287,7 +2545,9 @@ def _serialize_multitool_variant_for_viewer(
             "flute_length_mm": round(float(op.tool_record.flute_length_mm), 3),
             "setup_index": op.setup_index,
             "work_offset": op.work_offset,
+            "op_index": op.op_index,
             "op_id": op.op_id,
+            "op_kind": op.op_kind,
             "gcode_line": gline,
         }
 
@@ -2495,6 +2755,8 @@ def _serialize_multitool_variant_for_viewer(
 def _audit_multitool_safety(
     features: RecognizedFeatures,
     ops_and_plans: Sequence[Tuple[PlannedOperationSpec, C.MotionPlan]],
+    *,
+    op2_jaw_top_z_mm: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Chronological 2.5D/3D dexel-voxel safety check across Op1/Op2, tools, holders, rapids, and vise jaws."""
     xs = features.xs_mm
@@ -2512,12 +2774,39 @@ def _audit_multitool_safety(
     vise_collision = False
 
     for op, plan in ops_and_plans:
-        if op.op_kind == "wips_probe" or op.tool_record.entity_type == "probe":
-            continue
-        z_active = z_stock_op2 if op.setup_index >= 2 else z_stock_op1
         r_cut = float(op.tool_assembly.cutter_radius_mm)
         r_hld = float(op.tool_assembly.holder_radius_mm)
         h_bot = float(op.tool_assembly.holder_bottom_mm)
+
+        if op.op_kind == "wips_probe" or op.tool_record.entity_type == "probe":
+            for seg in plan.segments:
+                pa, pb = seg.start_mm, seg.end_mm
+                for alpha in (0.0, 0.5, 1.0):
+                    px = pa[0] + alpha * (pb[0] - pa[0])
+                    py = pa[1] + alpha * (pb[1] - pa[1])
+                    pz = pa[2] + alpha * (pb[2] - pa[2])
+                    if op.setup_index == 1:
+                        for jaw in features.vise_jaws:
+                            dx = max(jaw.min_mm[0] - px, 0.0, px - jaw.max_mm[0])
+                            dy = max(jaw.min_mm[1] - py, 0.0, py - jaw.max_mm[1])
+                            if pz < jaw.max_mm[2] + 0.15 and math.hypot(dx, dy) < r_cut + 0.15:
+                                vise_collision = True
+                            if pz + h_bot < jaw.max_mm[2] + 0.15 and math.hypot(dx, dy) < r_hld + 0.15:
+                                vise_collision = True
+                    elif op2_jaw_top_z_mm is not None:
+                        outside_xy = (
+                            px < features.stock_min_mm[0] - 0.10
+                            or px > features.stock_max_mm[0] + 0.10
+                            or py < features.stock_min_mm[1] - 0.10
+                            or py > features.stock_max_mm[1] + 0.10
+                        )
+                        if outside_xy and pz < op2_jaw_top_z_mm + 0.15:
+                            vise_collision = True
+                        if outside_xy and pz + h_bot < op2_jaw_top_z_mm + 0.15:
+                            vise_collision = True
+            continue
+
+        z_active = z_stock_op2 if op.setup_index >= 2 else z_stock_op1
         is_sub_bore_op = op.op_kind in ("thread_mill", "countersink", "chamfer_contour")
         r_active_cone = (
             min(r_cut, max(0.85, float(op.doc_mm) + 0.15))
@@ -2615,8 +2904,13 @@ def _post_seq_all_dialects(
     title: str,
     unit_output: str,
     stock_dims_mm: Tuple[float, float, float],
+    probing_config: Optional[ProbingConfig] = None,
+    jaw_top_s1_mm: Optional[float] = None,
+    jaw_top_s2_mm: Optional[float] = None,
+    stock_min_z_mm: Optional[float] = None,
 ) -> Dict[str, Dict[str, Any]]:
     """Compile a multi-tool operation sequence across all 6 controller dialects for viewer + shop."""
+    sp_depth = probing_config.spindle_probe.side_touch_depth_mm if probing_config is not None else 3.5
     post_inputs = [
         MultiToolPostOpInput(
             op_index=op.op_index,
@@ -2631,6 +2925,18 @@ def _post_seq_all_dialects(
             base_feed_mm_s=op.base_feed_mm_s,
             motion_plan=plan,
             notes=op.notes,
+            entity_type=op.tool_record.entity_type,
+            stickout_mm=float(op.tool_assembly.holder_bottom_mm),
+            side_touch_z_mm=(
+                compute_safe_side_touch_z_mm(
+                    0.0,
+                    sp_depth,
+                    jaw_top_s2_mm if op.setup_index >= 2 else jaw_top_s1_mm,
+                    stock_min_z_mm,
+                )
+                if op.op_kind == "wips_probe"
+                else None
+            ),
         )
         for op, plan in seq
     ]
@@ -2639,7 +2945,8 @@ def _post_seq_all_dialects(
         program_number=program_number,
         title=title,
         unit_output=unit_output,
-        enable_probing=False,  # wips_probe is already an explicit op in seq when enabled!
+        enable_probing=bool(probing_config.enabled) if probing_config is not None else False,
+        probing_config=probing_config,
         stock_dims_mm=stock_dims_mm,
     )
     return {
@@ -2671,7 +2978,10 @@ def execute_tamp_pipeline(
     tool_material_id: Optional[str] = None,
     setup_mode: str = "auto",
     controller_dialect: str = "haas_ngc",
-    enable_probing: bool = False,
+    enable_probing: bool = True,
+    probing_profile: str = "haas_wips_r",
+    enable_ots_tool_setter: bool = True,
+    probing_config: Optional[ProbingConfig] = None,
     enable_chamfer: bool = True,
     enable_threading: bool = True,
 ) -> TAMPMultiToolResult:
@@ -2680,6 +2990,17 @@ def execute_tamp_pipeline(
     warnings_list: List[str] = []
     unit_filter = unit_system if unit_system in ("inches", "millimeters") else None
     primary_dialect = normalize_multi_dialect(controller_dialect)
+    eff_probing = (
+        probing_config
+        if probing_config is not None
+        else make_probing_config(
+            enabled=enable_probing,
+            profile_id=probing_profile,
+            enable_spindle_wcs_probe=enable_probing,
+            enable_tool_setter=enable_ots_tool_setter,
+            probe_after_flip=True,
+        )
+    )
 
     features = load_cad_part(stl_source, filename_hint=filename_hint)
     ops_planned = plan_tamp_operations(
@@ -2691,7 +3012,10 @@ def execute_tamp_pipeline(
         allowed_tool_ids=allowed_tool_ids,
         tool_material_override=tool_material_id,
         setup_mode=setup_mode,
-        enable_probing=enable_probing,
+        enable_probing=eff_probing.enabled,
+        probing_profile=eff_probing.profile_id,
+        enable_ots_tool_setter=eff_probing.enable_tool_setter,
+        probing_config=eff_probing,
         enable_chamfer=enable_chamfer,
         enable_threading=enable_threading,
         warnings_out=warnings_list,
@@ -2702,8 +3026,30 @@ def execute_tamp_pipeline(
         or library.has_custom_crib
         or unit_filter is not None
         or allowed_tool_ids is not None
-        or enable_probing
         or setup_mode == "dual_op1_op2"
+    )
+
+    has_op2_planned = any(op.setup_index >= 2 for op in ops_planned)
+    wh_planned, _ = select_kurt_dx6_workholding(
+        features.stock_min_mm,
+        features.stock_max_mm,
+        part_min_mm=features.part_min_mm,
+        part_max_mm=features.part_max_mm,
+        vise_grip_z_mm=features.vise_grip_z_mm,
+        top_face_depth_mm=features.top_face_depth_mm,
+        has_op2=has_op2_planned,
+    )
+    wh_setups_p = wh_planned.get("setups") or {}
+    jaw_top_s1_mm = float(
+        (wh_setups_p.get("1") or {}).get(
+            "jaw_top_z_mm",
+            max((float(j.max_mm[2]) for j in features.vise_jaws), default=float(features.stock_min_mm[2]) + 2.0),
+        )
+    )
+    jaw_top_s2_mm: Optional[float] = (
+        float((wh_setups_p.get("2") or {}).get("jaw_top_z_mm", -3.2))
+        if has_op2_planned
+        else None
     )
 
     naive_seq: List[Tuple[PlannedOperationSpec, C.MotionPlan]] = []
@@ -2727,12 +3073,14 @@ def execute_tamp_pipeline(
 
         if op.op_kind == "wips_probe":
             z_datum = 0.0
-            pr_plan = build_wips_probe_motion_plan(
+            jaw_top_active = jaw_top_s2_mm if op.setup_index >= 2 else jaw_top_s1_mm
+            pr_plan = build_wcs_probe_motion_plan(
                 features.stock_min_mm,
                 features.stock_max_mm,
+                spec=eff_probing.spindle_probe,
                 stylus_radius_mm=max(1.0, r_cut),
                 z_top_datum_mm=z_datum,
-                probe_feed_mm_s=op.base_feed_mm_s,
+                jaw_top_z_mm=jaw_top_active,
             )
             naive_seq.append((op, pr_plan))
             same_seq.append((op, pr_plan))
@@ -3100,17 +3448,21 @@ def execute_tamp_pipeline(
     )
     unit_out_str = "inch" if unit_filter == "inches" else "mm"
 
-    gcode_naive_full = _post_seq_all_dialects(
-        naive_seq, program_number=program_number, title=title, unit_output=unit_out_str, stock_dims_mm=stock_dims
-    )
-    gcode_same_full = _post_seq_all_dialects(
-        same_seq, program_number=program_number, title=title, unit_output=unit_out_str, stock_dims_mm=stock_dims
-    )
+    post_kw: Dict[str, Any] = {
+        "program_number": program_number,
+        "title": title,
+        "unit_output": unit_out_str,
+        "stock_dims_mm": stock_dims,
+        "probing_config": eff_probing,
+        "jaw_top_s1_mm": jaw_top_s1_mm,
+        "jaw_top_s2_mm": jaw_top_s2_mm,
+        "stock_min_z_mm": float(features.stock_min_mm[2]),
+    }
+    gcode_naive_full = _post_seq_all_dialects(naive_seq, **post_kw)
+    gcode_same_full = _post_seq_all_dialects(same_seq, **post_kw)
     gcode_naive = {k: v for k, v in gcode_naive_full.items() if k in ("haas_ngc", primary_dialect)}
     gcode_same = {k: v for k, v in gcode_same_full.items() if k in ("haas_ngc", primary_dialect)}
-    gcode_opt = _post_seq_all_dialects(
-        opt_seq, program_number=program_number, title=title, unit_output=unit_out_str, stock_dims_mm=stock_dims
-    )
+    gcode_opt = _post_seq_all_dialects(opt_seq, **post_kw)
 
     v_naive = _serialize_multitool_variant_for_viewer(
         "nominal", "Naive Multi-Tool CAM (@2)", naive_seq, features, atc_swap_time_s,
@@ -3135,7 +3487,7 @@ def execute_tamp_pipeline(
     unique_tools = len({op.tool_number for op in ops_final})
     atc_total = atc_swaps * atc_swap_time_s
 
-    audit = _audit_multitool_safety(features, opt_seq)
+    audit = _audit_multitool_safety(features, opt_seq, op2_jaw_top_z_mm=jaw_top_s2_mm)
     haas_nc = gcode_opt["haas_ngc"]["text"] if "haas_ngc" in gcode_opt else _format_multitool_haas_ngc(program_number, title, opt_seq)
 
     # Build viewer tools_table & operations_table & cad_metadata
@@ -3148,7 +3500,7 @@ def execute_tamp_pipeline(
                 float(tdict.get("stickout_mm", 0.0)),
                 round(float(op.tool_assembly.holder_bottom_mm), 2),
             )
-            if tool_material_id:
+            if tool_material_id and op.tool_record.entity_type != "probe":
                 tdict["tool_material_id"] = tool_material_id
             tools_table[key_tn] = tdict
 
@@ -3176,9 +3528,13 @@ def execute_tamp_pipeline(
 
     has_op2_exec = any(op.setup_index >= 2 for op in ops_final)
     setup_summary = (
-        f"G54 Op1 ({features.setup_axis_label}) + M00 Flip → G55 Op2 Soft Jaws"
-        if has_op2_exec
-        else f"G54 Op1 Single-Setup ({features.setup_axis_label})"
+        f"G54 Op1 ({features.setup_axis_label}) + M00 Flip → G55 Op2 Soft Jaws + Re-Probe"
+        if (has_op2_exec and eff_probing.enabled and eff_probing.probe_after_flip)
+        else (
+            f"G54 Op1 ({features.setup_axis_label}) + M00 Flip → G55 Op2 Soft Jaws"
+            if has_op2_exec
+            else f"G54 Op1 Single-Setup ({features.setup_axis_label})"
+        )
     )
     part_dims = (
         round(features.part_max_mm[0] - features.part_min_mm[0], 2),
@@ -3213,12 +3569,43 @@ def execute_tamp_pipeline(
     if allowed_tool_ids is not None:
         unit_lib_label += f" [{len(allowed_tool_ids)} crib tools]"
 
+    workholding_spec, _ = select_kurt_dx6_workholding(
+        features.stock_min_mm,
+        features.stock_max_mm,
+        part_min_mm=features.part_min_mm,
+        part_max_mm=features.part_max_mm,
+        vise_grip_z_mm=features.vise_grip_z_mm,
+        top_face_depth_mm=features.top_face_depth_mm,
+        has_op2=has_op2_exec,
+    )
+
+    setup_sheet_dict = build_setup_sheet(
+        part_id=part_id,
+        part_title=title,
+        program_number=program_number,
+        stock_material_id=stock_material_id,
+        primary_dialect=primary_dialect,
+        stock_min_mm=features.stock_min_mm,
+        stock_max_mm=features.stock_max_mm,
+        part_min_mm=features.part_min_mm,
+        part_max_mm=features.part_max_mm,
+        workholding=workholding_spec,
+        tools_table=tools_table,
+        operations_table=operations_table,
+        probing_config=eff_probing,
+    )
+
     cad_metadata: Dict[str, Any] = {
         "is_step_cad": features.is_step_cad,
         "source_units": features.source_unit,
         "setup_label": features.setup_axis_label,
         "setup_summary": setup_summary,
+        "workholding_summary": workholding_spec["summary"],
+        "vise_model": workholding_spec["vise_model"],
         "has_op2_flip": has_op2_exec,
+        "probing_enabled": bool(eff_probing.enabled),
+        "probing_profile": eff_probing.profile_id,
+        "probing_package": setup_sheet_dict["probe_package"]["package_label"] if eff_probing.enabled else "Manual WCS / Offsets",
         "part_dims_mm": list(part_dims),
         "stock_dims_mm": [round(d, 2) for d in stock_dims],
         "bbox_mm_str": f"{part_dims[0]:.1f} × {part_dims[1]:.1f} × {part_dims[2]:.1f} mm",
@@ -3268,6 +3655,8 @@ def execute_tamp_pipeline(
         tools_table=tools_table,
         operations_table=operations_table,
         cad_metadata=cad_metadata,
+        workholding=workholding_spec,
+        setup_sheet=setup_sheet_dict,
         warnings=warnings_list,
     )
 
@@ -3427,6 +3816,33 @@ def export_tamp_result_to_viewer_bundle(
         "tools_table": res.tools_table,
         "operations_table": res.operations_table,
         "cad_metadata": res.cad_metadata,
+        "workholding": res.workholding
+        if res.workholding
+        else select_kurt_dx6_workholding(
+            feats.stock_min_mm,
+            feats.stock_max_mm,
+            part_min_mm=feats.part_min_mm,
+            part_max_mm=feats.part_max_mm,
+            vise_grip_z_mm=feats.vise_grip_z_mm,
+            top_face_depth_mm=feats.top_face_depth_mm,
+            has_op2=any(op.setup_index >= 2 for op in res.operations),
+        )[0],
+        "setup_sheet": res.setup_sheet
+        if res.setup_sheet
+        else build_setup_sheet(
+            part_id=pid,
+            part_title=res.title,
+            program_number=program_number,
+            stock_material_id=res.stock_material_id,
+            primary_dialect=str(res.cad_metadata.get("primary_dialect") or "haas_ngc"),
+            stock_min_mm=feats.stock_min_mm,
+            stock_max_mm=feats.stock_max_mm,
+            part_min_mm=feats.part_min_mm,
+            part_max_mm=feats.part_max_mm,
+            workholding=res.workholding,
+            tools_table=res.tools_table,
+            operations_table=res.operations_table,
+        ),
         "target_stl_url": f"/data/meshes/{pid}_target.stl",
         "rustcnc_download_url": haas_url,
         "variants": viewer_vars,

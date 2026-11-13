@@ -54,6 +54,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from cam.feeds_and_speeds import STOCK_MATERIALS, TOOL_MATERIALS
 from cam.multi_dialect_post import SUPPORTED_MULTI_DIALECTS
+from cam.probing import PROBING_DRIVERS
 from cam.step_brep import is_step_payload
 from cam.tamp_planner import (
     execute_tamp_pipeline,
@@ -653,7 +654,12 @@ class SimulatorRequestHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "opt_iters must be an integer."})
             return
 
-        enable_probing = bool(req_data.get("enable_probing", False))
+        enable_probing = bool(req_data.get("enable_probing", True))
+        enable_ots = bool(req_data.get("enable_ots", True))
+        probing_profile = str(req_data.get("probing_profile") or "haas_wips_r").strip().lower()
+        if probing_profile not in PROBING_DRIVERS:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "Unsupported probing_profile."})
+            return
         enable_chamfer = bool(req_data.get("enable_chamfer", True))
         enable_threading = bool(req_data.get("enable_threading", True))
 
@@ -705,6 +711,8 @@ class SimulatorRequestHandler(BaseHTTPRequestHandler):
                 setup_mode=setup_mode,
                 controller_dialect=dialect,
                 enable_probing=enable_probing,
+                probing_profile=probing_profile,
+                enable_ots_tool_setter=enable_ots,
                 enable_chamfer=enable_chamfer,
                 enable_threading=enable_threading,
             )

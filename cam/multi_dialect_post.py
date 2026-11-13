@@ -44,6 +44,13 @@ from cam.dialects.base import (
     posted_work_vector,
     sanitize_comment,
 )
+from cam.probing import (
+    ProbingConfig,
+    ToolSettingInput,
+    compute_safe_side_touch_z_mm,
+    get_probing_driver,
+    make_probing_config,
+)
 
 SUPPORTED_MULTI_DIALECTS: Tuple[str, ...] = (
     "haas_ngc",
@@ -173,6 +180,9 @@ class MultiToolPostOpInput:
     base_feed_mm_s: float
     motion_plan: C.MotionPlan
     notes: str = ""
+    entity_type: str = ""
+    stickout_mm: float = 30.0
+    side_touch_z_mm: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -294,6 +304,9 @@ def format_multitool_program(
     title: str = "DiffCAM Part",
     unit_output: str = "mm",
     enable_probing: bool = False,
+    enable_ots_tool_setter: bool = False,
+    probing_profile: str = "haas_wips_r",
+    probing_config: Optional[ProbingConfig] = None,
     stock_dims_mm: Tuple[float, float, float] = (100.0, 60.0, 20.0),
     work_to_machine: Optional[C.RigidTransform] = None,
     include_atc_pseudo_segments: bool = False,
@@ -306,6 +319,21 @@ def format_multitool_program(
     spec = get_dialect_spec(ctrl_dialect)
     units = _normalize_output_units(unit_output)
     cfg = MachineConfig(units=units)
+
+    has_any_probe_op = any(op.op_kind == "wips_probe" or int(op.tool_number) == 99 for op in ops)
+    eff_probing = (
+        probing_config
+        if probing_config is not None
+        else make_probing_config(
+            enabled=bool(enable_probing or enable_ots_tool_setter or has_any_probe_op),
+            profile_id=probing_profile,
+            enable_spindle_wcs_probe=bool(enable_probing or has_any_probe_op),
+            enable_tool_setter=bool(enable_ots_tool_setter or enable_probing),
+            probe_after_flip=True,
+        )
+    )
+    probe_driver = get_probing_driver(eff_probing.profile_id)
+    prb_tnum = int(eff_probing.spindle_probe.tool_number)
 
     xyz_p = spec.shop_xyz_decimals(units)
     feed_p = spec.shop_feed_decimals(units)
@@ -342,20 +370,36 @@ def format_multitool_program(
         lines.append(f"{o_word} (DIFFCAM MIT {banner_ctrl} - {clean_title})")
 
     lines.append("(DIFFCAM AUTOMATED MULTI-TOOL MULTI-SETUP CAM - MIT CLEAN-ROOM)")
+    if eff_probing.enabled:
+        lines.append(f"(PROBING PACKAGE: {sanitize_comment(probe_driver.package_label).upper()})")
 
-    # Emit shop tool-crib table comments
+    # Emit shop tool-crib table comments + gather unique tools for OTS tool-setting preamble
     seen_tools: Dict[int, Tuple[float, str]] = {}
+    tool_setting_inputs: List[ToolSettingInput] = []
     for op in ops:
-        if op.tool_number not in seen_tools:
-            seen_tools[int(op.tool_number)] = (float(op.diameter_mm), op.tool_label)
+        tn_key = int(op.tool_number)
+        if tn_key not in seen_tools:
+            seen_tools[tn_key] = (float(op.diameter_mm), op.tool_label)
+            tool_setting_inputs.append(
+                ToolSettingInput(
+                    tool_number=tn_key,
+                    tool_label=op.tool_label,
+                    entity_type=op.entity_type or ("probe" if (op.op_kind == "wips_probe" or tn_key == prb_tnum) else "flat end mill"),
+                    diameter_mm=float(op.diameter_mm),
+                    stickout_mm=float(op.stickout_mm),
+                )
+            )
     for t_num, (d_mm, t_lbl) in seen_tools.items():
         d_str = fmt_real(float(len_out(d_mm, cfg)), xyz_p, force_decimal=True)
         lines.append(
             f"(T{fmt_int(t_num, name='T')} D={d_str} - {sanitize_comment(t_lbl).upper()})"
         )
-    if enable_probing and 99 not in seen_tools:
-        d_prb = fmt_real(float(len_out(4.0, cfg)), xyz_p, force_decimal=True)
-        lines.append(f"(T99 D={d_prb} - RUBY SPINDLE TOUCH PROBE)")
+    if eff_probing.enabled and eff_probing.enable_spindle_wcs_probe and prb_tnum not in seen_tools:
+        d_prb = fmt_real(float(len_out(eff_probing.spindle_probe.stylus_diameter_mm, cfg)), xyz_p, force_decimal=True)
+        lines.append(
+            f"(T{fmt_int(prb_tnum, name='T')} D={d_prb} - "
+            f"{sanitize_comment(eff_probing.spindle_probe.label).upper()})"
+        )
 
     # Safe modal initialization block + unit selection
     if dialect_id == "rs274":
@@ -364,6 +408,20 @@ def format_multitool_program(
         lines.append("G90 G94 G17 G40 G49 G80")
     lines.append(cfg.units_code)
     lines.extend(_home_z_retract_blocks(dialect_id))
+
+    # Automatic OTS Tool-Setter Calibration Preamble (measures length H & rotating diameter D prior to cutting)
+    if eff_probing.enabled and eff_probing.enable_tool_setter and tool_setting_inputs:
+        lines.extend(
+            probe_driver.emit_tool_setting_preamble(
+                tool_setting_inputs,
+                config=eff_probing,
+                dialect_id=dialect_id,
+                machine_cfg=cfg,
+                xyz_p=xyz_p,
+                feed_p=feed_p,
+                home_z_blocks=_home_z_retract_blocks(dialect_id),
+            )
+        )
 
     smooth_on, smooth_off = _smoothing_blocks(
         dialect_id, units=units, xyz_precision=xyz_p, blend_tolerance_mm=0.05
@@ -388,6 +446,12 @@ def format_multitool_program(
     flat_segment_lines: List[int] = []
     viewer_segment_lines: List[int] = []
 
+    explicit_probe_setups = {
+        int(op.setup_index)
+        for op in ops
+        if op.op_kind == "wips_probe" or int(op.tool_number) == prb_tnum
+    }
+
     def _shutdown_active_spindle_and_smoothing() -> None:
         nonlocal smoothing_active, coolant_active, spindle_active, output_plane
         if output_plane != C.ArcPlane.XY:
@@ -404,17 +468,29 @@ def format_multitool_program(
             spindle_active = False
         lines.extend(_home_z_retract_blocks(dialect_id))
 
-    if enable_probing and ops:
+    if (
+        eff_probing.enabled
+        and eff_probing.enable_spindle_wcs_probe
+        and ops
+        and int(ops[0].setup_index) not in explicit_probe_setups
+    ):
         first_wcs = _normalize_work_offset(ops[0].work_offset, ops[0].setup_index)
-        _emit_probing_cycle(
-            lines,
-            dialect_id=dialect_id,
-            work_offset=first_wcs,
-            setup_index=int(ops[0].setup_index),
-            stock_dims_mm=stock_dims_mm,
-            cfg=cfg,
-            xyz_p=xyz_p,
-            feed_p=feed_p,
+        z_side_def = compute_safe_side_touch_z_mm(
+            0.0, eff_probing.spindle_probe.side_touch_depth_mm, None, -abs(float(stock_dims_mm[2]))
+        )
+        lines.extend(
+            probe_driver.emit_standalone_wcs_probe_cycle(
+                config=eff_probing,
+                dialect_id=dialect_id,
+                work_offset=first_wcs,
+                setup_index=int(ops[0].setup_index),
+                stock_dims_mm=stock_dims_mm,
+                side_touch_z_mm=z_side_def,
+                machine_cfg=cfg,
+                xyz_p=xyz_p,
+                feed_p=feed_p,
+                home_z_blocks=_home_z_retract_blocks(dialect_id),
+            )
         )
 
     for op in ops:
@@ -431,16 +507,28 @@ def format_multitool_program(
             lines.append(f"M00 ({flip_comment})")
             flip_line_no = len(lines)
             setup_flip_lines[int(op.setup_index)] = flip_line_no
-            if enable_probing:
-                _emit_probing_cycle(
-                    lines,
-                    dialect_id=dialect_id,
-                    work_offset=wcs,
-                    setup_index=int(op.setup_index),
-                    stock_dims_mm=stock_dims_mm,
-                    cfg=cfg,
-                    xyz_p=xyz_p,
-                    feed_p=feed_p,
+            if (
+                eff_probing.enabled
+                and eff_probing.enable_spindle_wcs_probe
+                and eff_probing.probe_after_flip
+                and int(op.setup_index) not in explicit_probe_setups
+            ):
+                z_side_flip = compute_safe_side_touch_z_mm(
+                    0.0, eff_probing.spindle_probe.side_touch_depth_mm, -3.2, -abs(float(stock_dims_mm[2]))
+                )
+                lines.extend(
+                    probe_driver.emit_standalone_wcs_probe_cycle(
+                        config=eff_probing,
+                        dialect_id=dialect_id,
+                        work_offset=wcs,
+                        setup_index=int(op.setup_index),
+                        stock_dims_mm=stock_dims_mm,
+                        side_touch_z_mm=z_side_flip,
+                        machine_cfg=cfg,
+                        xyz_p=xyz_p,
+                        feed_p=feed_p,
+                        home_z_blocks=_home_z_retract_blocks(dialect_id),
+                    )
                 )
             current_tool = None
             current_wcs = None
@@ -461,7 +549,7 @@ def format_multitool_program(
         init_out = len_out(np.asarray(init_work, dtype=np.float64), cfg)
         z_init_str = fmt_real(float(init_out[2]), xyz_p, force_decimal=True)
 
-        is_probe_op = op.op_kind == "wips_probe" or t_num == 99
+        is_probe_op = op.op_kind == "wips_probe" or t_num == prb_tnum
         atc_action_line = op_header_line
         if current_tool != t_num or current_wcs != wcs:
             if current_tool is not None or spindle_active or coolant_active or smoothing_active:
@@ -474,8 +562,14 @@ def format_multitool_program(
                 spindle_active = True
             lines.append(f"G43 H{fmt_int(t_num, name='H')} Z{z_init_str}")
             if is_probe_op:
-                if dialect_id != "rs274":
-                    lines.append("G65 P9832 (SPINDLE PROBE ON)")
+                lines.extend(
+                    probe_driver.emit_wcs_probe_on_lines(
+                        config=eff_probing,
+                        dialect_id=dialect_id,
+                        work_offset=wcs,
+                        setup_index=int(op.setup_index),
+                    )
+                )
             else:
                 lines.append("M8")
                 coolant_active = True
@@ -580,10 +674,14 @@ def format_multitool_program(
                     lines.append(f"G53 G1 {coords}{f_suffix}")
                     last_linear_kind = None
                 elif is_probe_op:
-                    if dialect_id == "rs274":
-                        lines.append(f"G38.2 {coords} F{f_str}")
-                    else:
-                        lines.append(f"G65 P9810 {coords} F{f_str}")
+                    lines.append(
+                        probe_driver.format_probe_Protected_move(
+                            coords,
+                            f_str,
+                            config=eff_probing,
+                            dialect_id=dialect_id,
+                        )
+                    )
                     last_linear_kind = None
                 else:
                     prefix = "G1 " if last_linear_kind != C.SegmentKind.FEED else ""
@@ -595,13 +693,27 @@ def format_multitool_program(
             flat_segment_lines.append(seg_line_no)
             viewer_segment_lines.append(seg_line_no)
 
-        if is_probe_op and dialect_id != "rs274":
-            w_num, p_idx = _wcs_number_for_probe(wcs)
-            if dialect_id == "haas_ngc":
-                lines.append(f"G65 P9995 W{w_num}. A20. (UPDATE {wcs} WCS DATUM)")
-            else:
-                lines.append(f"G65 P9811 Z0.0 S{fmt_int(p_idx, name='S')} (UPDATE {wcs} WCS DATUM)")
-            lines.append("G65 P9833 (SPINDLE PROBE OFF)")
+        if is_probe_op:
+            op_side_z = (
+                float(op.side_touch_z_mm)
+                if op.side_touch_z_mm is not None
+                else min(
+                    (float(s.end_mm[2]) for s in op.motion_plan.segments if s.kind != C.SegmentKind.RAPID),
+                    default=-float(eff_probing.spindle_probe.side_touch_depth_mm),
+                )
+            )
+            lines.extend(
+                probe_driver.emit_wcs_probe_off_and_update_lines(
+                    config=eff_probing,
+                    dialect_id=dialect_id,
+                    work_offset=wcs,
+                    setup_index=int(op.setup_index),
+                    stock_dims_mm=stock_dims_mm,
+                    side_touch_z_mm=op_side_z,
+                    machine_cfg=cfg,
+                    xyz_p=xyz_p,
+                )
+            )
 
         per_op_segment_lines.append(tuple(op_seg_lines))
 
@@ -610,7 +722,8 @@ def format_multitool_program(
     if dialect_id == "haas_ngc":
         lines.append("G90 G53 G0 X0.0 Y0.0")
     lines.append("M30")
-    lines.append("%")
+    if dialect_id != "mazak":
+        lines.append("%")
 
     lines_tuple = tuple(lines)
     nc_text = "\n".join(lines_tuple) + "\n"
@@ -635,6 +748,9 @@ def format_all_dialects_multitool(
     title: str = "DiffCAM Part",
     unit_output: str = "mm",
     enable_probing: bool = False,
+    enable_ots_tool_setter: bool = False,
+    probing_profile: str = "haas_wips_r",
+    probing_config: Optional[ProbingConfig] = None,
     stock_dims_mm: Tuple[float, float, float] = (100.0, 60.0, 20.0),
     work_to_machine: Optional[C.RigidTransform] = None,
     include_atc_pseudo_segments: bool = False,
@@ -648,6 +764,9 @@ def format_all_dialects_multitool(
             title=title,
             unit_output=unit_output,
             enable_probing=enable_probing,
+            enable_ots_tool_setter=enable_ots_tool_setter,
+            probing_profile=probing_profile,
+            probing_config=probing_config,
             stock_dims_mm=stock_dims_mm,
             work_to_machine=work_to_machine,
             include_atc_pseudo_segments=include_atc_pseudo_segments,

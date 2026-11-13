@@ -378,6 +378,16 @@ def check_real_word_decimals(
         is_g05_block = any(
             ltr.upper() == "G" and abs(float(num) - 5.1) <= 1e-9 for ltr, num in tokens
         )
+        is_g65_block = any(
+            ltr.upper() == "G" and abs(float(num) - 65.0) <= 1e-9 for ltr, num in tokens
+        )
+        if is_g65_block:
+            for ltr_raw, num_str in tokens:
+                if ltr_raw.upper() == "P" and "." in num_str:
+                    raise HardwareSyntaxError(
+                        f"Line {line_no}: G65 macro program number P{num_str} must be an integer"
+                    )
+            continue
         for ltr_raw, num_str in tokens:
             ltr = ltr_raw.upper()
             if g05_r_is_integer and is_g05_block and ltr == "R":

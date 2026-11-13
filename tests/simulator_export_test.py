@@ -7,7 +7,9 @@ import hashlib
 import http.client
 import json
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import threading
 import uuid
@@ -256,8 +258,117 @@ def test_viewer_frontend_has_zero_unsafe_dom_or_storage_sinks() -> None:
         'id="tool-mat-select"',
         'id="path-width-slider"',
         'id="layout-sbs"',
+        'id="chk-vise"',
+        'id="op-bar"',
+        'id="op-pills-strip"',
+        'id="op-timeline-mount"',
+        'value="operation"',
     ):
         assert required_id in html_src
+
+
+def test_kurt_dx6_vise_mesh_and_multi_operation_js_helpers() -> None:
+    node_bin = shutil.which("node")
+    if not node_bin:
+        pytest.skip("node runtime not installed")
+
+    app_js = str((PROJECT_ROOT / "viewer" / "app.js").resolve())
+    js_test = """
+const assert = require("assert");
+const app = require(process.argv[1]);
+
+const dualCase = {
+  case_id: "unit-dual-op",
+  stock_min_mm: [-50.0, -25.0, -23.0],
+  stock_max_mm: [50.0, 25.0, 0.0],
+  pocket_min_mm: [-48.0, -23.0, -19.0],
+  pocket_max_mm: [48.0, 23.0, -1.5],
+  cad_metadata: { has_op2_flip: true, part_dims_mm: [99.0, 49.0, 19.0] },
+  operations_table: [
+    { op_index: 1, op_id: "s1_op1_face", op_kind: "facing", setup_index: 1, work_offset: "G54", tool_number: 1, tool_label: "Face Mill" },
+    { op_index: 2, op_id: "s1_op2_rough", op_kind: "pocket_adaptive", setup_index: 1, work_offset: "G54", tool_number: 2, tool_label: "Rough Endmill" },
+    { op_index: 3, op_id: "s2_op3_hat", op_kind: "op2_hat_facing", setup_index: 2, work_offset: "G55", tool_number: 1, tool_label: "Face Mill" },
+  ],
+};
+
+// 1. Kurt DX6 workholding resolution + Setup 1 (G54 Hard Jaws + Parallels) & Setup 2 (G55 Soft Jaws) 3D meshes
+const wh = app.resolveCaseWorkholding(dualCase);
+assert.strictEqual(wh.vise_model, "kurt_dx6_6in");
+assert.strictEqual(wh.jaw_width_mm, 152.4);
+assert.strictEqual(wh.clamping_axis, "Y");
+
+const mesh1 = app.buildKurtDx6ViseMesh(dualCase, 1);
+const mesh2 = app.buildKurtDx6ViseMesh(dualCase, 2);
+assert(mesh1.vertexCount >= 300, "Setup 1 DX6 vise should have rich 3D geometry");
+assert(mesh2.vertexCount >= 300, "Setup 2 DX6 soft-jaw vise should have rich 3D geometry");
+assert.strictEqual(mesh1.positions.length, mesh1.vertexCount * 3);
+assert.strictEqual(mesh1.normals.length, mesh1.vertexCount * 3);
+assert.strictEqual(mesh1.colors.length, mesh1.vertexCount * 3);
+for (let i = 0; i < mesh1.positions.length; i++) {
+  assert(Number.isFinite(mesh1.positions[i]), "non-finite position in mesh1");
+  assert(Number.isFinite(mesh1.normals[i]), "non-finite normal in mesh1");
+}
+for (let i = 0; i < mesh2.positions.length; i++) {
+  assert(Number.isFinite(mesh2.positions[i]), "non-finite position in mesh2");
+}
+
+// 2. Multi-operation extraction & selective multi-op ribbon filtering
+const variant = {
+  plan: {
+    segments: [
+      { id: 0, kind: "cut", start: [-45, -20, -1.5], end: [45, -20, -1.5], t0_s: 0.0, t1_s: 2.0, setup_index: 1, work_offset: "G54", tool_number: 1, op_id: "s1_op1_face", engaged: true },
+      { id: 1, kind: "rapid", start: [45, -20, 5.0], end: [-30, 0, 5.0], t0_s: 2.0, t1_s: 2.5, setup_index: 1, work_offset: "G54", tool_number: 2, op_id: "s1_op2_rough", engaged: false },
+      { id: 2, kind: "cut", start: [-30, 0, -8.0], end: [30, 0, -8.0], t0_s: 2.5, t1_s: 6.0, setup_index: 1, work_offset: "G54", tool_number: 2, op_id: "s1_op2_rough", engaged: true },
+      { id: 3, kind: "cut", start: [-45, 0, -2.0], end: [45, 0, -2.0], t0_s: 6.0, t1_s: 9.0, setup_index: 2, work_offset: "G55", tool_number: 1, op_id: "s2_op3_hat", engaged: true },
+    ],
+  },
+};
+const ops = app.deriveCaseOperations(dualCase, variant);
+assert.strictEqual(ops.length, 3);
+assert.strictEqual(ops[0].opId, "s1_op1_face");
+assert.strictEqual(ops[2].setupIndex, 2);
+assert.strictEqual(ops[2].workOffset, "G55");
+
+// Op1 and Op3 share T1, but color-by-operation assigns distinct RGB colors!
+const opColorMap = new Map(ops.map((o) => [o.key, o.colorIdx]));
+const cOp1 = app.cutSegmentColorRgb(variant.plan.segments[0], "operation", null, opColorMap);
+const cOp3 = app.cutSegmentColorRgb(variant.plan.segments[3], "operation", null, opColorMap);
+assert.notDeepStrictEqual(cOp1, cOp3);
+
+// Multi-select filter: select Op 1 + Op 3 simultaneously (skipping Op 2)
+const selected = new Set(["s1_op1_face", "s2_op3_hat"]);
+const allCuts = app.buildThickPathTubeGeometry(variant.plan.segments, false, 0.28, () => [1, 1, 1], -23.0);
+const filteredCuts = app.buildThickPathTubeGeometry(
+  variant.plan.segments,
+  false,
+  0.28,
+  () => [1, 1, 1],
+  -23.0,
+  (s) => selected.has(s.op_id)
+);
+assert.deepStrictEqual(allCuts.segIndices, [0, 2, 3]);
+assert.deepStrictEqual(filteredCuts.segIndices, [0, 3]);
+
+// 3. Haas WIPS-R (OMP40-2 + OTS) Setup Sheet & Combined Per-Tool Schedule synthesis
+const sheet = app.resolveCaseSetupSheet(dualCase, variant);
+assert.strictEqual(sheet.schema, "diffcam-setup-sheet/1");
+assert.strictEqual(sheet.probe_package.profile_id, "haas_wips_r");
+assert.strictEqual(sheet.setups.length, 2, "Dual-op case must generate G54 and G55 setup sheets");
+assert.strictEqual(sheet.setups[0].work_offset, "G54");
+assert.strictEqual(sheet.setups[1].work_offset, "G55");
+assert(sheet.setups[0].side_touch_z_mm > sheet.setups[0].jaw_top_z_mm);
+assert(sheet.setups[1].side_touch_z_mm > sheet.setups[1].jaw_top_z_mm);
+assert.strictEqual(sheet.tools_schedule[0].tool_number, 99);
+const md = app.formatSetupSheetMarkdown(sheet);
+assert(md.includes("OMP40-2") && md.includes("G54") && md.includes("G55") && md.includes("OTS"));
+"""
+    proc = subprocess.run(
+        [node_bin, "-e", js_test, app_js],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, f"Node JS helper test failed:\n{proc.stderr}\n{proc.stdout}"
 
 
 def test_loopback_server_security_headers_method_allowlist_and_traversal(
